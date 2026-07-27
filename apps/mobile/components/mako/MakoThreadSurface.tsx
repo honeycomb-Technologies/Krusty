@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
@@ -11,6 +11,9 @@ interface MakoThreadSurfaceProps {
   emptyBody: string;
   scrollToMessageId?: string | null;
   onScrollTargetHandled?: () => void;
+  emptyAccessory?: ReactNode;
+  showComposer?: boolean;
+  externalBottomPadding?: number;
 }
 
 export function MakoThreadSurface({
@@ -19,6 +22,9 @@ export function MakoThreadSurface({
   emptyBody,
   scrollToMessageId,
   onScrollTargetHandled,
+  emptyAccessory,
+  showComposer = true,
+  externalBottomPadding = 150,
 }: MakoThreadSurfaceProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -28,8 +34,11 @@ export function MakoThreadSurface({
   return (
     <View style={styles.container}>
       <ChatTranscript
+        key={`mako:${chat.sessionId ?? "new"}`}
         messages={chat.messages}
         sessionId={chat.sessionId}
+        sessionType="mako"
+        scrollStateKey={`mako:${chat.sessionId ?? "new"}`}
         isStreaming={chat.isStreaming}
         isThinking={chat.isThinking}
         activeToolCallId={chat.activeToolCallId}
@@ -37,7 +46,9 @@ export function MakoThreadSurface({
         onDenyTool={chat.onDenyTool}
         onSubmitToolResult={chat.onSubmitToolResult}
         onPlanConfirm={chat.onPlanConfirm}
-        bottomPadding={composerReserveHeight}
+        bottomPadding={
+          showComposer ? composerReserveHeight : externalBottomPadding
+        }
         hideJumpToLatest={bottomControlsOpen}
         showPlanTracker={false}
         scrollToMessageId={scrollToMessageId}
@@ -50,6 +61,9 @@ export function MakoThreadSurface({
             <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
               {emptyBody}
             </Text>
+            {emptyAccessory ? (
+              <View style={styles.emptyAccessory}>{emptyAccessory}</View>
+            ) : null}
           </View>
         }
       />
@@ -70,29 +84,31 @@ export function MakoThreadSurface({
         </View>
       ) : null}
 
-      <ChatBar
-        onSend={chat.onSend}
-        onStop={chat.onStop}
-        onHeightChange={setComposerReserveHeight}
-        isStreaming={chat.isStreaming}
-        disabled={false}
-        thinkingLevel={chat.thinkingLevel}
-        onThinkingChange={chat.onThinkingChange}
-        permissionMode={chat.permissionMode}
-        onPermissionModeToggle={chat.onPermissionModeToggle}
-        fastModeEnabled={chat.fastModeEnabled}
-        fastModeSupported={chat.fastModeSupported}
-        onFastModeToggle={chat.onFastModeToggle}
-        mode={chat.mode}
-        onModeToggle={chat.onModeToggle}
-        onModelSelect={chat.onModelSelect}
-        model={chat.model ?? null}
-        models={chat.models}
-        sessionType="mako"
-        tokenCount={chat.tokenCount}
-        onOverlayOpenChange={setBottomControlsOpen}
-        minimalControls
-      />
+      {showComposer ? (
+        <ChatBar
+          draftKey="mako"
+          onSend={chat.onSend}
+          onStop={chat.onStop}
+          onHeightChange={setComposerReserveHeight}
+          isStreaming={chat.isStreaming}
+          disabled={false}
+          thinkingLevel={chat.thinkingLevel}
+          onThinkingChange={chat.onThinkingChange}
+          permissionMode={chat.permissionMode}
+          onPermissionModeToggle={chat.onPermissionModeToggle}
+          fastModeEnabled={chat.fastModeEnabled}
+          fastModeSupported={chat.fastModeSupported}
+          onFastModeToggle={chat.onFastModeToggle}
+          mode={chat.mode}
+          onModeToggle={chat.onModeToggle}
+          onModelSelect={chat.onModelSelect}
+          model={chat.model ?? null}
+          models={chat.models}
+          sessionType="mako"
+          tokenCount={chat.tokenCount}
+          onOverlayOpenChange={setBottomControlsOpen}
+        />
+      ) : null}
     </View>
   );
 }
@@ -119,6 +135,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     textAlign: "center",
+  },
+  emptyAccessory: {
+    width: "100%",
+    maxWidth: 520,
+    marginTop: 10,
   },
   errorBanner: {
     marginHorizontal: 16,

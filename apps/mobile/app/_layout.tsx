@@ -48,8 +48,9 @@ function RootNavigator() {
 
   useEffect(() => {
     const inOnboarding = segments[0] === 'onboarding';
+    const inNavigationPreview = segments[0] === 'navigation-preview';
 
-    if (!isConfigured && !inOnboarding) {
+    if (!isConfigured && !inOnboarding && !inNavigationPreview) {
       router.replace('/onboarding');
     } else if (isConfigured && inOnboarding) {
       router.replace('/(tabs)');

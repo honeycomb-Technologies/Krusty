@@ -132,6 +132,7 @@ pub fn inject_context_with_mako_profile(
             db_path,
             context_project_dir.as_deref(),
             user_id,
+            mako_crew_slug,
             session_id,
             conversation,
         )

@@ -24,6 +24,7 @@ pub const KRUSTY_SYSTEM_PROMPT: &str = r#"You operate inside Krusty as its codin
 ## Communication
 
 - Give short updates during long work. Spend tokens on action and evidence, not repeated plans.
+- When the user asks for a rendered HTML visual, return the complete document in a fenced `html` block. Krusty renders completed HTML fences as sandboxed previews.
 - Lead the final response with the outcome, then validation and material caveats. Be direct; avoid filler and large repeated code blocks."#;
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ mod tests {
             "Preserve user changes",
             "Do not commit",
             "Never claim success",
+            "sandboxed previews",
         ] {
             assert!(
                 KRUSTY_SYSTEM_PROMPT.contains(required),

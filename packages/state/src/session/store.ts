@@ -209,6 +209,7 @@ export function createSessionStore(
     | "togglePermissionMode"
     | "submitToolResult"
     | "submitToolApproval"
+    | "detachSession"
     | "stopStreaming"
     | "startStatePolling"
     | "stopStatePolling"
@@ -1198,7 +1199,25 @@ export function createSessionStore(
       get().startStatePolling(state.sessionId);
     },
 
-    // -- stopStreaming ------------------------------------------------------
+    // -- detachSession / stopStreaming -------------------------------------
+
+    detachSession() {
+      const activeSessionId = get().sessionId;
+      streamAttachmentGeneration += 1;
+      abortController?.abort();
+      abortController = null;
+      get().stopStatePolling();
+      get().stopPresenceHeartbeat(activeSessionId);
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
+      }));
+    },
 
     stopStreaming() {
       const activeSessionId = get().sessionId;

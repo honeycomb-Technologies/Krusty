@@ -10,7 +10,6 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { LinearGradient } from '../../platform/linear-gradient';
 import * as Haptics from '../../platform/haptics';
 import Animated, {
   type SharedValue,
@@ -699,7 +698,6 @@ export function AccordionControls({
   const providerScrollMetricsRef = useRef({ x: 0, width: 0, contentWidth: 0 });
   const [providerEditMode, setProviderEditMode] = useState(false);
   const [providerDragging, setProviderDragging] = useState(false);
-  const providerDockProgress = useSharedValue(0);
   const providerDragIndex = useSharedValue(-1);
   const providerDropIndex = useSharedValue(-1);
   const providerDragX = useSharedValue(0);
@@ -866,19 +864,7 @@ export function AccordionControls({
   const thinkingColor = thinkingLevel === 'off'
     ? `${t.mutedForeground}${THINKING_ICON_ALPHA.off}`
     : `${fabAccent}${THINKING_ICON_ALPHA[thinkingLevel]}`;
-  const dockFadeColor = theme.scheme === 'dark'
-    ? 'rgba(11,17,25,0.92)'
-    : 'rgba(255,255,255,0.92)';
-
   const providerDockOpen = modelPickerOpen && isOpen;
-
-  useEffect(() => {
-    providerDockProgress.value = withSpring(providerDockOpen ? 1 : 0, SPRING_CONFIG);
-  }, [providerDockOpen, providerDockProgress]);
-
-  const providerDockFadeAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: providerDockProgress.value,
-  }));
 
   useEffect(() => {
     if (!providerDockOpen) {
@@ -1089,28 +1075,6 @@ export function AccordionControls({
                     </ProviderDockPill>
                   ))}
                 </ScrollView>
-                <Animated.View
-                  pointerEvents="none"
-                  style={[styles.modelFilterFadeLeft, providerDockFadeAnimatedStyle]}
-                >
-                  <LinearGradient
-                    colors={[dockFadeColor, 'transparent']}
-                    start={{ x: 0, y: 0.5 }}
-                    end={{ x: 1, y: 0.5 }}
-                    style={StyleSheet.absoluteFill}
-                  />
-                </Animated.View>
-                <Animated.View
-                  pointerEvents="none"
-                  style={[styles.modelFilterFadeRight, providerDockFadeAnimatedStyle]}
-                >
-                  <LinearGradient
-                    colors={['transparent', dockFadeColor]}
-                    start={{ x: 0, y: 0.5 }}
-                    end={{ x: 1, y: 0.5 }}
-                    style={StyleSheet.absoluteFill}
-                  />
-                </Animated.View>
               </Animated.View>
             }
           >
@@ -1326,20 +1290,6 @@ const styles = StyleSheet.create({
     gap: 0,
     paddingLeft: PROVIDER_CONTENT_PADDING_LEFT,
     paddingRight: PROVIDER_CONTENT_PADDING_RIGHT,
-  },
-  modelFilterFadeLeft: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: DOCK_FADE_WIDTH,
-  },
-  modelFilterFadeRight: {
-    position: 'absolute',
-    right: 0,
-    top: 0,
-    bottom: 0,
-    width: MODEL_BUTTON_GAP,
   },
   attachActions: {
     flexDirection: 'row',

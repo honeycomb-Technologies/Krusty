@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import {
+  type ComponentType,
+  type PropsWithChildren,
+  useState,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useCallback,
+} from 'react';
 import {
   View,
   TextInput,
@@ -11,11 +20,11 @@ import {
   Image,
   FlatList,
   Alert,
+  Modal,
   useWindowDimensions,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { LinearGradient } from '../../platform/linear-gradient';
-import { ArrowUp, X, Mic } from 'lucide-react-native';
+import { ArrowUp, Folder, GitBranch, Maximize2, X, Mic } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -23,10 +32,11 @@ import * as SecureStore from '../../platform/secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
+  cancelAnimation,
   useSharedValue,
   useAnimatedStyle,
+  useAnimatedProps,
   withSpring,
-  withRepeat,
   withTiming,
   Easing,
 } from 'react-native-reanimated';
@@ -36,7 +46,18 @@ import { AccordionControls } from './AccordionControls';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
-import Svg, { Circle, Path, Polygon } from 'react-native-svg';
+import { formatWorkspaceContextMetadata } from './composerMetadata';
+import { AppBottomSheet } from '../sheets/AppBottomSheet';
+import Svg, {
+  Circle,
+  Defs,
+  FeGaussianBlur,
+  Filter,
+  LinearGradient as SvgLinearGradient,
+  Path,
+  Polygon,
+  Stop,
+} from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
@@ -51,6 +72,8 @@ export interface Attachment {
 }
 
 interface ChatBarProps {
+  /** Keeps unsent text and attachments isolated when mode surfaces remount. */
+  draftKey?: string;
   onSend: (content: string, attachments?: Attachment[]) => void;
   onStop: () => void;
   onHeightChange?: (height: number) => void;
@@ -69,6 +92,8 @@ interface ChatBarProps {
   model: string | null;
   models: ModelInfo[];
   sessionType?: SessionType;
+  workspaceDirectory?: string | null;
+  targetBranch?: string | null;
   tokenCount?: number;
   onOverlayOpenChange?: (open: boolean) => void;
   minimalControls?: boolean;
@@ -79,6 +104,13 @@ interface ChatBarProps {
    */
   contentMaxWidth?: number;
 }
+
+interface CachedDraft {
+  text: string;
+  attachments: Attachment[];
+}
+
+const draftCache = new Map<string, CachedDraft>();
 
 const PILL = 56;
 /** Same rounded-square corner as accordion FABs (not a full circle). */
@@ -98,9 +130,17 @@ const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
 const RUN_LINE_HEIGHT = 3;
-const RUN_LINE_META_GAP = 3;
-const RUN_LINE_BEAM_WIDTH = 156;
+const RUN_LINE_BEAM_WIDTH = 370;
+const RUN_LINE_SOFTNESS = 3;
+const RUN_LINE_TAIL_SOFTNESS = 8;
+const RUN_LINE_STROKE_WIDTH = 14;
+const RUN_LINE_CORNER_CLIMB = 35;
+const RUN_LINE_CORNER_RADIUS = 44;
+const RUN_LINE_EDGE_INSET = 2;
+const RUN_LINE_EXIT_EXTENSION = 18;
+const RUN_LINE_EXIT_RISE = 10;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
+const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 /**
  * The accordion responder spans the full composer width so its provider dock
  * can extend left of the FAB column. Keep the model list above that responder:
@@ -120,6 +160,23 @@ const WEB_INPUT_STYLE = Platform.OS === 'web'
       resize: 'none',
     } as any)
   : null;
+
+function estimateCompactInputHeight(value: string, inputWidth: number): number {
+  if (!value) return 0;
+  const charactersPerLine = Math.max(
+    12,
+    Math.floor(inputWidth / COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH),
+  );
+  const visualLineCount = value.split('\n').reduce(
+    (total, line) =>
+      total + Math.max(1, Math.ceil(line.length / charactersPerLine)),
+    0,
+  );
+  return Math.min(
+    COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME,
+    visualLineCount * INPUT_LINE_HEIGHT,
+  );
+}
 
 interface ProviderFilter {
   id: string;
@@ -360,55 +417,200 @@ function ProviderLogo({
   }
 }
 
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+const SvgDefs = Defs as unknown as ComponentType<PropsWithChildren>;
+const normalizedPathLength = { pathLength: 1 };
+const RUN_LINE_DURATION_MS = 1700;
+const RUN_LINE_TONAL_STOPS = [
+  // The gradient is anchored to the screen, not the moving dash. Keep its
+  // opacity even so the rounded side sections do not disappear at x=0/width;
+  // the blurred round dash caps provide the moving wash's soft tails.
+  ['0', '#a55322', 0.82],
+  ['0.08', '#a95724', 0.82],
+  ['0.18', '#b75f27', 0.82],
+  ['0.28', '#c5682a', 0.82],
+  ['0.37', '#d2702d', 0.82],
+  ['0.44', '#dd772f', 0.82],
+  ['0.5', '#e17a30', 0.82],
+  ['0.56', '#dc762f', 0.82],
+  ['0.63', '#d06f2d', 0.82],
+  ['0.72', '#c36729', 0.82],
+  ['0.82', '#b55e26', 0.82],
+  ['0.92', '#a95724', 0.82],
+  ['1', '#a55322', 0.82],
+] as const;
+
 function RunningGradientLine({
   active,
   width,
-  color,
+  cornerClimb,
   style,
 }: {
   active: boolean;
   width: number;
-  color: string;
+  cornerClimb: number;
   style?: any;
 }) {
   const progress = useSharedValue(0);
 
   useEffect(() => {
     if (!active) {
+      cancelAnimation(progress);
       progress.value = 0;
       return;
     }
 
-    progress.value = withRepeat(
-      withTiming(1, { duration: 1350, easing: Easing.linear }),
-      -1,
-      false,
-    );
+    // Explicitly reset every pass instead of relying on Reanimated's repeat
+    // wrapper. react-native-svg can retain the terminal animated dash props on
+    // iOS, which makes subsequent passes look like only the end is looping.
+    const restart = () => {
+      cancelAnimation(progress);
+      progress.value = 0;
+      progress.value = withTiming(1, {
+        duration: RUN_LINE_DURATION_MS,
+        easing: Easing.linear,
+      });
+    };
+
+    restart();
+    const interval = setInterval(restart, RUN_LINE_DURATION_MS);
+    return () => {
+      clearInterval(interval);
+      cancelAnimation(progress);
+    };
   }, [active, progress]);
 
-  const beamStyle = useAnimatedStyle(() => ({
-    transform: [
-      {
-        translateX:
-          -RUN_LINE_BEAM_WIDTH +
-          progress.value * Math.max(width + RUN_LINE_BEAM_WIDTH * 2, RUN_LINE_BEAM_WIDTH),
-      },
-    ],
-  }));
+  const safeWidth = Math.max(width, 1);
+  const pathHeight = Math.max(
+    RUN_LINE_HEIGHT,
+    cornerClimb + RUN_LINE_EXIT_RISE + RUN_LINE_HEIGHT,
+  );
+  const strokeInset = RUN_LINE_HEIGHT / 2;
+  const baseline = pathHeight - strokeInset;
+  const curveTop = baseline - cornerClimb;
+  const cornerRadius = Math.min(
+    RUN_LINE_CORNER_RADIUS,
+    Math.max(0, safeWidth / 2 - strokeInset),
+  );
+  const effectiveClimb = Math.min(cornerClimb, cornerRadius);
+  const sideInset =
+    cornerRadius > 0
+      ? cornerRadius -
+        Math.sqrt(
+          Math.max(
+            0,
+            cornerRadius ** 2 - (cornerRadius - effectiveClimb) ** 2,
+          ),
+        )
+      : strokeInset;
+  const visibleSideInset = sideInset + RUN_LINE_EDGE_INSET;
+  const visibleCornerRadius = cornerRadius + RUN_LINE_EDGE_INSET;
+  const cornerArcLength =
+    cornerRadius > 0
+      ? cornerRadius *
+        Math.acos((cornerRadius - effectiveClimb) / cornerRadius)
+      : 0;
+  const exitLength = Math.hypot(
+    visibleSideInset + RUN_LINE_EXIT_EXTENSION,
+    curveTop - strokeInset,
+  );
+  const pathLength = Math.max(
+    1,
+    safeWidth -
+      cornerRadius * 2 +
+      cornerArcLength * 2 +
+      exitLength * 2,
+  );
+  const beamLength = Math.min(
+    RUN_LINE_BEAM_WIDTH,
+    Math.max(160, pathLength * 0.8),
+    pathLength * 0.92,
+  );
+  // Web SVG honors pathLength normalization; react-native-svg on iOS does not.
+  // Keep both renderers on the same visual geometry using their native units.
+  const beamFraction = Math.min(0.92, Math.max(0.5, beamLength / pathLength));
+  const usesNormalizedDashUnits = Platform.OS === 'web';
+  const dashPathLengthProps = usesNormalizedDashUnits
+    ? normalizedPathLength
+    : {};
+  const pathUnits = usesNormalizedDashUnits ? 1 : pathLength;
+  const beamUnits = usesNormalizedDashUnits ? beamFraction : beamLength;
+  const beamTravel = pathUnits + beamUnits;
+  const edgePath =
+    effectiveClimb > 0
+      ? [
+          `M ${-RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
+          `L ${visibleSideInset} ${curveTop}`,
+          `C ${visibleSideInset + (visibleCornerRadius - visibleSideInset) * 0.25}`,
+          `${curveTop + effectiveClimb * 0.6}`,
+          `${visibleCornerRadius - (visibleCornerRadius - visibleSideInset) * 0.22}`,
+          `${baseline}`,
+          `${visibleCornerRadius} ${baseline}`,
+          `H ${safeWidth - visibleCornerRadius}`,
+          `C ${safeWidth - visibleCornerRadius + (visibleCornerRadius - visibleSideInset) * 0.22}`,
+          `${baseline}`,
+          `${safeWidth - visibleSideInset - (visibleCornerRadius - visibleSideInset) * 0.25}`,
+          `${curveTop + effectiveClimb * 0.6}`,
+          `${safeWidth - visibleSideInset} ${curveTop}`,
+          `L ${safeWidth + RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
+        ].join(' ')
+      : `M ${strokeInset} ${baseline} H ${safeWidth - strokeInset}`;
 
+  const washProps = useAnimatedProps(() => ({
+    strokeDashoffset:
+      beamUnits - progress.value * beamTravel,
+  }));
   if (!active) return null;
 
   return (
-    <View pointerEvents="none" style={[styles.runLineTrack, style]}>
-      <Animated.View style={[styles.runLineBeam, beamStyle]}>
-        <LinearGradient
-          colors={['transparent', color, '#fff', color, 'transparent']}
-          locations={[0, 0.28, 0.5, 0.72, 1]}
-          start={{ x: 0, y: 0.5 }}
-          end={{ x: 1, y: 0.5 }}
-          style={StyleSheet.absoluteFill}
+    <View
+      pointerEvents="none"
+      style={[styles.runLineTrack, { height: pathHeight }, style]}
+    >
+      <Svg width={safeWidth} height={pathHeight}>
+        <SvgDefs>
+          <SvgLinearGradient
+            id="auroraGlassBeam"
+            x1={0}
+            y1={0}
+            x2={safeWidth}
+            y2={0}
+            gradientUnits="userSpaceOnUse"
+          >
+            {RUN_LINE_TONAL_STOPS.map(([offset, color, opacity]) => (
+              <Stop
+                key={offset}
+                offset={offset}
+                stopColor={color}
+                stopOpacity={opacity}
+              />
+            ))}
+          </SvgLinearGradient>
+          <Filter
+            id="auroraGlassSoftness"
+            x="-20%"
+            y="-160%"
+            width="140%"
+            height="420%"
+          >
+            <FeGaussianBlur
+              stdDeviation={`${RUN_LINE_TAIL_SOFTNESS} ${RUN_LINE_SOFTNESS}`}
+            />
+          </Filter>
+        </SvgDefs>
+        <AnimatedPath
+          animatedProps={washProps}
+          d={edgePath}
+          {...dashPathLengthProps}
+          fill="none"
+          stroke="url(#auroraGlassBeam)"
+          filter="url(#auroraGlassSoftness)"
+          strokeOpacity={0.86}
+          strokeWidth={RUN_LINE_STROKE_WIDTH}
+          strokeLinecap="round"
+          strokeDasharray={`${beamUnits} ${beamTravel - beamUnits}`}
         />
-      </Animated.View>
+      </Svg>
     </View>
   );
 }
@@ -475,12 +677,13 @@ async function prepareImageAttachment(
 
 export function ChatBar(props: ChatBarProps) {
   const {
+    draftKey = 'chat',
     onSend, onStop, onHeightChange, isStreaming, disabled,
     thinkingLevel, onThinkingChange,
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
-    sessionType, tokenCount, onOverlayOpenChange,
+    sessionType, workspaceDirectory, targetBranch, tokenCount, onOverlayOpenChange,
     contentMaxWidth, minimalControls = false,
   } = props;
 
@@ -488,8 +691,12 @@ export function ChatBar(props: ChatBarProps) {
   const { isDesktop } = useBreakpoint();
   const insets = useSafeAreaInsets();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
-  const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [text, setText] = useState(
+    () => draftCache.get(draftKey)?.text ?? '',
+  );
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    () => draftCache.get(draftKey)?.attachments ?? [],
+  );
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const [hoveredAttachmentIndex, setHoveredAttachmentIndex] = useState<number | null>(null);
   const [accordionOpen, setAccordionOpen] = useState(false);
@@ -502,6 +709,7 @@ export function ChatBar(props: ChatBarProps) {
   const [selectedProviderFilter, setSelectedProviderFilter] = useState<string | null>(null);
   const [providerFilterOrder, setProviderFilterOrder] = useState<string[] | null>(null);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
+  const [expandedEditorOpen, setExpandedEditorOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [inputContentHeight, setInputContentHeight] = useState(0);
   const modelPopoverScale = useSharedValue(0);
@@ -516,6 +724,45 @@ export function ChatBar(props: ChatBarProps) {
   /** Actual laid-out band width (after parent maxWidth / split). */
   const [measuredRootWidth, setMeasuredRootWidth] = useState(0);
   const modelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftRef = useRef<CachedDraft>({ text, attachments });
+  const activeDraftKeyRef = useRef(draftKey);
+  const skipDraftSyncRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (activeDraftKeyRef.current === draftKey) {
+      return;
+    }
+
+    draftCache.set(activeDraftKeyRef.current, draftRef.current);
+    const nextDraft = draftCache.get(draftKey) ?? {
+      text: '',
+      attachments: [],
+    };
+    activeDraftKeyRef.current = draftKey;
+    draftRef.current = nextDraft;
+    skipDraftSyncRef.current = true;
+    textRef.current = nextDraft.text;
+    setText(nextDraft.text);
+    setAttachments(nextDraft.attachments);
+    setPreviewAttachment(null);
+    setInputContentHeight(0);
+    setExpandedEditorOpen(false);
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (skipDraftSyncRef.current) {
+      skipDraftSyncRef.current = false;
+      return;
+    }
+    draftRef.current = { text, attachments };
+  }, [attachments, text]);
+
+  useEffect(
+    () => () => {
+      draftCache.set(activeDraftKeyRef.current, draftRef.current);
+    },
+    [],
+  );
 
   const clearModelCloseTimer = () => {
     if (!modelCloseTimerRef.current) return;
@@ -545,7 +792,10 @@ export function ChatBar(props: ChatBarProps) {
   }, []);
 
   const bottomOverlayOpen =
-    !minimalControls && (accordionVisible || modelPickerOpen || attachPickerOpen);
+    accordionVisible ||
+    modelPickerOpen ||
+    attachPickerOpen ||
+    expandedEditorOpen;
 
   useEffect(() => {
     onOverlayOpenChange?.(bottomOverlayOpen);
@@ -694,6 +944,13 @@ export function ChatBar(props: ChatBarProps) {
     if (!model) return 'No model selected';
     return models.find(candidate => candidate.id === model)?.display_name ?? model;
   }, [model, models]);
+  const workspaceContext = useMemo(
+    () =>
+      sessionType === 'code'
+        ? formatWorkspaceContextMetadata(workspaceDirectory, targetBranch)
+        : null,
+    [sessionType, targetBranch, workspaceDirectory],
+  );
   const selectedModelInfo = useMemo(
     () => models.find(candidate => candidate.id === model) ?? null,
     [model, models],
@@ -786,6 +1043,7 @@ export function ChatBar(props: ChatBarProps) {
     setAttachments([]);
     setPreviewAttachment(null);
     setHoveredAttachmentIndex(null);
+    setExpandedEditorOpen(false);
     Keyboard.dismiss();
     if (accordionOpen) setAccordionOpen(false);
   };
@@ -976,7 +1234,9 @@ export function ChatBar(props: ChatBarProps) {
     : inputRowBottom;
   // Space above the input row where the model list may sit.
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
-  const runLineBottom = Math.max(0, bottomOffset - RUN_LINE_HEIGHT - RUN_LINE_META_GAP);
+  // The activity line is a screen-edge indicator, independent of the composer
+  // safe-area inset. Keep it flush with the bottom edge on every platform.
+  const runLineBottom = 0;
   // Prefer measured column width over viewport so split/toolbox/resize stay in-bounds.
   const bandWidth =
     measuredRootWidth > 0
@@ -984,6 +1244,16 @@ export function ChatBar(props: ChatBarProps) {
       : contentMaxWidth != null && contentMaxWidth > 0
         ? contentMaxWidth
         : viewportWidth;
+  const compactInputWidth = Math.max(
+    120,
+    bandWidth -
+      ROOT_HORIZONTAL_PADDING * 2 -
+      PILL -
+      GAP -
+      36 -
+      36 -
+      INPUT_SIDE_PADDING * 2,
+  );
   const controlsLayerWidth = Math.max(
     PILL,
     bandWidth - ROOT_HORIZONTAL_PADDING * 2,
@@ -1036,6 +1306,14 @@ export function ChatBar(props: ChatBarProps) {
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
+    setInputContentHeight((current) =>
+      current === nextHeight ? current : nextHeight,
+    );
+  }, [compactInputWidth, text]);
 
   useEffect(() => {
     const measuredRootHeight = measuredRootHeightRef.current;
@@ -1165,6 +1443,29 @@ export function ChatBar(props: ChatBarProps) {
           <BlurView intensity={composerBlur} tint={blurTint} style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
           <View style={styles.barInner}>
+            {!isRecording ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Expand message editor"
+                onPress={() => {
+                  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setExpandedEditorOpen(true);
+                  setAccordionOpen(false);
+                  setAttachPickerOpen(false);
+                  setModelPickerOpen(false);
+                }}
+                style={({ pressed }) => [
+                  styles.expandEditorButton,
+                  pressed && styles.expandEditorButtonPressed,
+                ]}
+              >
+                <Maximize2
+                  size={17}
+                  color={t.mutedForeground}
+                  strokeWidth={1.8}
+                />
+              </Pressable>
+            ) : null}
             {isRecording
               ? <Waveform active volume={micVolume} />
               : <TextInput
@@ -1194,6 +1495,7 @@ export function ChatBar(props: ChatBarProps) {
                   placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
+                  scrollEnabled={composerBarHeight >= COMPOSER_MAX_HEIGHT}
                   maxLength={500000}
                   editable={!disabled}
                   keyboardAppearance={theme.scheme}
@@ -1389,46 +1691,55 @@ export function ChatBar(props: ChatBarProps) {
       )}
 
       {/* Composer status row — sits in safe area zone below input */}
-      {showComposerChrome ? (
-        <View pointerEvents="none" style={styles.metaRow}>
-          <View style={styles.metaLeft}>
-            {gaugeTokens > 0 && (
-              <View style={styles.gaugeRing}>
-                <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
-                  <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
-                  <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
-                    strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
-                    rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
-                  />
-                </Svg>
-                <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
-                  {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
-                </Text>
-              </View>
-            )}
-            {sessionType === 'code' && (
-              <Text style={[styles.metaMode, { color: t.thinking }]} numberOfLines={1}>
-                {mode === 'plan' ? 'Plan' : 'Build'}
+      <View
+        pointerEvents="none"
+        style={[styles.metaRow, !isDesktop && styles.metaRowMobile]}
+      >
+        <View style={styles.metaLeft}>
+          <View style={styles.gaugeRing}>
+            <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
+              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
+              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
+                strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
+                rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
+              />
+            </Svg>
+            <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
+              {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
+            </Text>
+          </View>
+          {workspaceContext ? (
+            <View style={styles.metaWorkspace}>
+              {workspaceContext.hasBranch ? (
+                <GitBranch size={12} color={t.mutedForeground} strokeWidth={1.8} />
+              ) : (
+                <Folder size={12} color={t.mutedForeground} strokeWidth={1.8} />
+              )}
+              <Text
+                style={[styles.metaWorkspaceText, { color: t.mutedForeground }]}
+                numberOfLines={1}
+              >
+                {workspaceContext.label}
               </Text>
-            )}
-          </View>
-          <View style={styles.metaRight}>
-            <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
-              {currentModelLabel}
-            </Text>
-            <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
-              |
-            </Text>
-            <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
-              {thinkingLabel}
-            </Text>
-          </View>
+            </View>
+          ) : null}
         </View>
-      ) : null}
+        <View style={styles.metaRight}>
+          <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
+            {currentModelLabel}
+          </Text>
+          <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
+            |
+          </Text>
+          <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
+            {thinkingLabel}
+          </Text>
+        </View>
+      </View>
       <RunningGradientLine
         active={isStreaming}
         width={bandWidth}
-        color={t.thinking}
+        cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
         style={[styles.runLineEdge, { bottom: runLineBottom }]}
       />
       <ImagePreviewModal
@@ -1437,6 +1748,64 @@ export function ChatBar(props: ChatBarProps) {
         title={previewAttachment?.name}
         onClose={() => setPreviewAttachment(null)}
       />
+      <Modal
+        visible={expandedEditorOpen}
+        transparent
+        animationType="none"
+        onRequestClose={() => setExpandedEditorOpen(false)}
+      >
+        <View style={styles.expandedEditorModal}>
+          <AppBottomSheet
+            visible={expandedEditorOpen}
+            onClose={() => setExpandedEditorOpen(false)}
+            accessibilityLabel="expanded message editor"
+            contentStyle={styles.expandedEditorContent}
+            footer={
+              <View style={styles.expandedEditorFooter}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send expanded message"
+                  accessibilityState={{ disabled: !canSend }}
+                  disabled={!canSend}
+                  onPress={handleSend}
+                  style={({ pressed }) => [
+                    styles.expandedEditorSend,
+                    {
+                      backgroundColor: canSend
+                        ? pressed
+                          ? `${t.success}cc`
+                          : t.success
+                        : t.border,
+                    },
+                  ]}
+                >
+                  <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
+                </Pressable>
+              </View>
+            }
+          >
+            <TextInput
+              autoFocus
+              value={text}
+              onChangeText={handleTextChange}
+              placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
+              placeholderTextColor={`${t.mutedForeground}70`}
+              multiline
+              maxLength={500000}
+              editable={!disabled}
+              keyboardAppearance={theme.scheme}
+              textAlignVertical="top"
+              style={[
+                styles.expandedEditorInput,
+                WEB_INPUT_STYLE,
+                {
+                  color: t.foreground,
+                },
+              ]}
+            />
+          </AppBottomSheet>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1460,9 +1829,7 @@ const styles = StyleSheet.create({
   attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 2 },
   runLineTrack: {
     height: RUN_LINE_HEIGHT,
-    borderRadius: RUN_LINE_HEIGHT,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    overflow: 'visible',
   },
   runLineEdge: {
     position: 'absolute',
@@ -1471,12 +1838,6 @@ const styles = StyleSheet.create({
     bottom: 0,
     borderRadius: 0,
     zIndex: 2,
-  },
-  runLineBeam: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: RUN_LINE_BEAM_WIDTH,
   },
   lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP, minHeight: PILL },
   bar: {
@@ -1500,6 +1861,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: INPUT_SIDE_PADDING,
     paddingVertical: 0,
     gap: 4,
+  },
+  expandEditorButton: {
+    width: 32,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expandEditorButtonPressed: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   actionBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
@@ -1526,6 +1897,35 @@ const styles = StyleSheet.create({
     paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
     paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
     textAlignVertical: 'top',
+  },
+  expandedEditorModal: {
+    flex: 1,
+  },
+  expandedEditorContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  expandedEditorInput: {
+    flex: 1,
+    minHeight: 220,
+    paddingHorizontal: 2,
+    paddingVertical: 10,
+    fontSize: 16,
+    lineHeight: 24,
+  },
+  expandedEditorFooter: {
+    minHeight: 64,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  expandedEditorSend: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   kCol: {
     width: PILL,
@@ -1614,8 +2014,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  metaRowMobile: {
+    paddingHorizontal: 26,
+  },
   metaLeft: {
-    flexShrink: 0,
+    flex: 1,
+    maxWidth: '54%',
     minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1629,10 +2033,18 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     gap: 10,
   },
-  metaMode: {
-    flexShrink: 0,
+  metaWorkspace: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  metaWorkspaceText: {
+    flex: 1,
+    minWidth: 0,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '600',
     letterSpacing: 0,
   },
   metaModel: {

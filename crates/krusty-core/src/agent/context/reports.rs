@@ -7,7 +7,7 @@ use crate::agent::context_ledger::ContextLedger;
 use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
-    MemoryStore, Report, ReportStore, TaskStatus,
+    MemoryNamespace, MemoryStore, Report, ReportStore, TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
@@ -87,15 +87,23 @@ pub(super) fn build_mako_knowledge_context(
     db_path: &Path,
     project_dir: Option<&str>,
     user_id: Option<&str>,
+    mako_crew_slug: Option<&str>,
     session_id: &str,
     conversation: &[ModelMessage],
 ) -> String {
-    let generated_snapshot = match refresh_current_snapshot(db_path, project_dir, user_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            warn!(project_dir = ?project_dir, error = %error, "Failed to refresh Mako snapshot context");
-            None
+    // The materialized snapshot is owner/project scoped rather than crew
+    // scoped. Only the primary Mako presence may consume it; named crew
+    // members receive their own explicit memory namespace below.
+    let generated_snapshot = if mako_crew_slug.is_none() {
+        match refresh_current_snapshot(db_path, project_dir, user_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(project_dir = ?project_dir, error = %error, "Failed to refresh Mako snapshot context");
+                None
+            }
         }
+    } else {
+        None
     };
 
     let mut memories =
@@ -105,6 +113,16 @@ pub(super) fn build_mako_knowledge_context(
         } else {
             Vec::new()
         };
+    memories.retain(|memory| match mako_crew_slug {
+        Some(crew_slug) => {
+            memory.namespace == MemoryNamespace::Shared
+                || (memory.namespace == MemoryNamespace::Crew
+                    && memory.namespace_id.as_deref() == Some(crew_slug))
+        }
+        None => {
+            memory.namespace == MemoryNamespace::Shared || memory.namespace == MemoryNamespace::Mako
+        }
+    });
     if let Some(project_dir) = project_dir {
         memories.sort_by(|left, right| {
             let left_project_match = left.project_dir.as_deref() == Some(project_dir);

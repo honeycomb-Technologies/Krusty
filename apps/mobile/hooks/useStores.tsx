@@ -20,6 +20,7 @@ import type {
   PlanStoreState,
 } from "@krusty/state";
 import type { KrustyClient } from "@krusty/api";
+import type { SessionType } from "@krusty/api";
 import { createStorage } from "../platform/krusty-storage";
 import { useStore } from "zustand";
 
@@ -32,9 +33,17 @@ type PlanStore = ReturnType<typeof createPlanStore>;
 
 interface StoresContextValue {
   sessions: SessionsStore;
+  modes: Record<SessionType, ModeStores>;
+  /** Compatibility aliases for shared/non-mode-aware surfaces. */
   session: SessionStore;
   workspace: WorkspaceStore;
   git: GitStore;
+  plan: PlanStore;
+}
+
+interface ModeStores {
+  session: SessionStore;
+  workspace: WorkspaceStore;
   plan: PlanStore;
 }
 
@@ -47,25 +56,52 @@ interface StoresProviderProps {
 
 const STORAGE_HYDRATION_KEYS = [
   "krusty:workspace",
+  "krusty:workspace:chat",
+  "krusty:workspace:mako",
   "krusty-permission-mode",
   "krusty:presence-client-id",
 ] as const;
 
 function buildStores(client: KrustyClient, storage: ReturnType<typeof createStorage>) {
-  const workspace = createWorkspaceStore(storage);
-  const sessions = createSessionsStore(client, workspace);
-  const plan = createPlanStore();
-  const session = createSessionStore(
-    client,
-    storage,
-    workspace,
-    sessions,
-    plan,
+  // Keep the legacy workspace key attached to Code so existing project and
+  // branch selection survives the migration to independent mode slots.
+  const workspaces: Record<SessionType, WorkspaceStore> = {
+    chat: createWorkspaceStore(storage, "krusty:workspace:chat"),
+    code: createWorkspaceStore(storage),
+    mako: createWorkspaceStore(storage, "krusty:workspace:mako"),
+  };
+  const sessions = createSessionsStore(client, workspaces.code);
+  const modes = (["chat", "code", "mako"] as const).reduce(
+    (result, mode) => {
+      const plan = createPlanStore();
+      result[mode] = {
+        workspace: workspaces[mode],
+        plan,
+        session: createSessionStore(
+          client,
+          storage,
+          workspaces[mode],
+          sessions,
+          plan,
+        ),
+      };
+      return result;
+    },
+    {} as Record<SessionType, ModeStores>,
   );
-  const getDirectory = () => workspace.getState().directory;
+  const getDirectory = () => workspaces.code.getState().directory;
   const git = createGitStore(client, getDirectory);
 
-  return { sessions, session, workspace, git, plan };
+  return {
+    sessions,
+    modes,
+    // These aliases keep older shared components working. Mode-aware chat
+    // surfaces use the hooks below with an explicit mode.
+    session: modes.chat.session,
+    workspace: modes.code.workspace,
+    plan: modes.chat.plan,
+    git,
+  };
 }
 
 export function StoresProvider({ client, children }: StoresProviderProps) {
@@ -109,7 +145,10 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
 
   useEffect(() => {
     return () => {
-      stores?.session.getState().cleanup();
+      if (!stores) return;
+      for (const mode of ["chat", "code", "mako"] as const) {
+        stores.modes[mode].session.getState().cleanup();
+      }
     };
   }, [stores]);
 
@@ -139,15 +178,17 @@ export function useSessionsStore<T>(
 
 export function useSessionStore<T>(
   selector: (state: SessionStoreState) => T,
+  mode: SessionType = "chat",
 ): T {
-  const store = useRequiredStoresContext().session;
+  const store = useRequiredStoresContext().modes[mode].session;
   return useStore(store, selector);
 }
 
 export function useWorkspaceStore<T>(
   selector: (state: WorkspaceStoreState) => T,
+  mode: SessionType = "code",
 ): T {
-  const store = useRequiredStoresContext().workspace;
+  const store = useRequiredStoresContext().modes[mode].workspace;
   return useStore(store, selector);
 }
 
@@ -156,8 +197,11 @@ export function useGitStore<T>(selector: (state: GitStoreState) => T): T {
   return useStore(store, selector);
 }
 
-export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T {
-  const store = useRequiredStoresContext().plan;
+export function usePlanStore<T>(
+  selector: (state: PlanStoreState) => T,
+  mode: SessionType = "chat",
+): T {
+  const store = useRequiredStoresContext().modes[mode].plan;
   return useStore(store, selector);
 }
 

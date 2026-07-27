@@ -56,6 +56,9 @@ export function SettingsHeader({ onClose }: { onClose?: () => void }) {
       <Text style={[styles.title, { color: t.foreground }]}>Settings</Text>
       {onClose ? (
         <Pressable
+          accessibilityLabel="Close settings"
+          accessibilityRole="button"
+          hitSlop={10}
           onPress={() => {
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             onClose();

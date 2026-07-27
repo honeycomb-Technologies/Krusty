@@ -208,14 +208,7 @@ export function MessageBubble({
               <Pressable
                 onLongPress={handleCopy}
                 delayLongPress={250}
-                style={[
-                  styles.userBubble,
-                  {
-                    backgroundColor: message.isQueued
-                      ? `${t.warning}20`
-                      : t.userMessage,
-                  },
-                ]}
+                style={styles.userMessage}
               >
                 <MarkdownContent content={message.content} isUser />
               </Pressable>
@@ -489,11 +482,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
   },
-  userBubble: {
-    borderRadius: 20,
-    borderBottomRightRadius: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+  userMessage: {
+    paddingVertical: 2,
   },
   attachmentStrip: {
     flexDirection: "row",

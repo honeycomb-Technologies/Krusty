@@ -1,47 +1,117 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect } from "react";
 import {
-  View,
+  Platform,
   Pressable,
   StyleSheet,
-  Platform,
-  useWindowDimensions,
-} from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { BlurView } from '../platform/blur';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  withTiming,
-  interpolate,
-  Easing,
-  runOnJS,
-} from 'react-native-reanimated';
-import { Search, TerminalSquare, X } from 'lucide-react-native';
-import * as Haptics from '../platform/haptics';
-import { useThemeContext } from '../hooks/useTheme';
-import { useBreakpoint } from '../hooks/useBreakpoint';
-import { ToolboxTerminal } from './toolbox/ToolboxTerminal';
-import { ToolboxBrowser } from './toolbox/ToolboxBrowser';
+  View,
+} from "react-native";
+import {
+  Archive,
+  CalendarClock,
+  Cable,
+  FileCode2,
+  Globe2,
+  MemoryStick,
+  TerminalSquare,
+  Workflow,
+  X,
+  type LucideIcon,
+} from "lucide-react-native";
+import type { SessionType } from "@krusty/api";
 
-const SPRING = { damping: 22, stiffness: 280, mass: 0.8 };
-const TOOL_TABS = [
-  { label: 'Terminal', icon: TerminalSquare },
-  { label: 'Browser', icon: Search },
-];
+import { useThemeContext } from "../hooks/useTheme";
+import { useBreakpoint } from "../hooks/useBreakpoint";
+import * as Haptics from "../platform/haptics";
+import { AppBottomSheet } from "./sheets/AppBottomSheet";
+import { ToolboxTerminal } from "./toolbox/ToolboxTerminal";
+import { ToolboxBrowser } from "./toolbox/ToolboxBrowser";
+import { ToolboxChanges } from "./toolbox/ToolboxChanges";
+import { ToolboxConnections } from "./toolbox/ToolboxConnections";
+import { ReportsContent } from "./ReportsViewer";
+import { MakoScheduleView } from "./mako/MakoScheduleView";
+import { MakoRunsView } from "./mako/MakoRunsView";
+import { MakoMemoryView } from "./mako/MakoMemoryView";
+import { useMakoCurrent } from "./mako/hooks/useMakoCurrent";
+import { useMakoMemories } from "./mako/hooks/useMakoMemories";
+
+interface ToolTab {
+  label: string;
+  icon: LucideIcon;
+}
+
+const TOOL_TABS: Record<SessionType, ToolTab[]> = {
+  chat: [
+    { label: "Library", icon: Archive },
+    { label: "Connections", icon: Cable },
+  ],
+  code: [
+    { label: "Browser", icon: Globe2 },
+    { label: "Terminal", icon: TerminalSquare },
+    { label: "Changes", icon: FileCode2 },
+  ],
+  mako: [
+    { label: "Schedule", icon: CalendarClock },
+    { label: "Runs", icon: Workflow },
+    { label: "Memory", icon: MemoryStick },
+  ],
+};
 
 interface ToolboxPanelProps {
   visible: boolean;
   onClose: () => void;
   activeTab: number;
   onTabChange: (tab: number) => void;
+  sessionType: SessionType;
+  projectDirectory?: string | null;
+  onOpenSettings?: () => void;
+  onOpenMakoRun?: (sessionId: string) => void;
+  onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
   /**
-   * `dock` — desktop side panel (sibling of chat, no overlay/handle).
-   * `overlay` — mobile top sheet with backdrop + drag handle.
-   * Default: desktop → dock, mobile → overlay.
+   * `dock` is the wide-web rail. `overlay` is the shared mobile bottom drawer.
    */
-  variant?: 'dock' | 'overlay';
+  variant?: "dock" | "overlay";
+}
+
+function MakoToolboxBody({
+  activeTab,
+  visible,
+  workspaceDirectory,
+  onOpenMakoRun,
+  onOpenProject,
+}: {
+  activeTab: number;
+  visible: boolean;
+  workspaceDirectory?: string | null;
+  onOpenMakoRun?: (sessionId: string) => void;
+  onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
+}) {
+  const current = useMakoCurrent(visible);
+  const memories = useMakoMemories(
+    visible && activeTab === 2,
+    workspaceDirectory,
+  );
+  const openRun = (sessionId: string) => onOpenMakoRun?.(sessionId);
+
+  return (
+    <View style={styles.body}>
+      <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
+        <MakoScheduleView
+          state={current}
+          onSelectRun={openRun}
+          onOpenProject={onOpenProject}
+        />
+      </View>
+      <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
+        <MakoRunsView state={current} onSelectRun={openRun} />
+      </View>
+      <View style={[styles.tabContent, activeTab !== 2 && styles.hidden]}>
+        <MakoMemoryView
+          workspaceDirectory={workspaceDirectory}
+          state={memories}
+        />
+      </View>
+    </View>
+  );
 }
 
 export function ToolboxPanel({
@@ -49,186 +119,151 @@ export function ToolboxPanel({
   onClose,
   activeTab,
   onTabChange,
+  sessionType,
+  projectDirectory,
+  onOpenSettings,
+  onOpenMakoRun,
+  onOpenProject,
   variant,
 }: ToolboxPanelProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const t = theme.colors;
-  const isDark = theme.scheme === 'dark';
-  const { height: windowHeight } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
-  const mode = variant ?? (isDesktop ? 'dock' : 'overlay');
-  const isDock = mode === 'dock';
-
-  const panelHeight = Math.max(windowHeight, 1);
-  const progress = useSharedValue(0);
-  const dragOffset = useSharedValue(0);
-  const [mounted, setMounted] = useState(false);
+  const mode = variant ?? (isDesktop ? "dock" : "overlay");
+  const isDock = mode === "dock";
+  const tabs = TOOL_TABS[sessionType];
 
   useEffect(() => {
-    if (isDock) {
-      // Dock is layout-driven by the parent; mount when visible.
-      setMounted(visible);
-      progress.value = visible ? 1 : 0;
-      dragOffset.value = 0;
-      return;
+    if (activeTab >= tabs.length) {
+      onTabChange(0);
     }
-
-    if (visible) {
-      setMounted(true);
-      dragOffset.value = 0;
-      progress.value = withSpring(1, SPRING);
-    } else {
-      progress.value = withTiming(0, {
-        duration: 220,
-        easing: Easing.out(Easing.cubic),
-      });
-      const timer = setTimeout(() => {
-        dragOffset.value = 0;
-        setMounted(false);
-      }, 240);
-      return () => clearTimeout(timer);
-    }
-  }, [visible, progress, dragOffset, isDock]);
-
-  const overlayPanelStyle = useAnimatedStyle(() => {
-    const upwardDrag = Math.max(-panelHeight, Math.min(dragOffset.value, 0));
-    const translateY =
-      interpolate(progress.value, [0, 1], [-panelHeight, 0]) + upwardDrag;
-    return {
-      height: panelHeight,
-      borderBottomLeftRadius: 20,
-      borderBottomRightRadius: 20,
-      transform: [{ translateY }],
-      opacity: progress.value,
-    };
-  });
-
-  const backdropStyle = useAnimatedStyle(() => {
-    const backdropOpacity = interpolate(progress.value, [0, 1], [0, 1]);
-    return {
-      opacity: backdropOpacity,
-      pointerEvents: backdropOpacity > 0.05 ? ('auto' as const) : ('none' as const),
-    };
-  });
+  }, [activeTab, onTabChange, tabs.length]);
 
   const handleClose = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onClose();
   }, [onClose]);
 
   const handleTabChange = useCallback(
     (index: number) => {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       onTabChange(index);
     },
     [onTabChange],
   );
 
-  const closeHandleGesture = Gesture.Pan()
-    .activeOffsetY([-8, 8])
-    .failOffsetX([-24, 24])
-    .onUpdate((event) => {
-      dragOffset.value = Math.min(event.translationY, 0);
-    })
-    .onEnd((event) => {
-      if (event.translationY < -44 || event.velocityY < -500) {
-        runOnJS(handleClose)();
-        return;
-      }
-      dragOffset.value = withSpring(0, SPRING);
-    });
+  if (isDock && !visible) {
+    return null;
+  }
 
-  if (isDock && !visible) return null;
-  if (!isDock && !mounted) return null;
-
-  const header = (
+  const tabRail = (
     <View
+      accessibilityRole="tablist"
       style={[
-        styles.header,
-        !isDock && { paddingTop: Math.max(insets.top, 8) + 8 },
-        { borderBottomColor: t.border },
+        styles.tabRail,
+        {
+          backgroundColor: t.glass.background,
+          borderColor: t.glass.border,
+        },
       ]}
     >
-      <View
-        style={[
-          styles.tabRail,
-          {
-            backgroundColor: t.glass.background,
-            borderColor: t.glass.border,
-          },
-        ]}
-      >
-        {TOOL_TABS.map((tab, index) => {
-          const Icon = tab.icon;
-          const active = index === activeTab;
-          return (
-            <Pressable
-              key={tab.label}
-              accessibilityRole="tab"
-              accessibilityLabel={tab.label}
-              accessibilityState={{ selected: active }}
-              onPress={() => handleTabChange(index)}
-              style={[
-                styles.tabButton,
-                active && { backgroundColor: t.glass.backgroundElevated },
-              ]}
-            >
-              <Icon
-                size={18}
-                color={active ? t.foreground : t.mutedForeground}
-                strokeWidth={active ? 2.1 : 1.8}
-              />
-            </Pressable>
-          );
-        })}
-      </View>
+      {tabs.map((tab, index) => {
+        const Icon = tab.icon;
+        const active = index === activeTab;
+        return (
+          <Pressable
+            key={tab.label}
+            accessibilityRole="tab"
+            accessibilityLabel={tab.label}
+            accessibilityState={{ selected: active }}
+            onPress={() => handleTabChange(index)}
+            style={[
+              styles.tabButton,
+              active && { backgroundColor: t.glass.backgroundElevated },
+            ]}
+          >
+            <Icon
+              size={18}
+              color={active ? t.foreground : t.mutedForeground}
+              strokeWidth={active ? 2.1 : 1.8}
+            />
+          </Pressable>
+        );
+      })}
+    </View>
+  );
 
+  const header = (
+    <View style={[styles.header, { borderBottomColor: t.border }]}>
+      {tabRail}
       <Pressable
         onPress={handleClose}
         accessibilityRole="button"
         accessibilityLabel="Close toolbox"
-        style={[styles.closeBtn, !isDock && { top: Math.max(insets.top, 8) + 9 }]}
+        style={styles.closeBtn}
       >
         <X size={18} color={t.mutedForeground} strokeWidth={1.8} />
       </Pressable>
     </View>
   );
 
-  const body = (
-    <View style={styles.body}>
-      <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
-        <ToolboxTerminal visible={activeTab === 0 && visible} />
-      </View>
-      <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
-        <ToolboxBrowser visible={activeTab === 1 && visible} />
-      </View>
+  const drawerDock = (
+    <View style={[styles.drawerDock, { borderTopColor: t.border }]}>
+      {tabRail}
     </View>
   );
 
-  const surface = (
-    <>
-      <BlurView
-        intensity={50}
-        tint={isDark ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight'}
-        style={StyleSheet.absoluteFill}
+  let body;
+  if (sessionType === "chat") {
+    body = (
+      <View style={styles.body}>
+        <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
+          <ReportsContent visible={visible && activeTab === 0} />
+        </View>
+        <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
+          <ToolboxConnections
+            visible={visible && activeTab === 1}
+            onOpenSettings={onOpenSettings}
+          />
+        </View>
+      </View>
+    );
+  } else if (sessionType === "code") {
+    body = (
+      <View style={styles.body}>
+        <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
+          <ToolboxBrowser visible={visible && activeTab === 0} />
+        </View>
+        <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
+          <ToolboxTerminal visible={visible && activeTab === 1} />
+        </View>
+        <View style={[styles.tabContent, activeTab !== 2 && styles.hidden]}>
+          <ToolboxChanges
+            visible={visible && activeTab === 2}
+            projectDirectory={projectDirectory}
+          />
+        </View>
+      </View>
+    );
+  } else {
+    body = (
+      <MakoToolboxBody
+        activeTab={activeTab}
+        visible={visible}
+        workspaceDirectory={projectDirectory}
+        onOpenMakoRun={onOpenMakoRun}
+        onOpenProject={onOpenProject}
       />
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            backgroundColor: isDark
-              ? 'rgba(11,17,25,0.94)'
-              : 'rgba(255,255,255,0.94)',
-          },
-        ]}
-      />
-      {header}
+    );
+  }
+
+  const content = (
+    <View style={styles.surface}>
+      {isDock ? header : null}
       {body}
-    </>
+    </View>
   );
 
-  // Desktop dock: fixed-width side rail — no overlay, no half-screen flex share.
   if (isDock) {
     return (
       <View
@@ -237,78 +272,58 @@ export function ToolboxPanel({
           { borderLeftColor: t.border, backgroundColor: t.background },
         ]}
       >
-        {surface}
+        {content}
       </View>
     );
   }
 
-  // Mobile overlay sheet.
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      <Animated.View style={[styles.backdrop, backdropStyle]}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
-      </Animated.View>
-
-      <Animated.View
-        style={[
-          styles.panelMobile,
-          overlayPanelStyle,
-          { paddingBottom: Math.max(insets.bottom, 8) },
-        ]}
-      >
-        {surface}
-        <GestureDetector gesture={closeHandleGesture}>
-          <Animated.View style={styles.handleZoneMobile}>
-            <View
-              style={[styles.handleMobile, { backgroundColor: t.mutedForeground }]}
-            />
-          </Animated.View>
-        </GestureDetector>
-      </Animated.View>
-    </View>
+    <AppBottomSheet
+      visible={visible}
+      onClose={handleClose}
+      footer={drawerDock}
+      accessibilityLabel={`${sessionType} toolbox`}
+      testID="mobile-toolbox-sheet"
+    >
+      {content}
+    </AppBottomSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    zIndex: 400,
-  },
-  panelMobile: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    zIndex: 401,
-    overflow: 'hidden',
-  },
-  /**
-   * Fixed side rail — never flex-share with chat (no % / flex:1 half-screen).
-   * Width must match TOOLBOX_DOCK_WIDTH in chat-screen/styles.
-   */
   dockPanel: {
     width: 360,
     flexGrow: 0,
     flexShrink: 0,
     flexBasis: 360,
-    alignSelf: 'stretch',
-    flexDirection: 'column',
-    overflow: 'hidden',
+    alignSelf: "stretch",
+    flexDirection: "column",
+    overflow: "hidden",
     borderLeftWidth: StyleSheet.hairlineWidth,
   },
+  surface: {
+    flex: 1,
+    minHeight: 0,
+  },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     gap: 10,
   },
+  drawerDock: {
+    minHeight: 58,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   tabRail: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 2,
@@ -316,42 +331,28 @@ const styles = StyleSheet.create({
   },
   tabButton: {
     width: 44,
-    minHeight: 34,
+    minHeight: 36,
     borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   closeBtn: {
-    position: 'absolute',
+    position: "absolute",
     right: 10,
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
   },
   body: {
     flex: 1,
-  },
-  handleZoneMobile: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 6,
-  },
-  handleMobile: {
-    width: 44,
-    height: 5,
-    borderRadius: 999,
-    opacity: 0.48,
+    minHeight: 0,
   },
   tabContent: {
     ...StyleSheet.absoluteFillObject,
   },
-  hidden: Platform.OS === 'web'
-    ? { display: 'none' as any }
-    : { opacity: 0, pointerEvents: 'none' as const },
+  hidden:
+    Platform.OS === "web"
+      ? ({ display: "none" } as const)
+      : { opacity: 0, pointerEvents: "none" as const },
 });

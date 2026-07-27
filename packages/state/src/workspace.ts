@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { KrustyStorage } from './storage';
 
-const STORAGE_KEY = 'krusty:workspace';
+export const DEFAULT_WORKSPACE_STORAGE_KEY = 'krusty:workspace';
 
 type WorkspaceMode = 'neutral' | 'selected' | 'created';
 
@@ -39,9 +39,12 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
   return trimmed ? trimmed : null;
 }
 
-function loadState(storage: KrustyStorage): Omit<WorkspaceStoreState, 'setWorkspace' | 'setSession' | 'setDirectory' | 'setTargetBranch' | 'clear' | 'initFromSession'> {
+function loadState(
+  storage: KrustyStorage,
+  storageKey: string,
+): Omit<WorkspaceStoreState, 'setWorkspace' | 'setSession' | 'setDirectory' | 'setTargetBranch' | 'clear' | 'initFromSession'> {
   try {
-    const stored = storage.get(STORAGE_KEY);
+    const stored = storage.get(storageKey);
     if (stored) {
       const parsed = JSON.parse(stored) as Partial<PersistedWorkspaceState>;
       return {
@@ -60,6 +63,7 @@ function loadState(storage: KrustyStorage): Omit<WorkspaceStoreState, 'setWorksp
 
 function saveState(
   storage: KrustyStorage,
+  storageKey: string,
   state: {
     directory: string | null;
     targetBranch: string | null;
@@ -68,7 +72,7 @@ function saveState(
   },
 ) {
   try {
-    storage.set(STORAGE_KEY, JSON.stringify({
+    storage.set(storageKey, JSON.stringify({
       directory: state.directory,
       targetBranch: state.targetBranch,
       mode: state.mode,
@@ -79,8 +83,11 @@ function saveState(
   }
 }
 
-export function createWorkspaceStore(storage: KrustyStorage) {
-  const initial = loadState(storage);
+export function createWorkspaceStore(
+  storage: KrustyStorage,
+  storageKey = DEFAULT_WORKSPACE_STORAGE_KEY,
+) {
+  const initial = loadState(storage, storageKey);
 
   return create<WorkspaceStoreState>((set, get) => ({
     ...initial,
@@ -99,14 +106,14 @@ export function createWorkspaceStore(storage: KrustyStorage) {
         initialized: true,
       };
       set(newState);
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
 
     setSession(sessionId: string | null) {
       const prev = get();
       const newState = { ...prev, sessionId };
       set({ sessionId });
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
 
     setDirectory(directory: string | null, targetBranch: string | null = null) {
@@ -121,7 +128,7 @@ export function createWorkspaceStore(storage: KrustyStorage) {
         mode,
       };
       set({ directory, targetBranch: newState.targetBranch, mode });
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
 
     setTargetBranch(targetBranch: string | null) {
@@ -131,7 +138,7 @@ export function createWorkspaceStore(storage: KrustyStorage) {
         targetBranch: normalizeTargetBranch(targetBranch),
       };
       set({ targetBranch: newState.targetBranch });
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
 
     clear() {
@@ -143,7 +150,7 @@ export function createWorkspaceStore(storage: KrustyStorage) {
         initialized: true,
       };
       set(newState);
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
 
     initFromSession(
@@ -160,7 +167,7 @@ export function createWorkspaceStore(storage: KrustyStorage) {
         initialized: true,
       };
       set(newState);
-      saveState(storage, newState);
+      saveState(storage, storageKey, newState);
     },
   }));
 }

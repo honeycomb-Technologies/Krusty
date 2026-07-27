@@ -78,7 +78,7 @@ test('code first-send with a selected workspace streams a new code session with 
   assert.equal(intent.shouldPrecreate, false);
   await sessionStore
     .getState()
-    .sendMessage('inspect this repository', [], false, intent.sendOptions);
+    .sendMessage('inspect this repository', [], intent.sendOptions);
 
   assert.equal(streamRequests.length, 1);
   assert.deepEqual(streamRequests[0], {
@@ -90,11 +90,11 @@ test('code first-send with a selected workspace streams a new code session with 
     workspace_mode: 'selected',
     session_type: 'code',
     target_branch: null,
-    research_enabled: undefined,
     model: undefined,
+    model_key: undefined,
     fast_mode: undefined,
     thinking_enabled: 'medium',
-    permission_mode: 'supervised',
+    permission_mode: 'autonomous',
     mode: 'build',
   });
 });

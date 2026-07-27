@@ -161,9 +161,6 @@ export const styles = StyleSheet.create({
     fontWeight: "600",
     textAlign: "center",
   },
-  titlePlaceholder: {
-    fontWeight: "500",
-  },
   statusDot: {
     width: 8,
     height: 8,

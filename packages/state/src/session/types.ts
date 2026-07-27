@@ -207,6 +207,11 @@ export interface SessionStoreState {
   togglePermissionMode: () => void;
   submitToolResult: (toolCallId: string, result: string) => Promise<void>;
   submitToolApproval: (toolCallId: string, approved: boolean) => Promise<void>;
+  /**
+   * Disconnect the local UI from the active stream without cancelling the
+   * server-side session. Used when navigating between conversations or modes.
+   */
+  detachSession: () => void;
   stopStreaming: () => void;
   startStatePolling: (sessionId: string) => void;
   stopStatePolling: () => void;

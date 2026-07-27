@@ -29,10 +29,13 @@ import {
 } from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
 import type { ChatMessage } from "@krusty/api";
+import type { SessionType } from "@krusty/api";
 
 interface ChatTranscriptProps {
   messages: ChatMessage[];
   sessionId?: string | null;
+  sessionType?: SessionType;
+  scrollStateKey?: string;
   isStreaming: boolean;
   isThinking?: boolean;
   activeToolCallId?: string | null;
@@ -66,6 +69,13 @@ const BOTTOM_CONTROL_INSET = 10;
 const BOTTOM_CONTROL_SIZE = 56;
 const BOTTOM_CONTROL_RADIUS = 18;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
+
+interface CachedTranscriptScrollState {
+  offset: number;
+  autoFollow: boolean;
+}
+
+const transcriptScrollCache = new Map<string, CachedTranscriptScrollState>();
 
 function lastMessageLayoutSignature(messages: ChatMessage[]): string {
   const lastMessage = messages[messages.length - 1];
@@ -116,6 +126,8 @@ function distanceFromBottom(
 export function ChatTranscript({
   messages,
   sessionId,
+  sessionType = "chat",
+  scrollStateKey = sessionId ?? "empty",
   isStreaming,
   isThinking,
   activeToolCallId,
@@ -132,20 +144,31 @@ export function ChatTranscript({
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
+  const restoredScrollStateRef = useRef(
+    transcriptScrollCache.get(scrollStateKey) ?? null,
+  );
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
-  const scrollOffsetRef = useRef(0);
-  const autoFollowRef = useRef(true);
+  const scrollOffsetRef = useRef(
+    restoredScrollStateRef.current?.offset ?? 0,
+  );
+  const autoFollowRef = useRef(
+    restoredScrollStateRef.current?.autoFollow ?? true,
+  );
   const pendingAutoScrollRef = useRef(false);
   const pendingAutoScrollAnimatedRef = useRef(false);
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
   const isUserDraggingRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
-  const loadedSessionIdRef = useRef<string | null>(null);
+  const loadedSessionIdRef = useRef<string | null>(
+    restoredScrollStateRef.current ? sessionId ?? null : null,
+  );
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
-  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [isNearBottom, setIsNearBottom] = useState(
+    restoredScrollStateRef.current?.autoFollow ?? true,
+  );
   const t = theme.colors;
   const blurTint =
     theme.scheme === "dark"
@@ -309,6 +332,16 @@ export function ChatTranscript({
 
   useEffect(() => clearBottomAnchorTimers, [clearBottomAnchorTimers]);
 
+  useEffect(
+    () => () => {
+      transcriptScrollCache.set(scrollStateKey, {
+        offset: scrollOffsetRef.current,
+        autoFollow: autoFollowRef.current,
+      });
+    },
+    [scrollStateKey],
+  );
+
   useEffect(() => {
     if (!sessionId) {
       loadedSessionIdRef.current = null;
@@ -457,6 +490,10 @@ export function ChatTranscript({
         }}
         onScroll={handleListScroll}
         scrollEventThrottle={16}
+        contentOffset={{
+          x: 0,
+          y: restoredScrollStateRef.current?.offset ?? 0,
+        }}
         renderItem={renderTurn}
         style={styles.flex}
         contentContainerStyle={[
@@ -527,7 +564,10 @@ export function ChatTranscript({
         </View>
       ) : null}
       {!isDesktop && showPlanTracker ? (
-        <PlanTracker onHeightChange={setPlanTrackerHeight} />
+        <PlanTracker
+          sessionType={sessionType}
+          onHeightChange={setPlanTrackerHeight}
+        />
       ) : null}
       <View
         style={[
