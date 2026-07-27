@@ -44,7 +44,7 @@ import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
-import { buildToolDiffPresentation } from "../../components/chat/toolDiffModel";
+import { getToolDiffStats } from "../../components/chat/toolDiffModel";
 import Animated, {
   runOnJS,
   SlideInLeft,
@@ -293,10 +293,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       activeToolCall: getActiveToolCall(toolCalls),
       activityDiff: toolCalls.reduce(
         (total, toolCall) => {
-          const diff = buildToolDiffPresentation(toolCall);
-          if (diff) {
-            total.additions += diff.additions;
-            total.deletions += diff.deletions;
+          const stats = getToolDiffStats(toolCall);
+          if (stats) {
+            total.additions += stats.additions;
+            total.deletions += stats.deletions;
           }
           return total;
         },

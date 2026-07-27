@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useMemo,
   useCallback,
+  memo,
 } from 'react';
 import {
   View,
@@ -675,7 +676,7 @@ async function prepareImageAttachment(
   }
 }
 
-export function ChatBar(props: ChatBarProps) {
+function ChatBarComponent(props: ChatBarProps) {
   const {
     draftKey = 'chat',
     onSend, onStop, onHeightChange, isStreaming, disabled,
@@ -2070,3 +2071,5 @@ const styles = StyleSheet.create({
   gaugeRing: { width: GAUGE_SIZE, height: GAUGE_SIZE, alignItems: 'center', justifyContent: 'center' },
   gaugeLabel: { position: 'absolute', fontSize: 7, fontWeight: '600', letterSpacing: 0 },
 });
+
+export const ChatBar = memo(ChatBarComponent);

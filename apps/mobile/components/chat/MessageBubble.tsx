@@ -23,6 +23,7 @@ import {
   isQuestionTool,
   type AssistantVisualSegment,
 } from "./assistantRenderPlan";
+import { assistantMessageRevision } from "./assistantSegments";
 import {
   presentTool,
   shouldExpandToolByPolicy,
@@ -243,7 +244,6 @@ export const MessageBubble = memo(function MessageBubble({
     </View>
   );
 }, (prev, next) => (
-  prev.message === next.message &&
   prev.isLast === next.isLast &&
   prev.isStreaming === next.isStreaming &&
   prev.isThinking === next.isThinking &&
@@ -251,7 +251,15 @@ export const MessageBubble = memo(function MessageBubble({
   prev.onApproveTool === next.onApproveTool &&
   prev.onDenyTool === next.onDenyTool &&
   prev.onSubmitToolResult === next.onSubmitToolResult &&
-  prev.onPlanConfirm === next.onPlanConfirm
+  prev.onPlanConfirm === next.onPlanConfirm &&
+  (
+    prev.message.role === 'assistant'
+      ? assistantMessageRevision(prev.message) === assistantMessageRevision(next.message)
+      : prev.message.id === next.message.id &&
+        prev.message.content === next.message.content &&
+        prev.message.isQueued === next.message.isQueued &&
+        prev.message.attachments === next.message.attachments
+  )
 ));
 
 function ToolClusterCard({

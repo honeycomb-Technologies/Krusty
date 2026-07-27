@@ -49,6 +49,44 @@ export function isDiffTool(toolName: string): boolean {
   return DIFF_TOOL_NAMES.has(toolName.toLowerCase());
 }
 
+/** Cheap +/− counts for Live Activity / badges without building full diff models. */
+export function getToolDiffStats(
+  toolCall: ToolCall,
+): { additions: number; deletions: number } | null {
+  if (!isDiffTool(toolCall.name)) return null;
+
+  const args = toolCall.arguments ?? {};
+  const envelope = parseToolEnvelope(toolCall.output);
+  const emittedPatch = envelope?.diff ?? rawUnifiedPatch(toolCall.output);
+  if (emittedPatch) {
+    return countPatchChanges(emittedPatch);
+  }
+
+  const normalizedName = toolCall.name.toLowerCase();
+  if (normalizedName === "apply_patch" || normalizedName === "patch") {
+    const patch = convertApplyPatchToUnified(firstString(args.patch));
+    return patch ? countPatchChanges(patch) : null;
+  }
+
+  if (normalizedName === "edit") {
+    const oldContents = firstString(args.old_string);
+    const newContents = firstString(args.new_string);
+    if (oldContents === undefined || newContents === undefined) return null;
+    return {
+      additions: lineCount(newContents),
+      deletions: lineCount(oldContents),
+    };
+  }
+
+  if (normalizedName === "write") {
+    const contents = firstString(args.content);
+    if (contents === undefined) return null;
+    return { additions: lineCount(contents), deletions: 0 };
+  }
+
+  return null;
+}
+
 export function buildToolDiffPresentation(
   toolCall: ToolCall,
 ): ToolDiffPresentation | null {
