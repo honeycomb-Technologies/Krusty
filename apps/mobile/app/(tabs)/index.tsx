@@ -491,7 +491,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       fallbackDefault,
       catalog,
       allowedProviders,
-      sessionStore.getState().modelKey,
+      targetStore.getState().modelKey,
       fallbackDefaultKey,
     );
 
@@ -512,7 +512,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     defaultModelKey,
     loadModelCatalog,
     models,
-    sessionStore,
   ]);
 
   useEffect(() => {
