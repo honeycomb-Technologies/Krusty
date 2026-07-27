@@ -57,7 +57,10 @@ interface ChatTranscriptProps {
   hideJumpToLatest?: boolean;
 }
 
-const DESKTOP_TOP_EDGE_HEIGHT = 22;
+const DESKTOP_TOP_EDGE_HEIGHT = 64;
+const MOBILE_TOP_EDGE_HEIGHT = 78;
+const DESKTOP_TOP_EDGE_OFFSET = -28;
+const MOBILE_TOP_EDGE_OFFSET = -34;
 const DESKTOP_BOTTOM_EDGE_HEIGHT = 116;
 const MOBILE_BOTTOM_SCRIM_MIN_HEIGHT = 148;
 const MOBILE_BOTTOM_SCRIM_MAX_HEIGHT = 228;
@@ -188,8 +191,10 @@ export function ChatTranscript({
     () => lastMessageLayoutSignature(messages),
     [messages],
   );
-  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : 0;
-  const topContentGap = topFadeHeight > 0 ? topFadeHeight + EDGE_GAP : EDGE_GAP;
+  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : MOBILE_TOP_EDGE_HEIGHT;
+  const topFadeOffset = isDesktop ? DESKTOP_TOP_EDGE_OFFSET : MOBILE_TOP_EDGE_OFFSET;
+  // Content starts lower than the raised fade so the blur sits under header chrome.
+  const topContentGap = isDesktop ? 28 : 34;
   const bottomScrimHeight = isDesktop
     ? Math.max(DESKTOP_BOTTOM_EDGE_HEIGHT, Math.min(bottomPadding + 40, 188))
     : Math.max(
@@ -198,7 +203,7 @@ export function ChatTranscript({
       );
   const bottomScrimOffset = 0;
   const listTopPadding = isDesktop
-    ? 8
+    ? topContentGap
     : topContentGap +
       (showPlanTracker && planTrackerHeight > 0
         ? planTrackerHeight + TRACKER_GAP
@@ -263,7 +268,7 @@ export function ChatTranscript({
       // One bounded fallback catches delayed Markdown measurement without
       // issuing a multi-frame scroll storm for every streamed delta.
       bottomAnchorTimersRef.current = [
-        setTimeout(() => anchor(false), 96),
+        setTimeout(() => anchor(false), 120),
       ];
     },
     [clearBottomAnchorTimers, scrollToBottom],
@@ -541,28 +546,38 @@ export function ChatTranscript({
         showsVerticalScrollIndicator={false}
       />
 
-      {topFadeHeight > 0 ? (
-        <View
-          style={[
-            styles.edgeMask,
-            styles.edgeMaskTop,
-            { height: topFadeHeight },
-          ]}
-          pointerEvents="none"
-        >
+      <View
+        style={[
+          styles.edgeMask,
+          styles.edgeMaskTop,
+          { height: topFadeHeight, top: topFadeOffset },
+        ]}
+        pointerEvents="none"
+      >
+        {isDesktop ? (
           <BlurView
-            intensity={10}
+            intensity={18}
             tint={blurTint}
             style={StyleSheet.absoluteFill}
           />
-          <LinearGradient
-            colors={[`${t.background}88`, `${t.background}00`]}
-            start={{ x: 0.5, y: 0 }}
-            end={{ x: 0.5, y: 1 }}
-            style={StyleSheet.absoluteFill}
-          />
-        </View>
-      ) : null}
+        ) : null}
+        <LinearGradient
+          colors={
+            isDesktop
+              ? [t.background, `${t.background}b8`, `${t.background}00`]
+              : [
+                  t.background,
+                  `${t.background}c8`,
+                  `${t.background}18`,
+                  `${t.background}00`,
+                ]
+          }
+          locations={isDesktop ? [0, 0.42, 1] : [0, 0.28, 0.58, 1]}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
       {!isDesktop && showPlanTracker ? (
         <PlanTracker
           sessionType={sessionType}

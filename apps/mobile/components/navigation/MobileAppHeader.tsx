@@ -145,11 +145,17 @@ export function MobileAppHeader({
               accessibilityRole={onTitlePress ? "button" : undefined}
               accessibilityLabel={onTitlePress ? "Rename thread" : undefined}
               onPress={onTitlePress}
-              style={styles.titleTuck}
+              style={[
+                styles.titleTag,
+                {
+                  borderColor: t.glass.border,
+                  backgroundColor: t.glass.background,
+                },
+              ]}
             >
               <Text
                 numberOfLines={1}
-                style={[styles.titleText, { color: t.mutedForeground }]}
+                style={[styles.titleText, { color: t.foreground }]}
               >
                 {visibleTitle}
               </Text>
@@ -186,17 +192,22 @@ export function MobileAppHeader({
 const styles = StyleSheet.create({
   root: {
     paddingHorizontal: 14,
+    zIndex: 40,
+    overflow: "visible",
   },
   header: {
-    height: 48,
+    minHeight: 48,
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 10,
     paddingTop: 4,
+    paddingBottom: 2,
+    overflow: "visible",
   },
   headerWithTitle: {
-    height: 64,
+    minHeight: 88,
+    paddingBottom: 10,
   },
   headerButton: {
     width: 40,
@@ -218,6 +229,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     alignItems: "center",
+    overflow: "visible",
   },
   modeButton: {
     height: 34,
@@ -235,16 +247,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
-  titleTuck: {
-    height: 18,
+  titleTag: {
+    marginTop: 8,
     maxWidth: "100%",
+    minHeight: 32,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
     justifyContent: "center",
-    paddingHorizontal: 10,
+    alignItems: "center",
+    zIndex: 41,
   },
   titleText: {
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0,
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 18,
+    letterSpacing: -0.1,
     textAlign: "center",
   },
 });

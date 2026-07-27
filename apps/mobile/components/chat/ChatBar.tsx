@@ -1190,6 +1190,9 @@ export function ChatBar(props: ChatBarProps) {
     : Platform.OS === 'web'
       ? Math.max(closedGap, insets.bottom)
       : Math.max(10, Math.min(insets.bottom, closedGap));
+  // On iOS/Android, endCoordinates.height is distance from window bottom to keyboard top.
+  // Use that directly so the absolute composer sits flush above the keyboard.
+  // Avoid subtracting safe-area here or the bar can land in the keyboard.
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
@@ -1318,10 +1321,9 @@ export function ChatBar(props: ChatBarProps) {
   useEffect(() => {
     const measuredRootHeight = measuredRootHeightRef.current;
     if (!measuredRootHeight || !onHeightChange) return;
-    const reservedHeight = Math.max(
-      PILL,
-      Math.ceil(measuredRootHeight - (keyboardHeight > 0 ? keyboardHeight : 0)),
-    );
+    // Reserve the full mounted height, including keyboard lift. Transcript
+    // content must clear both the composer chrome and the open keyboard.
+    const reservedHeight = Math.max(PILL, Math.ceil(measuredRootHeight));
     if (reportedComposerHeightRef.current === reservedHeight) return;
     reportedComposerHeightRef.current = reservedHeight;
     onHeightChange(reservedHeight);
@@ -1353,10 +1355,8 @@ export function ChatBar(props: ChatBarProps) {
         const nextWidth = Math.round(width);
         setMeasuredRootWidth((prev) => (prev === nextWidth ? prev : nextWidth));
         if (!onHeightChange) return;
-        const reservedHeight = Math.max(
-          PILL,
-          Math.ceil(height - (keyboardHeight > 0 ? keyboardHeight : 0)),
-        );
+        // Include keyboard paddingBottom so chat content is never covered.
+        const reservedHeight = Math.max(PILL, Math.ceil(height));
         if (reportedComposerHeightRef.current === reservedHeight) return;
         reportedComposerHeightRef.current = reservedHeight;
         onHeightChange(reservedHeight);
@@ -1773,8 +1773,8 @@ export function ChatBar(props: ChatBarProps) {
                     {
                       backgroundColor: canSend
                         ? pressed
-                          ? `${t.success}cc`
-                          : t.success
+                          ? `${t.userMessage}cc`
+                          : t.userMessage
                         : t.border,
                     },
                   ]}

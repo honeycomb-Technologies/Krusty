@@ -23,6 +23,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
   const [hoveredImageKey, setHoveredImageKey] = useState<unknown>(null);
   const [copiedCodeKey, setCopiedCodeKey] = useState<unknown>(null);
+  const renderContent = stabilizeStreamingMarkdown(content);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -150,8 +151,8 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
             style={{
               fontFamily: 'Courier',
               fontSize: 13,
-              backgroundColor: isUser ? `${t.success}14` : 'rgba(255,255,255,0.08)',
-              color: isUser ? t.success : t.foreground,
+              backgroundColor: isUser ? `${t.userMessage}14` : 'rgba(255,255,255,0.08)',
+              color: isUser ? t.userMessage : t.foreground,
               paddingHorizontal: 4,
               paddingVertical: 1,
               borderRadius: 4,
@@ -162,7 +163,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
         ),
         }}
       >
-        {content}
+        {renderContent}
       </Markdown>
       <ImagePreviewModal
         visible={Boolean(previewImage)}
@@ -172,6 +173,23 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
       />
     </>
   );
+}
+
+/**
+ * Soft-stabilize incomplete markdown while streaming so punctuation/words do not
+ * appear cut off or oddly spaced when a token arrives mid-construct.
+ */
+function stabilizeStreamingMarkdown(content: string): string {
+  if (!content) return content;
+
+  // Keep this deliberately conservative. Aggressive marker stripping can itself
+  // make periods/words appear to vanish mid-stream.
+  let next = content;
+
+  // Incomplete ordered-list marker at end of stream ("1.") should not become a list item.
+  next = next.replace(/(^|\n)(\d+)\.(\s*)$/u, "$1$2\\.$3");
+
+  return next;
 }
 
 function getMarkdownImageUri(node: any): string | null {
@@ -192,9 +210,9 @@ function stripTrailingCodeNewline(content: unknown): string {
 }
 
 function getStyles(t: any, isUser?: boolean) {
-  const textColor = isUser ? t.success : t.foreground;
-  const mutedColor = isUser ? `${t.success}b8` : t.mutedForeground;
-  const accentColor = isUser ? t.success : t.userMessage;
+  const textColor = isUser ? t.userMessage : t.foreground;
+  const mutedColor = isUser ? `${t.userMessage}b8` : t.mutedForeground;
+  const accentColor = t.userMessage;
 
   return StyleSheet.create({
     body: { color: textColor, fontSize: 15, lineHeight: 22 },

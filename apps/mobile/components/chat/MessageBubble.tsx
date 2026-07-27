@@ -23,6 +23,10 @@ import {
   isQuestionTool,
   type AssistantVisualSegment,
 } from "./assistantRenderPlan";
+import {
+  presentTool,
+  shouldExpandToolByPolicy,
+} from "./toolPresentation";
 import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@krusty/api";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
@@ -126,7 +130,10 @@ export function MessageBubble({
         isStreaming={
           toolIsStreaming || (isDelegatedTool(toolCall) && isLast && isStreaming)
         }
-        defaultExpanded={shouldExpandTool(toolCall, isLast && isStreaming)}
+        defaultExpanded={shouldExpandToolByPolicy(
+          toolCall,
+          toolIsStreaming || (isDelegatedTool(toolCall) && isLast && isStreaming),
+        )}
       />
     );
   };
@@ -236,16 +243,6 @@ export function MessageBubble({
   );
 }
 
-function shouldExpandTool(toolCall: ToolCall, isStreaming: boolean): boolean {
-  if (toolCall.status === "awaiting_approval") {
-    return true;
-  }
-  if (isStreaming && toolCall.status === "running") {
-    return true;
-  }
-  return false;
-}
-
 function ToolClusterCard({
   tools,
   isStreaming,
@@ -260,18 +257,17 @@ function ToolClusterCard({
   const errorCount = tools.filter((tool) => tool.status === "error").length;
   const label =
     tools.length === 1
-      ? formatToolName(tools[0]?.name ?? "Tool")
+      ? presentTool(tools[0]!).label
       : `${tools.length} exploration actions`;
   const detail = [
     runningCount > 0 ? `${runningCount} running` : null,
     errorCount > 0 ? `${errorCount} failed` : null,
-    isStreaming ? "live" : null,
   ]
     .filter(Boolean)
     .join(" · ");
 
   return (
-    <View style={[styles.toolCluster, { borderColor: t.border }]}>
+    <View style={styles.toolCluster}>
       <Pressable
         onPress={() => setExpanded((current) => !current)}
         style={styles.toolClusterHeader}
@@ -295,24 +291,25 @@ function ToolClusterCard({
       </Pressable>
       {expanded ? (
         <View style={styles.toolClusterBody}>
-          {tools.map((toolCall) => (
-            <ToolCallCard
-              key={toolCall.id}
-              toolCall={toolCall}
-              isStreaming={isStreaming && toolCall.status === "running"}
-              defaultExpanded={shouldExpandTool(toolCall, isStreaming)}
-            />
-          ))}
+          {tools.map((toolCall) => {
+            const toolStreaming = isStreaming && toolCall.status === "running";
+            return (
+              <ToolCallCard
+                key={toolCall.id}
+                toolCall={toolCall}
+                isStreaming={toolStreaming}
+                defaultExpanded={shouldExpandToolByPolicy(
+                  toolCall,
+                  toolStreaming,
+                )}
+                compact
+              />
+            );
+          })}
         </View>
       ) : null}
     </View>
   );
-}
-
-function formatToolName(name: string): string {
-  return name
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function MessageAttachments({

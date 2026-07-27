@@ -8,11 +8,11 @@ export const colors = {
   primaryMuted: 'rgba(250, 250, 250, 0.7)',
 
   // Messages
-  userMessage: '#4090ff',
-  userMessageBg: 'rgba(64, 144, 255, 0.15)',
+  userMessage: '#ff6b35',
+  userMessageBg: 'rgba(255, 107, 53, 0.15)',
   aiMessage: 'rgba(255, 255, 255, 0.04)',
-  thinking: '#e6a700',
-  thinkingBg: 'rgba(230, 167, 0, 0.1)',
+  thinking: '#ff6b35',
+  thinkingBg: 'rgba(255, 107, 53, 0.1)',
 
   // Status
   success: '#22c55e',
@@ -48,7 +48,7 @@ export const colors = {
     muted: '#f4f4f5',
     mutedForeground: '#71717a',
     border: 'rgba(0, 0, 0, 0.08)',
-    userMessageBg: 'rgba(64, 144, 255, 0.10)',
+    userMessageBg: 'rgba(255, 107, 53, 0.10)',
     aiMessage: 'rgba(0, 0, 0, 0.03)',
     glass: {
       background: 'rgba(255, 255, 255, 0.60)',

@@ -5,6 +5,8 @@ import {
   Text,
   Pressable,
   Alert,
+  Modal,
+  TextInput,
   useWindowDimensions,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -34,7 +36,6 @@ import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
 import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
-import { MakoCrewPicker } from "../../components/mako/MakoCrewPicker";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
@@ -139,6 +140,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const entrance = useEntranceAnimation(splashDone);
 
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
   const [modeTransitionDirection, setModeTransitionDirection] =
     useState<1 | -1>(1);
   const activeTab = tabForSessionType(activeMode);
@@ -219,7 +223,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     },
     [activeMode],
   );
-  const [newMakoCrewSlug, setNewMakoCrewSlug] = useState<string | null>(null);
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
@@ -818,12 +821,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           const response = await client.dispatchMako(task, {
             projectDir: workspaceDirectory ?? undefined,
             model: resolvedModel,
-            crewSlug: newMakoCrewSlug,
           });
           lastSessionIdByTypeRef.current.mako = response.session_id;
           await sessionsStore.getState().loadSessions();
           await sessionStore.getState().loadSession(response.session_id, true);
-          setNewMakoCrewSlug(null);
           void Haptics.notificationAsync(
             Haptics.NotificationFeedbackType.Success,
           );
@@ -845,7 +846,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       client,
       ensureModelReady,
       handleSend,
-      newMakoCrewSlug,
       sessionStore,
       sessionsStore,
       workspaceDirectory,
@@ -855,7 +855,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const handleNewMakoSession = useCallback(() => {
     setActiveMode("mako");
     setActiveSheet(null);
-    setNewMakoCrewSlug(null);
     const makoStore = stores.modes.mako.session;
     makoStore.getState().detachSession();
     makoStore.getState().clearSession();
@@ -871,26 +870,45 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   );
 
   const handleRenameSession = useCallback(() => {
-    if (!sessionId || !sessionTitle) {
+    if (!sessionId) {
+      return;
+    }
+    setRenameDraft((sessionTitle || "").trim() || "Untitled");
+    setRenameOpen(true);
+  }, [sessionId, sessionTitle]);
+
+  const handleRenameCancel = useCallback(() => {
+    if (renameSaving) return;
+    setRenameOpen(false);
+  }, [renameSaving]);
+
+  const handleRenameSave = useCallback(async () => {
+    if (!sessionId || renameSaving) return;
+    const nextTitle = renameDraft.trim();
+    const currentTitle = (sessionTitle || "").trim();
+    if (!nextTitle) {
+      Alert.alert("Title required", "Enter a session title to continue.");
+      return;
+    }
+    if (nextTitle === currentTitle) {
+      setRenameOpen(false);
       return;
     }
 
-    Alert.prompt(
-      "Rename Session",
-      undefined,
-      async (newTitle?: string) => {
-        const nextTitle = newTitle?.trim();
-        if (!nextTitle) {
-          return;
-        }
-
-        sessionStore.getState().setTitle(nextTitle);
-        await sessionStore.getState().updateTitle(sessionId, nextTitle);
-      },
-      "plain-text",
-      sessionTitle,
-    );
-  }, [sessionId, sessionStore, sessionTitle]);
+    setRenameSaving(true);
+    try {
+      sessionStore.getState().setTitle(nextTitle);
+      await sessionStore.getState().updateTitle(sessionId, nextTitle);
+      setRenameOpen(false);
+    } catch (error) {
+      Alert.alert(
+        "Rename failed",
+        error instanceof Error ? error.message : "Could not update session title.",
+      );
+    } finally {
+      setRenameSaving(false);
+    }
+  }, [renameDraft, renameSaving, sessionId, sessionStore, sessionTitle]);
 
   const handleToolboxClose = useCallback(() => {
     if (isDesktop) {
@@ -972,8 +990,18 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     >
       <Pressable
         onPress={handleRenameSession}
-        style={styles.titleBtn}
-        disabled={!sessionId}
+        style={[
+          styles.titleBtn,
+          displayTitle
+            ? {
+                borderColor: t.glass.border,
+                backgroundColor: t.glass.background,
+              }
+            : { borderColor: "transparent", backgroundColor: "transparent" },
+        ]}
+        disabled={!sessionId || !displayTitle}
+        accessibilityRole="button"
+        accessibilityLabel="Rename thread"
       >
         <Text
           style={[
@@ -1301,17 +1329,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
         <MakoThreadSurface
           chat={makoChat}
-          emptyTitle="Start a Mako thread"
-          emptyBody="Choose a working identity, then send the first direction."
-          emptyAccessory={
-            !sessionId && (makoHome.crew?.members.length ?? 0) > 0 ? (
-              <MakoCrewPicker
-                members={makoHome.crew?.members ?? []}
-                selectedSlug={newMakoCrewSlug}
-                onSelect={setNewMakoCrewSlug}
-              />
-            ) : undefined
-          }
         />
       </Animated.View>
       <ToolboxPanel
@@ -1371,17 +1388,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               chat={makoChat}
               showComposer={false}
               externalBottomPadding={composerReserveHeight}
-              emptyTitle="Start a Mako thread"
-              emptyBody="Choose a working identity, then send the first direction."
-              emptyAccessory={
-                !sessionId && (makoHome.crew?.members.length ?? 0) > 0 ? (
-                  <MakoCrewPicker
-                    members={makoHome.crew?.members ?? []}
-                    selectedSlug={newMakoCrewSlug}
-                    onSelect={setNewMakoCrewSlug}
-                  />
-                ) : undefined
-              }
             />
           ) : (
             chatTranscriptSurface
@@ -1419,6 +1425,73 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     </SafeAreaView>
   );
 
+  const renameModal = (
+    <Modal
+      visible={renameOpen}
+      transparent
+      animationType="fade"
+      onRequestClose={handleRenameCancel}
+    >
+      <Pressable style={styles.renameBackdrop} onPress={handleRenameCancel}>
+        <Pressable
+          style={[
+            styles.renameCard,
+            {
+              backgroundColor: t.card,
+              borderColor: t.border,
+            },
+          ]}
+          onPress={(event) => event.stopPropagation()}
+        >
+          <Text style={[styles.renameTitle, { color: t.foreground }]}>Rename session</Text>
+          <TextInput
+            value={renameDraft}
+            onChangeText={setRenameDraft}
+            autoFocus
+            editable={!renameSaving}
+            placeholder="Session title"
+            placeholderTextColor={t.mutedForeground}
+            style={[
+              styles.renameInput,
+              {
+                color: t.foreground,
+                borderColor: t.border,
+                backgroundColor: t.background,
+              },
+            ]}
+            onSubmitEditing={() => {
+              void handleRenameSave();
+            }}
+          />
+          <View style={styles.renameActions}>
+            <Pressable
+              onPress={handleRenameCancel}
+              disabled={renameSaving}
+              style={[styles.renameButton, { borderColor: t.border }]}
+            >
+              <Text style={[styles.renameButtonText, { color: t.mutedForeground }]}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                void handleRenameSave();
+              }}
+              disabled={renameSaving}
+              style={[
+                styles.renameButton,
+                styles.renameButtonPrimary,
+                { backgroundColor: t.userMessage },
+              ]}
+            >
+              <Text style={[styles.renameButtonText, { color: "#fff" }]}>
+                {renameSaving ? "Saving…" : "Save"}
+              </Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+
   return (
     <DesktopShell
       sessions={sessions}
@@ -1433,6 +1506,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       activeMakoView={makoTopLevel}
       onSelectMakoView={handleSelectMakoView}
     >
+      {renameModal}
       {isDesktop ? (
         activeTab === 2 ? makoContent : chatContent
       ) : (

@@ -5,7 +5,7 @@ interface CrabIconProps {
   color?: string;
 }
 
-export function CrabIcon({ size = 24, color = '#e6a700' }: CrabIconProps) {
+export function CrabIcon({ size = 24, color = '#ff6b35' }: CrabIconProps) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
       {/* Body shell */}

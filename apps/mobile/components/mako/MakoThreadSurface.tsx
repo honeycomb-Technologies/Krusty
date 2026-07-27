@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
@@ -7,22 +7,16 @@ import type { MakoChatContext } from "./types";
 
 interface MakoThreadSurfaceProps {
   chat: MakoChatContext;
-  emptyTitle: string;
-  emptyBody: string;
   scrollToMessageId?: string | null;
   onScrollTargetHandled?: () => void;
-  emptyAccessory?: ReactNode;
   showComposer?: boolean;
   externalBottomPadding?: number;
 }
 
 export function MakoThreadSurface({
   chat,
-  emptyTitle,
-  emptyBody,
   scrollToMessageId,
   onScrollTargetHandled,
-  emptyAccessory,
   showComposer = true,
   externalBottomPadding = 150,
 }: MakoThreadSurfaceProps) {
@@ -53,19 +47,6 @@ export function MakoThreadSurface({
         showPlanTracker={false}
         scrollToMessageId={scrollToMessageId}
         onScrollTargetHandled={onScrollTargetHandled}
-        emptyState={
-          <View style={styles.emptyState}>
-            <Text style={[styles.emptyTitle, { color: t.foreground }]}>
-              {emptyTitle}
-            </Text>
-            <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
-              {emptyBody}
-            </Text>
-            {emptyAccessory ? (
-              <View style={styles.emptyAccessory}>{emptyAccessory}</View>
-            ) : null}
-          </View>
-        }
       />
 
       {chat.error ? (
@@ -117,29 +98,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     minHeight: 0,
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 28,
-    gap: 10,
-  },
-  emptyTitle: {
-    fontSize: 22,
-    fontWeight: "700",
-    textAlign: "center",
-    letterSpacing: -0.4,
-  },
-  emptyBody: {
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-  },
-  emptyAccessory: {
-    width: "100%",
-    maxWidth: 520,
-    marginTop: 10,
   },
   errorBanner: {
     marginHorizontal: 16,
