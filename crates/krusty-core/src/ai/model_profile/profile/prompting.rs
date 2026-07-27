@@ -39,10 +39,10 @@ impl ModelProfile {
                 "Keep prose compact, use parallel tools when independent, and resume from preserved state after compaction."
             }
             PromptFamily::OpenAiReasoning => {
-                "Turn reasoning into the next concrete action; reassess after tool results and continue."
+                "Turn internal reasoning into the next concrete tool call or final answer; do not dump the plan in user-visible text every round."
             }
             PromptFamily::Grok => {
-                "Reassess the latest user instruction after every tool result. If it asks for a direct reply or says not to call another tool, reply immediately without a tool. Never issue a no-op, placeholder, or redundant tool call merely to bridge from a tool result to text."
+                "After each tool result, silently decide the next action—do not re-narrate the plan. If the latest user message asks for a direct reply or says not to call another tool, reply immediately without a tool. Never issue a no-op or placeholder tool call merely to bridge from a tool result to text. Between tool rounds, at most one 8–12 word next-step preamble; otherwise stay quiet and call tools until done."
             }
             PromptFamily::GoogleGemini => {
                 "Ground decisions in tool evidence, keep calls narrow, and preserve the active task across long contexts."

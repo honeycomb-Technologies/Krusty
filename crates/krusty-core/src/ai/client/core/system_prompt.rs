@@ -23,7 +23,8 @@ pub const KRUSTY_SYSTEM_PROMPT: &str = r#"You operate inside Krusty as its codin
 
 ## Communication
 
-- Give short updates during long work. Spend tokens on action and evidence, not repeated plans.
+- Prefer tools over prose. Between tool rounds, a preamble is optional and must stay tiny: one short sentence (about 8–12 words) on the immediate next action—never restate the full plan, goal, or file list.
+- Skip status chatter after trivial reads. Speak when strategy changes, you need input, or you deliver the outcome.
 - Lead the final response with the outcome, then validation and material caveats. Be direct; avoid filler and large repeated code blocks."#;
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::ai::models::{ApiFormat, ModelMetadata};
-use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningFormat};
+use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat};
 
 const DEFAULT_GROK_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 
@@ -119,10 +119,13 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
     let max_output = model
         .max_completion_tokens
         .unwrap_or_else(|| default_max_output(context_window));
-    let supports_reasoning = model
+    // Proxy field names are overloaded: historically they meant "emits
+    // reasoning", not "accepts effort". Graded effort is decided separately.
+    let advertises_reasoning = model
         .supports_reasoning_effort
         .or(model.supports_reasoning_efforts)
         .unwrap_or_else(|| is_grok_build_reasoning_model(&id));
+    let graded_effort = graded_effort_for_grok_model(&id);
 
     let display_name = model
         .name
@@ -134,11 +137,17 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
     metadata.api_format = api_format;
     metadata.supports_tools = true;
     metadata.supports_vision = true;
-    if supports_reasoning {
+    if let Some((levels, default, mandatory)) = graded_effort {
+        // Public-style Grok 4.x graded effort (low/medium/high).
+        metadata = metadata
+            .with_thinking(ReasoningFormat::OpenAI)
+            .with_reasoning_levels(levels, Some(default), mandatory)
+            .with_reasoning_control(ReasoningControl::OpenAiEffort);
+    } else if advertises_reasoning {
         metadata = metadata.with_thinking(ReasoningFormat::OpenAI);
-        // Grok Build's subscription proxy chooses its own reasoning behavior.
-        // It may advertise that reasoning is produced, but it does not expose
-        // the public xAI API's explicit effort controls.
+        // Classic Grok Build / Composer subscription rows: show reasoning
+        // output when present, but do not send an effort selector the proxy
+        // historically rejected.
         metadata.reasoning_control = Some(ReasoningControl::OutputOnly);
     }
 
@@ -148,6 +157,50 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
     let _ = model.description;
 
     Some(metadata)
+}
+
+/// Graded `reasoning_effort` support for Grok model IDs.
+///
+/// Public xAI Grok 4.5 is low/medium/high (default high, always-on).
+/// Older subscription-only rows (grok-build, composer) stay output-only.
+fn graded_effort_for_grok_model(
+    model_id: &str,
+) -> Option<(Vec<ReasoningEffort>, ReasoningEffort, bool)> {
+    let normalized = model_id.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.starts_with("grok-4.5")
+        || normalized.starts_with("grok-4-5")
+        || normalized.contains("grok-4.5")
+        || normalized.contains("grok-4-5")
+    {
+        return Some((
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ],
+            ReasoningEffort::High,
+            true,
+        ));
+    }
+    if normalized.starts_with("grok-4.3")
+        || normalized.starts_with("grok-4-3")
+        || normalized.contains("grok-4.3")
+        || normalized.contains("grok-4-3")
+    {
+        // 4.3 family can accept none on some surfaces; keep low/med/high as the
+        // stable UI set and default low for agentic speed.
+        return Some((
+            vec![
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ],
+            ReasoningEffort::Low,
+            false,
+        ));
+    }
+    None
 }
 
 fn default_max_output(context_window: usize) -> usize {
@@ -213,5 +266,40 @@ mod tests {
         assert_eq!(model.context_window, 200_000);
         assert_eq!(model.api_format, ApiFormat::OpenAIResponses);
         assert!(model.supports_thinking);
+        assert_eq!(model.reasoning_control, Some(ReasoningControl::OutputOnly));
+    }
+
+    #[test]
+    fn parses_grok_45_with_graded_effort() {
+        let raw = GrokModel {
+            id: Some("grok-4.5".to_string()),
+            model: None,
+            name: Some("Grok 4.5".to_string()),
+            description: None,
+            context_window: Some(500_000),
+            max_completion_tokens: Some(32_768),
+            api_backend: Some("responses".to_string()),
+            supports_reasoning_effort: Some(true),
+            supports_reasoning_efforts: None,
+        };
+
+        let model = parse_model(raw).expect("model should parse");
+
+        assert_eq!(model.id, "grok-4.5");
+        assert!(model.supports_thinking);
+        assert_eq!(
+            model.reasoning_control,
+            Some(ReasoningControl::OpenAiEffort)
+        );
+        assert_eq!(
+            model.supported_reasoning_levels,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]
+        );
+        assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::High));
+        assert!(model.reasoning_is_mandatory);
     }
 }
