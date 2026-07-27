@@ -3,6 +3,11 @@ import type {
 	SessionContinuationEvent,
 	StreamCallbacks,
 } from "@krusty/api";
+import {
+	MAX_LIVE_MESSAGE_CONTENT_LENGTH,
+	MAX_LIVE_THINKING_CONTENT_LENGTH,
+	MAX_LIVE_TOOL_OUTPUT_LENGTH,
+} from "./constants";
 import type { createPlanStore } from "../plan";
 import type { createSessionsStore } from "../sessions";
 import {
@@ -41,6 +46,12 @@ interface StreamCallbackDependencies {
 		getState: () => SessionStoreState,
 		mode: SessionMode,
 	) => Promise<void>;
+}
+
+function appendBounded(existing: string, delta: string, max: number): string {
+	const next = existing + delta;
+	if (next.length <= max) return next;
+	return next.slice(next.length - max);
 }
 
 function appendRenderPart(ref: AssistantMessageRef, part: ChatRenderPart) {
@@ -138,7 +149,11 @@ export function createStreamCallbacks(
 		let flushedThinking = false;
 
 		if (pendingTextDelta) {
-			ref.current.content += pendingTextDelta;
+			ref.current.content = appendBounded(
+				ref.current.content,
+				pendingTextDelta,
+				MAX_LIVE_MESSAGE_CONTENT_LENGTH,
+			);
 			appendTextRenderPart(ref, pendingTextDelta);
 			pendingTextDelta = "";
 			changed = true;
@@ -146,8 +161,11 @@ export function createStreamCallbacks(
 		}
 
 		if (pendingThinkingDelta) {
-			ref.current.thinking =
-				(ref.current.thinking || "") + pendingThinkingDelta;
+			ref.current.thinking = appendBounded(
+				ref.current.thinking || "",
+				pendingThinkingDelta,
+				MAX_LIVE_THINKING_CONTENT_LENGTH,
+			);
 			appendThinkingRenderPart(ref, pendingThinkingDelta);
 			pendingThinkingDelta = "";
 			const delegatedIndex = (ref.current.toolCalls || []).findIndex(
@@ -195,7 +213,7 @@ export function createStreamCallbacks(
 					toolCallsChanged = true;
 					return {
 						...toolCall,
-						output: (toolCall.output || "") + delta,
+						output: appendBounded(toolCall.output || "", delta, MAX_LIVE_TOOL_OUTPUT_LENGTH),
 					};
 				});
 			}

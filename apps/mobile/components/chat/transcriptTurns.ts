@@ -1,5 +1,9 @@
 import type { ChatMessage } from "@krusty/api";
 import { assistantMessageRevision } from "./assistantSegments";
+import {
+  compactHistoricalMessage,
+  isTurnInRichWindow,
+} from "./presentationRetention";
 
 export interface TranscriptTurn {
   id: string;
@@ -31,19 +35,26 @@ export function buildTranscriptTurns(
   }
 
   const lastIndex = groupedMessages.length - 1;
+  const turnCount = groupedMessages.length;
   return groupedMessages.map((turnMessages, index) => {
     const firstMessage = turnMessages[0];
     const id = firstMessage ? `turn-${firstMessage.id}` : `turn-${index}`;
     const isLive = isStreaming && index === lastIndex;
+    // Litter-style retention: only recent turns keep full tool/thinking detail.
+    const rich = isTurnInRichWindow(index, turnCount) || isLive;
+    const displayMessages = rich
+      ? turnMessages
+      : turnMessages.map(compactHistoricalMessage);
 
     return {
       id,
-      messages: turnMessages,
+      messages: displayMessages,
       isLive,
       renderSignature: [
         id,
         isLive ? "live" : "steady",
-        ...turnMessages.map(messageRenderSignature),
+        rich ? "rich" : "compact",
+        ...displayMessages.map(messageRenderSignature),
       ].join("||"),
     };
   });

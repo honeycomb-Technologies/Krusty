@@ -80,7 +80,22 @@ interface CachedTranscriptScrollState {
   autoFollow: boolean;
 }
 
+const MAX_TRANSCRIPT_SCROLL_CACHE = 40;
 const transcriptScrollCache = new Map<string, CachedTranscriptScrollState>();
+
+function setTranscriptScrollCache(
+  key: string,
+  value: CachedTranscriptScrollState,
+) {
+  transcriptScrollCache.delete(key);
+  transcriptScrollCache.set(key, value);
+  while (transcriptScrollCache.size > MAX_TRANSCRIPT_SCROLL_CACHE) {
+    const oldest = transcriptScrollCache.keys().next().value;
+    if (!oldest) break;
+    transcriptScrollCache.delete(oldest);
+  }
+}
+
 
 function lastMessageLayoutSignature(messages: ChatMessage[]): string {
   const lastMessage = messages[messages.length - 1];
@@ -342,7 +357,7 @@ export function ChatTranscript({
 
   useEffect(
     () => () => {
-      transcriptScrollCache.set(scrollStateKey, {
+      setTranscriptScrollCache(scrollStateKey, {
         offset: scrollOffsetRef.current,
         autoFollow: autoFollowRef.current,
       });

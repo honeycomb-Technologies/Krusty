@@ -129,7 +129,17 @@ export function SessionDrawer({
   const [pickerPath, setPickerPath] = useState("");
   const [pickerParent, setPickerParent] = useState<string | null>(null);
   const [pickerDirs, setPickerDirs] = useState<DirEntry[]>([]);
+  const MAX_DIR_CACHE = 40;
   const dirCache = useRef<Map<string, DirCache>>(new Map());
+  const setDirCache = (key: string, value: DirCache) => {
+    dirCache.current.delete(key);
+    setDirCache(key, value);
+    while (dirCache.current.size > MAX_DIR_CACHE) {
+      const oldest = dirCache.current.keys().next().value;
+      if (!oldest) break;
+      dirCache.current.delete(oldest);
+    }
+  };
   const [pickerReady, setPickerReady] = useState(false);
   const pickerHeight = Math.max(300, Math.round(windowHeight * 0.58));
 
@@ -204,8 +214,8 @@ export function SessionDrawer({
         parent: result.parent,
         directories: result.directories,
       };
-      dirCache.current.set("", entry);
-      dirCache.current.set(result.current, entry);
+      setDirCache("", entry);
+      setDirCache(result.current, entry);
       setPickerPath(result.current);
       setPickerParent(result.parent);
       setPickerDirs(result.directories);
@@ -249,8 +259,8 @@ export function SessionDrawer({
           parent: result.parent,
           directories: result.directories,
         };
-        dirCache.current.set(path, entry);
-        dirCache.current.set(result.current, entry);
+        setDirCache(path, entry);
+        setDirCache(result.current, entry);
         setPickerPath(result.current);
         setPickerParent(result.parent);
         setPickerDirs(result.directories);

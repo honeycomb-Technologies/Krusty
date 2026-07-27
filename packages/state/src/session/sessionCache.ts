@@ -7,6 +7,12 @@ import type {
 } from "@krusty/api";
 
 import type { ChatMessage, PermissionMode, SessionMode } from "./types";
+import {
+  MAX_CACHED_SESSION_MESSAGES,
+  MAX_LIVE_MESSAGE_CONTENT_LENGTH,
+  MAX_LIVE_THINKING_CONTENT_LENGTH,
+  MAX_LIVE_TOOL_OUTPUT_LENGTH,
+} from "./constants";
 
 export interface CachedSessionSnapshot {
   sessionId: string;
@@ -26,7 +32,77 @@ export interface CachedSessionSnapshot {
   updatedAt: number;
 }
 
-const DEFAULT_MAX_ENTRIES = 24;
+
+function truncateText(value: string | undefined, max: number): string | undefined {
+  if (!value) return value;
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}
+…[truncated for cache]`;
+}
+
+/** Strip heavy payloads so warm-session cache cannot retain multi-MB transcripts. */
+export function compactMessagesForCache(messages: ChatMessage[]): ChatMessage[] {
+  const sliced =
+    messages.length > MAX_CACHED_SESSION_MESSAGES
+      ? messages.slice(messages.length - MAX_CACHED_SESSION_MESSAGES)
+      : messages;
+
+  return sliced.map((message) => {
+    const next: ChatMessage = {
+      ...message,
+      content: truncateText(message.content, MAX_LIVE_MESSAGE_CONTENT_LENGTH) || "",
+      thinking: truncateText(message.thinking, MAX_LIVE_THINKING_CONTENT_LENGTH),
+      attachments: message.attachments?.map((attachment) => ({
+        type: attachment.type,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        // Never keep base64 blobs in the warm session cache.
+        uri: attachment.uri,
+      })),
+      toolCalls: message.toolCalls?.map((toolCall) => ({
+        ...toolCall,
+        output: truncateText(toolCall.output, MAX_LIVE_TOOL_OUTPUT_LENGTH),
+        delegated: toolCall.delegated
+          ? {
+              ...toolCall.delegated,
+              thinking: truncateText(
+                toolCall.delegated.thinking,
+                MAX_LIVE_THINKING_CONTENT_LENGTH,
+              ),
+              message: truncateText(toolCall.delegated.message, 2_000),
+              investigationSummary: truncateText(
+                toolCall.delegated.investigationSummary,
+                2_000,
+              ),
+              humanReview: truncateText(toolCall.delegated.humanReview, 2_000),
+              // Keep agent list short in cache.
+              agents: toolCall.delegated.agents.slice(0, 8),
+              filesExamined: toolCall.delegated.filesExamined.slice(0, 20),
+              errors: toolCall.delegated.errors.slice(0, 10),
+            }
+          : undefined,
+      })),
+      renderParts: message.renderParts?.map((part) => {
+        if (part.type === "text" || part.type === "thinking") {
+          return {
+            ...part,
+            content:
+              truncateText(
+                part.content,
+                part.type === "thinking"
+                  ? MAX_LIVE_THINKING_CONTENT_LENGTH
+                  : MAX_LIVE_MESSAGE_CONTENT_LENGTH,
+              ) || "",
+          };
+        }
+        return part;
+      }),
+    };
+    return next;
+  });
+}
+
+const DEFAULT_MAX_ENTRIES = 8;
 
 export class SessionSnapshotCache {
   private readonly entries = new Map<string, CachedSessionSnapshot>();
@@ -47,8 +123,21 @@ export class SessionSnapshotCache {
 
   set(snapshot: CachedSessionSnapshot): void {
     // Refresh insertion order so recently used sessions stay hot.
-    this.entries.delete(snapshot.sessionId);
-    this.entries.set(snapshot.sessionId, snapshot);
+    const compact: CachedSessionSnapshot = {
+      ...snapshot,
+      messages: compactMessagesForCache(snapshot.messages),
+      // Keep only lightweight server metadata, not full live partials.
+      serverState: snapshot.serverState
+        ? {
+            ...snapshot.serverState,
+            live_partial_assistant: null,
+            delegated_tools: [],
+            recent_delegated_runs: [],
+          }
+        : null,
+    };
+    this.entries.delete(compact.sessionId);
+    this.entries.set(compact.sessionId, compact);
     this.trim();
   }
 

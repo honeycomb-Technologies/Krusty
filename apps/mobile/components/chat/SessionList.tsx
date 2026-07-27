@@ -71,14 +71,24 @@ export function SessionList({
   const [pickerParent, setPickerParent] = useState<string | null>(null);
   const [pickerDirs, setPickerDirs] = useState<DirEntry[]>([]);
   const [pickerReady, setPickerReady] = useState(false);
+  const MAX_DIR_CACHE = 40;
   const dirCache = useRef<Map<string, DirCache>>(new Map());
+  const setDirCache = (key: string, value: DirCache) => {
+    dirCache.current.delete(key);
+    setDirCache(key, value);
+    while (dirCache.current.size > MAX_DIR_CACHE) {
+      const oldest = dirCache.current.keys().next().value;
+      if (!oldest) break;
+      dirCache.current.delete(oldest);
+    }
+  };
 
   useEffect(() => {
     if (client && showPicker && !pickerReady) {
       client.browseDirectories().then(result => {
         const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
-        dirCache.current.set('', entry);
-        dirCache.current.set(result.current, entry);
+        setDirCache('', entry);
+        setDirCache(result.current, entry);
         setPickerPath(result.current);
         setPickerParent(result.parent);
         setPickerDirs(result.directories);
@@ -100,8 +110,8 @@ export function SessionList({
     try {
       const result = await client.browseDirectories(path || undefined);
       const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
-      dirCache.current.set(path, entry);
-      dirCache.current.set(result.current, entry);
+      setDirCache(path, entry);
+      setDirCache(result.current, entry);
       setPickerPath(result.current);
       setPickerParent(result.parent);
       setPickerDirs(result.directories);

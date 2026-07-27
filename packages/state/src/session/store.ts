@@ -14,6 +14,7 @@ import type { createWorkspaceStore } from '../workspace';
 
 import {
   MAX_QUEUED_MESSAGES,
+  MAX_LAST_KNOWN_SERVER_STATE,
   PRESENCE_CLIENT_STORAGE_KEY,
   STATE_POLL_DEGRADED_AFTER,
   STATE_POLL_DEGRADED_MESSAGE,
@@ -151,7 +152,20 @@ export function createSessionStore(
     serverState: ApiSessionStateResponse | null | undefined,
   ) {
     if (!serverState) return;
-    lastKnownServerState.set(sessionId, serverState);
+    // LRU-ish: reinsert so oldest keys are the first Map iteration order.
+    lastKnownServerState.delete(sessionId);
+    lastKnownServerState.set(sessionId, {
+      ...serverState,
+      // Keep only status metadata; drop heavy live partials from the side map.
+      live_partial_assistant: null,
+      delegated_tools: [],
+      recent_delegated_runs: [],
+    });
+    while (lastKnownServerState.size > MAX_LAST_KNOWN_SERVER_STATE) {
+      const oldest = lastKnownServerState.keys().next().value;
+      if (!oldest) break;
+      lastKnownServerState.delete(oldest);
+    }
   }
 
   function getPresenceClientId(): string | null {
@@ -1683,6 +1697,20 @@ export function createSessionStore(
       get().stopStatePolling();
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
+      // Dispose heavy in-memory retention so mode/store teardown cannot sludge RAM.
+      sessionCache.clear();
+      lastKnownServerState.clear();
+      inFlightSessionLoads.clear();
+      set({
+        messages: [],
+        queuedMessages: [],
+        thinkingContent: "",
+        tokenUsage: null,
+        error: null,
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+      });
     },
     };
   });

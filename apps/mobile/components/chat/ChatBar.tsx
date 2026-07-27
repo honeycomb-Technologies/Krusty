@@ -111,7 +111,27 @@ interface CachedDraft {
   attachments: Attachment[];
 }
 
+const MAX_DRAFT_CACHE = 12;
 const draftCache = new Map<string, CachedDraft>();
+
+function setDraftCache(key: string, value: CachedDraft) {
+  // Strip heavy base64 from drafts so composer history cannot sludge RAM.
+  const compact: CachedDraft = {
+    text: value.text,
+    attachments: value.attachments.map((attachment) => ({
+      ...attachment,
+      base64: undefined,
+    })),
+  };
+  draftCache.delete(key);
+  setDraftCache(key, compact);
+  while (draftCache.size > MAX_DRAFT_CACHE) {
+    const oldest = draftCache.keys().next().value;
+    if (!oldest) break;
+    draftCache.delete(oldest);
+  }
+}
+
 
 const PILL = 56;
 /** Same rounded-square corner as accordion FABs (not a full circle). */
@@ -734,7 +754,7 @@ function ChatBarComponent(props: ChatBarProps) {
       return;
     }
 
-    draftCache.set(activeDraftKeyRef.current, draftRef.current);
+    setDraftCache(activeDraftKeyRef.current, draftRef.current);
     const nextDraft = draftCache.get(draftKey) ?? {
       text: '',
       attachments: [],
@@ -760,7 +780,7 @@ function ChatBarComponent(props: ChatBarProps) {
 
   useEffect(
     () => () => {
-      draftCache.set(activeDraftKeyRef.current, draftRef.current);
+      setDraftCache(activeDraftKeyRef.current, draftRef.current);
     },
     [],
   );

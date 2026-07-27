@@ -13,7 +13,7 @@ export interface NativeDiffToken {
 
 let highlighterPromise: Promise<HighlighterCore | null> | undefined;
 const tokenCache = new Map<string, NativeDiffToken[][]>();
-const MAX_TOKEN_CACHE_ENTRIES = 24;
+const MAX_TOKEN_CACHE_ENTRIES = 12;
 
 export async function highlightDiffRows(
   rows: ToolDiffRow[],
@@ -26,7 +26,8 @@ export async function highlightDiffRows(
   const language = languageForPath(filePath);
   const theme = KRUSTY_DIFF_THEME_NAMES[scheme];
   const source = rows.map((row) => (row.kind === "metadata" ? "" : row.content)).join("\n");
-  const cacheKey = `${theme}\u0000${language}\u0000${source}`;
+  const sourceKey = `${source.length}:${source.slice(0, 96)}:${source.slice(-96)}`;
+  const cacheKey = `${theme}\u0000${language}\u0000${sourceKey}`;
   const cached = tokenCache.get(cacheKey);
   if (cached) return cached;
 
