@@ -1,82 +1,145 @@
-import { View, Text, ScrollView, StyleSheet } from 'react-native';
-import { useThemeContext } from '../../hooks/useTheme';
+import { View, Text, ScrollView, StyleSheet } from "react-native";
+import { useThemeContext } from "../../hooks/useTheme";
+import { DotEchoIndicator } from "./DotEchoIndicator";
+
+const LIVE_TAIL_LINES = 3;
+const EXPANDED_MAX_LINES = 40;
 
 interface BashOutputProps {
   command?: string;
   output: string;
+  /** True while the command is still running. */
+  streaming?: boolean;
+  /**
+   * Hybrid density: short live tail (default while streaming).
+   * Full scrollable body when expanded.
+   */
+  compact?: boolean;
 }
 
-export function BashOutput({ command, output }: BashOutputProps) {
+export function BashOutput({
+  command,
+  output,
+  streaming = false,
+  compact = false,
+}: BashOutputProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
 
+  const lines = output.length > 0 ? output.replace(/\s+$/, "").split("\n") : [];
+  const maxLines = compact ? LIVE_TAIL_LINES : EXPANDED_MAX_LINES;
+  const visibleLines =
+    lines.length > maxLines ? lines.slice(lines.length - maxLines) : lines;
+  const truncated = lines.length > maxLines;
+
   return (
-    <View style={[styles.terminal, { borderColor: t.border }]}>
-      {/* macOS window dots */}
-      <View style={styles.titleBar}>
-        <View style={[styles.dot, { backgroundColor: '#ff5f57' }]} />
-        <View style={[styles.dot, { backgroundColor: '#febc2e' }]} />
-        <View style={[styles.dot, { backgroundColor: '#28c840' }]} />
+    <View
+      style={[
+        styles.shell,
+        compact ? styles.shellCompact : styles.shellExpanded,
+        { borderColor: t.border },
+      ]}
+    >
+      <View style={styles.header}>
+        <Text style={[styles.caret, { color: t.primary }]} numberOfLines={1}>
+          {compact || streaming ? "▼" : "▶"}
+        </Text>
+        <Text style={[styles.prompt, { color: t.primary }]}>$</Text>
+        <Text
+          style={[styles.command, { color: t.foreground }]}
+          numberOfLines={1}
+        >
+          {command?.trim() || "bash"}
+        </Text>
+        {streaming ? (
+          <View style={styles.activity}>
+            <DotEchoIndicator color={t.thinking} />
+          </View>
+        ) : null}
       </View>
 
-      <ScrollView style={styles.body} horizontal={false} showsVerticalScrollIndicator={false}>
-        {command && (
-          <Text style={styles.commandLine} selectable>
-            <Text style={styles.prompt}>$ </Text>
-            <Text style={styles.command}>{command}</Text>
+      {visibleLines.length > 0 ? (
+        <ScrollView
+          style={compact ? styles.bodyCompact : styles.bodyExpanded}
+          horizontal={false}
+          showsVerticalScrollIndicator={!compact}
+        >
+          {truncated && !compact ? (
+            <Text style={[styles.meta, { color: t.mutedForeground }]}>
+              …earlier output hidden
+            </Text>
+          ) : null}
+          <Text
+            style={[styles.output, { color: t.foreground }]}
+            selectable
+          >
+            {visibleLines.join("\n")}
           </Text>
-        )}
-        {output ? (
-          <Text style={[styles.output, { color: t.foreground }]} selectable>
-            {output}
-          </Text>
-        ) : null}
-      </ScrollView>
+        </ScrollView>
+      ) : streaming ? (
+        <Text style={[styles.meta, { color: t.mutedForeground }]}>
+          running…
+        </Text>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  terminal: {
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    borderRadius: 10,
-    overflow: 'hidden',
+  shell: {
+    backgroundColor: "rgba(0,0,0,0.28)",
+    borderRadius: 8,
+    overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
     marginVertical: 4,
   },
-  titleBar: {
-    flexDirection: 'row',
+  shellCompact: {
+    // hybrid: header + short live tail, not a full terminal pane
+  },
+  shellExpanded: {
+    // keep a bit more room when the user expands for detail
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
     gap: 6,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  body: {
-    padding: 12,
-    maxHeight: 250,
-  },
-  commandLine: {
-    fontFamily: 'Courier',
-    fontSize: 13,
-    lineHeight: 18,
-    marginBottom: 4,
+  caret: {
+    fontSize: 11,
+    fontWeight: "600",
   },
   prompt: {
-    color: '#22c55e',
-    fontFamily: 'Courier',
+    fontFamily: "Courier",
+    fontSize: 13,
+    fontWeight: "600",
   },
   command: {
-    color: '#fff',
-    fontFamily: 'Courier',
+    flex: 1,
+    fontFamily: "Courier",
+    fontSize: 13,
+  },
+  activity: {
+    marginLeft: 4,
+  },
+  bodyCompact: {
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    maxHeight: 72,
+  },
+  bodyExpanded: {
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    maxHeight: 250,
+  },
+  meta: {
+    fontFamily: "Courier",
+    fontSize: 11,
+    marginBottom: 2,
   },
   output: {
-    fontFamily: 'Courier',
+    fontFamily: "Courier",
     fontSize: 13,
     lineHeight: 18,
   },

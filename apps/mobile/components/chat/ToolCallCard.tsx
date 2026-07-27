@@ -177,7 +177,7 @@ export function ToolCallCard({
       );
     }
 
-    // Bash tool — terminal output
+    // Bash tool — hybrid: compact live tail while running, expand for full body
     if (name === "bash" || name === "Bash") {
       if (!expanded && !isStreaming) {
         return command ? (
@@ -193,6 +193,8 @@ export function ToolCallCard({
         <BashOutput
           command={command || undefined}
           output={toolCall.output ?? ""}
+          streaming={Boolean(isStreaming)}
+          compact={Boolean(isStreaming) && !expanded}
         />
       );
     }
