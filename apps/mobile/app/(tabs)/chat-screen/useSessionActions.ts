@@ -508,10 +508,25 @@ export function useSessionActions({
 
   const handleTabChange = useCallback(
     async (index: number) => {
+      const nextType = sessionTypeForTab(index);
       setActiveTab(index);
       setDrawerOpen(false);
+
+      // Warm the destination mode only when focused. Keep this off the critical
+      // path if a session is already active for that mode.
+      const targetStore = modeStores[nextType].session;
+      if (targetStore.getState().sessionId) {
+        return;
+      }
+      const rememberedId = lastSessionIdByTypeRef.current[nextType];
+      if (!rememberedId) {
+        return;
+      }
+      void targetStore.getState().loadSession(rememberedId, true);
     },
     [
+      lastSessionIdByTypeRef,
+      modeStores,
       setActiveTab,
       setDrawerOpen,
     ],

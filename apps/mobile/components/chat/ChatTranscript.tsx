@@ -534,11 +534,13 @@ function ChatTranscriptComponent({
         ref={flatListRef}
         data={turns}
         keyExtractor={(turn) => turn.id}
-        windowSize={6}
-        maxToRenderPerBatch={3}
-        initialNumToRender={8}
-        updateCellsBatchingPeriod={64}
-        removeClippedSubviews
+        windowSize={7}
+        maxToRenderPerBatch={4}
+        initialNumToRender={10}
+        updateCellsBatchingPeriod={50}
+        // removeClippedSubviews is a known native crash source on iOS New
+        // Architecture with nested message/tool cells and absolute chrome.
+        removeClippedSubviews={false}
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
           clearBottomAnchorTimers();

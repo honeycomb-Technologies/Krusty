@@ -556,40 +556,42 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       return;
     }
 
-    for (const type of ["chat", "code", "mako"] as const) {
-      const slot = stores.modes[type];
-      if (slot.session.getState().sessionId) {
-        continue;
-      }
-      const persistedId = slot.workspace.getState().sessionId;
-      const persisted = persistedId
-        ? sessions.find(
-            (candidate) =>
-              candidate.id === persistedId && candidate.session_type === type,
-          )
-        : null;
-      const recent = sessions
-        .filter((candidate) => candidate.session_type === type)
-        .sort(
-          (left, right) =>
-            new Date(right.updated_at).getTime() -
-            new Date(left.updated_at).getTime(),
-        )[0];
-      const targetId = persisted?.id ?? recent?.id ?? null;
-      if (
-        !targetId ||
-        attemptedWorkspaceSessionHydrationRef.current[type] === targetId
-      ) {
-        continue;
-      }
-
-      attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
-      lastSessionIdByTypeRef.current[type] = targetId;
-      void slot.session.getState().loadSession(targetId, true).catch(() => {
-        void sessionsStore.getState().loadSessions();
-      });
+    // Eager-hydrate only the visible mode. Parallel chat/code/mako loads were a
+    // major source of resume thrash and made mode switches feel crashy under load.
+    // Background modes warm on first focus instead of all at once.
+    const type = activeMode;
+    const slot = stores.modes[type];
+    if (slot.session.getState().sessionId) {
+      return;
     }
-  }, [client, isConnected, sessions, sessionsStore, stores.modes]);
+    const persistedId = slot.workspace.getState().sessionId;
+    const persisted = persistedId
+      ? sessions.find(
+          (candidate) =>
+            candidate.id === persistedId && candidate.session_type === type,
+        )
+      : null;
+    const recent = sessions
+      .filter((candidate) => candidate.session_type === type)
+      .sort(
+        (left, right) =>
+          new Date(right.updated_at).getTime() -
+          new Date(left.updated_at).getTime(),
+      )[0];
+    const targetId = persisted?.id ?? recent?.id ?? null;
+    if (
+      !targetId ||
+      attemptedWorkspaceSessionHydrationRef.current[type] === targetId
+    ) {
+      return;
+    }
+
+    attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
+    lastSessionIdByTypeRef.current[type] = targetId;
+    void slot.session.getState().loadSession(targetId, true).catch(() => {
+      void sessionsStore.getState().loadSessions();
+    });
+  }, [activeMode, client, isConnected, sessions, sessionsStore, stores.modes]);
 
   useEffect(() => {
     if (!client || !isConnected) {

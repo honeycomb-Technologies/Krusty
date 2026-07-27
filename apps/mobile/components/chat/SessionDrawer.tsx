@@ -539,7 +539,7 @@ export function SessionDrawer({
               windowSize={7}
               maxToRenderPerBatch={8}
               initialNumToRender={12}
-              removeClippedSubviews
+              removeClippedSubviews={false}
               showsVerticalScrollIndicator={false}
             />
           ) : (
@@ -618,7 +618,7 @@ export function SessionDrawer({
               windowSize={7}
               maxToRenderPerBatch={8}
               initialNumToRender={12}
-              removeClippedSubviews
+              removeClippedSubviews={false}
               showsVerticalScrollIndicator={false}
             />
           ) : (

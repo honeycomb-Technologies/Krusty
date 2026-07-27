@@ -124,7 +124,7 @@ function setDraftCache(key: string, value: CachedDraft) {
     })),
   };
   draftCache.delete(key);
-  setDraftCache(key, compact);
+  draftCache.set(key, compact);
   while (draftCache.size > MAX_DRAFT_CACHE) {
     const oldest = draftCache.keys().next().value;
     if (!oldest) break;
