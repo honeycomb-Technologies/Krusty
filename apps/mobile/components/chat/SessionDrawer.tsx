@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  FlatList,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -349,161 +350,93 @@ export function SessionDrawer({
     );
   };
 
+  // Chat/Mako use virtualized lists. Code keeps a small grouped ScrollView
+  // because project folders expand/collapse in place.
   const content = (() => {
-    if (activeMode === "chat") {
-      return chatSessions.length > 0 ? (
-        chatSessions.map(renderSession)
-      ) : (
-        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-          No Chat threads yet
-        </Text>
-      );
+    if (activeMode !== "code") {
+      return null;
     }
 
-    if (activeMode === "code") {
-      return codeGroups.length > 0 ? (
-        codeGroups.map((group) => {
-          const expanded = expandedDirs.has(group.directory);
-          return (
-            <View key={group.directory}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ expanded }}
-                onPress={() => {
-                  void Haptics.impactAsync(
-                    Haptics.ImpactFeedbackStyle.Light,
-                  );
-                  setExpandedDirs((current) => {
-                    const next = new Set(current);
-                    if (next.has(group.directory)) {
-                      next.delete(group.directory);
-                    } else {
-                      next.add(group.directory);
-                    }
-                    return next;
-                  });
-                }}
-                style={styles.dirHeader}
-              >
-                {expanded ? (
-                  <FolderOpen
-                    size={18}
-                    color={t.thinking}
-                    strokeWidth={1.7}
-                  />
-                ) : (
-                  <Folder
-                    size={18}
-                    color={t.mutedForeground}
-                    strokeWidth={1.6}
-                  />
-                )}
-                <View style={styles.dirCopy}>
-                  <Text
-                    numberOfLines={1}
-                    style={[
-                      styles.dirName,
-                      { color: expanded ? t.foreground : t.mutedForeground },
-                    ]}
-                  >
-                    {dirDisplayName(group.directory)}
-                  </Text>
-                  <Text
-                    numberOfLines={1}
-                    style={[styles.dirPath, { color: t.mutedForeground }]}
-                  >
-                    {group.directory === "Neutral"
-                      ? "No project selected"
-                      : group.directory}
-                  </Text>
-                </View>
-                <Text style={[styles.dirCount, { color: t.mutedForeground }]}>
-                  {group.sessions.length}
-                </Text>
-                {expanded ? (
-                  <ChevronDown size={16} color={t.mutedForeground} />
-                ) : (
-                  <ChevronRight size={16} color={t.mutedForeground} />
-                )}
-              </Pressable>
-              {expanded ? (
-                <View style={styles.dirSessions}>
-                  {group.sessions.map(renderSession)}
-                </View>
-              ) : null}
-            </View>
-          );
-        })
-      ) : (
+    if (codeGroups.length === 0) {
+      return (
         <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
           No Code threads yet
         </Text>
       );
     }
 
-    if (makoLoading && makoSessions.length === 0) {
-      return <SessionListSkeleton count={4} />;
-    }
-
-    return makoSessions.length > 0 ? (
-      makoSessions.map((session) => {
-        const active = session.session_id === activeSessionId;
-        const runtime = session.runtime;
-        const runtimeLabel = runtime?.status ?? session.agent_state;
-        const crew = runtime?.crew_slug || "Mako default";
-        return (
+    return codeGroups.map((group) => {
+      const expanded = expandedDirs.has(group.directory);
+      return (
+        <View key={group.directory}>
           <Pressable
-            key={session.session_id}
             accessibilityRole="button"
-            accessibilityState={{ selected: active }}
+            accessibilityState={{ expanded }}
             onPress={() => {
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              onSelectMakoSession(session.session_id);
+              void Haptics.impactAsync(
+                Haptics.ImpactFeedbackStyle.Light,
+              );
+              setExpandedDirs((current) => {
+                const next = new Set(current);
+                if (next.has(group.directory)) {
+                  next.delete(group.directory);
+                } else {
+                  next.add(group.directory);
+                }
+                return next;
+              });
             }}
-            style={[
-              styles.sessionItem,
-              active && { backgroundColor: `${t.userMessage}12` },
-            ]}
+            style={styles.dirHeader}
           >
-            <View style={styles.makoTitleRow}>
+            {expanded ? (
+              <FolderOpen
+                size={18}
+                color={t.thinking}
+                strokeWidth={1.7}
+              />
+            ) : (
+              <Folder
+                size={18}
+                color={t.mutedForeground}
+                strokeWidth={1.6}
+              />
+            )}
+            <View style={styles.dirCopy}>
               <Text
-                numberOfLines={2}
+                numberOfLines={1}
                 style={[
-                  styles.sessionTitle,
-                  { color: active ? t.userMessage : t.foreground },
+                  styles.dirName,
+                  { color: expanded ? t.foreground : t.mutedForeground },
                 ]}
               >
-                {session.title || "Untitled Mako"}
-              </Text>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor:
-                      runtimeLabel === "running" ? t.success : t.mutedForeground,
-                  },
-                ]}
-              />
-            </View>
-            <View style={styles.sessionMeta}>
-              <Text style={[styles.sessionTime, { color: t.mutedForeground }]}>
-                {formatTime(session.updated_at)}
+                {dirDisplayName(group.directory)}
               </Text>
               <Text
                 numberOfLines={1}
-                style={[styles.sessionModel, { color: t.mutedForeground }]}
+                style={[styles.dirPath, { color: t.mutedForeground }]}
               >
-                {crew} · {runtimeLabel}
+                {group.directory === "Neutral"
+                  ? "No project selected"
+                  : group.directory}
               </Text>
             </View>
+            <Text style={[styles.dirCount, { color: t.mutedForeground }]}>
+              {group.sessions.length}
+            </Text>
+            {expanded ? (
+              <ChevronDown size={16} color={t.mutedForeground} />
+            ) : (
+              <ChevronRight size={16} color={t.mutedForeground} />
+            )}
           </Pressable>
-        );
-      })
-    ) : (
-      <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-        No Mako threads yet
-      </Text>
-    );
+          {expanded ? (
+            <View style={styles.dirSessions}>
+              {group.sessions.map(renderSession)}
+            </View>
+          ) : null}
+        </View>
+      );
+    });
   })();
 
   const footer = (
@@ -595,13 +528,115 @@ export function SessionDrawer({
           </Text>
         </View>
 
-        <ScrollView
-          style={styles.list}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-        >
-          {content}
-        </ScrollView>
+        {activeMode === "chat" ? (
+          chatSessions.length > 0 ? (
+            <FlatList
+              style={styles.list}
+              contentContainerStyle={styles.listContent}
+              data={chatSessions}
+              keyExtractor={(session) => session.id}
+              renderItem={({ item }) => renderSession(item)}
+              windowSize={7}
+              maxToRenderPerBatch={8}
+              initialNumToRender={12}
+              removeClippedSubviews
+              showsVerticalScrollIndicator={false}
+            />
+          ) : (
+            <View style={styles.listContent}>
+              <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+                No Chat threads yet
+              </Text>
+            </View>
+          )
+        ) : activeMode === "mako" ? (
+          makoLoading && makoSessions.length === 0 ? (
+            <View style={styles.listContent}>
+              <SessionListSkeleton count={4} />
+            </View>
+          ) : makoSessions.length > 0 ? (
+            <FlatList
+              style={styles.list}
+              contentContainerStyle={styles.listContent}
+              data={makoSessions}
+              keyExtractor={(session) => session.session_id}
+              renderItem={({ item: session }) => {
+                const active = session.session_id === activeSessionId;
+                const runtime = session.runtime;
+                const runtimeLabel = runtime?.status ?? session.agent_state;
+                const crew = runtime?.crew_slug || "Mako default";
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    onPress={() => {
+                      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      onSelectMakoSession(session.session_id);
+                    }}
+                    style={[
+                      styles.sessionItem,
+                      active && { backgroundColor: `${t.userMessage}12` },
+                    ]}
+                  >
+                    <View style={styles.makoTitleRow}>
+                      <Text
+                        numberOfLines={2}
+                        style={[
+                          styles.sessionTitle,
+                          { color: active ? t.userMessage : t.foreground },
+                        ]}
+                      >
+                        {session.title || "Untitled Mako"}
+                      </Text>
+                      <View
+                        style={[
+                          styles.statusDot,
+                          {
+                            backgroundColor:
+                              runtimeLabel === "running"
+                                ? t.success
+                                : t.mutedForeground,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <View style={styles.sessionMeta}>
+                      <Text style={[styles.sessionTime, { color: t.mutedForeground }]}>
+                        {formatTime(session.updated_at)}
+                      </Text>
+                      <Text
+                        numberOfLines={1}
+                        style={[styles.sessionModel, { color: t.mutedForeground }]}
+                      >
+                        {crew}
+                        {runtimeLabel ? ` · ${runtimeLabel}` : ""}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              }}
+              windowSize={7}
+              maxToRenderPerBatch={8}
+              initialNumToRender={12}
+              removeClippedSubviews
+              showsVerticalScrollIndicator={false}
+            />
+          ) : (
+            <View style={styles.listContent}>
+              <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+                No Mako threads yet
+              </Text>
+            </View>
+          )
+        ) : (
+          <ScrollView
+            style={styles.list}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {content}
+          </ScrollView>
+        )}
 
         {pickerVisible ? (
           <Animated.View

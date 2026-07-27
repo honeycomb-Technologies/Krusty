@@ -304,17 +304,13 @@ export function useSessionActions({
 
       if (existing) {
         lastSessionIdByTypeRef.current.code = existing.id;
-        if (codeStore.getState().sessionId !== existing.id) {
-          codeStore.getState().detachSession();
-        }
-        await codeStore.getState().loadSession(existing.id);
+        // loadSession detaches the previous stream attachment; avoid thrashing
+        // presence/poll state with an extra detachSession on thread open.
+        void codeStore.getState().loadSession(existing.id);
         return;
       }
 
       try {
-        if (codeStore.getState().sessionId) {
-          codeStore.getState().detachSession();
-        }
         await ensureModelReady(codeStore);
         const session = await client.createSession(
           undefined,

@@ -57,6 +57,8 @@ interface ChatTranscriptProps {
   scrollToMessageId?: string | null;
   onScrollTargetHandled?: () => void;
   hideJumpToLatest?: boolean;
+  /** When false, skip auto-scroll and interaction work for warm-but-hidden shells. */
+  isActive?: boolean;
 }
 
 const DESKTOP_TOP_EDGE_HEIGHT = 64;
@@ -143,7 +145,7 @@ function distanceFromBottom(
   return Math.max(0, contentHeight - (offsetY + viewportHeight));
 }
 
-export function ChatTranscript({
+function ChatTranscriptComponent({
   messages,
   sessionId,
   sessionType = "chat",
@@ -162,6 +164,7 @@ export function ChatTranscript({
   scrollToMessageId,
   onScrollTargetHandled,
   hideJumpToLatest = false,
+  isActive = true,
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
@@ -184,7 +187,9 @@ export function ChatTranscript({
   const isUserDraggingRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
   const loadedSessionIdRef = useRef<string | null>(
-    restoredScrollStateRef.current ? sessionId ?? null : null,
+    restoredScrollStateRef.current
+      ? `${scrollStateKey}::${sessionId ?? "new"}`
+      : null,
   );
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
@@ -368,6 +373,7 @@ export function ChatTranscript({
   useEffect(() => {
     if (!sessionId) {
       loadedSessionIdRef.current = null;
+      restoredScrollStateRef.current = null;
       autoFollowRef.current = true;
       pendingAutoScrollRef.current = false;
       clearBottomAnchorTimers();
@@ -377,21 +383,51 @@ export function ChatTranscript({
       return;
     }
 
-    if (loadedSessionIdRef.current === sessionId) {
+    // Identity key includes mode so chat/code/mako shells stay independent.
+    const selectionKey = `${scrollStateKey}::${sessionId}`;
+    if (loadedSessionIdRef.current === selectionKey) {
       return;
     }
 
-    loadedSessionIdRef.current = sessionId;
-    autoFollowRef.current = true;
+    const cached = transcriptScrollCache.get(scrollStateKey) ?? null;
+    restoredScrollStateRef.current = cached;
+    loadedSessionIdRef.current = selectionKey;
+    autoFollowRef.current = cached?.autoFollow ?? true;
     pendingAutoScrollRef.current = false;
     clearBottomAnchorTimers();
-    scrollOffsetRef.current = 0;
+    scrollOffsetRef.current = cached?.offset ?? 0;
     setPlanTrackerHeight(0);
-    setIsNearBottom(true);
-    scheduleBottomAnchor(false);
-  }, [clearBottomAnchorTimers, scheduleBottomAnchor, sessionId]);
+    setIsNearBottom(cached?.autoFollow ?? true);
+
+    // Restore without remounting the FlatList tree. contentOffset only applies
+    // on first mount, so explicit scroll is required on thread switches.
+    requestAnimationFrame(() => {
+      if (!flatListRef.current) {
+        return;
+      }
+      if (cached && cached.offset > 0 && cached.autoFollow === false) {
+        markProgrammaticScroll(120);
+        flatListRef.current.scrollToOffset({
+          animated: false,
+          offset: cached.offset,
+        });
+        return;
+      }
+      scheduleBottomAnchor(false);
+    });
+  }, [
+    clearBottomAnchorTimers,
+    markProgrammaticScroll,
+    scheduleBottomAnchor,
+    scrollStateKey,
+    sessionId,
+  ]);
 
   useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+
     if (messageCount === 0) {
       pendingAutoScrollRef.current = false;
       autoFollowRef.current = true;
@@ -407,6 +443,7 @@ export function ChatTranscript({
     }
   }, [
     clearBottomAnchorTimers,
+    isActive,
     isStreaming,
     layoutSignature,
     messageCount,
@@ -415,13 +452,14 @@ export function ChatTranscript({
   ]);
 
   useEffect(() => {
-    if (messageCount === 0 || !autoFollowRef.current) {
+    if (!isActive || messageCount === 0 || !autoFollowRef.current) {
       return;
     }
 
     scheduleBottomAnchor(false);
   }, [
     bottomPadding,
+    isActive,
     listTopPadding,
     messageCount,
     planTrackerHeight,
@@ -429,7 +467,7 @@ export function ChatTranscript({
   ]);
 
   useEffect(() => {
-    if (!scrollToMessageId) {
+    if (!isActive || !scrollToMessageId) {
       return;
     }
 
@@ -449,7 +487,7 @@ export function ChatTranscript({
       });
       onScrollTargetHandled?.();
     });
-  }, [markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
+  }, [isActive, markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
 
   const renderTurn = useCallback(
     ({ item, index }: { item: TranscriptTurn; index: number }) => {
@@ -496,10 +534,10 @@ export function ChatTranscript({
         ref={flatListRef}
         data={turns}
         keyExtractor={(turn) => turn.id}
-        windowSize={8}
-        maxToRenderPerBatch={4}
-        initialNumToRender={10}
-        updateCellsBatchingPeriod={50}
+        windowSize={6}
+        maxToRenderPerBatch={3}
+        initialNumToRender={8}
+        updateCellsBatchingPeriod={64}
         removeClippedSubviews
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
@@ -667,6 +705,8 @@ export function ChatTranscript({
     </View>
   );
 }
+
+export const ChatTranscript = memo(ChatTranscriptComponent);
 
 interface TranscriptTurnRowProps {
   turn: TranscriptTurn;

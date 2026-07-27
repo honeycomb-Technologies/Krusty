@@ -24,8 +24,8 @@ import {
   useStores,
   useWorkspaceStore,
 } from "../../hooks/useStores";
-import { ChatTranscript } from "../../components/chat/ChatTranscript";
-import { KrustyLogo } from "../../components/ui/KrustyLogo";
+import { useShallow } from "zustand/react/shallow";
+import { ModeConversationSurface } from "../../components/chat/ModeConversationSurface";
 import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
 import {
   ChatBar,
@@ -35,7 +35,6 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
-import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
@@ -45,13 +44,7 @@ import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
 import { getToolDiffStats } from "../../components/chat/toolDiffModel";
-import Animated, {
-  runOnJS,
-  SlideInLeft,
-  SlideInRight,
-  SlideOutLeft,
-  SlideOutRight,
-} from "react-native-reanimated";
+import Animated, { runOnJS } from "react-native-reanimated";
 
 import type {
   ModelInfo,
@@ -142,8 +135,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
-  const [modeTransitionDirection, setModeTransitionDirection] =
-    useState<1 | -1>(1);
   const activeTab = tabForSessionType(activeMode);
   const setActiveTab = useCallback((index: number) => {
     setActiveMode(sessionTypeForTab(index));
@@ -157,31 +148,42 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  const sessionId =
-    useSessionStore((state) => state.sessionId, activeMode) ?? null;
-  const sessionTitle =
-    useSessionStore((state) => state.title, activeMode) ?? null;
-  const messages =
-    useSessionStore((state) => state.messages, activeMode) ?? [];
-  const isStreaming =
-    useSessionStore((state) => state.isStreaming, activeMode) ?? false;
-  const isThinking =
-    useSessionStore((state) => state.isThinking, activeMode) ?? false;
-  const model = useSessionStore((state) => state.model, activeMode) ?? null;
-  const modelKey = useSessionStore((state) => state.modelKey, activeMode) ?? null;
-  const thinkingLevel =
-    useSessionStore((state) => state.thinkingLevel, activeMode) ?? "medium";
-  const permissionMode =
-    useSessionStore((state) => state.permissionMode, activeMode) ?? "autonomous";
-  const fastModeStoreEnabled =
-    useSessionStore((state) => state.fastModeEnabled, activeMode) ?? false;
-  const mode =
-    useSessionStore((state) => state.mode, activeMode) ?? "build";
-  const tokenCount =
-    useSessionStore((state) => state.tokenCount, activeMode) ?? 0;
-  const error = useSessionStore((state) => state.error, activeMode) ?? null;
-  const isLoading =
-    useSessionStore((state) => state.isLoading, activeMode) ?? false;
+  // Subscribe once per active mode. Streaming text still re-renders this shell
+  // when messages change (needed for tool approvals / live activity), but we
+  // avoid 14 independent store subscriptions re-firing the whole screen.
+  const sessionView = useSessionStore(
+    useShallow((state) => ({
+      sessionId: state.sessionId,
+      title: state.title,
+      messages: state.messages,
+      isStreaming: state.isStreaming,
+      isThinking: state.isThinking,
+      model: state.model,
+      modelKey: state.modelKey,
+      thinkingLevel: state.thinkingLevel,
+      permissionMode: state.permissionMode,
+      fastModeEnabled: state.fastModeEnabled,
+      mode: state.mode,
+      tokenCount: state.tokenCount,
+      error: state.error,
+      isLoading: state.isLoading,
+    })),
+    activeMode,
+  );
+  const sessionId = sessionView.sessionId ?? null;
+  const sessionTitle = sessionView.title ?? null;
+  const messages = sessionView.messages ?? [];
+  const isStreaming = sessionView.isStreaming ?? false;
+  const isThinking = sessionView.isThinking ?? false;
+  const model = sessionView.model ?? null;
+  const modelKey = sessionView.modelKey ?? null;
+  const thinkingLevel = sessionView.thinkingLevel ?? "medium";
+  const permissionMode = sessionView.permissionMode ?? "autonomous";
+  const fastModeStoreEnabled = sessionView.fastModeEnabled ?? false;
+  const mode = sessionView.mode ?? "build";
+  const tokenCount = sessionView.tokenCount ?? 0;
+  const error = sessionView.error ?? null;
+  const isLoading = sessionView.isLoading ?? false;
   const workspaceDirectory =
     useWorkspaceStore((state) => state.directory, activeMode) ?? null;
   const workspaceTargetBranch =
@@ -947,10 +949,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       if (mode === activeMode) {
         return;
       }
-      const order: SessionType[] = ["chat", "code", "mako"];
-      setModeTransitionDirection(
-        order.indexOf(mode) > order.indexOf(activeMode) ? 1 : -1,
-      );
       setActiveSheet(null);
       void handleTabChange(tabForSessionType(mode));
     },
@@ -1078,36 +1076,28 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const chatTranscriptSurface = (
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <ChatTranscript
-          key={`${activeMode}:${sessionId ?? "new"}`}
-          messages={messages}
-          sessionId={sessionId}
-          sessionType={activeMode}
-          scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
-          isStreaming={isStreaming}
-          isThinking={isThinking}
-          isLoading={isLoading}
-          activeToolCallId={activeToolCallId}
-          onApproveTool={handleApproveTranscriptTool}
-          onDenyTool={handleDenyTranscriptTool}
-          onSubmitToolResult={handleSubmitTranscriptTool}
-          onPlanConfirm={handleTranscriptPlanConfirm}
-          emptyState={
-            <View style={styles.empty}>
-              <KrustyLogo />
-              {error ? (
-                <Text style={[styles.emptyHint, { color: t.error }]}>
-                  {error}
-                </Text>
-              ) : null}
-            </View>
-          }
-          bottomPadding={
-            composerReserveHeight
-            + (showTranscriptError ? errorBannerHeight + 10 : 0)
-          }
-          hideJumpToLatest={bottomControlsOpen}
-        />
+        <View style={styles.flex}>
+          {(["chat", "code"] as const).map((mode) => (
+            <ModeConversationSurface
+              key={mode}
+              mode={mode}
+              active={activeMode === mode}
+              externalBottomPadding={
+                composerReserveHeight
+                + (showTranscriptError && activeMode === mode
+                  ? errorBannerHeight + 10
+                  : 0)
+              }
+              hideJumpToLatest={bottomControlsOpen}
+              activeToolCallId={activeToolCallId}
+              onApproveTool={handleApproveTranscriptTool}
+              onDenyTool={handleDenyTranscriptTool}
+              onSubmitToolResult={handleSubmitTranscriptTool}
+              onPlanConfirm={handleTranscriptPlanConfirm}
+              emptyError={activeMode === mode ? error : null}
+            />
+          ))}
+        </View>
 
         {showTranscriptError ? (
           <View
@@ -1317,7 +1307,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     onModelSelect: handleModelSelect,
   };
 
-  const makoContent = isDesktop ? (
+  // Desktop owns the full Mako product surface. Mobile keeps the conversation
+  // surface warm inside `mobileConversationSurface` so mode swipes stay light.
+  const makoContent = (
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
       <MakoScreen
         workspaceDirectory={workspaceDirectory}
@@ -1331,35 +1323,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         chat={makoChat}
       />
     </Animated.View>
-  ) : (
-    <SafeAreaView
-      style={[styles.container, { backgroundColor: t.background }]}
-      edges={["top"]}
-    >
-      {topBar}
-      <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <MakoThreadSurface
-          chat={makoChat}
-        />
-      </Animated.View>
-      <ToolboxPanel
-        variant="overlay"
-        visible={toolboxOpen}
-        onClose={handleToolboxClose}
-        activeTab={toolboxTab}
-        onTabChange={setToolboxTab}
-        sessionType="mako"
-        projectDirectory={workspaceDirectory}
-        onOpenSettings={() => {
-          setActiveSheet(null);
-          router.push("/(tabs)/settings");
-        }}
-        onOpenMakoRun={(id) => void loadSessionById(id)}
-        onOpenProject={(path, branch) =>
-          void openProjectInCode(path, branch)
-        }
-      />
-    </SafeAreaView>
   );
 
   const mobileConversationSurface = (
@@ -1379,17 +1342,60 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             backgroundColor: t.background,
           }}
         >
-          {/* Avoid enter/exit remount animations on mode swipe. They felt flashy
-              and forced expensive unmount/remount of transcript/composer trees. */}
-          {activeMode === "mako" ? (
-            <MakoThreadSurface
-              chat={makoChat}
-              showComposer={false}
-              externalBottomPadding={composerReserveHeight}
+          {/* Keep all three mode transcripts warm. Swiping only toggles
+              visibility, so we never pay a full unmount/remount tax. */}
+          {(["chat", "code", "mako"] as const).map((mode) => (
+            <ModeConversationSurface
+              key={mode}
+              mode={mode}
+              active={activeMode === mode}
+              externalBottomPadding={
+                composerReserveHeight
+                + (showTranscriptError && activeMode === mode
+                  ? errorBannerHeight + 10
+                  : 0)
+              }
+              hideJumpToLatest={bottomControlsOpen}
+              activeToolCallId={activeToolCallId}
+              onApproveTool={handleApproveTranscriptTool}
+              onDenyTool={handleDenyTranscriptTool}
+              onSubmitToolResult={handleSubmitTranscriptTool}
+              onPlanConfirm={handleTranscriptPlanConfirm}
+              emptyError={activeMode === mode ? error : null}
             />
-          ) : (
-            chatTranscriptSurface
-          )}
+          ))}
+          {showTranscriptError ? (
+            <View
+              accessibilityRole="alert"
+              accessibilityLiveRegion="polite"
+              onLayout={(event) => {
+                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+                setErrorBannerHeight((current) =>
+                  current === nextHeight ? current : nextHeight,
+                );
+              }}
+              style={[
+                styles.errorBanner,
+                {
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: composerReserveHeight + 10,
+                  marginBottom: 0,
+                  zIndex: 30,
+                  borderColor: `${t.error}40`,
+                  backgroundColor: `${t.error}14`,
+                },
+              ]}
+            >
+              <Text
+                selectable
+                style={[styles.errorBannerText, { color: t.error }]}
+              >
+                {error}
+              </Text>
+            </View>
+          ) : null}
         </View>
       </View>
     </GestureDetector>
