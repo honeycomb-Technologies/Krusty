@@ -20,6 +20,9 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Install mobile workspace dependencies
+        working-directory: apps/mobile
+        run: bun install --frozen-lockfile
       - name: Test API streaming and error contracts
         run: bun test packages/api/test
       - name: Test mobile navigation and workspace contracts
