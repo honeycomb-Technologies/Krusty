@@ -133,7 +133,7 @@ export function SessionDrawer({
   const dirCache = useRef<Map<string, DirCache>>(new Map());
   const setDirCache = (key: string, value: DirCache) => {
     dirCache.current.delete(key);
-    setDirCache(key, value);
+    dirCache.current.set(key, value);
     while (dirCache.current.size > MAX_DIR_CACHE) {
       const oldest = dirCache.current.keys().next().value;
       if (!oldest) break;
@@ -157,7 +157,8 @@ export function SessionDrawer({
       return;
     }
     let active = true;
-    setMakoLoading(true);
+    // Only show skeleton when we have no cached list to render.
+    setMakoLoading((current) => current || makoSessions.length === 0);
     void client
       .listMakoSessions()
       .then((nextSessions) => {

@@ -1373,27 +1373,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           },
         ]}
       >
-        <Animated.View
-          key={activeMode}
-          entering={
-            modeTransitionDirection > 0
-              ? SlideInRight.duration(240)
-              : SlideInLeft.duration(240)
-          }
-          exiting={
-            modeTransitionDirection > 0
-              ? SlideOutLeft.duration(210)
-              : SlideOutRight.duration(210)
-          }
+        <View
           style={{
-            position: "absolute",
-            top: 0,
-            right: 0,
-            bottom: 0,
-            left: 0,
+            flex: 1,
             backgroundColor: t.background,
           }}
         >
+          {/* Avoid enter/exit remount animations on mode swipe. They felt flashy
+              and forced expensive unmount/remount of transcript/composer trees. */}
           {activeMode === "mako" ? (
             <MakoThreadSurface
               chat={makoChat}
@@ -1403,7 +1390,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           ) : (
             chatTranscriptSurface
           )}
-        </Animated.View>
+        </View>
       </View>
     </GestureDetector>
   );

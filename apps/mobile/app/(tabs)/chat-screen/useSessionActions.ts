@@ -251,13 +251,13 @@ export function useSessionActions({
   const loadSession = useCallback(
     async (session: SessionResponse) => {
       const targetStore = modeStores[session.session_type].session;
-      if (targetStore.getState().sessionId !== session.id) {
-        targetStore.getState().detachSession();
-      }
+      // Close drawer and switch mode immediately so the gesture feels instant.
       lastSessionIdByTypeRef.current[session.session_type] = session.id;
       setDrawerOpen(false);
       setActiveTab(tabForSessionType(session.session_type));
-      await targetStore.getState().loadSession(session.id);
+      // loadSession already detaches stream callbacks for the leaving session.
+      // Avoid an extra detachSession() which can thrash presence/poll state.
+      void targetStore.getState().loadSession(session.id);
     },
     [
       lastSessionIdByTypeRef,
@@ -273,12 +273,9 @@ export function useSessionActions({
       const target = sessions.find((session) => session.id === id);
       const targetType = target?.session_type ?? "mako";
       const targetStore = modeStores[targetType].session;
-      if (targetStore.getState().sessionId !== id) {
-        targetStore.getState().detachSession();
-      }
       lastSessionIdByTypeRef.current[targetType] = id;
       setActiveTab(tabForSessionType(targetType));
-      await targetStore.getState().loadSession(id);
+      void targetStore.getState().loadSession(id);
     },
     [
       lastSessionIdByTypeRef,
