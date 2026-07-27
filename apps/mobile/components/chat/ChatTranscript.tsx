@@ -28,6 +28,7 @@ import {
   type TranscriptTurn,
 } from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
+import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@krusty/api";
 import type { SessionType } from "@krusty/api";
 
@@ -38,6 +39,7 @@ interface ChatTranscriptProps {
   scrollStateKey?: string;
   isStreaming: boolean;
   isThinking?: boolean;
+  isLoading?: boolean;
   activeToolCallId?: string | null;
   onApproveTool?: (sessionId: string, toolCallId: string) => void;
   onDenyTool?: (sessionId: string, toolCallId: string) => void;
@@ -133,6 +135,7 @@ export function ChatTranscript({
   scrollStateKey = sessionId ?? "empty",
   isStreaming,
   isThinking,
+  isLoading = false,
   activeToolCallId,
   onApproveTool,
   onDenyTool,
@@ -467,7 +470,7 @@ export function ChatTranscript({
   if (messages.length === 0) {
     return (
       <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
-        {emptyState}
+        {isLoading ? <ConversationSkeleton /> : emptyState}
       </Pressable>
     );
   }

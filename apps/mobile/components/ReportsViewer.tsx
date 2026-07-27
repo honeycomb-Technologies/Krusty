@@ -440,7 +440,7 @@ const styles = StyleSheet.create({
   tagPill: {
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
   },
   tagText: {

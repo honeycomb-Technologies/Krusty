@@ -251,7 +251,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
     maxWidth: "100%",
     minHeight: 32,
-    borderRadius: 999,
+    borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 14,
     paddingVertical: 7,

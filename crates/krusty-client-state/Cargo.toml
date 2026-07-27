@@ -1,6 +1,6 @@
 [package]
 name = "krusty-client-state"
-version = "0.9.13"
+version = "0.9.14"
 edition = "2021"
 description = "Headless Rust state machine for Krusty chat clients"
 

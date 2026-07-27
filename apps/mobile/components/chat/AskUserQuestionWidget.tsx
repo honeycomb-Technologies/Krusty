@@ -301,7 +301,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 999,
+    borderRadius: 8,
     overflow: "hidden",
   },
   questionText: {

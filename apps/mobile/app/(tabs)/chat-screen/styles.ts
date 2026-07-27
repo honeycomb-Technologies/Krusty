@@ -154,7 +154,7 @@ export const styles = StyleSheet.create({
   },
   titleBtn: {
     maxWidth: "70%",
-    borderRadius: 999,
+    borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 16,
     paddingVertical: 8,

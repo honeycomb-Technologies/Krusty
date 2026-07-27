@@ -5,7 +5,6 @@ import {
   FlatList,
   Pressable,
   StyleSheet,
-  ActivityIndicator,
   RefreshControl,
   Alert,
 } from 'react-native';
@@ -15,6 +14,7 @@ import { Plus, Trash2 } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
+import { SessionListSkeleton } from '../../components/ui/Skeleton';
 import { GlassCard } from '../../components/ui/GlassCard';
 import type { SessionResponse } from '@krusty/api';
 
@@ -116,9 +116,7 @@ export default function SessionsScreen() {
       </View>
 
       {isLoading ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={t.userMessage} />
-        </View>
+        <SessionListSkeleton />
       ) : (
         <FlatList
           data={sessions}

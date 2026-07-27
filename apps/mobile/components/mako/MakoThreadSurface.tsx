@@ -35,6 +35,7 @@ export function MakoThreadSurface({
         scrollStateKey={`mako:${chat.sessionId ?? "new"}`}
         isStreaming={chat.isStreaming}
         isThinking={chat.isThinking}
+        isLoading={chat.isLoading}
         activeToolCallId={chat.activeToolCallId}
         onApproveTool={chat.onApproveTool}
         onDenyTool={chat.onDenyTool}

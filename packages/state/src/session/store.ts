@@ -45,6 +45,13 @@ import {
   sessionAgentErrorMessage,
   shouldStopSessionStatePolling,
 } from './serverState';
+import {
+  SessionSnapshotCache,
+  buildOptimisticSessionShell,
+  buildSessionSnapshotFromResponse,
+  normalizeDisplayTitle,
+  type CachedSessionSnapshot,
+} from './sessionCache';
 import { createStreamCallbacks } from './streaming';
 import {
   applyLivePartialAssistant,
@@ -83,14 +90,6 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
   return trimmed ? trimmed : null;
 }
 
-function normalizeDisplayTitle(title: string | null | undefined): string {
-  const trimmed = title?.trim() ?? "";
-  const placeholder = trimmed.toLowerCase();
-  return placeholder === "new chat" || placeholder === "new session"
-    ? ""
-    : trimmed;
-}
-
 function buildDisplayAttachments(
   attachments: Attachment[],
 ): ChatMessageAttachment[] {
@@ -118,6 +117,7 @@ export function createSessionStore(
   let statePollingGeneration = 0;
   let streamAttachmentGeneration = 0;
   let sessionLoadGeneration = 0;
+  const sessionCache = new SessionSnapshotCache();
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
@@ -704,165 +704,286 @@ export function createSessionStore(
 
     // -- loadSession --------------------------------------------------------
 
-    async loadSession(sessionId: string, isRefresh = false) {
-      const previousSessionId = get().sessionId;
-      const loadGeneration = ++sessionLoadGeneration;
-      if (previousSessionId !== sessionId) {
-        streamAttachmentGeneration += 1;
-        abortController?.abort();
-        abortController = null;
-        get().stopStatePolling();
-        get().stopPresenceHeartbeat(previousSessionId);
-        planStore.getState().setWorkflow(null);
-      }
-      set({ isLoading: true });
+        async loadSession(sessionId: string, isRefresh = false) {
+          const previousSessionId = get().sessionId;
+          const loadGeneration = ++sessionLoadGeneration;
+          const isSessionSwitch = previousSessionId !== sessionId;
+          const listedSessions = sessionsStore.getState().sessions ?? [];
 
-      try {
-        const data = await client.getSession(sessionId);
-        if (loadGeneration !== sessionLoadGeneration) return;
-        const processedMessages = processStoredMessages(data.messages);
+          if (isSessionSwitch) {
+            // Detach any in-flight stream callbacks for the leaving session without
+            // cancelling its server-side run.
+            streamAttachmentGeneration += 1;
+            abortController?.abort();
+            abortController = null;
+            get().stopStatePolling();
+            get().stopPresenceHeartbeat(previousSessionId);
+            planStore.getState().setWorkflow(null);
 
-        let serverState: ApiSessionStateResponse | null = null;
-        try {
-          serverState = await client.getSessionState(sessionId);
-        } catch {
-          // State endpoint may not exist
-        }
-        if (loadGeneration !== sessionLoadGeneration) return;
-
-        const mode = serverState?.mode ?? data.session.mode ?? "build";
-        const permissionMode =
-          serverState?.permission_mode ?? data.session.permission_mode ?? "autonomous";
-        const previousModel = get().model;
-        const previousModelKey = get().modelKey;
-        const sessionModel = data.session.model?.trim() || null;
-        const sessionModelKey = data.session.model_key ?? null;
-        set((s) => {
-          const sameExactSelection = Boolean(sessionModelKey)
-            && modelKeysEqual(sessionModelKey, s.modelKey);
-          const nextModelProvider = sessionModel
-            ? sessionModelKey?.provider
-              ?? (sessionModel === s.model
-              ? s.modelProvider
-              : null)
-            : s.modelProvider;
-          const nextModelInfo = sessionModel
-            ? sameExactSelection || (!sessionModelKey && sessionModel === s.model)
-              ? s.modelInfo
-              : null
-            : s.modelInfo;
-          const capabilityInput = nextModelInfo ?? sessionModel ?? s.model;
-          const nextThinkingLevel = normalizeThinkingLevel(
-            s.thinkingLevel,
-            capabilityInput,
-          );
-          return {
-            ...s,
-            sessionId: data.session.id,
-            sessionType: data.session.session_type,
-            title: normalizeDisplayTitle(data.session.title),
-            mode,
-            permissionMode,
-            model: sessionModel ?? s.model,
-            modelKey: sessionModel ? sessionModelKey : s.modelKey,
-            modelProvider: nextModelProvider,
-            modelInfo: nextModelInfo,
-            thinkingLevel: nextThinkingLevel,
-            thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
-            fastModeEnabled: sessionModel
-              ? s.fastModeEnabled
-                && supportsFastMode(capabilityInput, nextModelProvider)
-              : s.fastModeEnabled,
-            tokenCount: data.session.token_count ?? 0,
-            tokenUsage: null,
-            error:
-              serverState !== null
-                ? sessionAgentErrorMessage(serverState)
-                : previousSessionId === sessionId
-                  ? s.error
-                  : null,
-            messages: applyLivePartialAssistant(
-              applyRecoveryParity(
-                processedMessages,
-                serverState?.recovery,
-                serverState?.agent_state ?? "idle",
-              ),
-              serverState?.live_partial_assistant,
-              serverState?.agent_state ?? "idle",
-              pendingInteractionsFromSnapshot(serverState),
-            ),
-            isLoading: false,
-          };
-        });
-        try {
-          storage.set("krusty-permission-mode", permissionMode);
-        } catch {
-          /* ignore */
-        }
-
-        planStore.getState().setVisible(mode === "plan");
-
-        workspace
-          .getState()
-          .initFromSession(
-            data.session.id,
-            data.session.project_dir ?? data.session.working_dir ?? null,
-            (data.session.workspace_mode ??
-              ((data.session.project_dir ?? data.session.working_dir)
-                ? "selected"
-                : "neutral")) as "neutral" | "selected" | "created",
-            data.session.target_branch ?? null,
-          );
-
-        applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
-        if (
-          serverState
-          && isActiveSessionAgentState(serverState.agent_state)
-          && !statePollingTimer
-        ) {
-          get().startStatePolling(sessionId);
-        }
-        get().startPresenceHeartbeat(sessionId);
-        if (
-          sessionModel
-          && (
-            sessionModel !== previousModel
-            || !modelKeysEqual(sessionModelKey, previousModelKey)
-          )
-        ) {
-          void persistCurrentSelectedModel(sessionModel, sessionModelKey);
-        }
-      } catch (err) {
-        if (loadGeneration !== sessionLoadGeneration) return;
-        if (err instanceof KrustyApiError && err.status === 404) {
-          const current = get();
-          current.stopPresenceHeartbeat(previousSessionId);
-          if (workspace.getState().sessionId === sessionId) {
-            workspace.getState().setSession(null);
+            // Keep the leaving session warm so back-navigation can paint instantly.
+            if (previousSessionId) {
+              const previous = get();
+              if (previous.sessionId === previousSessionId && previous.messages.length > 0) {
+                const previousListItem =
+                  listedSessions.find((session) => session.id === previousSessionId) ?? null;
+                sessionCache.set({
+                  sessionId: previousSessionId,
+                  sessionType: previous.sessionType,
+                  title: previous.title,
+                  mode: previous.mode,
+                  permissionMode: previous.permissionMode,
+                  model: previous.model,
+                  modelKey: previous.modelKey,
+                  tokenCount: previous.tokenCount,
+                  messages: previous.messages,
+                  projectDir:
+                    previousListItem?.project_dir
+                    ?? workspace.getState().directory
+                    ?? null,
+                  workingDir:
+                    previousListItem?.working_dir
+                    ?? workspace.getState().directory
+                    ?? null,
+                  workspaceMode:
+                    previousListItem?.workspace_mode
+                    ?? workspace.getState().mode
+                    ?? null,
+                  targetBranch:
+                    previousListItem?.target_branch
+                    ?? workspace.getState().targetBranch
+                    ?? null,
+                  serverState: null,
+                  updatedAt: Date.now(),
+                });
+              }
+            }
           }
-          set({
-            ...initialState,
-            permissionMode: current.permissionMode,
-            model: current.model,
-            modelKey: current.modelKey,
-            modelProvider: current.modelProvider,
-            modelInfo: current.modelInfo,
-            thinkingLevel: current.thinkingLevel,
-            thinkingEnabled: current.thinkingEnabled,
-            fastModeEnabled: current.fastModeEnabled,
-            isLoading: false,
-            error: null,
-          });
-          sessionsStore.getState().loadSessions();
-          return;
-        }
-        set({
-          isLoading: false,
-          error: toErrorMessage(err, "Failed to load session"),
-        });
-      }
-    },
 
+          const listItem =
+            listedSessions.find((session) => session.id === sessionId) ?? null;
+          const cached = sessionCache.get(sessionId);
+          const optimistic = buildOptimisticSessionShell(sessionId, listItem, cached);
+          const hasCachedMessages = optimistic.messages.length > 0;
+
+          if (isSessionSwitch) {
+            // Activate destination shell immediately so navigation never waits on network.
+            const current = get();
+            const sameExactSelection = Boolean(optimistic.modelKey)
+              && modelKeysEqual(optimistic.modelKey, current.modelKey);
+            const nextModelProvider = optimistic.model
+              ? optimistic.modelKey?.provider
+                ?? (optimistic.model === current.model ? current.modelProvider : null)
+              : current.modelProvider;
+            const nextModelInfo = optimistic.model
+              ? sameExactSelection || (!optimistic.modelKey && optimistic.model === current.model)
+                ? current.modelInfo
+                : null
+              : current.modelInfo;
+            const capabilityInput = nextModelInfo ?? optimistic.model ?? current.model;
+            const nextThinkingLevel = normalizeThinkingLevel(
+              current.thinkingLevel,
+              capabilityInput,
+            );
+            const directory = optimistic.projectDir ?? optimistic.workingDir ?? null;
+            const workspaceMode = (optimistic.workspaceMode
+              ?? (directory ? "selected" : "neutral")) as "neutral" | "selected" | "created";
+
+            set({
+              sessionId: optimistic.sessionId,
+              sessionType: optimistic.sessionType,
+              title: optimistic.title,
+              mode: optimistic.mode,
+              permissionMode: optimistic.permissionMode,
+              model: optimistic.model ?? current.model,
+              modelKey: optimistic.model ? optimistic.modelKey : current.modelKey,
+              modelProvider: nextModelProvider,
+              modelInfo: nextModelInfo,
+              thinkingLevel: nextThinkingLevel,
+              thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
+              fastModeEnabled: optimistic.model
+                ? current.fastModeEnabled
+                  && supportsFastMode(capabilityInput, nextModelProvider)
+                : current.fastModeEnabled,
+              tokenCount: optimistic.tokenCount,
+              tokenUsage: null,
+              messages: optimistic.messages,
+              queuedMessages: [],
+              isLoading: !hasCachedMessages,
+              isStreaming: false,
+              isThinking: false,
+              thinkingContent: "",
+              lastEventSequence: null,
+              error: null,
+            });
+            try {
+              storage.set("krusty-permission-mode", optimistic.permissionMode);
+            } catch {
+              /* ignore */
+            }
+            planStore.getState().setVisible(optimistic.mode === "plan");
+            workspace
+              .getState()
+              .initFromSession(
+                optimistic.sessionId,
+                directory,
+                workspaceMode,
+                optimistic.targetBranch,
+              );
+            get().startPresenceHeartbeat(optimistic.sessionId);
+          } else if (!get().messages.length) {
+            set({ isLoading: true, error: null });
+          }
+
+          try {
+            const data = await client.getSession(sessionId);
+            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+              return;
+            }
+            const processedMessages = processStoredMessages(data.messages);
+
+            let serverState: ApiSessionStateResponse | null = null;
+            try {
+              serverState = await client.getSessionState(sessionId);
+            } catch {
+              // State endpoint may not exist
+            }
+            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+              return;
+            }
+
+            const snapshot = buildSessionSnapshotFromResponse(
+              data,
+              processedMessages,
+              serverState,
+            );
+            sessionCache.set(snapshot);
+
+            const previousModel = get().model;
+            const previousModelKey = get().modelKey;
+            set((s) => {
+              const sameExactSelection = Boolean(snapshot.modelKey)
+                && modelKeysEqual(snapshot.modelKey, s.modelKey);
+              const nextModelProvider = snapshot.model
+                ? snapshot.modelKey?.provider
+                  ?? (snapshot.model === s.model ? s.modelProvider : null)
+                : s.modelProvider;
+              const nextModelInfo = snapshot.model
+                ? sameExactSelection || (!snapshot.modelKey && snapshot.model === s.model)
+                  ? s.modelInfo
+                  : null
+                : s.modelInfo;
+              const capabilityInput = nextModelInfo ?? snapshot.model ?? s.model;
+              const nextThinkingLevel = normalizeThinkingLevel(
+                s.thinkingLevel,
+                capabilityInput,
+              );
+              return {
+                ...s,
+                sessionId: snapshot.sessionId,
+                sessionType: snapshot.sessionType,
+                title: snapshot.title,
+                mode: snapshot.mode,
+                permissionMode: snapshot.permissionMode,
+                model: snapshot.model ?? s.model,
+                modelKey: snapshot.model ? snapshot.modelKey : s.modelKey,
+                modelProvider: nextModelProvider,
+                modelInfo: nextModelInfo,
+                thinkingLevel: nextThinkingLevel,
+                thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
+                fastModeEnabled: snapshot.model
+                  ? s.fastModeEnabled
+                    && supportsFastMode(capabilityInput, nextModelProvider)
+                  : s.fastModeEnabled,
+                tokenCount: snapshot.tokenCount,
+                tokenUsage: null,
+                error:
+                  serverState !== null
+                    ? sessionAgentErrorMessage(serverState)
+                    : previousSessionId === snapshot.sessionId
+                      ? s.error
+                      : null,
+                messages: applyLivePartialAssistant(
+                  applyRecoveryParity(
+                    snapshot.messages,
+                    serverState?.recovery,
+                    serverState?.agent_state ?? "idle",
+                  ),
+                  serverState?.live_partial_assistant,
+                  serverState?.agent_state ?? "idle",
+                  pendingInteractionsFromSnapshot(serverState),
+                ),
+                isLoading: false,
+              };
+            });
+            try {
+              storage.set("krusty-permission-mode", snapshot.permissionMode);
+            } catch {
+              /* ignore */
+            }
+
+            planStore.getState().setVisible(snapshot.mode === "plan");
+            const directory = snapshot.projectDir ?? snapshot.workingDir ?? null;
+            workspace
+              .getState()
+              .initFromSession(
+                snapshot.sessionId,
+                directory,
+                (snapshot.workspaceMode
+                  ?? (directory ? "selected" : "neutral")) as "neutral" | "selected" | "created",
+                snapshot.targetBranch,
+              );
+
+            applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
+            if (
+              serverState
+              && isActiveSessionAgentState(serverState.agent_state)
+              && get().sessionId === sessionId
+            ) {
+              get().startStatePolling(sessionId);
+            }
+            get().startPresenceHeartbeat(sessionId);
+            if (
+              snapshot.model
+              && (
+                snapshot.model !== previousModel
+                || !modelKeysEqual(snapshot.modelKey, previousModelKey)
+              )
+            ) {
+              void persistCurrentSelectedModel(snapshot.model, snapshot.modelKey);
+            }
+          } catch (err) {
+            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+              return;
+            }
+            if (err instanceof KrustyApiError && err.status === 404) {
+              const current = get();
+              sessionCache.delete(sessionId);
+              current.stopPresenceHeartbeat(previousSessionId);
+              if (workspace.getState().sessionId === sessionId) {
+                workspace.getState().setSession(null);
+              }
+              set({
+                ...initialState,
+                permissionMode: current.permissionMode,
+                model: current.model,
+                modelKey: current.modelKey,
+                modelProvider: current.modelProvider,
+                modelInfo: current.modelInfo,
+                thinkingLevel: current.thinkingLevel,
+                thinkingEnabled: current.thinkingEnabled,
+                fastModeEnabled: current.fastModeEnabled,
+                isLoading: false,
+                error: null,
+              });
+              sessionsStore.getState().loadSessions();
+              return;
+            }
+            set({
+              isLoading: false,
+              error: toErrorMessage(err, "Failed to load session"),
+            });
+          }
+        },
     // -- clearSession -------------------------------------------------------
 
     clearSession() {

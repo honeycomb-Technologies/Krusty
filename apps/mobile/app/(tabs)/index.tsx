@@ -1075,6 +1075,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
           isStreaming={isStreaming}
           isThinking={isThinking}
+          isLoading={isLoading}
           activeToolCallId={activeToolCallId}
           onApproveTool={handleApproveTranscriptTool}
           onDenyTool={handleDenyTranscriptTool}
