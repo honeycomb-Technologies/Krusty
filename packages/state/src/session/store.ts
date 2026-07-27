@@ -36,6 +36,7 @@ import {
   persistSessionPermissionMode,
   syncSessionPresence,
 } from './persistence';
+import { applyDelegatedSessionState } from './delegated';
 import {
   applySessionSnapshot,
   isActionableSessionAgentState,
@@ -90,6 +91,17 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
   return trimmed ? trimmed : null;
 }
 
+function isNotFoundApiError(err: unknown): boolean {
+  if (err instanceof KrustyApiError) {
+    return err.status === 404;
+  }
+  if (!err || typeof err !== "object") {
+    return false;
+  }
+  const status = (err as { status?: unknown }).status;
+  return status === 404;
+}
+
 function buildDisplayAttachments(
   attachments: Attachment[],
 ): ChatMessageAttachment[] {
@@ -118,9 +130,29 @@ export function createSessionStore(
   let streamAttachmentGeneration = 0;
   let sessionLoadGeneration = 0;
   const sessionCache = new SessionSnapshotCache();
+  const inFlightSessionLoads = new Map<string, Promise<void>>();
+  const lastKnownServerState = new Map<string, ApiSessionStateResponse>();
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  let presenceHeartbeatSessionId: string | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
+
+  let localStreamLive = false;
+
+  function isLocalStreamAttached(): boolean {
+    // True only while this client is actively consuming an SSE stream.
+    // Must not stay true after the transport ends, or recovery/poll will skip
+    // full transcript remaps that restore approvals and canonical history.
+    return localStreamLive;
+  }
+
+  function rememberServerState(
+    sessionId: string,
+    serverState: ApiSessionStateResponse | null | undefined,
+  ) {
+    if (!serverState) return;
+    lastKnownServerState.set(sessionId, serverState);
+  }
 
   function getPresenceClientId(): string | null {
     if (presenceClientId) return presenceClientId;
@@ -173,6 +205,21 @@ export function createSessionStore(
     sessionId: string,
     getState: () => SessionStoreState,
   ) => syncSessionPresence(client, sessionId, getPresenceClientId(), getState);
+
+
+  function attachLiveStreamLifecycle(callbacks: StreamCallbacks): StreamCallbacks {
+    return {
+      ...callbacks,
+      onFinish: (sessionId) => {
+        localStreamLive = false;
+        callbacks.onFinish?.(sessionId);
+      },
+      onError: (error) => {
+        localStreamLive = false;
+        callbacks.onError?.(error);
+      },
+    };
+  }
 
   function guardStreamCallbacks(
     callbacks: StreamCallbacks,
@@ -267,6 +314,8 @@ export function createSessionStore(
     ): Promise<boolean> {
       try {
         const serverState = await client.getSessionState(sessionId);
+        rememberServerState(sessionId, serverState);
+        // Recovery runs only when SSE is unavailable; always remap transcript.
         applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
         if (isActiveSessionAgentState(serverState.agent_state)) {
@@ -527,6 +576,7 @@ export function createSessionStore(
       }));
 
       abortController = new AbortController();
+      localStreamLive = true;
       const streamController = abortController;
       const streamGeneration = ++streamAttachmentGeneration;
       const isStreamAttached = () =>
@@ -539,14 +589,16 @@ export function createSessionStore(
 
       const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
       const callbacks = guardStreamCallbacks(
-        createRecoveringStreamCallbacks(
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
-          pollingSessionId,
-          streamRecovery,
+        attachLiveStreamLifecycle(
+          createRecoveringStreamCallbacks(
+            createStreamCallbacks(ref, set, get, {
+              planStore,
+              sessionsStore,
+              persistSessionMode: persistMode,
+            }),
+            pollingSessionId,
+            streamRecovery,
+          ),
         ),
         isStreamAttached,
       );
@@ -652,7 +704,12 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
-        if (!isStreamAttached()) return;
+        if (!isStreamAttached()) {
+          localStreamLive = false;
+          return;
+        }
+        // SSE transport is done; recovery/poll may still own truth after this.
+        localStreamLive = false;
         if (streamRecovery.promise) {
           keepStatePolling = await streamRecovery.promise;
         }
@@ -705,6 +762,12 @@ export function createSessionStore(
     // -- loadSession --------------------------------------------------------
 
         async loadSession(sessionId: string, isRefresh = false) {
+          const existing = inFlightSessionLoads.get(sessionId);
+          if (existing) {
+            return existing;
+          }
+
+          const run = (async () => {
           const previousSessionId = get().sessionId;
           const loadGeneration = ++sessionLoadGeneration;
           const isSessionSwitch = previousSessionId !== sessionId;
@@ -716,6 +779,7 @@ export function createSessionStore(
             streamAttachmentGeneration += 1;
             abortController?.abort();
             abortController = null;
+            localStreamLive = false;
             get().stopStatePolling();
             get().stopPresenceHeartbeat(previousSessionId);
             planStore.getState().setWorkflow(null);
@@ -752,7 +816,7 @@ export function createSessionStore(
                     previousListItem?.target_branch
                     ?? workspace.getState().targetBranch
                     ?? null,
-                  serverState: null,
+                  serverState: lastKnownServerState.get(previousSessionId) ?? null,
                   updatedAt: Date.now(),
                 });
               }
@@ -764,6 +828,13 @@ export function createSessionStore(
           const cached = sessionCache.get(sessionId);
           const optimistic = buildOptimisticSessionShell(sessionId, listItem, cached);
           const hasCachedMessages = optimistic.messages.length > 0;
+          const cachedServerState =
+            optimistic.serverState
+            ?? lastKnownServerState.get(sessionId)
+            ?? null;
+          const cachedIsStreaming = isActiveSessionAgentState(
+            cachedServerState?.agent_state,
+          );
 
           if (isSessionSwitch) {
             // Activate destination shell immediately so navigation never waits on network.
@@ -809,10 +880,13 @@ export function createSessionStore(
               messages: optimistic.messages,
               queuedMessages: [],
               isLoading: !hasCachedMessages,
-              isStreaming: false,
-              isThinking: false,
-              thinkingContent: "",
-              lastEventSequence: null,
+              isStreaming: cachedIsStreaming,
+              isThinking: Boolean(
+                cachedServerState?.live_partial_assistant?.thinking?.trim(),
+              ),
+              thinkingContent:
+                cachedServerState?.live_partial_assistant?.thinking || "",
+              lastEventSequence: cachedServerState?.last_event_sequence ?? null,
               error: null,
             });
             try {
@@ -820,7 +894,11 @@ export function createSessionStore(
             } catch {
               /* ignore */
             }
-            planStore.getState().setVisible(optimistic.mode === "plan");
+            // Keep plan chrome collapsed by default; server snapshot can expand it.
+            planStore.getState().setVisible(false);
+            if (cachedServerState?.workflow) {
+              planStore.getState().setWorkflow(cachedServerState.workflow);
+            }
             workspace
               .getState()
               .initFromSession(
@@ -830,26 +908,94 @@ export function createSessionStore(
                 optimistic.targetBranch,
               );
             get().startPresenceHeartbeat(optimistic.sessionId);
+            if (cachedIsStreaming) {
+              get().startStatePolling(optimistic.sessionId);
+            }
           } else if (!get().messages.length) {
             set({ isLoading: true, error: null });
           }
 
           try {
-            const data = await client.getSession(sessionId);
-            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
-              return;
-            }
-            const processedMessages = processStoredMessages(data.messages);
+            let prefetchedServerState: ApiSessionStateResponse | null = null;
+            let hasPrefetchedServerState = false;
 
-            let serverState: ApiSessionStateResponse | null = null;
-            try {
-              serverState = await client.getSessionState(sessionId);
-            } catch {
-              // State endpoint may not exist
+            // Same-session refresh: fetch state once up front so recovery/poll
+            // paths can reuse it instead of draining the state endpoint twice.
+            if (
+              isRefresh
+              && !isSessionSwitch
+              && get().messages.length > 0
+              && get().sessionId === sessionId
+              && client.getSessionState
+            ) {
+              try {
+                const softState = await client.getSessionState(sessionId);
+                if (
+                  loadGeneration !== sessionLoadGeneration
+                  || get().sessionId !== sessionId
+                ) {
+                  return;
+                }
+                prefetchedServerState = softState;
+                hasPrefetchedServerState = true;
+                rememberServerState(sessionId, softState);
+                applySessionSnapshot(
+                  sessionId,
+                  softState,
+                  true,
+                  set,
+                  get,
+                  planStore,
+                  {
+                    // Only skip transcript remap while this client still owns SSE.
+                    metadataOnly: isLocalStreamAttached(),
+                  },
+                );
+                if (isActiveSessionAgentState(softState.agent_state)) {
+                  get().startStatePolling(sessionId);
+                }
+                if (isLocalStreamAttached()) {
+                  set({ isLoading: false });
+                  return;
+                }
+              } catch {
+                // Fall through to full load when soft refresh fails.
+              }
             }
+
+            const sessionPromise = client.getSession(sessionId);
+            const statePromise = hasPrefetchedServerState
+              ? Promise.resolve({
+                  ok: true as const,
+                  state: prefetchedServerState,
+                })
+              : client.getSessionState
+                ? client.getSessionState(sessionId).then(
+                    (state) => ({ ok: true as const, state }),
+                    () => ({
+                      ok: false as const,
+                      state: null as ApiSessionStateResponse | null,
+                    }),
+                  )
+                : Promise.resolve({
+                    ok: false as const,
+                    state: null as ApiSessionStateResponse | null,
+                  });
+            const [data, serverStateResult] = await Promise.all([
+              sessionPromise,
+              statePromise,
+            ]);
             if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
               return;
             }
+
+            const previousMessages = get().messages;
+            const processedMessages = processStoredMessages(
+              data.messages,
+              previousMessages,
+            );
+            const serverState = serverStateResult.ok ? serverStateResult.state : null;
+            rememberServerState(sessionId, serverState);
 
             const snapshot = buildSessionSnapshotFromResponse(
               data,
@@ -860,6 +1006,21 @@ export function createSessionStore(
 
             const previousModel = get().model;
             const previousModelKey = get().modelKey;
+            const hydratedMessages = applyDelegatedSessionState(
+              applyLivePartialAssistant(
+                applyRecoveryParity(
+                  snapshot.messages,
+                  serverState?.recovery,
+                  serverState?.agent_state ?? "idle",
+                ),
+                serverState?.live_partial_assistant,
+                serverState?.agent_state ?? "idle",
+                pendingInteractionsFromSnapshot(serverState),
+              ),
+              serverState?.delegated_tools,
+              serverState?.recent_delegated_runs,
+            );
+
             set((s) => {
               const sameExactSelection = Boolean(snapshot.modelKey)
                 && modelKeysEqual(snapshot.modelKey, s.modelKey);
@@ -877,13 +1038,16 @@ export function createSessionStore(
                 s.thinkingLevel,
                 capabilityInput,
               );
+              const nextMode = serverState?.mode ?? snapshot.mode;
+              const nextPermissionMode =
+                serverState?.permission_mode ?? snapshot.permissionMode;
               return {
                 ...s,
                 sessionId: snapshot.sessionId,
                 sessionType: snapshot.sessionType,
                 title: snapshot.title,
-                mode: snapshot.mode,
-                permissionMode: snapshot.permissionMode,
+                mode: nextMode,
+                permissionMode: nextPermissionMode,
                 model: snapshot.model ?? s.model,
                 modelKey: snapshot.model ? snapshot.modelKey : s.modelKey,
                 modelProvider: nextModelProvider,
@@ -902,26 +1066,35 @@ export function createSessionStore(
                     : previousSessionId === snapshot.sessionId
                       ? s.error
                       : null,
-                messages: applyLivePartialAssistant(
-                  applyRecoveryParity(
-                    snapshot.messages,
-                    serverState?.recovery,
-                    serverState?.agent_state ?? "idle",
-                  ),
-                  serverState?.live_partial_assistant,
-                  serverState?.agent_state ?? "idle",
-                  pendingInteractionsFromSnapshot(serverState),
-                ),
+                messages: hydratedMessages,
                 isLoading: false,
+                isStreaming: isActiveSessionAgentState(serverState?.agent_state),
+                isThinking:
+                  serverState?.agent_state === "streaming"
+                    ? Boolean(
+                        serverState.live_partial_assistant?.thinking?.trim(),
+                      ) || s.isThinking
+                    : false,
+                thinkingContent:
+                  serverState?.live_partial_assistant?.thinking || "",
+                lastEventSequence: serverState?.last_event_sequence ?? null,
               };
             });
             try {
-              storage.set("krusty-permission-mode", snapshot.permissionMode);
+              storage.set(
+                "krusty-permission-mode",
+                serverState?.permission_mode ?? snapshot.permissionMode,
+              );
             } catch {
               /* ignore */
             }
 
-            planStore.getState().setVisible(snapshot.mode === "plan");
+            planStore.getState().setWorkflow(serverState?.workflow ?? null);
+            planStore
+              .getState()
+              .setVisible(
+                Boolean(serverState?.workflow) || snapshot.mode === "plan",
+              );
             const directory = snapshot.projectDir ?? snapshot.workingDir ?? null;
             workspace
               .getState()
@@ -933,7 +1106,6 @@ export function createSessionStore(
                 snapshot.targetBranch,
               );
 
-            applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
             if (
               serverState
               && isActiveSessionAgentState(serverState.agent_state)
@@ -955,9 +1127,10 @@ export function createSessionStore(
             if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
               return;
             }
-            if (err instanceof KrustyApiError && err.status === 404) {
+            if (isNotFoundApiError(err)) {
               const current = get();
               sessionCache.delete(sessionId);
+              lastKnownServerState.delete(sessionId);
               current.stopPresenceHeartbeat(previousSessionId);
               if (workspace.getState().sessionId === sessionId) {
                 workspace.getState().setSession(null);
@@ -980,8 +1153,18 @@ export function createSessionStore(
             }
             set({
               isLoading: false,
-              error: toErrorMessage(err, "Failed to load session"),
+              error: toErrorMessage(err),
             });
+          }
+          })();
+
+          inFlightSessionLoads.set(sessionId, run);
+          try {
+            await run;
+          } finally {
+            if (inFlightSessionLoads.get(sessionId) === run) {
+              inFlightSessionLoads.delete(sessionId);
+            }
           }
         },
     // -- clearSession -------------------------------------------------------
@@ -992,6 +1175,7 @@ export function createSessionStore(
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
+      localStreamLive = false;
       get().stopStatePolling();
       get().stopPresenceHeartbeat(current.sessionId);
       set({
@@ -1022,6 +1206,7 @@ export function createSessionStore(
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
+      localStreamLive = false;
       get().stopStatePolling();
       get().stopPresenceHeartbeat(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
@@ -1230,6 +1415,7 @@ export function createSessionStore(
       }));
 
       abortController = new AbortController();
+      localStreamLive = true;
       const streamController = abortController;
       const streamGeneration = ++streamAttachmentGeneration;
       const isStreamAttached = () =>
@@ -1247,14 +1433,16 @@ export function createSessionStore(
 
       const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
       const callbacks = guardStreamCallbacks(
-        createRecoveringStreamCallbacks(
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
-          state.sessionId,
-          streamRecovery,
+        attachLiveStreamLifecycle(
+          createRecoveringStreamCallbacks(
+            createStreamCallbacks(ref, set, get, {
+              planStore,
+              sessionsStore,
+              persistSessionMode: persistMode,
+            }),
+            state.sessionId,
+            streamRecovery,
+          ),
         ),
         isStreamAttached,
       );
@@ -1282,7 +1470,12 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
-        if (!isStreamAttached()) return;
+        if (!isStreamAttached()) {
+          localStreamLive = false;
+          return;
+        }
+        // SSE transport is done; recovery/poll may still own truth after this.
+        localStreamLive = false;
         if (streamRecovery.promise) {
           keepStatePolling = await streamRecovery.promise;
         }
@@ -1327,6 +1520,7 @@ export function createSessionStore(
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
+      localStreamLive = false;
       get().stopStatePolling();
       get().stopPresenceHeartbeat(activeSessionId);
       set((s) => ({
@@ -1348,6 +1542,7 @@ export function createSessionStore(
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
+      localStreamLive = false;
       get().stopStatePolling();
       set((s) => ({
         isLoading: false,
@@ -1378,7 +1573,12 @@ export function createSessionStore(
           const serverState = await client.getSessionState(sessionId);
           if (generation !== statePollingGeneration) return;
           consecutiveFailures = 0;
-          applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
+          rememberServerState(sessionId, serverState);
+          applySessionSnapshot(sessionId, serverState, true, set, get, planStore, {
+            // While the local SSE stream is attached it owns the live transcript.
+            // Poll only for metadata so we don't remount the whole chat every 3s.
+            metadataOnly: isLocalStreamAttached(),
+          });
 
           if (get().error === STATE_POLL_DEGRADED_MESSAGE) {
             set({ error: null });
@@ -1442,18 +1642,27 @@ export function createSessionStore(
     // -- presence heartbeat -------------------------------------------------
 
     startPresenceHeartbeat(sessionId: string) {
+      if (
+        presenceHeartbeatSessionId === sessionId
+        && presenceHeartbeatInterval
+      ) {
+        return;
+      }
       get().stopPresenceHeartbeat();
+      presenceHeartbeatSessionId = sessionId;
       void syncPresence(sessionId, get);
       presenceHeartbeatInterval = setInterval(() => {
         void syncPresence(sessionId, get);
       }, PRESENCE_HEARTBEAT_INTERVAL);
     },
 
+
     stopPresenceHeartbeat(sessionId?: string | null) {
       if (presenceHeartbeatInterval) {
         clearInterval(presenceHeartbeatInterval);
         presenceHeartbeatInterval = null;
       }
+      presenceHeartbeatSessionId = null;
 
       if (!sessionId) return;
 
@@ -1470,6 +1679,7 @@ export function createSessionStore(
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
+      localStreamLive = false;
       get().stopStatePolling();
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);

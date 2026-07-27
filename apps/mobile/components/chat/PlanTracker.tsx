@@ -45,10 +45,9 @@ export function PlanTracker({
   );
 
   const planIdentity = workflow?.goal.id ?? items.map((item) => item.id).join("|");
-  useEffect(() => {
-    if (!trackerAvailable) return;
-    setIsExpanded(true);
-  }, [planIdentity, trackerAvailable]);
+  // Preserve the user's expanded/collapsed choice across plan identity updates.
+  // Auto-forcing expand on every identity tick reflows the transcript and feels
+  // like plan mode is taking over the screen.
 
   useEffect(() => {
     if (trackerAvailable || lastReportedHeightRef.current === 0) return;

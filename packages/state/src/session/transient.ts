@@ -343,11 +343,13 @@ export function applyLivePartialAssistant(
     return nextMessages;
   }
 
-  // Prefer the SSE-built chronological timeline when present. Coarse live_partial
-  // snapshots only carry flat text + tool lists and will make tools jump around prose.
+  // Prefer the SSE-built chronological timeline only while the agent is still
+  // actively streaming/tool-executing. Once the server is idle/awaiting input,
+  // live_partial + pending interactions are the source of truth for recovery.
   const lastMessage = nextMessages[nextMessages.length - 1];
   if (
-    lastMessage?.kind === 'streaming'
+    (agentState === 'streaming' || agentState === 'tool_executing')
+    && lastMessage?.kind === 'streaming'
     && ((lastMessage.renderParts?.length ?? 0) > 0 || (lastMessage.toolCalls?.length ?? 0) > 0)
   ) {
     return nextMessages;

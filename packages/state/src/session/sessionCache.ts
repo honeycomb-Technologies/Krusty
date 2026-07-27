@@ -37,7 +37,12 @@ export class SessionSnapshotCache {
   }
 
   get(sessionId: string): CachedSessionSnapshot | null {
-    return this.entries.get(sessionId) ?? null;
+    const snapshot = this.entries.get(sessionId);
+    if (!snapshot) return null;
+    // Touch LRU so warm reopens stay hot even without a rewrite.
+    this.entries.delete(sessionId);
+    this.entries.set(sessionId, snapshot);
+    return snapshot;
   }
 
   set(snapshot: CachedSessionSnapshot): void {

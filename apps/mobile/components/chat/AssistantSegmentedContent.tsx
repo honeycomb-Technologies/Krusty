@@ -1,16 +1,19 @@
 import { memo, useMemo } from "react";
-import { View, StyleSheet } from "react-native";
+import { Text, View, StyleSheet } from "react-native";
 import { MarkdownContent } from "./MarkdownContent";
 import { assistantRenderSegments } from "./assistantSegments";
+import { useThemeContext } from "../../hooks/useTheme";
 
 interface AssistantSegmentedContentProps {
   messageId: string;
   content: string;
+  isStreaming?: boolean;
 }
 
 export function AssistantSegmentedContent({
   messageId,
   content,
+  isStreaming = false,
 }: AssistantSegmentedContentProps) {
   const segments = useMemo(
     () => assistantRenderSegments(messageId, content),
@@ -19,11 +22,15 @@ export function AssistantSegmentedContent({
 
   return (
     <View style={styles.container}>
-      {segments.map((segment) =>
-        segment.content ? (
+      {segments.map((segment, index) => {
+        if (!segment.content) return null;
+        const isLiveTail = isStreaming && index === segments.length - 1;
+        return isLiveTail ? (
+          <LivePlainText key={segment.id} content={segment.content} />
+        ) : (
           <MemoizedMarkdownSegment key={segment.id} content={segment.content} />
-        ) : null,
-      )}
+        );
+      })}
     </View>
   );
 }
@@ -36,8 +43,21 @@ const MemoizedMarkdownSegment = memo(function MemoizedMarkdownSegment({
   return <MarkdownContent content={content} />;
 });
 
+const LivePlainText = memo(function LivePlainText({ content }: { content: string }) {
+  const { theme } = useThemeContext();
+  return (
+    <Text style={[styles.liveText, { color: theme.colors.foreground }]} selectable>
+      {content}
+    </Text>
+  );
+});
+
 const styles = StyleSheet.create({
   container: {
     gap: 2,
+  },
+  liveText: {
+    fontSize: 15,
+    lineHeight: 22,
   },
 });

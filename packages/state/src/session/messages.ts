@@ -244,9 +244,17 @@ function parseStoredMessage(
 
 export function processStoredMessages(
   rawMessages: { role: string; content: unknown }[],
+  previousMessages: ChatMessage[] = [],
 ): ChatMessage[] {
   const result: ChatMessage[] = [];
   const toolResults = new Map<string, { output: string; isError: boolean }>();
+  const previousByFingerprint = new Map<string, ChatMessage>();
+  for (const previous of previousMessages) {
+    if (previous.kind === 'streaming' || previous.kind === 'live_partial') {
+      continue;
+    }
+    previousByFingerprint.set(messageStabilityFingerprint(previous), previous);
+  }
 
   for (const message of rawMessages) {
     const contentArray = Array.isArray(message.content) ? message.content : [];
@@ -276,12 +284,38 @@ export function processStoredMessages(
     const hasToolCalls = (parsed.toolCalls?.length ?? 0) > 0;
     const hasAttachments = (parsed.attachments?.length ?? 0) > 0;
     if (hasContent || hasThinking || hasToolCalls || hasAttachments) {
-      parsed.id = buildStoredMessageId(result.length, parsed);
+      const fingerprint = messageStabilityFingerprint(parsed);
+      const previous = previousByFingerprint.get(fingerprint);
+      parsed.id = previous?.id || buildStoredMessageId(result.length, parsed);
+      // Prefer one-to-one reuse so later duplicates still get unique IDs.
+      if (previous) {
+        previousByFingerprint.delete(fingerprint);
+      }
       result.push(parsed);
     }
   }
 
   return result;
+}
+
+function messageStabilityFingerprint(message: ChatMessage): string {
+  const toolIds = (message.toolCalls || []).map((toolCall) => toolCall.id).join(',');
+  return [
+    message.role,
+    message.content,
+    message.thinking || '',
+    toolIds,
+    (message.attachments || [])
+      .map((attachment) =>
+        [
+          attachment.type,
+          attachment.name || '',
+          attachment.uri || '',
+          attachment.base64?.length || 0,
+        ].join(':'),
+      )
+      .join('|'),
+  ].join('::');
 }
 
 export function buildContentBlocks(

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Brain,
@@ -49,7 +49,7 @@ interface MessageBubbleProps {
   ) => void | Promise<void>;
 }
 
-export function MessageBubble({
+export const MessageBubble = memo(function MessageBubble({
   message,
   isLast,
   isStreaming,
@@ -178,6 +178,7 @@ export function MessageBubble({
             <AssistantSegmentedContent
               messageId={`${message.id}-${segment.id}`}
               content={segment.content}
+              isStreaming={isLast && isStreaming}
             />
           </Pressable>
         );
@@ -241,7 +242,17 @@ export function MessageBubble({
       )}
     </View>
   );
-}
+}, (prev, next) => (
+  prev.message === next.message &&
+  prev.isLast === next.isLast &&
+  prev.isStreaming === next.isStreaming &&
+  prev.isThinking === next.isThinking &&
+  prev.activeToolCallId === next.activeToolCallId &&
+  prev.onApproveTool === next.onApproveTool &&
+  prev.onDenyTool === next.onDenyTool &&
+  prev.onSubmitToolResult === next.onSubmitToolResult &&
+  prev.onPlanConfirm === next.onPlanConfirm
+));
 
 function ToolClusterCard({
   tools,

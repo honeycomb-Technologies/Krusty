@@ -39,7 +39,6 @@ import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
-import { useMakoHome } from "../../components/mako/hooks/useMakoHome";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
@@ -274,8 +273,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     code: null,
     mako: null,
   });
-  const makoHome = useMakoHome(activeMode === "mako");
-
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
     [messages],
@@ -595,7 +592,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       void sessionsStore.getState().loadSessions().finally(() => {
         sessionsRefreshInFlightRef.current = false;
       });
-    }, 5000);
+    }, 30_000);
 
     return () => clearInterval(refreshHandle);
   }, [client, isConnected, sessionStore, sessionsStore]);
@@ -606,20 +603,23 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         return;
       }
 
-      for (const type of ["chat", "code", "mako"] as const) {
-        const slot = stores.modes[type];
-        const currentSessionId =
-          slot.session.getState().sessionId ??
-          slot.workspace.getState().sessionId;
-        if (currentSessionId) {
-          void slot.session.getState().loadSession(currentSessionId, true);
-        }
+      // Refresh only the active mode on resume. Background modes warm lazily
+      // when the user switches to them, which avoids a resume network storm.
+      const activeSlot = stores.modes[activeMode];
+      const currentSessionId =
+        activeSlot.session.getState().sessionId ??
+        activeSlot.workspace.getState().sessionId;
+      if (
+        currentSessionId &&
+        !activeSlot.session.getState().isStreaming
+      ) {
+        void activeSlot.session.getState().loadSession(currentSessionId, true);
       }
       void loadModelCatalog().catch(() => null);
     });
 
     return () => subscription.remove();
-  }, [loadModelCatalog, stores.modes]);
+  }, [activeMode, loadModelCatalog, stores.modes]);
 
   useEffect(() => {
     const nextNotifiedIds = new Set<string>();

@@ -39,7 +39,13 @@ export function createSessionsStore(
     error: null,
 
     async loadSessions() {
-      set((s) => ({ ...s, isLoading: true }));
+      // Only show list loading chrome on the first fill. Soft refreshes should
+      // not flash/disable the drawer while chat is active.
+      set((s) => ({
+        ...s,
+        isLoading: s.sessions.length === 0,
+        error: null,
+      }));
 
       try {
         const data = await client.getSessions();

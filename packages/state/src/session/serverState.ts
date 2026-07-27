@@ -54,6 +54,11 @@ export function pendingInteractionsFromSnapshot(
   );
 }
 
+export interface ApplySessionSnapshotOptions {
+  /** When true, update run/workflow metadata without remapping the transcript. */
+  metadataOnly?: boolean;
+}
+
 export function applySessionSnapshot(
   sessionId: string,
   serverState: ApiSessionStateResponse | null,
@@ -61,38 +66,51 @@ export function applySessionSnapshot(
   set: SessionStateSetter,
   get: () => SessionStoreState,
   planStore: ReturnType<typeof createPlanStore>,
+  options: ApplySessionSnapshotOptions = {},
 ) {
   if (!serverState) return;
 
   const nextMode: SessionMode = serverState.mode ?? 'build';
   const nextPermissionMode: PermissionMode = serverState.permission_mode ?? get().permissionMode;
   const pendingInteractions = pendingInteractionsFromSnapshot(serverState);
-  set((state) => ({
-    mode: nextMode,
-    permissionMode: nextPermissionMode,
-    isStreaming: isActiveSessionAgentState(serverState.agent_state),
-    isThinking:
-      serverState.agent_state === 'streaming'
-        ? Boolean(serverState.live_partial_assistant?.thinking?.trim()) ||
-          state.isThinking
-        : false,
-    thinkingContent: serverState.live_partial_assistant?.thinking || '',
-    lastEventSequence: serverState.last_event_sequence ?? null,
-    messages: applyDelegatedSessionState(
-      applyLivePartialAssistant(
-        applyRecoveryParity(
-          state.messages,
-          serverState.recovery,
+  const metadataOnly = options.metadataOnly === true;
+  set((state) => {
+    const base = {
+      mode: nextMode,
+      permissionMode: nextPermissionMode,
+      isStreaming: isActiveSessionAgentState(serverState.agent_state),
+      isThinking:
+        serverState.agent_state === 'streaming'
+          ? Boolean(serverState.live_partial_assistant?.thinking?.trim()) ||
+            state.isThinking
+          : false,
+      thinkingContent: serverState.live_partial_assistant?.thinking || '',
+      lastEventSequence: serverState.last_event_sequence ?? null,
+    };
+
+    if (metadataOnly) {
+      // SSE owns the live timeline. Avoid remapping message identities every poll.
+      return base;
+    }
+
+    return {
+      ...base,
+      messages: applyDelegatedSessionState(
+        applyLivePartialAssistant(
+          applyRecoveryParity(
+            state.messages,
+            serverState.recovery,
+            serverState.agent_state,
+          ),
+          serverState.live_partial_assistant,
           serverState.agent_state,
+          pendingInteractions,
         ),
-        serverState.live_partial_assistant,
-        serverState.agent_state,
-        pendingInteractions,
+        serverState.delegated_tools,
+        serverState.recent_delegated_runs,
       ),
-      serverState.delegated_tools,
-      serverState.recent_delegated_runs,
-    ),
-  }));
+    };
+  });
   planStore.getState().setWorkflow(serverState.workflow ?? null);
   planStore
     .getState()

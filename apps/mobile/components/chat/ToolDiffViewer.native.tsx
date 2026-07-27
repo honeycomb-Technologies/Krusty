@@ -16,7 +16,7 @@ interface ToolDiffViewerProps {
   maxLines?: number;
 }
 
-const MAX_NATIVE_LINES = 180;
+const MAX_NATIVE_LINES = 120;
 
 export function ToolDiffViewer({
   presentation,

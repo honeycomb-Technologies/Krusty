@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import { Image, StyleSheet, Text, View, Pressable, Linking, ScrollView } from 'react-native';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import * as Clipboard from '../../platform/clipboard';
@@ -17,7 +17,7 @@ interface MarkdownContentProps {
   isUser?: boolean;
 }
 
-export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
+export const MarkdownContent = memo(function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
@@ -30,7 +30,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
     return false;
   }, []);
 
-  const styles = getStyles(t, isUser);
+  const styles = useMemo(() => getStyles(t, isUser), [isUser, t]);
   const isDark = theme.scheme === 'dark';
 
   const renderCodeBlock = (node: any, language = '') => {
@@ -173,7 +173,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
       />
     </>
   );
-}
+});
 
 /**
  * Soft-stabilize incomplete markdown while streaming so punctuation/words do not

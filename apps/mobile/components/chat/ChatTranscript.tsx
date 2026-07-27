@@ -481,6 +481,11 @@ export function ChatTranscript({
         ref={flatListRef}
         data={turns}
         keyExtractor={(turn) => turn.id}
+        windowSize={8}
+        maxToRenderPerBatch={4}
+        initialNumToRender={10}
+        updateCellsBatchingPeriod={50}
+        removeClippedSubviews
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
           clearBottomAnchorTimers();
