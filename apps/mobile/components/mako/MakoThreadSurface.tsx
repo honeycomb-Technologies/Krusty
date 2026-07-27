@@ -28,7 +28,6 @@ export function MakoThreadSurface({
   return (
     <View style={styles.container}>
       <ChatTranscript
-        key={`mako:${chat.sessionId ?? "new"}`}
         messages={chat.messages}
         sessionId={chat.sessionId}
         sessionType="mako"

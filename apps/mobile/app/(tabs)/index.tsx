@@ -25,7 +25,8 @@ import {
   useWorkspaceStore,
 } from "../../hooks/useStores";
 import { useShallow } from "zustand/react/shallow";
-import { ModeConversationSurface } from "../../components/chat/ModeConversationSurface";
+import { ChatTranscript } from "../../components/chat/ChatTranscript";
+import { KrustyLogo } from "../../components/ui/KrustyLogo";
 import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
 import {
   ChatBar,
@@ -35,6 +36,7 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
+import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
@@ -1074,30 +1076,40 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     </Animated.View>
   );
 
+  // One transcript tree only. Keeping three absolute FlatLists mounted for
+  // "warm modes" crashed native on mode switch (especially leaving chat).
+  // Session switches still avoid remount via no key + scroll restore.
   const chatTranscriptSurface = (
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <View style={styles.flex}>
-          {(["chat", "code"] as const).map((mode) => (
-            <ModeConversationSurface
-              key={mode}
-              mode={mode}
-              active={activeMode === mode}
-              externalBottomPadding={
-                composerReserveHeight
-                + (showTranscriptError && activeMode === mode
-                  ? errorBannerHeight + 10
-                  : 0)
-              }
-              hideJumpToLatest={bottomControlsOpen}
-              activeToolCallId={activeToolCallId}
-              onApproveTool={handleApproveTranscriptTool}
-              onDenyTool={handleDenyTranscriptTool}
-              onSubmitToolResult={handleSubmitTranscriptTool}
-              onPlanConfirm={handleTranscriptPlanConfirm}
-              emptyError={activeMode === mode ? error : null}
-            />
-          ))}
-        </View>
+        <ChatTranscript
+          messages={messages}
+          sessionId={sessionId}
+          sessionType={activeMode === "code" ? "code" : "chat"}
+          scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
+          isStreaming={isStreaming}
+          isThinking={isThinking}
+          isLoading={isLoading}
+          activeToolCallId={activeToolCallId}
+          onApproveTool={handleApproveTranscriptTool}
+          onDenyTool={handleDenyTranscriptTool}
+          onSubmitToolResult={handleSubmitTranscriptTool}
+          onPlanConfirm={handleTranscriptPlanConfirm}
+          emptyState={
+            <View style={styles.empty}>
+              <KrustyLogo />
+              {error ? (
+                <Text style={[styles.emptyHint, { color: t.error }]}>
+                  {error}
+                </Text>
+              ) : null}
+            </View>
+          }
+          bottomPadding={
+            composerReserveHeight
+            + (showTranscriptError ? errorBannerHeight + 10 : 0)
+          }
+          hideJumpToLatest={bottomControlsOpen}
+        />
 
         {showTranscriptError ? (
           <View
@@ -1307,8 +1319,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     onModelSelect: handleModelSelect,
   };
 
-  // Desktop owns the full Mako product surface. Mobile keeps the conversation
-  // surface warm inside `mobileConversationSurface` so mode swipes stay light.
+  // Desktop owns the full Mako product surface. Mobile uses a single active
+  // conversation surface so mode switches stay crash-free.
   const makoContent = (
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
       <MakoScreen
@@ -1342,60 +1354,17 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             backgroundColor: t.background,
           }}
         >
-          {/* Keep all three mode transcripts warm. Swiping only toggles
-              visibility, so we never pay a full unmount/remount tax. */}
-          {(["chat", "code", "mako"] as const).map((mode) => (
-            <ModeConversationSurface
-              key={mode}
-              mode={mode}
-              active={activeMode === mode}
-              externalBottomPadding={
-                composerReserveHeight
-                + (showTranscriptError && activeMode === mode
-                  ? errorBannerHeight + 10
-                  : 0)
-              }
-              hideJumpToLatest={bottomControlsOpen}
-              activeToolCallId={activeToolCallId}
-              onApproveTool={handleApproveTranscriptTool}
-              onDenyTool={handleDenyTranscriptTool}
-              onSubmitToolResult={handleSubmitTranscriptTool}
-              onPlanConfirm={handleTranscriptPlanConfirm}
-              emptyError={activeMode === mode ? error : null}
+          {/* Single active surface only. Multi-mounted absolute FlatLists were
+              crashing on mode switch in 0.9.18. */}
+          {activeMode === "mako" ? (
+            <MakoThreadSurface
+              chat={makoChat}
+              showComposer={false}
+              externalBottomPadding={composerReserveHeight}
             />
-          ))}
-          {showTranscriptError ? (
-            <View
-              accessibilityRole="alert"
-              accessibilityLiveRegion="polite"
-              onLayout={(event) => {
-                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
-                setErrorBannerHeight((current) =>
-                  current === nextHeight ? current : nextHeight,
-                );
-              }}
-              style={[
-                styles.errorBanner,
-                {
-                  position: "absolute",
-                  left: 0,
-                  right: 0,
-                  bottom: composerReserveHeight + 10,
-                  marginBottom: 0,
-                  zIndex: 30,
-                  borderColor: `${t.error}40`,
-                  backgroundColor: `${t.error}14`,
-                },
-              ]}
-            >
-              <Text
-                selectable
-                style={[styles.errorBannerText, { color: t.error }]}
-              >
-                {error}
-              </Text>
-            </View>
-          ) : null}
+          ) : (
+            chatTranscriptSurface
+          )}
         </View>
       </View>
     </GestureDetector>
