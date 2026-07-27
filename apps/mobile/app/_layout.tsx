@@ -10,6 +10,7 @@ import { StoresProvider } from '../hooks/useStores';
 import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
+import { NotificationProvider } from '../hooks/useNotifications';
 
 const BOOT_BACKGROUND = '#0b1119';
 
@@ -71,7 +72,11 @@ function RootNavigator() {
     </>
   );
 
-  return <StoresProvider client={client}>{content}</StoresProvider>;
+  return (
+    <NotificationProvider>
+      <StoresProvider client={client}>{content}</StoresProvider>
+    </NotificationProvider>
+  );
 }
 
 function SplashWrapper({ children }: { children: React.ReactNode }) {

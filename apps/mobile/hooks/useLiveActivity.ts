@@ -4,6 +4,7 @@ import {
   liveActivityStateEqual,
   type LiveActivitySemanticState,
 } from './presentationCadence';
+import { useConnection } from './useConnection';
 
 // Native-only imports — loaded dynamically to avoid crash on web
 let addUserInteractionListener: any = () => ({ remove: () => {} });
@@ -61,6 +62,8 @@ function parseApprovalTarget(
 }
 
 export function useLiveActivity(options?: UseLiveActivityOptions) {
+  const { client } = useConnection();
+  const clientRef = useRef(client);
   const activityRef = useRef<LiveActivity | null>(null);
   const startTimeRef = useRef<number>(0);
   const stateRef = useRef<StreamState | null>(null);
@@ -71,6 +74,64 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   const updateGenerationRef = useRef(0);
   const lastUpdateStartedAtRef = useRef(0);
   const updateDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushTokenRef = useRef<string | null>(null);
+  const pushTokenSubscriptionRef = useRef<{ remove?: () => void } | null>(null);
+
+  useEffect(() => {
+    clientRef.current = client;
+  }, [client]);
+
+  const removePushTokenSubscription = useCallback(() => {
+    pushTokenSubscriptionRef.current?.remove?.();
+    pushTokenSubscriptionRef.current = null;
+  }, []);
+
+  const registerActivityPushToken = useCallback(
+    async (
+      activity: LiveActivity,
+      sessionId: string,
+      pushToken: string,
+      contentState: ActivityContentState,
+    ) => {
+      if (
+        activityRef.current !== activity ||
+        sessionIdRef.current !== sessionId ||
+        !pushToken
+      ) {
+        return;
+      }
+      pushTokenRef.current = pushToken;
+      await clientRef.current?.registerLiveActivity({
+        sessionId,
+        pushToken,
+        contentState: contentState as unknown as Record<string, unknown>,
+        startedAtMs: contentState.startedAtMs,
+        environment: __DEV__ ? 'sandbox' : 'production',
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const activity = activityRef.current;
+    const sessionId = sessionIdRef.current;
+    const pushToken = pushTokenRef.current;
+    const state = stateRef.current;
+    if (!client || !activity || !sessionId || !pushToken || !state) return;
+    const contentState: ActivityContentState = {
+      ...state,
+      startedAtMs: startTimeRef.current,
+      elapsedSeconds: Math.floor(
+        (Date.now() - startTimeRef.current) / 1_000,
+      ),
+    };
+    void registerActivityPushToken(
+      activity,
+      sessionId,
+      pushToken,
+      contentState,
+    ).catch(() => {});
+  }, [client, registerActivityPushToken]);
 
   const clearUpdateDelay = useCallback(() => {
     if (updateDelayRef.current) {
@@ -122,7 +183,17 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     updateInFlightRef.current = true;
     lastUpdateStartedAtRef.current = Date.now();
 
-    void activity.update(content).catch(() => {}).finally(() => {
+    void activity.update(content).then(() => {
+      const pushToken = pushTokenRef.current;
+      const sessionId = sessionIdRef.current;
+      if (pushToken && sessionId) {
+        void clientRef.current?.updateLiveActivityState(
+          sessionId,
+          pushToken,
+          content as unknown as Record<string, unknown>,
+        );
+      }
+    }).catch(() => {}).finally(() => {
       updateInFlightRef.current = false;
       if (pendingUpdateRef.current && activityRef.current) {
         schedulePendingUpdate(pendingUpdateUrgentRef.current);
@@ -183,13 +254,22 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     }
 
     clearUpdateDelay();
+    removePushTokenSubscription();
     updateGenerationRef.current += 1;
     pendingUpdateRef.current = null;
     pendingUpdateUrgentRef.current = false;
     if (activityRef.current) {
+      const previousSessionId = sessionIdRef.current;
+      const previousPushToken = pushTokenRef.current;
       void activityRef.current.end('immediate').catch(() => {});
+      if (previousSessionId && previousPushToken) {
+        void clientRef.current
+          ?.unregisterLiveActivity(previousSessionId, previousPushToken)
+          .catch(() => {});
+      }
       activityRef.current = null;
     }
+    pushTokenRef.current = null;
     closeExistingActivities();
 
     startTimeRef.current = Date.now();
@@ -203,21 +283,55 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     };
 
     try {
-      activityRef.current = ChatStreamActivityFactory.start({
+      const initialContent: ActivityContentState = {
         ...stateRef.current,
         startedAtMs: startTimeRef.current,
         elapsedSeconds: 0,
-      }, `krusty://?sessionId=${encodeURIComponent(sessionId)}`);
+      };
+      activityRef.current = ChatStreamActivityFactory.start(
+        initialContent,
+        `krusty://?sessionId=${encodeURIComponent(sessionId)}`,
+      );
+      const activity = activityRef.current;
+      pushTokenSubscriptionRef.current = activity.addPushTokenListener?.(
+        (event: { pushToken?: unknown }) => {
+          if (typeof event.pushToken === 'string') {
+            void registerActivityPushToken(
+              activity,
+              sessionId,
+              event.pushToken,
+              pendingUpdateRef.current ?? initialContent,
+            ).catch(() => {});
+          }
+        },
+      ) ?? null;
+      void activity.getPushToken?.().then((pushToken: unknown) => {
+        if (typeof pushToken === 'string') {
+          return registerActivityPushToken(
+            activity,
+            sessionId,
+            pushToken,
+            pendingUpdateRef.current ?? initialContent,
+          );
+        }
+      }).catch(() => {});
       lastUpdateStartedAtRef.current = Date.now();
     } catch {
       // Live Activities may not be available (simulator, unsupported device)
       activityRef.current = null;
+      removePushTokenSubscription();
+      pushTokenRef.current = null;
       stateRef.current = null;
       sessionIdRef.current = null;
       return;
     }
 
-  }, [clearUpdateDelay, closeExistingActivities]);
+  }, [
+    clearUpdateDelay,
+    closeExistingActivities,
+    registerActivityPushToken,
+    removePushTokenSubscription,
+  ]);
 
   const updateActivity = useCallback((partial: Partial<StreamState>) => {
     if (!activityRef.current || !stateRef.current) return;
@@ -244,6 +358,8 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     if (!activityRef.current || !stateRef.current) return;
 
     const activity = activityRef.current;
+    const sessionId = sessionIdRef.current;
+    const pushToken = pushTokenRef.current;
     const finalState = stateRef.current;
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
     updateGenerationRef.current += 1;
@@ -256,21 +372,29 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
       startedAtMs: startTimeRef.current,
       elapsedSeconds: elapsed,
     }, new Date()).catch(() => {});
+    if (sessionId && pushToken) {
+      void clientRef.current
+        ?.unregisterLiveActivity(sessionId, pushToken)
+        .catch(() => {});
+    }
 
+    removePushTokenSubscription();
     activityRef.current = null;
+    pushTokenRef.current = null;
     stateRef.current = null;
     sessionIdRef.current = null;
-  }, [clearUpdateDelay]);
+  }, [clearUpdateDelay, removePushTokenSubscription]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       clearUpdateDelay();
+      removePushTokenSubscription();
       updateGenerationRef.current += 1;
       pendingUpdateRef.current = null;
       pendingUpdateUrgentRef.current = false;
     };
-  }, [clearUpdateDelay]);
+  }, [clearUpdateDelay, removePushTokenSubscription]);
 
   return { startActivity, updateActivity, endActivity };
 }

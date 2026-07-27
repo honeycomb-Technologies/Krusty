@@ -842,11 +842,32 @@ export interface SimpleOkResponse {
 
 export interface ApnsRegisterResponse {
 	id: string;
+	registered: boolean;
 }
 
 export interface ApnsStatusResponse {
 	apns_configured: boolean;
 	device_count: number;
+	last_success_at?: string | null;
+	last_failure_at?: string | null;
+	last_failure_reason?: string | null;
+}
+
+export type NotificationDeliveryLevel = "all" | "important" | "silent";
+export type PushPlatform = "ios" | "android";
+
+export interface ExpoPushRegisterResponse {
+	id: string;
+	registered: boolean;
+}
+
+export interface LiveActivityRegisterRequest {
+	sessionId: string;
+	pushToken: string;
+	contentState: Record<string, unknown>;
+	startedAtMs: number;
+	bundleId?: string;
+	environment?: "sandbox" | "production";
 }
 
 export type MemoryType = "user" | "feedback" | "project" | "reference";

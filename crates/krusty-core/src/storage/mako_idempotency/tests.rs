@@ -110,6 +110,37 @@ fn key_reuse_with_a_different_payload_is_a_conflict() {
 }
 
 #[test]
+fn uncompleted_claim_can_be_released_after_dispatch_rejection() {
+    let (store, _temp) = store();
+    store
+        .claim(
+            "session:one",
+            "tool_approval",
+            "approval-1",
+            "hash-a",
+            instant(0),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+    assert!(store
+        .release("session:one", "tool_approval", "approval-1", "hash-a",)
+        .unwrap());
+    assert!(matches!(
+        store
+            .claim(
+                "session:one",
+                "tool_approval",
+                "approval-1",
+                "hash-a",
+                instant(1),
+                Duration::from_secs(30),
+            )
+            .unwrap(),
+        IdempotencyClaim::Claimed(_)
+    ));
+}
+
+#[test]
 fn expired_claim_can_be_reacquired_and_stale_owner_cannot_complete() {
     let (store, _temp) = store();
     store

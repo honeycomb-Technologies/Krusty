@@ -918,12 +918,16 @@ export function AppearanceSection({
 
 export function NotificationsSection({
   notificationLevel,
-  pushToken,
+  registrationState,
+  lastRegistrationError,
+  pendingActionCount,
   notifOptions,
   onSelect,
 }: {
   notificationLevel: string;
-  pushToken: string | null | undefined;
+  registrationState: string;
+  lastRegistrationError: string | null;
+  pendingActionCount: number;
   notifOptions: NotificationOption[];
   onSelect: (key: NotificationOption["key"]) => void;
 }) {
@@ -938,9 +942,15 @@ export function NotificationsSection({
           <Bell size={20} color={t.mutedForeground} strokeWidth={1.8} />
           <View style={styles.rowContent}>
             <Text style={[styles.rowTitle, { color: t.foreground }]}>Delivery level</Text>
-            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}> 
-              Notification token: {pushToken ? "registered" : "not registered"}
+            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+              Delivery: {registrationState.replaceAll("_", " ")}
+              {pendingActionCount > 0 ? ` · ${pendingActionCount} pending action` : ""}
             </Text>
+            {lastRegistrationError ? (
+              <Text style={[styles.rowSubtitle, { color: t.error }]}>
+                {lastRegistrationError}
+              </Text>
+            ) : null}
           </View>
         </View>
 

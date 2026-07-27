@@ -191,7 +191,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
   const streamStartedAtRef = useRef<number | null>(null);
-  const liveActivityOpenRef = useRef(false);
+  const liveActivitySessionIdRef = useRef<string | null>(null);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
   const attemptedWorkspaceSessionHydrationRef = useRef<string | null>(null);
@@ -335,30 +335,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionId,
   ]);
 
-  const handleRegisterNativeDevice = useCallback(
-    async (deviceToken: string) => {
-      if (!client || !isConnected || !deviceToken) {
-        return false;
-      }
-
-      try {
-        await client.registerApnsDevice(deviceToken);
-        return true;
-      } catch (error) {
-        console.debug("Failed to register APNs device", error);
-        return false;
-      }
+  const {
+    notificationLevel,
+    notifyToolApproval,
+    notifyStreamComplete,
+    submitToolApprovalAction,
+  } = useNotifications();
+  const handleLiveActivityToolApproval = useCallback(
+    (targetSessionId: string, toolCallId: string, approved: boolean) => {
+      void submitToolApprovalAction(targetSessionId, toolCallId, approved);
     },
-    [client, isConnected],
+    [submitToolApprovalAction],
   );
-
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
-    onToolApproval: handleToolApprovalAction,
-  });
-  const { notifyToolApproval, notifyStreamComplete } = useNotifications({
-    onToolApproval: handleToolApprovalAction,
-    onNavigate: handleNotificationNavigate,
-    onRegisterNativeDevice: handleRegisterNativeDevice,
+    onToolApproval: handleLiveActivityToolApproval,
   });
 
   useWidgetSync({
@@ -551,11 +541,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       }
 
       void notifyToolApproval(toolCall.id, toolCall.name, sessionId);
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      if (notificationLevel !== "silent") {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      }
     }
 
     notifiedApprovalIdsRef.current = nextNotifiedIds;
-  }, [awaitingApprovalCalls, notifyToolApproval, sessionId]);
+  }, [awaitingApprovalCalls, notificationLevel, notifyToolApproval, sessionId]);
 
   useEffect(() => {
     const awaitingApproval =
@@ -569,9 +561,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       streamStartedAtRef.current = Date.now();
     }
 
-    if (shouldKeepActivity && !liveActivityOpenRef.current) {
+    if (
+      shouldKeepActivity &&
+      liveActivitySessionIdRef.current !== sessionId
+    ) {
       startActivity(sessionId!, sessionTitle || "Chat");
-      liveActivityOpenRef.current = true;
+      liveActivitySessionIdRef.current = sessionId;
     }
 
     if (shouldKeepActivity) {
@@ -585,9 +580,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         toolApprovalName: awaitingApproval?.name,
         toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
       });
-    } else if (liveActivityOpenRef.current) {
+    } else if (liveActivitySessionIdRef.current === sessionId) {
       endActivity();
-      liveActivityOpenRef.current = false;
+      liveActivitySessionIdRef.current = null;
     }
 
     if (

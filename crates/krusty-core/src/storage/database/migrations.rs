@@ -2440,6 +2440,128 @@ impl Database {
             workflow_tx.commit()?;
         }
 
+        // Migration 48: canonical mobile notification lifecycle.
+        //
+        // Device identity and policy are persisted independently from provider
+        // acceptance. Notification intents form a durable outbox, Expo tokens
+        // cover Android delivery, and ActivityKit tokens are scoped to the
+        // session whose Live Activity they update.
+        if current_version < 48 {
+            info!("Running migration 48: mobile notification lifecycle");
+            let notification_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring notification lifecycle migration lock")?;
+
+            if Self::table_exists(&notification_tx, "apns_devices") {
+                if !Self::column_exists(&notification_tx, "apns_devices", "notification_level") {
+                    notification_tx.execute_batch(
+                        "ALTER TABLE apns_devices
+                         ADD COLUMN notification_level TEXT NOT NULL DEFAULT 'important'
+                         CHECK (notification_level IN ('all', 'important', 'silent'));",
+                    )?;
+                }
+                if !Self::column_exists(&notification_tx, "apns_devices", "environment") {
+                    notification_tx.execute_batch(
+                        "ALTER TABLE apns_devices
+                         ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'
+                         CHECK (environment IN ('sandbox', 'production'));",
+                    )?;
+                }
+                if !Self::column_exists(&notification_tx, "apns_devices", "last_registered_at") {
+                    notification_tx.execute_batch(
+                        "ALTER TABLE apns_devices ADD COLUMN last_registered_at TEXT;",
+                    )?;
+                }
+                if !Self::column_exists(&notification_tx, "apns_devices", "enabled") {
+                    notification_tx.execute_batch(
+                        "ALTER TABLE apns_devices
+                         ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1
+                         CHECK (enabled IN (0, 1));",
+                    )?;
+                }
+            }
+
+            notification_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS expo_push_devices (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        expo_push_token TEXT NOT NULL UNIQUE,
+                        platform TEXT NOT NULL,
+                        notification_level TEXT NOT NULL DEFAULT 'important'
+                            CHECK (notification_level IN ('all', 'important', 'silent')),
+                        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                        created_at TEXT NOT NULL,
+                        last_registered_at TEXT NOT NULL,
+                        last_success_at TEXT,
+                        last_failure_at TEXT,
+                        last_failure_reason TEXT,
+                        failure_count INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_expo_push_devices_user
+                        ON expo_push_devices(user_id);
+
+                    CREATE TABLE IF NOT EXISTS live_activity_tokens (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        session_id TEXT NOT NULL,
+                        push_token TEXT NOT NULL UNIQUE,
+                        bundle_id TEXT NOT NULL DEFAULT 'io.krusty.mobile',
+                        environment TEXT NOT NULL DEFAULT 'production'
+                            CHECK (environment IN ('sandbox', 'production')),
+                        content_state_json TEXT NOT NULL DEFAULT '{}'
+                            CHECK (json_valid(content_state_json)),
+                        started_at_ms INTEGER NOT NULL,
+                        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        ended_at TEXT,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_live_activity_tokens_session_active
+                        ON live_activity_tokens(session_id, active);
+                    CREATE INDEX IF NOT EXISTS idx_live_activity_tokens_user
+                        ON live_activity_tokens(user_id);
+
+                    CREATE TABLE IF NOT EXISTS notification_intents (
+                        id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        user_id TEXT,
+                        session_id TEXT,
+                        event_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'dispatching', 'accepted', 'failed',
+                                'expired', 'cancelled'
+                            )),
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        available_at TEXT NOT NULL,
+                        expires_at TEXT,
+                        last_error TEXT,
+                        provider_message_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        accepted_at TEXT,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_notification_intents_pending
+                        ON notification_intents(status, available_at);
+                    CREATE INDEX IF NOT EXISTS idx_notification_intents_session
+                        ON notification_intents(session_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_notification_intents_user
+                        ON notification_intents(user_id, created_at DESC);
+                    "#,
+                )
+                .context("Migration 48: create notification lifecycle schema")?;
+            notification_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (48)",
+                [],
+            )?;
+            notification_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }

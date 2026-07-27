@@ -20,9 +20,11 @@ mod database;
 mod database_tests;
 mod delegated_runs;
 mod episodes;
+pub mod expo_push_devices;
 mod file_activity;
 mod knowledge;
 mod learning_candidates;
+pub mod live_activity_tokens;
 mod mako_attention_state;
 mod mako_controller_events;
 mod mako_controllers;
@@ -35,6 +37,7 @@ mod mako_runtime_state;
 mod mako_schedules;
 mod memories;
 mod messages;
+pub mod notification_intents;
 mod plans;
 mod preferences;
 mod project_settings;
@@ -46,7 +49,7 @@ mod runtime_traces;
 mod sessions;
 
 pub use agent_state::AgentState;
-pub use apns_devices::{ApnsDevice, ApnsDeviceStore};
+pub use apns_devices::{ApnsDevice, ApnsDeviceRegistration, ApnsDeviceStore};
 pub use autonomous_tasks::{AutonomousTask, AutonomousTaskStore, TaskStatus};
 pub use block_ui::BlockUiState;
 pub use compaction::{CompactionSegmentRecord, CompactionStore};
@@ -57,6 +60,7 @@ pub use delegated_runs::{
     DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
 };
 pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
+pub use expo_push_devices::{ExpoPushDevice, ExpoPushDeviceRegistration, ExpoPushDeviceStore};
 pub use file_activity::{FileActivityTracker, RankedFile};
 pub use knowledge::{
     get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
@@ -66,6 +70,9 @@ pub(crate) use learning_candidates::load_candidate_owned_from_connection;
 pub use learning_candidates::{
     LearningCandidate, LearningCandidateInput, LearningCandidateStatus, LearningCandidateStore,
     LearningKind, LearningSensitivity, LearningThroughState,
+};
+pub use live_activity_tokens::{
+    LiveActivityToken, LiveActivityTokenRegistration, LiveActivityTokenStore,
 };
 pub use mako_attention_state::{MakoAttentionItemState, MakoAttentionStateStore};
 pub use mako_controller_events::{
@@ -109,6 +116,7 @@ pub(crate) use memories::{
     load_canonical_for_provenance_from_connection, save_canonical_in_transaction,
 };
 pub use messages::{MessageStore, StoredMessageRecord};
+pub use notification_intents::{NotificationIntent, NotificationIntentStore};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
 pub use project_settings::{DelegationMode, ProjectAgentExtensionSettings, ProjectSettings};
