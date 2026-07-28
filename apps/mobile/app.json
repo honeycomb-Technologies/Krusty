@@ -2,7 +2,7 @@
   "expo": {
     "name": "Krusty",
     "slug": "krusty",
-    "version": "0.9.19",
+    "version": "0.9.20",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
@@ -30,7 +30,8 @@
       },
       "config": {
         "usesNonExemptEncryption": false
-      }
+      },
+      "buildNumber": "253"
     },
     "android": {
       "package": "io.krusty.mobile",

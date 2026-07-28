@@ -1,6 +1,6 @@
 {
   "name": "@krusty/mobile",
-  "version": "0.9.19",
+  "version": "0.9.20",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
