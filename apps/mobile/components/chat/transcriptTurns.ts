@@ -12,10 +12,30 @@ export interface TranscriptTurn {
   renderSignature: string;
 }
 
+export interface SplitTranscriptTurns {
+  /** Completed/previous turns rendered as stable FlatList rows. */
+  historicalTurns: TranscriptTurn[];
+  /** Active/latest turn isolated from historical row updates. */
+  liveTurn: TranscriptTurn | null;
+  /** Full turn list (historical + live) for callers that need both. */
+  turns: TranscriptTurn[];
+}
+
 export function buildTranscriptTurns(
   messages: ChatMessage[],
   isStreaming: boolean,
 ): TranscriptTurn[] {
+  return splitTranscriptTurns(messages, isStreaming).turns;
+}
+
+/**
+ * Split the transcript so streaming updates only invalidate the live turn.
+ * Historical turns keep stable identities/signatures while the tail grows.
+ */
+export function splitTranscriptTurns(
+  messages: ChatMessage[],
+  isStreaming: boolean,
+): SplitTranscriptTurns {
   const groupedMessages: ChatMessage[][] = [];
   let currentGroup: ChatMessage[] = [];
 
@@ -36,9 +56,11 @@ export function buildTranscriptTurns(
 
   const lastIndex = groupedMessages.length - 1;
   const turnCount = groupedMessages.length;
-  return groupedMessages.map((turnMessages, index) => {
+  const turns = groupedMessages.map((turnMessages, index) => {
     const firstMessage = turnMessages[0];
     const id = firstMessage ? `turn-${firstMessage.id}` : `turn-${index}`;
+    // Only the isolated tail row is live; historical rows never flip live state
+    // during stream ticks.
     const isLive = isStreaming && index === lastIndex;
     // Litter-style retention: only recent turns keep full tool/thinking detail.
     const rich = isTurnInRichWindow(index, turnCount) || isLive;
@@ -58,6 +80,22 @@ export function buildTranscriptTurns(
       ].join("||"),
     };
   });
+
+  if (turns.length === 0) {
+    return {
+      historicalTurns: [],
+      liveTurn: null,
+      turns,
+    };
+  }
+
+  // Always isolate the latest turn from FlatList row recycling so stream
+  // deltas do not rebuild historical cells.
+  return {
+    historicalTurns: turns.slice(0, -1),
+    liveTurn: turns[turns.length - 1] ?? null,
+    turns,
+  };
 }
 
 export function findTurnIndexForMessage(
@@ -67,6 +105,14 @@ export function findTurnIndexForMessage(
   return turns.findIndex((turn) =>
     turn.messages.some((message) => message.id === messageId),
   );
+}
+
+export function turnContainsMessage(
+  turn: TranscriptTurn | null | undefined,
+  messageId: string,
+): boolean {
+  if (!turn) return false;
+  return turn.messages.some((message) => message.id === messageId);
 }
 
 function messageRenderSignature(message: ChatMessage): string {

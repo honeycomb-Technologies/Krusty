@@ -24,6 +24,7 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
 import {
   buildTranscriptTurns,
+  splitTranscriptTurns,
   findTurnIndexForMessage,
   type TranscriptTurn,
 } from "./transcriptTurns";
@@ -208,8 +209,8 @@ function ChatTranscriptComponent({
     theme.scheme === "dark" ? "rgba(11,17,25,0.6)" : "rgba(255,255,255,0.6)";
 
   const messageCount = messages.length;
-  const turns = useMemo(
-    () => buildTranscriptTurns(messages, isStreaming),
+  const { historicalTurns, liveTurn, turns } = useMemo(
+    () => splitTranscriptTurns(messages, isStreaming),
     [isStreaming, messages],
   );
   const layoutSignature = useMemo(
@@ -524,7 +525,7 @@ function ChatTranscriptComponent({
 
   const renderTurn = useCallback(
     ({ item, index }: { item: TranscriptTurn; index: number }) => {
-      const isLastTurn = index === turns.length - 1;
+      const isLastTurn = false; // live turn is rendered in the footer
       return (
         <TranscriptTurnRow
           turn={item}
@@ -565,7 +566,7 @@ function ChatTranscriptComponent({
     <View style={styles.flex}>
       <FlatList
         ref={flatListRef}
-        data={turns}
+        data={historicalTurns}
         keyExtractor={(turn) => turn.id}
         windowSize={7}
         maxToRenderPerBatch={4}
@@ -596,6 +597,22 @@ function ChatTranscriptComponent({
           y: restoredScrollStateRef.current?.offset ?? 0,
         }}
         renderItem={renderTurn}
+        ListFooterComponent={
+          liveTurn ? (
+            <TranscriptTurnRow
+              turn={liveTurn}
+              isLastTurn
+              isStreaming={isStreaming}
+              isThinking={isThinking}
+              activeToolCallId={activeToolCallId}
+              sessionId={sessionId}
+              onApproveTool={onApproveTool}
+              onDenyTool={onDenyTool}
+              onSubmitToolResult={onSubmitToolResult}
+              onPlanConfirm={onPlanConfirm}
+            />
+          ) : null
+        }
         style={styles.flex}
         contentContainerStyle={[
           styles.list,

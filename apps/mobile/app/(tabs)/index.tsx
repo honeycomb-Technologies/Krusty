@@ -39,6 +39,7 @@ import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
+import { resolveLiveActivityTransition } from "../../hooks/presentationCadence";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
 import { getToolDiffStats } from "../../components/chat/toolDiffModel";
@@ -481,15 +482,24 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       streamStartedAtRef.current = Date.now();
     }
 
-    if (
-      shouldKeepActivity &&
-      liveActivitySessionIdRef.current !== sessionId
-    ) {
-      startActivity(sessionId!, sessionTitle || "Chat");
-      liveActivitySessionIdRef.current = sessionId;
+    // Batch Live Activity lifecycle through a pure transition resolver so
+    // rapid session/stream flips collapse into start/update/end instead of
+    // unconditional destroy/create thrash.
+    const transition = resolveLiveActivityTransition({
+      trackedSessionId: liveActivitySessionIdRef.current,
+      focusedSessionId: sessionId,
+      shouldKeepFocused: shouldKeepActivity,
+    });
+
+    if (transition.action === "start") {
+      startActivity(transition.sessionId, sessionTitle || "Chat");
+      liveActivitySessionIdRef.current = transition.sessionId;
+    } else if (transition.action === "end") {
+      endActivity();
+      liveActivitySessionIdRef.current = null;
     }
 
-    if (shouldKeepActivity) {
+    if (transition.action === "start" || transition.action === "update") {
       updateActivity({
         chatTitle: sessionTitle || "Chat",
         status: awaitingApproval ? "needs_input" : "working",
@@ -500,9 +510,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         toolApprovalName: awaitingApproval?.name,
         toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
       });
-    } else if (liveActivitySessionIdRef.current === sessionId) {
-      endActivity();
-      liveActivitySessionIdRef.current = null;
     }
 
     if (

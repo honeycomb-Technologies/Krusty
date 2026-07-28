@@ -1,6 +1,8 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { Platform } from 'react-native';
 import {
+  LIVE_ACTIVITY_TRANSITION_GRACE_MS,
+  MIN_LIVE_ACTIVITY_UPDATE_INTERVAL_MS,
   liveActivityStateEqual,
   type LiveActivitySemanticState,
 } from './presentationCadence';
@@ -30,8 +32,6 @@ interface ActivityContentState extends StreamState {
   startedAtMs: number;
   elapsedSeconds: number;
 }
-
-const MIN_ACTIVITY_UPDATE_INTERVAL_MS = 2_000;
 
 interface UseLiveActivityOptions {
   onToolApproval?: (
@@ -69,6 +69,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   const stateRef = useRef<StreamState | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const pendingEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingEndSessionIdRef = useRef<string | null>(null);
   const pendingUpdateRef = useRef<ActivityContentState | null>(null);
   const pendingUpdateUrgentRef = useRef(false);
   const updateInFlightRef = useRef(false);
@@ -141,6 +142,14 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     }
   }, []);
 
+  const clearPendingEnd = useCallback(() => {
+    if (pendingEndTimerRef.current) {
+      clearTimeout(pendingEndTimerRef.current);
+      pendingEndTimerRef.current = null;
+    }
+    pendingEndSessionIdRef.current = null;
+  }, []);
+
   const runPendingUpdateRef = useRef<(generation: number) => void>(() => {});
 
   const schedulePendingUpdate = useCallback((force = false) => {
@@ -151,7 +160,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     const elapsed = Date.now() - lastUpdateStartedAtRef.current;
     const delay = pendingUpdateUrgentRef.current
       ? 0
-      : Math.max(0, MIN_ACTIVITY_UPDATE_INTERVAL_MS - elapsed);
+      : Math.max(0, MIN_LIVE_ACTIVITY_UPDATE_INTERVAL_MS - elapsed);
 
     if (delay === 0 && !updateInFlightRef.current) {
       clearUpdateDelay();
@@ -247,20 +256,35 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     return () => sub.remove();
   }, [options?.onToolApproval]);
 
-  const clearPendingEnd = useCallback(() => {
-    if (pendingEndTimerRef.current) {
-      clearTimeout(pendingEndTimerRef.current);
-      pendingEndTimerRef.current = null;
-    }
-  }, []);
-
   const startActivity = useCallback((sessionId: string, chatTitle: string) => {
     if (Platform.OS !== 'ios' || !sessionId || !ChatStreamActivityFactory) return;
 
-    // Same session: keep existing activity.
+    // Same session still active: cancel any deferred end and keep the instance.
     if (activityRef.current && sessionIdRef.current === sessionId) {
       clearPendingEnd();
+      if (stateRef.current && stateRef.current.chatTitle !== chatTitle) {
+        stateRef.current = { ...stateRef.current, chatTitle };
+        pendingUpdateRef.current = {
+          ...stateRef.current,
+          startedAtMs: startTimeRef.current,
+          elapsedSeconds: Math.floor((Date.now() - startTimeRef.current) / 1000),
+        };
+        schedulePendingUpdate(true);
+      }
       return;
+    }
+
+    // Re-enter during the transition grace window for the same session that was
+    // about to end: cancel the deferred destroy instead of recreate thrash.
+    if (
+      !activityRef.current &&
+      pendingEndTimerRef.current &&
+      pendingEndSessionIdRef.current === sessionId &&
+      stateRef.current
+    ) {
+      clearPendingEnd();
+      // We no longer hold the previous activity handle once end was scheduled,
+      // so create a fresh one only when the deferred end already released it.
     }
 
     clearPendingEnd();
@@ -270,22 +294,29 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     pendingUpdateRef.current = null;
     pendingUpdateUrgentRef.current = false;
 
-    // Session switch: end previous activity, but prefer a short delayed end over
-    // immediate destroy/recreate thrash when the user is flipping sessions.
+    // Session switch: delay previous destroy slightly so rapid flips batch into
+    // one create, while still allowing the new session's activity to start now.
     if (activityRef.current) {
       const previousActivity = activityRef.current;
       const previousSessionId = sessionIdRef.current;
       const previousPushToken = pushTokenRef.current;
+      const previousState = stateRef.current;
       activityRef.current = null;
+      pendingEndSessionIdRef.current = previousSessionId;
       pendingEndTimerRef.current = setTimeout(() => {
         pendingEndTimerRef.current = null;
+        pendingEndSessionIdRef.current = null;
         void previousActivity.end('immediate').catch(() => {});
         if (previousSessionId && previousPushToken) {
           void clientRef.current
             ?.unregisterLiveActivity(previousSessionId, previousPushToken)
             .catch(() => {});
         }
-      }, 250);
+        // Drop only if no newer activity replaced this transition.
+        if (sessionIdRef.current === previousSessionId && !activityRef.current) {
+          stateRef.current = previousState;
+        }
+      }, LIVE_ACTIVITY_TRANSITION_GRACE_MS);
     } else {
       // No local activity handle, but OS may still have orphans.
       closeExistingActivities();
@@ -345,17 +376,20 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
       sessionIdRef.current = null;
       return;
     }
-
   }, [
     clearUpdateDelay,
     clearPendingEnd,
     closeExistingActivities,
     registerActivityPushToken,
     removePushTokenSubscription,
+    schedulePendingUpdate,
   ]);
 
   const updateActivity = useCallback((partial: Partial<StreamState>) => {
     if (!activityRef.current || !stateRef.current) return;
+
+    // A deferred end means the stream resumed for this session; keep it alive.
+    clearPendingEnd();
 
     const previous = stateRef.current;
     const next = { ...previous, ...partial };
@@ -371,52 +405,81 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
 
     const statusChanged = previous.status !== next.status;
     schedulePendingUpdate(statusChanged);
-  }, [schedulePendingUpdate]);
+  }, [clearPendingEnd, schedulePendingUpdate]);
 
-  const endActivity = useCallback(() => {
-    clearPendingEnd();
+  const endActivity = useCallback((immediate = false) => {
     clearUpdateDelay();
 
-    if (!activityRef.current || !stateRef.current) return;
+    if (!activityRef.current || !stateRef.current) {
+      // If only a deferred end is pending, either cancel-noop or force it.
+      if (immediate) {
+        clearPendingEnd();
+      }
+      return;
+    }
 
     const activity = activityRef.current;
     const sessionId = sessionIdRef.current;
     const pushToken = pushTokenRef.current;
     const finalState = stateRef.current;
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-    updateGenerationRef.current += 1;
-    pendingUpdateRef.current = null;
-    pendingUpdateUrgentRef.current = false;
 
-    activity.end({ after: new Date(Date.now() + 60_000) }, {
-      ...finalState,
-      status: 'completed',
-      startedAtMs: startTimeRef.current,
-      elapsedSeconds: elapsed,
-    }, new Date()).catch(() => {});
-    if (sessionId && pushToken) {
-      void clientRef.current
-        ?.unregisterLiveActivity(sessionId, pushToken)
-        .catch(() => {});
+    const commitEnd = () => {
+      updateGenerationRef.current += 1;
+      pendingUpdateRef.current = null;
+      pendingUpdateUrgentRef.current = false;
+      activity.end({ after: new Date(Date.now() + 60_000) }, {
+        ...finalState,
+        status: 'completed',
+        startedAtMs: startTimeRef.current,
+        elapsedSeconds: elapsed,
+      }, new Date()).catch(() => {});
+      if (sessionId && pushToken) {
+        void clientRef.current
+          ?.unregisterLiveActivity(sessionId, pushToken)
+          .catch(() => {});
+      }
+
+      removePushTokenSubscription();
+      activityRef.current = null;
+      pushTokenRef.current = null;
+      stateRef.current = null;
+      sessionIdRef.current = null;
+      pendingEndSessionIdRef.current = null;
+    };
+
+    if (immediate) {
+      clearPendingEnd();
+      commitEnd();
+      return;
     }
 
-    removePushTokenSubscription();
-    activityRef.current = null;
-    pushTokenRef.current = null;
-    stateRef.current = null;
-    sessionIdRef.current = null;
-  }, [clearUpdateDelay, removePushTokenSubscription]);
+    // Batch short idle gaps / session-transition blips: defer the completed end
+    // so a quick restart of the same session reuses the activity path.
+    clearPendingEnd();
+    pendingEndSessionIdRef.current = sessionId;
+    pendingEndTimerRef.current = setTimeout(() => {
+      pendingEndTimerRef.current = null;
+      // Abort if a newer start/update reclaimed the activity.
+      if (activityRef.current !== activity || sessionIdRef.current !== sessionId) {
+        pendingEndSessionIdRef.current = null;
+        return;
+      }
+      commitEnd();
+    }, LIVE_ACTIVITY_TRANSITION_GRACE_MS);
+  }, [clearPendingEnd, clearUpdateDelay, removePushTokenSubscription]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      clearPendingEnd();
       clearUpdateDelay();
       removePushTokenSubscription();
       updateGenerationRef.current += 1;
       pendingUpdateRef.current = null;
       pendingUpdateUrgentRef.current = false;
     };
-  }, [clearUpdateDelay, removePushTokenSubscription]);
+  }, [clearPendingEnd, clearUpdateDelay, removePushTokenSubscription]);
 
   return { startActivity, updateActivity, endActivity };
 }
