@@ -350,6 +350,9 @@ export function useSessionActions({
       lastSessionIdByTypeRef.current[session.session_type] = session.id;
       setDrawerOpen(false);
       setActiveTab(tabForSessionType(session.session_type));
+      if (targetStore.getState().sessionId === session.id) {
+        return;
+      }
       // loadSession already detaches stream callbacks for the leaving session.
       // Avoid an extra detachSession() which can thrash presence/poll state.
       void targetStore.getState().loadSession(session.id);
@@ -371,6 +374,9 @@ export function useSessionActions({
       sessionCreationCoordinatorRef.current.invalidate(targetType);
       lastSessionIdByTypeRef.current[targetType] = id;
       setActiveTab(tabForSessionType(targetType));
+      if (targetStore.getState().sessionId === id) {
+        return;
+      }
       void targetStore.getState().loadSession(id);
     },
     [
@@ -619,6 +625,10 @@ export function useSessionActions({
   const handleTabChange = useCallback(
     async (index: number) => {
       const nextType = sessionTypeForTab(index);
+      if (index === activeTab) {
+        setDrawerOpen(false);
+        return;
+      }
       setActiveTab(index);
       setDrawerOpen(false);
 
@@ -636,6 +646,7 @@ export function useSessionActions({
     },
     [
       lastSessionIdByTypeRef,
+      activeTab,
       modeStores,
       setActiveTab,
       setDrawerOpen,

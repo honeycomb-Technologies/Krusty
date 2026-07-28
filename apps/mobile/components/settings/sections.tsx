@@ -15,8 +15,11 @@ import {
   RefreshCw,
   Sun,
   Monitor,
+  Play,
   Wifi,
   WifiOff,
+  Square,
+  Upload,
   X,
 } from "lucide-react-native";
 
@@ -69,6 +72,108 @@ export function SettingsHeader({ onClose }: { onClose?: () => void }) {
         </Pressable>
       ) : null}
     </View>
+  );
+}
+
+export function DiagnosticsSection({
+  mode,
+  runId,
+  eventCount,
+  nativePayloadCount,
+  approximateBytes,
+  uploadState,
+  isConnected,
+  onStart,
+  onStopAndUpload,
+  onUpload,
+}: {
+  mode: "baseline" | "stress";
+  runId: string | null;
+  eventCount: number;
+  nativePayloadCount: number;
+  approximateBytes: number;
+  uploadState: "idle" | "pending" | "uploading" | "uploaded" | "failed" | "unavailable";
+  isConnected: boolean;
+  onStart: () => void;
+  onStopAndUpload: () => void;
+  onUpload: () => void;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+  const statusTone = uploadState === "uploaded"
+    ? "success"
+    : uploadState === "failed" || uploadState === "unavailable"
+      ? "error"
+      : mode === "stress" || uploadState === "pending"
+        ? "warning"
+        : "neutral";
+
+  return (
+    <>
+      <SectionTitle
+        title="Internal diagnostics"
+        subtitle="Content-free performance capture uploaded securely to Honey"
+      />
+      <GlassCard>
+        <View style={styles.stack}>
+          <View style={styles.subsectionHeader}>
+            <View style={styles.rowContent}>
+              <Text style={[styles.rowTitle, { color: t.foreground }]}>Stress capture</Text>
+              <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+                {runId ? `Run ${runId.slice(-12)}` : "Recorder starting…"}
+              </Text>
+            </View>
+            <Pill
+              label={mode === "stress" ? "Recording" : uploadState}
+              tone={statusTone}
+            />
+          </View>
+
+          <View style={styles.pillRow}>
+            <Pill label={`${eventCount} events`} tone="info" />
+            {nativePayloadCount > 0 ? (
+              <Pill label={`${nativePayloadCount} native reports`} tone="warning" />
+            ) : null}
+            <Pill label={`${Math.ceil(approximateBytes / 1024)} KB`} />
+            <Pill label="No chat or file content" tone="success" />
+          </View>
+
+          <View style={styles.actionsWrap}>
+            {mode === "stress" ? (
+              <Pressable
+                onPress={onStopAndUpload}
+                disabled={uploadState === "uploading"}
+                style={[styles.smallActionBtn, { borderColor: t.border }]}
+              >
+                <Square size={14} color={t.warning} strokeWidth={1.8} />
+                <Text style={[styles.smallActionText, { color: t.warning }]}>Stop & {isConnected ? "upload" : "save"}</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={onStart}
+                disabled={!runId || uploadState === "pending"}
+                style={[styles.smallActionBtn, { borderColor: t.border }]}
+              >
+                <Play size={14} color={t.userMessage} strokeWidth={1.8} />
+                <Text style={[styles.smallActionText, { color: t.userMessage }]}>Start 10-minute capture</Text>
+              </Pressable>
+            )}
+            <Pressable
+              onPress={onUpload}
+              disabled={!isConnected || uploadState === "uploading" || (eventCount === 0 && nativePayloadCount === 0)}
+              style={[styles.smallActionBtn, { borderColor: t.border }]}
+            >
+              {uploadState === "uploading" ? (
+                <ActivityIndicator color={t.foreground} size="small" />
+              ) : (
+                <Upload size={14} color={t.foreground} strokeWidth={1.8} />
+              )}
+              <Text style={[styles.smallActionText, { color: t.foreground }]}>Upload now</Text>
+            </Pressable>
+          </View>
+        </View>
+      </GlassCard>
+    </>
   );
 }
 

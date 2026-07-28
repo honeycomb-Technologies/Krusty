@@ -62,6 +62,8 @@ import type {
 		SimpleOkResponse,
 		SteerRequest,
 		SteerResponse,
+		MobileDiagnosticUploadBatch,
+		MobileDiagnosticUploadResponse,
 	} from "./types";
 
 type UsageStreamEvent = Extract<StreamEvent, { type: "usage" }>;
@@ -225,6 +227,15 @@ export class KrustyClient {
 			body: JSON.stringify({
 				expo_push_token: expoPushToken,
 			}),
+		});
+	}
+
+	async uploadMobileDiagnostics(
+		batch: MobileDiagnosticUploadBatch,
+	): Promise<MobileDiagnosticUploadResponse> {
+		return this.request("/mobile-diagnostics/batches", {
+			method: "POST",
+			body: JSON.stringify(batch),
 		});
 	}
 

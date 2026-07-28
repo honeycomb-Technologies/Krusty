@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ActivityIndicator, View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { Plus, X } from 'lucide-react-native';
+import { Plus, RefreshCw, X } from 'lucide-react-native';
 import type { WebViewProps } from 'react-native-webview';
 import type { PortEntry, PreviewSettings } from '@krusty/api';
 import { trackKrustyPerformanceResource } from '@krusty/state';
@@ -8,6 +8,7 @@ import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { WorkspacePreview } from '../desktop/WorkspacePreview';
+import { recordWebViewDiagnostic } from '../../diagnostics/mobileDiagnostics';
 
 let WebViewComponent: React.ComponentType<WebViewProps> | null = null;
 if (Platform.OS !== 'web') {
@@ -23,9 +24,15 @@ interface PreviewTab {
   port: number | null;
   label: string;
   revision?: number;
+  recoveryAttempts?: number;
+  recoveryBlocked?: boolean;
+  lastTerminationAt?: number;
 }
 
 const MAX_BROWSER_TABS = 4;
+const WEBVIEW_MOUNT_SETTLE_MS = 250;
+const WEBVIEW_RECOVERY_COOLDOWN_MS = 1_500;
+const MAX_AUTOMATIC_RECOVERIES = 1;
 
 // Survive toolbox sheet unmount so reopening Browser does not look like a fresh launch.
 const browserSession: {
@@ -67,7 +74,14 @@ function NativeBrowser({ visible }: { visible: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(browserSession.error);
   const loadPromiseRef = useRef<Promise<void> | null>(null);
-  const loadGenerationRef = useRef(0);
+  const tabsRef = useRef(tabs);
+  const visibleRef = useRef(visible);
+  const activeTabIdRef = useRef(activeTabId);
+  const recoveryTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const [renderedTabId, setRenderedTabId] = useState<string | null>(null);
+  tabsRef.current = tabs;
+  visibleRef.current = visible;
+  activeTabIdRef.current = activeTabId;
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
 
@@ -99,7 +113,6 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     if (!client) return Promise.resolve();
     if (loadPromiseRef.current) return loadPromiseRef.current;
 
-    const generation = loadGenerationRef.current;
     const releaseRequest = trackKrustyPerformanceResource('toolbox_requests');
     if (background) {
       setRefreshing(true);
@@ -110,7 +123,6 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     const request = (async () => {
       try {
         const response = await client.getPorts();
-        if (generation !== loadGenerationRef.current) return;
         setPorts((current) => JSON.stringify(current) === JSON.stringify(response.ports)
           ? current
           : response.ports);
@@ -132,14 +144,11 @@ function NativeBrowser({ visible }: { visible: boolean }) {
           return changed ? next : current;
         });
       } catch (err) {
-        if (generation !== loadGenerationRef.current) return;
         setError(err instanceof Error ? err.message : 'Failed to load preview ports.');
       } finally {
         releaseRequest();
-        if (generation === loadGenerationRef.current) {
-          setLoading(false);
-          setRefreshing(false);
-        }
+        setLoading(false);
+        setRefreshing(false);
       }
     })();
     loadPromiseRef.current = request;
@@ -154,7 +163,6 @@ function NativeBrowser({ visible }: { visible: boolean }) {
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    loadGenerationRef.current += 1;
     const poll = async (background: boolean) => {
       await loadPorts(background);
       if (cancelled) return;
@@ -167,11 +175,92 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     void poll(false);
     return () => {
       cancelled = true;
-      loadGenerationRef.current += 1;
-      loadPromiseRef.current = null;
       if (timer) clearTimeout(timer);
     };
   }, [client, loadPorts, visible]);
+
+  // Coalesce frantic tab/open transitions before constructing another native
+  // WebView. The selected tab updates immediately; native process ownership
+  // moves only after the interaction settles.
+  useEffect(() => {
+    if (!visible || !activeTabId) {
+      setRenderedTabId(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (visibleRef.current) setRenderedTabId(activeTabId);
+    }, WEBVIEW_MOUNT_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [activeTabId, visible]);
+
+  useEffect(() => {
+    if (visible) {
+      setTabs((current) => current.map((tab) =>
+        tab.recoveryBlocked || (tab.recoveryAttempts ?? 0) > 0
+          ? { ...tab, recoveryBlocked: false, recoveryAttempts: 0 }
+          : tab));
+      return;
+    }
+    for (const timer of recoveryTimersRef.current.values()) clearTimeout(timer);
+    recoveryTimersRef.current.clear();
+  }, [visible]);
+
+  useEffect(() => () => {
+    for (const timer of recoveryTimersRef.current.values()) clearTimeout(timer);
+    recoveryTimersRef.current.clear();
+  }, []);
+
+  const retryWebView = useCallback((tabId: string) => {
+    recordWebViewDiagnostic('browser', 'reload');
+    const timer = recoveryTimersRef.current.get(tabId);
+    if (timer) clearTimeout(timer);
+    recoveryTimersRef.current.delete(tabId);
+    setTabs((current) => current.map((tab) =>
+      tab.id === tabId
+        ? {
+            ...tab,
+            revision: (tab.revision ?? 0) + 1,
+            recoveryAttempts: 0,
+            recoveryBlocked: false,
+          }
+        : tab));
+  }, []);
+
+  const handleWebViewTerminated = useCallback((tabId: string) => {
+    if (!visibleRef.current || activeTabIdRef.current !== tabId) return;
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    const now = Date.now();
+    if (now - (tab.lastTerminationAt ?? 0) < 250) return;
+    const attempts = tab.recoveryAttempts ?? 0;
+    recordWebViewDiagnostic('browser', 'terminate');
+    setTabs((current) => current.map((candidate) =>
+      candidate.id === tabId
+        ? {
+            ...candidate,
+            recoveryAttempts: attempts + 1,
+            recoveryBlocked: true,
+            lastTerminationAt: now,
+          }
+        : candidate));
+    if (attempts >= MAX_AUTOMATIC_RECOVERIES) return;
+
+    const existing = recoveryTimersRef.current.get(tabId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      recoveryTimersRef.current.delete(tabId);
+      if (!visibleRef.current || activeTabIdRef.current !== tabId) return;
+      setTabs((current) => current.map((candidate) =>
+        candidate.id === tabId
+          ? {
+              ...candidate,
+              revision: (candidate.revision ?? 0) + 1,
+              recoveryBlocked: false,
+            }
+          : candidate));
+    }, WEBVIEW_RECOVERY_COOLDOWN_MS);
+    recoveryTimersRef.current.set(tabId, timer);
+  }, []);
 
   const createBlankTab = useCallback(() => {
     setTabs((current) => {
@@ -296,7 +385,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
       <View style={styles.previewArea}>
         {WebViewComponent && visible
           ? tabs
-              .filter((tab) => tab.port !== null && tab.id === activeTabId)
+              .filter((tab) => tab.port !== null && tab.id === renderedTabId)
               .map((tab) => {
                 // Tab metadata survives closure, but native WebViews are
                 // deliberately cold-restored to avoid hidden WebContent CPU.
@@ -309,10 +398,10 @@ function NativeBrowser({ visible }: { visible: boolean }) {
                 return (
                   <View
                     key={`${tab.id}:${tab.revision ?? 0}`}
-                    pointerEvents="auto"
+                    pointerEvents={tab.id === activeTabId ? 'auto' : 'none'}
                     style={styles.webviewHost}
                   >
-                    <WebViewComponent
+                    {!tab.recoveryBlocked ? <WebViewComponent
                       source={{
                         uri,
                         headers: serverToken
@@ -323,19 +412,22 @@ function NativeBrowser({ visible }: { visible: boolean }) {
                       originWhitelist={['*']}
                       javaScriptEnabled
                       domStorageEnabled
-                      onContentProcessDidTerminate={() => {
-                        setTabs((current) => current.map((candidate) =>
-                          candidate.id === tab.id
-                            ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
-                            : candidate));
-                      }}
-                      onRenderProcessGone={() => {
-                        setTabs((current) => current.map((candidate) =>
-                          candidate.id === tab.id
-                            ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
-                            : candidate));
-                      }}
-                    />
+                      onContentProcessDidTerminate={() => handleWebViewTerminated(tab.id)}
+                      onRenderProcessGone={() => handleWebViewTerminated(tab.id)}
+                    /> : (
+                      <View style={styles.recoveryState}>
+                        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Preview paused</Text>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel="Reload preview"
+                          onPress={() => retryWebView(tab.id)}
+                          style={[styles.retryButton, { borderColor: t.border }]}
+                        >
+                          <RefreshCw size={15} color={t.foreground} strokeWidth={2} />
+                          <Text style={[styles.retryText, { color: t.foreground }]}>Reload</Text>
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
                 );
               })
@@ -418,6 +510,25 @@ const styles = StyleSheet.create({
   },
   previewArea: {
     flex: 1,
+  },
+  recoveryState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  retryButton: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  retryText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   webviewHost: {
     ...StyleSheet.absoluteFillObject,

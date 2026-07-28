@@ -213,6 +213,22 @@ export function useSessionController({
         state.stopStatePolling();
       }
     }
+
+    // Session identity can bind after the mode change effect (optimistic load,
+    // creation, notification navigation). Only the visible store is observed,
+    // so a late hidden hydration cannot re-enable its presence transport.
+    const activeStore = modeStores[activeMode].session;
+    let activeSessionId = activeStore.getState().sessionId;
+    const unsubscribe = activeStore.subscribe((state) => {
+      if (state.sessionId === activeSessionId) return;
+      activeSessionId = state.sessionId;
+      if (activeSessionId) {
+        state.startPresenceHeartbeat(activeSessionId);
+      } else {
+        state.stopPresenceHeartbeat();
+      }
+    });
+    return unsubscribe;
   }, [activeMode, modeStores]);
 
   // Periodic model catalog refresh while the app is foregrounded.

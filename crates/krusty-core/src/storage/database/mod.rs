@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 48;
+const SCHEMA_VERSION: i32 = 49;
 
 /// Shared database handle for connection reuse
 ///
@@ -55,6 +55,11 @@ impl Database {
     /// Get the underlying connection
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Get the underlying connection mutably for atomic multi-row stores.
+    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     /// Create a shared database handle for connection reuse

@@ -233,7 +233,6 @@ Deno.test("loadSession activates the destination shell before the network resolv
 
 Deno.test("unresolved A to B to A navigation honors the latest selection intent", async () => {
 	const firstA = deferred<ReturnType<typeof sessionResponse>>();
-	const secondA = deferred<ReturnType<typeof sessionResponse>>();
 	const sessionB = deferred<ReturnType<typeof sessionResponse>>();
 	let aRequests = 0;
 
@@ -241,7 +240,7 @@ Deno.test("unresolved A to B to A navigation honors the latest selection intent"
 		getSession: (sessionId: string) => {
 			if (sessionId === "session-a") {
 				aRequests += 1;
-				return aRequests === 1 ? firstA.promise : secondA.promise;
+				return firstA.promise;
 			}
 			if (sessionId === "session-b") return sessionB.promise;
 			throw new Error(`unexpected session ${sessionId}`);
@@ -282,21 +281,107 @@ Deno.test("unresolved A to B to A navigation honors the latest selection intent"
 	const loadLatestA = store.getState().loadSession("session-a");
 
 	assertEquals(store.getState().sessionId, "session-a", "latest selection should activate A immediately");
-	assertEquals(aRequests, 2, "returning to unresolved A needs a request owned by the latest intent");
+	assertEquals(aRequests, 1, "returning to unresolved A should reuse its exact hydration request");
 
 	firstA.resolve(sessionResponse("session-a", "Stale Alpha", "stale a"));
 	sessionB.resolve(sessionResponse("session-b", "Beta", "stale b"));
-	await Promise.all([loadFirstA, loadB]);
+	await Promise.all([loadFirstA, loadB, loadLatestA]);
 	assertEquals(store.getState().sessionId, "session-a", "stale requests must not replace latest A shell");
-	assertEquals(store.getState().messages.length, 0, "stale first A response must not hydrate latest A intent");
-
-	secondA.resolve(sessionResponse("session-a", "Latest Alpha", "latest a"));
-	await loadLatestA;
-	assertEquals(store.getState().title, "Latest Alpha", "latest A response should own hydration");
+	assertEquals(store.getState().title, "Stale Alpha", "shared A response should hydrate the latest A intent");
 	assertEquals(
-		store.getState().messages.some((message) => message.content.includes("latest a")),
+		store.getState().messages.some((message) => message.content.includes("stale a")),
 		true,
-		"latest A transcript should hydrate",
+		"latest A intent should apply the shared transcript once",
+	);
+	store.getState().cleanup();
+});
+
+Deno.test("presence teardown is owned, idempotent, and not resurrected by hidden hydration", async () => {
+	const hydration = deferred<ReturnType<typeof sessionResponse>>();
+	const heartbeats: string[] = [];
+	const removals: string[] = [];
+	const client = {
+		getSession: () => hydration.promise,
+		getSessionState: async () => ({
+			id: "session-a",
+			agent_state: "idle",
+			started_at: null,
+			last_event_at: null,
+			mode: "build",
+			permission_mode: "autonomous",
+			recovery: null,
+			live_partial_assistant: null,
+			pending_interactions: [],
+			delegated_tools: [],
+			recent_delegated_runs: [],
+			last_event_sequence: null,
+		}),
+		heartbeatSessionPresence: async (sessionId: string) => {
+			heartbeats.push(sessionId);
+			return {};
+		},
+		removeSessionPresence: async (sessionId: string) => {
+			removals.push(sessionId);
+			return {};
+		},
+		updateSession: async () => ({}),
+		setCurrentModel: async () => ({}),
+	};
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore([
+			{ id: "session-a", title: "Alpha", session_type: "chat", mode: "build", permission_mode: "autonomous" },
+		]) as never,
+		createPlanStore() as never,
+	);
+
+	store.getState().startPresenceHeartbeat("owned");
+	store.getState().startPresenceHeartbeat("owned");
+	await Promise.resolve();
+	assertEquals(
+		heartbeats.filter((id) => id === "owned").length,
+		1,
+		"starting the same owned heartbeat twice must be idempotent",
+	);
+	store.getState().stopPresenceHeartbeat("not-owned");
+	await Promise.resolve();
+	assertEquals(removals.length, 0, "a mismatched stop must not remove owned presence");
+
+	const load = store.getState().loadSession("session-a");
+	store.getState().stopPresenceHeartbeat("session-a");
+	hydration.resolve(sessionResponse("session-a", "Alpha", "hydrated"));
+	await load;
+	await Promise.resolve();
+	assertEquals(
+		heartbeats.filter((id) => id === "session-a").length,
+		1,
+		"late hydration must not restart presence after the mode was hidden",
+	);
+	assertEquals(
+		removals.filter((id) => id === "session-a").length,
+		1,
+		"owned presence should be removed exactly once",
+	);
+	store.getState().stopPresenceHeartbeat("session-a");
+	await Promise.resolve();
+	assertEquals(
+		removals.filter((id) => id === "session-a").length,
+		1,
+		"repeated hidden teardown must not issue another remove",
+	);
+	store.getState().initSession(
+		"late-created",
+		"Late Created",
+		"autonomous",
+		"chat",
+	);
+	await Promise.resolve();
+	assertEquals(
+		heartbeats.filter((id) => id === "late-created").length,
+		0,
+		"a late hidden creation bind must not resurrect presence",
 	);
 	store.getState().cleanup();
 });

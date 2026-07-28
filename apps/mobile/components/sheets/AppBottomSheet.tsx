@@ -227,7 +227,10 @@ export function AppBottomSheet({
   return (
     <View
       style={styles.root}
-      pointerEvents={visible ? 'box-none' : retainContent ? 'none' : 'box-none'}
+      // Closing content must stop accepting touches immediately. Otherwise the
+      // still-mounted panel can dispatch another navigation/session action while
+      // its exit animation is running.
+      pointerEvents={visible ? "box-none" : "none"}
     >
       <Animated.View style={[styles.backdrop, backdropStyle]}>
         <Pressable

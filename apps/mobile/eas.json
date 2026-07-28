@@ -16,6 +16,9 @@
       "distribution": "internal"
     },
     "production": {
+      "env": {
+        "EXPO_PUBLIC_KRUSTY_PERFORMANCE": "1"
+      },
       "ios": {
         "autoIncrement": true
       }

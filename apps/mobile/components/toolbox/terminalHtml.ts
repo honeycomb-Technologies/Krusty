@@ -10,6 +10,10 @@ export function getTerminalHtml(wsUrl: string, theme: TerminalTheme): string {
   const foregroundJson = JSON.stringify(theme.foreground);
   const cursorJson = JSON.stringify(theme.cursor);
 
+  // xterm is already an app dependency, but the native WebView currently has
+  // no build step that emits its browser distribution as a local Expo asset.
+  // Keep these pinned URLs until that asset pipeline exists; the surrounding
+  // lifecycle gate prevents frantic UI transitions from repeatedly mounting it.
   return `<!DOCTYPE html>
 <html>
 <head>

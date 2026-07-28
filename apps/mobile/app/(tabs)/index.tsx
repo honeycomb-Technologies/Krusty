@@ -39,6 +39,7 @@ import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
+import { useMobileDiagnosticMode } from "../../diagnostics/MobileDiagnosticsProvider";
 import Animated, { runOnJS } from "react-native-reanimated";
 
 import type {
@@ -122,6 +123,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const entrance = useEntranceAnimation(splashDone);
 
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  useMobileDiagnosticMode(activeMode);
   const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
   const finishToolboxOpenSpanRef = useRef<(() => number | null) | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -857,7 +859,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               onTabChange={setToolboxTab}
               sessionType={activeMode}
               projectDirectory={workspaceDirectory}
-              onOpenSettings={() => router.push("/(tabs)/settings")}
+              onOpenSettings={() => router.navigate("/(tabs)/settings")}
               onOpenMakoRun={(id) => void loadSessionById(id)}
               onOpenProject={(path, branch) =>
                 void openProjectInCode(path, branch)
@@ -878,7 +880,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             projectDirectory={workspaceDirectory}
             onOpenSettings={() => {
               setActiveSheet(null);
-              router.push("/(tabs)/settings");
+              router.navigate("/(tabs)/settings");
             }}
             onOpenMakoRun={(id) => void loadSessionById(id)}
             onOpenProject={(path, branch) =>
@@ -995,7 +997,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         projectDirectory={workspaceDirectory}
         onOpenSettings={() => {
           setActiveSheet(null);
-          router.push("/(tabs)/settings");
+          router.navigate("/(tabs)/settings");
         }}
         onOpenMakoRun={(id) => void loadSessionById(id)}
         onOpenProject={(path, branch) =>
@@ -1080,7 +1082,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       onNewSession={() => void handleNewSession("chat")}
       onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
       onDeleteSession={handleDeleteSession}
-      onOpenSettings={() => router.push("/(tabs)/settings")}
+      onOpenSettings={() => router.navigate("/(tabs)/settings")}
       activeTab={activeTab}
       onTabChange={handleTabChange}
       activeMakoView={makoTopLevel}
@@ -1111,7 +1113,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onDeleteSession={handleDeleteSession}
           onOpenSettings={() => {
             setDrawerOpen(false);
-            router.push("/(tabs)/settings");
+            router.navigate("/(tabs)/settings");
           }}
           activeMode={activeMode}
         />

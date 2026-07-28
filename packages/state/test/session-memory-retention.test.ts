@@ -127,3 +127,49 @@ Deno.test("compactMessagesForCache keeps only the newest message window", () => 
     "keeps the newest message",
   );
 });
+
+Deno.test("SessionSnapshotCache reuses compacted messages for an unchanged source revision", () => {
+  const cache = new SessionSnapshotCache();
+  const messages: ChatMessage[] = [
+    { id: "u1", role: "user", content: "hello" },
+    { id: "a1", role: "assistant", content: "world" },
+  ];
+  const snapshot = {
+    sessionId: "stable",
+    sessionType: "chat" as const,
+    title: "Stable",
+    mode: "build" as const,
+    permissionMode: "autonomous" as const,
+    model: null,
+    modelKey: null,
+    tokenCount: 0,
+    messages,
+    projectDir: null,
+    workingDir: null,
+    workspaceMode: null,
+    targetBranch: null,
+    serverState: null,
+    updatedAt: 1,
+  };
+
+  cache.set(snapshot);
+  const first = cache.get("stable");
+  assert(first, "first compact snapshot exists");
+  cache.set({ ...snapshot, updatedAt: 2 });
+  const second = cache.get("stable");
+  assert(second, "second compact snapshot exists");
+  assertEquals(
+    second.messages,
+    first.messages,
+    "unchanged message source should not be deep-compacted again",
+  );
+
+  cache.set({ ...snapshot, messages: first.messages, updatedAt: 3 });
+  const third = cache.get("stable");
+  assert(third, "cached-source snapshot exists");
+  assertEquals(
+    third.messages,
+    first.messages,
+    "reopening and leaving a cached shell should retain compact message identity",
+  );
+});

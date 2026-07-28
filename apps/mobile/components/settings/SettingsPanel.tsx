@@ -29,6 +29,7 @@ import {
 	AboutSection,
 	AppearanceSection,
 	ConnectionSection,
+	DiagnosticsSection,
 	McpSection,
 	NotificationsSection,
 	PreviewSection,
@@ -46,6 +47,7 @@ import {
 	toErrorMessage,
 } from "./shared";
 import { styles } from "./styles";
+import { useMobileDiagnostics } from "../../diagnostics/MobileDiagnosticsProvider";
 
 interface SettingsPanelProps {
 	active?: boolean;
@@ -76,6 +78,7 @@ export function SettingsPanel({
 		lastRegistrationError,
 		pendingActionCount,
 	} = useNotifications();
+	const diagnostics = useMobileDiagnostics();
 
 	const [inputUrl, setInputUrl] = useState("");
 	const [inputToken, setInputToken] = useState("");
@@ -631,6 +634,19 @@ export function SettingsPanel({
 				colorScheme={colorScheme as ColorScheme}
 				schemeOptions={schemeOptions}
 				onSelect={setColorScheme}
+			/>
+
+			<DiagnosticsSection
+				mode={diagnostics.mode}
+				runId={diagnostics.runId}
+				eventCount={diagnostics.eventCount}
+				nativePayloadCount={diagnostics.nativePayloadCount}
+				approximateBytes={diagnostics.approximateBytes}
+				uploadState={diagnostics.uploadState}
+				isConnected={isConnected}
+				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
+				onStopAndUpload={() => void diagnostics.stopStressRun()}
+				onUpload={() => void diagnostics.flush(false)}
 			/>
 
 				<NotificationsSection

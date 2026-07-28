@@ -12,6 +12,7 @@ import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
 import { NotificationProvider } from '../hooks/useNotifications';
 import { configureKrustyPerformance } from '@krusty/state';
+import { MobileDiagnosticsProvider } from '../diagnostics/MobileDiagnosticsProvider';
 
 const BOOT_BACKGROUND = '#0b1119';
 
@@ -103,7 +104,9 @@ export default function RootLayout() {
           <SplashWrapper>
             <ThemeProvider>
               <ConnectionProvider>
-                <RootNavigator />
+                <MobileDiagnosticsProvider>
+                  <RootNavigator />
+                </MobileDiagnosticsProvider>
               </ConnectionProvider>
             </ThemeProvider>
           </SplashWrapper>

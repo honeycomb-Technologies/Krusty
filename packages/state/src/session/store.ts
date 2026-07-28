@@ -136,15 +136,93 @@ export function createSessionStore(
   let sessionSelectionGeneration = 0;
   const sessionCache = new SessionSnapshotCache();
   const inFlightSessionLoads = new Map<string, Promise<void>>();
+  const inFlightSessionHydrations = new Map<string, Promise<{
+    data: Awaited<ReturnType<KrustyClient['getSession']>>;
+    serverStateResult: {
+      ok: boolean;
+      state: ApiSessionStateResponse | null;
+    };
+  }>>();
   const lastKnownServerState = new Map<string, ApiSessionStateResponse>();
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let presenceHeartbeatSessionId: string | null = null;
+  let presenceDesired = false;
   let releaseStatePollingResource: (() => void) | null = null;
   let releasePresenceHeartbeatResource: (() => void) | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
+  let readStoreState: (() => SessionStoreState) | null = null;
 
   let localStreamLive = false;
+
+  function stopPresenceTransport(sessionId?: string | null) {
+    const ownedSessionId = presenceHeartbeatSessionId;
+    if (sessionId && ownedSessionId && sessionId !== ownedSessionId) return;
+    if (presenceHeartbeatInterval) {
+      clearInterval(presenceHeartbeatInterval);
+      presenceHeartbeatInterval = null;
+    }
+    releasePresenceHeartbeatResource?.();
+    releasePresenceHeartbeatResource = null;
+    presenceHeartbeatSessionId = null;
+
+    if (!ownedSessionId) return;
+    const clientId = getPresenceClientId();
+    if (!clientId) return;
+    void client.removeSessionPresence(ownedSessionId, clientId).catch(() => {});
+  }
+
+  function startPresenceTransport(sessionId: string) {
+    if (!presenceDesired) return;
+    if (
+      presenceHeartbeatSessionId === sessionId
+      && presenceHeartbeatInterval
+    ) {
+      return;
+    }
+    stopPresenceTransport();
+    presenceHeartbeatSessionId = sessionId;
+    const getState = readStoreState;
+    if (!getState) return;
+    void syncPresence(sessionId, getState);
+    presenceHeartbeatInterval = setInterval(() => {
+      void syncPresence(sessionId, getState);
+    }, PRESENCE_HEARTBEAT_INTERVAL);
+    releasePresenceHeartbeatResource = trackKrustyPerformanceResource(
+      'presence_heartbeats',
+    );
+  }
+
+  function getSessionHydration(
+    sessionId: string,
+    prefetchedServerState?: ApiSessionStateResponse | null,
+  ) {
+    const existing = inFlightSessionHydrations.get(sessionId);
+    if (existing) return existing;
+
+    const statePromise = prefetchedServerState !== undefined
+      ? Promise.resolve({
+          ok: true,
+          state: prefetchedServerState,
+        })
+      : client.getSessionState
+        ? client.getSessionState(sessionId).then(
+            (state) => ({ ok: true, state }),
+            () => ({ ok: false, state: null }),
+          )
+        : Promise.resolve({ ok: false, state: null });
+    const hydration = Promise.all([
+      client.getSession(sessionId),
+      statePromise,
+    ]).then(([data, serverStateResult]) => ({ data, serverStateResult }));
+    inFlightSessionHydrations.set(sessionId, hydration);
+    void hydration.finally(() => {
+      if (inFlightSessionHydrations.get(sessionId) === hydration) {
+        inFlightSessionHydrations.delete(sessionId);
+      }
+    }).catch(() => {});
+    return hydration;
+  }
 
   function isLocalStreamAttached(): boolean {
     // True only while this client is actively consuming an SSE stream.
@@ -316,6 +394,7 @@ export function createSessionStore(
   // -------------------------------------------------------------------------
 
   return create<SessionStoreState>((set, get) => {
+    readStoreState = get;
     function applyStreamFailure(err: unknown) {
       set((s) => ({
         isLoading: false,
@@ -822,7 +901,7 @@ export function createSessionStore(
             abortController = null;
             localStreamLive = false;
             get().stopStatePolling();
-            get().stopPresenceHeartbeat(previousSessionId);
+            stopPresenceTransport(previousSessionId);
             planStore.getState().setWorkflow(null);
 
             // Keep the leaving session warm so back-navigation can paint instantly.
@@ -948,7 +1027,7 @@ export function createSessionStore(
                 workspaceMode,
                 optimistic.targetBranch,
               );
-            get().startPresenceHeartbeat(optimistic.sessionId);
+            startPresenceTransport(optimistic.sessionId);
             if (cachedIsStreaming) {
               get().startStatePolling(optimistic.sessionId);
             }
@@ -1004,28 +1083,10 @@ export function createSessionStore(
               }
             }
 
-            const sessionPromise = client.getSession(sessionId);
-            const statePromise = hasPrefetchedServerState
-              ? Promise.resolve({
-                  ok: true as const,
-                  state: prefetchedServerState,
-                })
-              : client.getSessionState
-                ? client.getSessionState(sessionId).then(
-                    (state) => ({ ok: true as const, state }),
-                    () => ({
-                      ok: false as const,
-                      state: null as ApiSessionStateResponse | null,
-                    }),
-                  )
-                : Promise.resolve({
-                    ok: false as const,
-                    state: null as ApiSessionStateResponse | null,
-                  });
-            const [data, serverStateResult] = await Promise.all([
-              sessionPromise,
-              statePromise,
-            ]);
+            const { data, serverStateResult } = await getSessionHydration(
+              sessionId,
+              hasPrefetchedServerState ? prefetchedServerState : undefined,
+            );
             if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
@@ -1154,7 +1215,7 @@ export function createSessionStore(
             ) {
               get().startStatePolling(sessionId);
             }
-            get().startPresenceHeartbeat(sessionId);
+            startPresenceTransport(sessionId);
             if (
               snapshot.model
               && (
@@ -1172,7 +1233,7 @@ export function createSessionStore(
               const current = get();
               sessionCache.delete(sessionId);
               lastKnownServerState.delete(sessionId);
-              current.stopPresenceHeartbeat(previousSessionId);
+              stopPresenceTransport(previousSessionId);
               if (workspace.getState().sessionId === sessionId) {
                 workspace.getState().setSession(null);
               }
@@ -1221,7 +1282,7 @@ export function createSessionStore(
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
-      get().stopPresenceHeartbeat(current.sessionId);
+      stopPresenceTransport(current.sessionId);
       set({
         ...initialState,
         permissionMode: current.permissionMode,
@@ -1252,7 +1313,7 @@ export function createSessionStore(
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
-      get().stopPresenceHeartbeat(current.sessionId);
+      stopPresenceTransport(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
       try {
         storage.set("krusty-permission-mode", nextPermissionMode);
@@ -1274,7 +1335,9 @@ export function createSessionStore(
         title: normalizeDisplayTitle(title),
       });
       planStore.getState().setWorkflow(null);
-      get().startPresenceHeartbeat(sessionId);
+      // The active-mode lifecycle owns presence intent. A creation can finish
+      // after its mode was hidden, so binding identity must not opt itself back in.
+      startPresenceTransport(sessionId);
     },
 
     // -- setTitle ------------------------------------------------------------
@@ -1702,39 +1765,21 @@ export function createSessionStore(
     // -- presence heartbeat -------------------------------------------------
 
     startPresenceHeartbeat(sessionId: string) {
-      if (
-        presenceHeartbeatSessionId === sessionId
-        && presenceHeartbeatInterval
-      ) {
-        return;
-      }
-      get().stopPresenceHeartbeat();
-      presenceHeartbeatSessionId = sessionId;
-      void syncPresence(sessionId, get);
-      presenceHeartbeatInterval = setInterval(() => {
-        void syncPresence(sessionId, get);
-      }, PRESENCE_HEARTBEAT_INTERVAL);
-      releasePresenceHeartbeatResource = trackKrustyPerformanceResource(
-        'presence_heartbeats',
-      );
+      presenceDesired = true;
+      startPresenceTransport(sessionId);
     },
 
 
     stopPresenceHeartbeat(sessionId?: string | null) {
-      if (presenceHeartbeatInterval) {
-        clearInterval(presenceHeartbeatInterval);
-        presenceHeartbeatInterval = null;
+      if (
+        sessionId
+        && presenceHeartbeatSessionId
+        && sessionId !== presenceHeartbeatSessionId
+      ) {
+        return;
       }
-      releasePresenceHeartbeatResource?.();
-      releasePresenceHeartbeatResource = null;
-      presenceHeartbeatSessionId = null;
-
-      if (!sessionId) return;
-
-      const clientId = getPresenceClientId();
-      if (!clientId) return;
-
-      void client.removeSessionPresence(sessionId, clientId).catch(() => {});
+      presenceDesired = false;
+      stopPresenceTransport(sessionId);
     },
 
     // -- cleanup ------------------------------------------------------------
@@ -1752,6 +1797,7 @@ export function createSessionStore(
       sessionCache.clear();
       lastKnownServerState.clear();
       inFlightSessionLoads.clear();
+      inFlightSessionHydrations.clear();
       set({
         messages: [],
         queuedMessages: [],

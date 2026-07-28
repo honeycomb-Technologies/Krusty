@@ -106,6 +106,7 @@ const DEFAULT_MAX_ENTRIES = 8;
 
 export class SessionSnapshotCache {
   private readonly entries = new Map<string, CachedSessionSnapshot>();
+  private readonly sourceMessages = new Map<string, ChatMessage[]>();
   private readonly maxEntries: number;
 
   constructor(maxEntries = DEFAULT_MAX_ENTRIES) {
@@ -122,10 +123,18 @@ export class SessionSnapshotCache {
   }
 
   set(snapshot: CachedSessionSnapshot): void {
+    const existing = this.entries.get(snapshot.sessionId);
+    const previousSource = this.sourceMessages.get(snapshot.sessionId);
+    const canReuseMessages = Boolean(existing) && (
+      existing!.messages === snapshot.messages
+      || previousSource === snapshot.messages
+    );
     // Refresh insertion order so recently used sessions stay hot.
     const compact: CachedSessionSnapshot = {
       ...snapshot,
-      messages: compactMessagesForCache(snapshot.messages),
+      messages: canReuseMessages
+        ? existing!.messages
+        : compactMessagesForCache(snapshot.messages),
       // Keep only lightweight server metadata, not full live partials.
       serverState: snapshot.serverState
         ? {
@@ -138,15 +147,18 @@ export class SessionSnapshotCache {
     };
     this.entries.delete(compact.sessionId);
     this.entries.set(compact.sessionId, compact);
+    this.sourceMessages.set(compact.sessionId, snapshot.messages);
     this.trim();
   }
 
   delete(sessionId: string): void {
     this.entries.delete(sessionId);
+    this.sourceMessages.delete(sessionId);
   }
 
   clear(): void {
     this.entries.clear();
+    this.sourceMessages.clear();
   }
 
   private trim(): void {
@@ -156,6 +168,7 @@ export class SessionSnapshotCache {
         return;
       }
       this.entries.delete(oldestKey);
+      this.sourceMessages.delete(oldestKey);
     }
   }
 }
