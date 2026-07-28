@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   memo,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -24,14 +25,16 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
 import {
   findTurnIndexForMessage,
-  splitTranscriptTurns,
+  splitTranscriptTurnsCached,
   turnContainsMessage,
+  type TranscriptTurnsCache,
   type TranscriptTurn,
 } from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@krusty/api";
 import type { SessionType } from "@krusty/api";
+import { beginKrustyPerformanceSpan } from "@krusty/state";
 
 interface ChatTranscriptProps {
   messages: ChatMessage[];
@@ -190,6 +193,9 @@ function ChatTranscriptComponent({
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
   const streamStickFrameRef = useRef<number | null>(null);
+  const streamStickThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const streamStickFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -203,6 +209,11 @@ function ChatTranscriptComponent({
       ? `${scrollStateKey}::${sessionId ?? "new"}`
       : null,
   );
+  const committedTurnCacheRef = useRef<{
+    key: string;
+    cache: TranscriptTurnsCache;
+  } | null>(null);
+  const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
     restoredScrollStateRef.current?.autoFollow ?? true,
@@ -220,10 +231,45 @@ function ChatTranscriptComponent({
   isStreamingRef.current = isStreaming;
 
   const messageCount = messages.length;
-  const { historicalTurns, liveTurn } = useMemo(
-    () => splitTranscriptTurns(messages, isStreaming),
-    [isStreaming, messages],
+  const transcriptCacheKey = `${scrollStateKey}::${sessionId ?? "new"}`;
+  const turnSplit = useMemo(
+    () => {
+      const finishDeriveSpan = beginKrustyPerformanceSpan(
+        "transcript.derive",
+        transcriptCacheKey,
+      );
+      try {
+        return splitTranscriptTurnsCached(
+          messages,
+          isStreaming,
+          committedTurnCacheRef.current?.key === transcriptCacheKey
+            ? committedTurnCacheRef.current.cache
+            : null,
+        );
+      } finally {
+        finishDeriveSpan();
+      }
+    },
+    [isStreaming, messages, transcriptCacheKey],
   );
+  const { historicalTurns, liveTurn } = turnSplit;
+  useEffect(() => {
+    committedTurnCacheRef.current = {
+      key: transcriptCacheKey,
+      cache: turnSplit.cache,
+    };
+  }, [transcriptCacheKey, turnSplit.cache]);
+  useLayoutEffect(() => {
+    finishFirstPaintSpanRef.current?.();
+    finishFirstPaintSpanRef.current = beginKrustyPerformanceSpan(
+      "transcript.first_paint",
+      transcriptCacheKey,
+    );
+    return () => {
+      finishFirstPaintSpanRef.current?.();
+      finishFirstPaintSpanRef.current = null;
+    };
+  }, [transcriptCacheKey]);
   const layoutSignature = useMemo(
     () => lastMessageLayoutSignature(messages),
     [messages],
@@ -258,6 +304,10 @@ function ChatTranscriptComponent({
     if (streamStickFrameRef.current !== null) {
       cancelAnimationFrame(streamStickFrameRef.current);
       streamStickFrameRef.current = null;
+    }
+    if (streamStickThrottleRef.current !== null) {
+      clearTimeout(streamStickThrottleRef.current);
+      streamStickThrottleRef.current = null;
     }
     if (streamStickFallbackRef.current !== null) {
       clearTimeout(streamStickFallbackRef.current);
@@ -342,32 +392,25 @@ function ChatTranscriptComponent({
     const elapsed = Date.now() - lastStreamStickAtRef.current;
     if (elapsed >= STREAM_STICK_MIN_INTERVAL_MS) {
       scheduleFrame();
-    } else if (streamStickFrameRef.current === null) {
-      // Throttle: wait out the remainder of the interval, then stick once.
-      const delay = STREAM_STICK_MIN_INTERVAL_MS - elapsed;
-      if (streamStickFallbackRef.current === null) {
-        streamStickFallbackRef.current = setTimeout(() => {
-          streamStickFallbackRef.current = null;
-          if (!streamStickPendingRef.current) {
-            return;
-          }
-          scheduleFrame();
-        }, delay);
-      }
+    } else if (streamStickThrottleRef.current === null) {
+      streamStickThrottleRef.current = setTimeout(() => {
+        streamStickThrottleRef.current = null;
+        if (!streamStickPendingRef.current) return;
+        scheduleFrame();
+      }, STREAM_STICK_MIN_INTERVAL_MS - elapsed);
     }
 
-    // One delayed measurement pass for late Markdown/layout growth. Reuse the
-    // same fallback timer slot only when idle so we do not stack storms.
-    if (streamStickFallbackRef.current === null) {
-      streamStickFallbackRef.current = setTimeout(() => {
-        streamStickFallbackRef.current = null;
-        if (!autoFollowRef.current || isUserDraggingRef.current) {
-          return;
-        }
-        streamStickPendingRef.current = true;
-        scheduleFrame();
-      }, STREAM_STICK_FALLBACK_MS);
+    // One delayed measurement pass for late Markdown/layout growth. This has a
+    // separate slot from the throttle so neither timer suppresses the other.
+    if (streamStickFallbackRef.current !== null) {
+      clearTimeout(streamStickFallbackRef.current);
     }
+    streamStickFallbackRef.current = setTimeout(() => {
+      streamStickFallbackRef.current = null;
+      if (!autoFollowRef.current || isUserDraggingRef.current) return;
+      streamStickPendingRef.current = true;
+      scheduleFrame();
+    }, STREAM_STICK_FALLBACK_MS);
   }, [stickToBottomNow]);
 
   const scheduleBottomAnchor = useCallback(
@@ -749,6 +792,8 @@ function ChatTranscriptComponent({
           },
         ]}
         onLayout={(event) => {
+          finishFirstPaintSpanRef.current?.();
+          finishFirstPaintSpanRef.current = null;
           listHeightRef.current = event.nativeEvent.layout.height;
           const shouldMaintainBottom =
             autoFollowRef.current && !isUserDraggingRef.current;

@@ -23,7 +23,6 @@ import {
   isQuestionTool,
   type AssistantVisualSegment,
 } from "./assistantRenderPlan";
-import { assistantMessageRevision } from "./assistantSegments";
 import {
   presentTool,
   shouldExpandToolByPolicy,
@@ -253,8 +252,14 @@ export const MessageBubble = memo(function MessageBubble({
   prev.onSubmitToolResult === next.onSubmitToolResult &&
   prev.onPlanConfirm === next.onPlanConfirm &&
   (
-    prev.message.role === 'assistant'
-      ? assistantMessageRevision(prev.message) === assistantMessageRevision(next.message)
+    prev.message.role === 'assistant' && next.message.role === 'assistant'
+      ? prev.message.id === next.message.id &&
+        prev.message.content === next.message.content &&
+        prev.message.thinking === next.message.thinking &&
+        prev.message.kind === next.message.kind &&
+        prev.message.toolCalls === next.message.toolCalls &&
+        prev.message.renderParts === next.message.renderParts &&
+        prev.message.attachments === next.message.attachments
       : prev.message.id === next.message.id &&
         prev.message.content === next.message.content &&
         prev.message.isQueued === next.message.isQueued &&

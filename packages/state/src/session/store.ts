@@ -11,6 +11,10 @@ import type { createPlanStore } from '../plan';
 import type { createSessionsStore } from '../sessions';
 import type { KrustyStorage } from '../storage';
 import type { createWorkspaceStore } from '../workspace';
+import {
+  beginKrustyPerformanceSpan,
+  trackKrustyPerformanceResource,
+} from '../performance';
 
 import {
   MAX_QUEUED_MESSAGES,
@@ -129,12 +133,14 @@ export function createSessionStore(
   let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
   let statePollingGeneration = 0;
   let streamAttachmentGeneration = 0;
-  let sessionLoadGeneration = 0;
+  let sessionSelectionGeneration = 0;
   const sessionCache = new SessionSnapshotCache();
   const inFlightSessionLoads = new Map<string, Promise<void>>();
   const lastKnownServerState = new Map<string, ApiSessionStateResponse>();
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let presenceHeartbeatSessionId: string | null = null;
+  let releaseStatePollingResource: (() => void) | null = null;
+  let releasePresenceHeartbeatResource: (() => void) | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
 
@@ -595,6 +601,13 @@ export function createSessionStore(
       const streamGeneration = ++streamAttachmentGeneration;
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration;
+      const finishConnectSpan = beginKrustyPerformanceSpan(
+        'stream.connect',
+        state.sessionId ?? undefined,
+      );
+      const releaseStreamConnection = trackKrustyPerformanceResource(
+        'stream_connections',
+      );
 
       const pollingSessionId = state.sessionId;
       if (pollingSessionId) {
@@ -609,6 +622,8 @@ export function createSessionStore(
               planStore,
               sessionsStore,
               persistSessionMode: persistMode,
+              isActive: isStreamAttached,
+              onFirstEvent: finishConnectSpan,
             }),
             pollingSessionId,
             streamRecovery,
@@ -718,6 +733,8 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        finishConnectSpan();
+        releaseStreamConnection();
         if (!isStreamAttached()) {
           localStreamLive = false;
           return;
@@ -776,14 +793,24 @@ export function createSessionStore(
     // -- loadSession --------------------------------------------------------
 
         async loadSession(sessionId: string, isRefresh = false) {
+          const isNewSelectionIntent = get().sessionId !== sessionId;
+          const selectionGeneration = isNewSelectionIntent
+            ? ++sessionSelectionGeneration
+            : sessionSelectionGeneration;
           const existing = inFlightSessionLoads.get(sessionId);
-          if (existing) {
+          if (existing && !isNewSelectionIntent) {
             return existing;
           }
+          const finishOpenSpan = beginKrustyPerformanceSpan(
+            'session.open',
+            sessionId,
+          );
+          const releaseRequest = trackKrustyPerformanceResource(
+            'session_requests',
+          );
 
           const run = (async () => {
           const previousSessionId = get().sessionId;
-          const loadGeneration = ++sessionLoadGeneration;
           const isSessionSwitch = previousSessionId !== sessionId;
           const listedSessions = sessionsStore.getState().sessions ?? [];
 
@@ -945,7 +972,7 @@ export function createSessionStore(
               try {
                 const softState = await client.getSessionState(sessionId);
                 if (
-                  loadGeneration !== sessionLoadGeneration
+                  selectionGeneration !== sessionSelectionGeneration
                   || get().sessionId !== sessionId
                 ) {
                   return;
@@ -999,7 +1026,7 @@ export function createSessionStore(
               sessionPromise,
               statePromise,
             ]);
-            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+            if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
 
@@ -1138,7 +1165,7 @@ export function createSessionStore(
               void persistCurrentSelectedModel(snapshot.model, snapshot.modelKey);
             }
           } catch (err) {
-            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+            if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
             if (isNotFoundApiError(err)) {
@@ -1170,7 +1197,10 @@ export function createSessionStore(
               error: toErrorMessage(err),
             });
           }
-          })();
+          })().finally(() => {
+            finishOpenSpan();
+            releaseRequest();
+          });
 
           inFlightSessionLoads.set(sessionId, run);
           try {
@@ -1185,7 +1215,7 @@ export function createSessionStore(
 
     clearSession() {
       const current = get();
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
@@ -1216,7 +1246,7 @@ export function createSessionStore(
       sessionType?: import("@krusty/api").SessionType,
     ) {
       const current = get();
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
@@ -1435,6 +1465,13 @@ export function createSessionStore(
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration
         && get().sessionId === state.sessionId;
+      const finishConnectSpan = beginKrustyPerformanceSpan(
+        'stream.connect',
+        state.sessionId,
+      );
+      const releaseStreamConnection = trackKrustyPerformanceResource(
+        'stream_connections',
+      );
       get().startStatePolling(state.sessionId);
 
       const ref: AssistantMessageRef = {
@@ -1453,6 +1490,8 @@ export function createSessionStore(
               planStore,
               sessionsStore,
               persistSessionMode: persistMode,
+              isActive: isStreamAttached,
+              onFirstEvent: finishConnectSpan,
             }),
             state.sessionId,
             streamRecovery,
@@ -1484,6 +1523,8 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        finishConnectSpan();
+        releaseStreamConnection();
         if (!isStreamAttached()) {
           localStreamLive = false;
           return;
@@ -1573,6 +1614,9 @@ export function createSessionStore(
 
     startStatePolling(sessionId: string) {
       get().stopStatePolling();
+      releaseStatePollingResource = trackKrustyPerformanceResource(
+        'state_polling',
+      );
       const generation = statePollingGeneration;
       let consecutiveFailures = 0;
 
@@ -1651,6 +1695,8 @@ export function createSessionStore(
         clearTimeout(statePollingTimer);
         statePollingTimer = null;
       }
+      releaseStatePollingResource?.();
+      releaseStatePollingResource = null;
     },
 
     // -- presence heartbeat -------------------------------------------------
@@ -1668,6 +1714,9 @@ export function createSessionStore(
       presenceHeartbeatInterval = setInterval(() => {
         void syncPresence(sessionId, get);
       }, PRESENCE_HEARTBEAT_INTERVAL);
+      releasePresenceHeartbeatResource = trackKrustyPerformanceResource(
+        'presence_heartbeats',
+      );
     },
 
 
@@ -1676,6 +1725,8 @@ export function createSessionStore(
         clearInterval(presenceHeartbeatInterval);
         presenceHeartbeatInterval = null;
       }
+      releasePresenceHeartbeatResource?.();
+      releasePresenceHeartbeatResource = null;
       presenceHeartbeatSessionId = null;
 
       if (!sessionId) return;
@@ -1689,7 +1740,7 @@ export function createSessionStore(
     // -- cleanup ------------------------------------------------------------
 
     cleanup() {
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;

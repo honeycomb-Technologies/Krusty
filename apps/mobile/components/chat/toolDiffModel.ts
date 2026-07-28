@@ -17,6 +17,11 @@ export interface ToolDiffRow {
   changedRanges?: ToolDiffRange[];
 }
 
+export interface ToolDiffPeekModel {
+  rows: ToolDiffRow[];
+  changedRowCount: number;
+}
+
 export type ToolDiffPresentation =
   | {
       kind: "patch";
@@ -178,16 +183,30 @@ export function buildToolDiffPeekRows(
   presentation: ToolDiffPresentation,
   maxRows = 12,
 ): ToolDiffRow[] {
-  const rows = buildToolDiffRows(presentation);
-  if (rows.length <= maxRows) return rows;
+  return buildToolDiffPeekModel(presentation, maxRows).rows;
+}
 
-  const changed = rows.filter(
-    (row) => row.kind === "addition" || row.kind === "deletion",
-  );
-  if (changed.length > 0) {
-    return changed.slice(0, maxRows);
+/** Build the expensive row model once and derive both peek rows and count. */
+export function buildToolDiffPeekModel(
+  presentation: ToolDiffPresentation,
+  maxRows = 12,
+): ToolDiffPeekModel {
+  const rows = buildToolDiffRows(presentation);
+  const changed: ToolDiffRow[] = [];
+  for (const row of rows) {
+    if (row.kind === "addition" || row.kind === "deletion") {
+      changed.push(row);
+    }
   }
-  return rows.slice(0, maxRows);
+  return {
+    rows:
+      rows.length <= maxRows
+        ? rows
+        : changed.length > 0
+          ? changed.slice(0, maxRows)
+          : rows.slice(0, maxRows),
+    changedRowCount: changed.length,
+  };
 }
 
 export function toolDiffChangedRowCount(presentation: ToolDiffPresentation): number {

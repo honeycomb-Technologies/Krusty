@@ -17,7 +17,7 @@ export function BashOutput({
 }: BashOutputProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const body = mode === "tail" ? tailLines(output, maxTailLines) : output;
+  const body = mode === "tail" ? boundedTailLines(output, maxTailLines) : output;
 
   if (mode === "tail") {
     if (!body && !command) return null;
@@ -71,11 +71,27 @@ export function BashOutput({
   );
 }
 
-function tailLines(output: string, maxLines: number): string {
-  if (!output) return "";
-  const lines = output.replace(/\s+$/u, "").split("\n");
-  if (lines.length <= maxLines) return lines.join("\n");
-  return lines.slice(-maxLines).join("\n");
+export function boundedTailLines(output: string, maxLines: number): string {
+  if (!output || maxLines <= 0) return "";
+
+  // Walk backward from the live edge instead of splitting a potentially huge
+  // terminal buffer just to show two lines.
+  let end = output.length;
+  while (end > 0 && /\s/u.test(output[end - 1]!)) end -= 1;
+  if (end === 0) return "";
+
+  let start = end;
+  let lineBreaks = 0;
+  while (start > 0) {
+    start -= 1;
+    if (output.charCodeAt(start) !== 10) continue;
+    lineBreaks += 1;
+    if (lineBreaks === maxLines) {
+      start += 1;
+      break;
+    }
+  }
+  return output.slice(start, end);
 }
 
 const styles = StyleSheet.create({

@@ -21,7 +21,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { Folder, GitBranch, Maximize2, X } from 'lucide-react-native';
+import { Maximize2, X } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -39,17 +39,15 @@ import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls } from './AccordionControls';
 import { ChatBarActionButton } from './ChatBarActionButton';
 import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
+import { ChatBarMetaRow } from './ChatBarMetaRow';
 import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import { resolveComposerSendPayload } from './composerSend';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
-import Svg, {
-  Circle,
-  Path,
-  Polygon,
-} from 'react-native-svg';
+import Svg, { Path, Polygon } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
@@ -219,7 +217,13 @@ interface PickedImageAsset {
   fileName?: string | null;
   mimeType?: string | null;
   base64?: string | null;
+  width?: number;
+  height?: number;
 }
+
+const MAX_ATTACHED_IMAGES = 4;
+const MAX_IMAGE_EDGE = 2048;
+const MAX_IMAGE_BASE64_CHARS = 8 * 1024 * 1024;
 
 function normalizeSupportedImageMimeType(
   mimeType?: string | null,
@@ -281,18 +285,6 @@ function extensionForImageMimeType(mimeType: string): string {
 
 function defaultImageFileName(mimeType: string, fallbackBaseName: string): string {
   return `${fallbackBaseName}.${extensionForImageMimeType(mimeType)}`;
-}
-
-function fileToBase64(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      resolve(result.split(',')[1] ?? '');
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 function clipboardImageFileName(file: File, index: number): string {
@@ -422,15 +414,19 @@ function ProviderLogo({
 async function prepareClipboardImageAttachment(file: File, index: number): Promise<Attachment> {
   const fallbackBaseName = index === 0 ? 'pasted-image' : `pasted-image-${index + 1}`;
   const fileName = clipboardImageFileName(file, index);
-  return prepareImageAttachment(
-    {
-      uri: URL.createObjectURL(file),
-      fileName,
-      mimeType: file.type || normalizeSupportedImageMimeType(null, fileName, null),
-      base64: await fileToBase64(file),
-    },
-    fallbackBaseName,
-  );
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    return await prepareImageAttachment(
+      {
+        uri: objectUrl,
+        fileName,
+        mimeType: file.type || normalizeSupportedImageMimeType(null, fileName, null),
+      },
+      fallbackBaseName,
+    );
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 async function prepareImageAttachment(
@@ -443,7 +439,11 @@ async function prepareImageAttachment(
     asset.uri,
   );
 
-  if (supportedMimeType && asset.base64) {
+  if (
+    supportedMimeType
+    && asset.base64
+    && asset.base64.length <= MAX_IMAGE_BASE64_CHARS
+  ) {
     return {
       uri: asset.uri,
       type: 'image',
@@ -454,14 +454,23 @@ async function prepareImageAttachment(
   }
 
   try {
+    const maxDimension = Math.max(asset.width ?? 0, asset.height ?? 0);
+    const actions = maxDimension > MAX_IMAGE_EDGE
+      ? [{ resize: asset.width && asset.height && asset.width >= asset.height
+          ? { width: MAX_IMAGE_EDGE }
+          : { height: MAX_IMAGE_EDGE } }]
+      : [];
     const result = await manipulateAsync(
       asset.uri,
-      [],
-      { compress: 0.82, format: SaveFormat.JPEG, base64: true },
+      actions,
+      { compress: 0.78, format: SaveFormat.JPEG, base64: true },
     );
 
     if (!result.base64) {
       throw new Error('Image conversion completed without base64 output.');
+    }
+    if (result.base64.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new Error('Image remains too large after optimization. Choose a smaller image.');
     }
 
     return {
@@ -520,7 +529,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const modelPopoverOpacity = useSharedValue(0);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const transcriptRef = useRef('');
-  const textRef = useRef('');
+  const textRef = useRef(text);
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
   const measuredRootHeightRef = useRef(0);
@@ -531,6 +540,22 @@ function ChatBarComponent(props: ChatBarProps) {
   const draftRef = useRef<CachedDraft>({ text, attachments });
   const activeDraftKeyRef = useRef(draftKey);
   const skipDraftSyncRef = useRef(false);
+  const isStreamingRef = useRef(isStreaming);
+  const disabledRef = useRef(disabled);
+  const attachmentsRef = useRef(attachments);
+  const isRecordingRef = useRef(isRecording);
+  const accordionOpenLocalRef = useRef(accordionOpen);
+  const onSendRef = useRef(onSend);
+  const onStopRef = useRef(onStop);
+  const onModelSelectRef = useRef(onModelSelect);
+  isStreamingRef.current = isStreaming;
+  disabledRef.current = disabled;
+  attachmentsRef.current = attachments;
+  isRecordingRef.current = isRecording;
+  accordionOpenLocalRef.current = accordionOpen;
+  onSendRef.current = onSend;
+  onStopRef.current = onStop;
+  onModelSelectRef.current = onModelSelect;
 
   useLayoutEffect(() => {
     if (activeDraftKeyRef.current === draftKey) {
@@ -568,11 +593,11 @@ function ChatBarComponent(props: ChatBarProps) {
     [],
   );
 
-  const clearModelCloseTimer = () => {
+  const clearModelCloseTimer = useCallback(() => {
     if (!modelCloseTimerRef.current) return;
     clearTimeout(modelCloseTimerRef.current);
     modelCloseTimerRef.current = null;
-  };
+  }, []);
 
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
 
@@ -822,26 +847,38 @@ function ChatBarComponent(props: ChatBarProps) {
     setMicVolume(Math.max(0, Math.min(1, (raw + 2) / 12)));
   });
 
-  const toggleRecording = async () => {
+  const toggleRecording = useCallback(async () => {
     if (!ExpoSpeechRecognitionModule) return;
-    if (isRecording) { ExpoSpeechRecognitionModule.stop(); return; }
+    if (isRecordingRef.current) { ExpoSpeechRecognitionModule.stop(); return; }
     const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!granted) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     transcriptRef.current = '';
     setIsRecording(true);
     ExpoSpeechRecognitionModule.start({ lang: 'en-US', interimResults: false, continuous: false });
-  };
+  }, []);
 
   // ── Send ──
-  const handleSend = () => {
-    if (isStreaming) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop(); return; }
-    const trimmed = text.trim();
-    if (!trimmed && attachments.length === 0) return;
+  const handleSend = useCallback(() => {
+    if (isStreamingRef.current) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      onStopRef.current();
+      return;
+    }
+    const payload = resolveComposerSendPayload(
+      textRef.current,
+      attachmentsRef.current,
+    );
+    if (!payload) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (isRecording && ExpoSpeechRecognitionModule) { ExpoSpeechRecognitionModule.stop(); setIsRecording(false); }
-    onSend(trimmed, attachments.length > 0 ? attachments : undefined);
+    if (isRecordingRef.current && ExpoSpeechRecognitionModule) {
+      ExpoSpeechRecognitionModule.stop();
+      setIsRecording(false);
+    }
+    onSendRef.current(payload.content, payload.attachments);
     textRef.current = '';
+    draftRef.current = { text: '', attachments: [] };
+    setDraftCache(activeDraftKeyRef.current, draftRef.current);
     setText('');
     setInputContentHeight(0);
     setAttachments([]);
@@ -849,8 +886,8 @@ function ChatBarComponent(props: ChatBarProps) {
     setHoveredAttachmentIndex(null);
     setExpandedEditorOpen(false);
     Keyboard.dismiss();
-    if (accordionOpen) setAccordionOpen(false);
-  };
+    if (accordionOpenLocalRef.current) setAccordionOpen(false);
+  }, []);
 
   // ── Attach ──
   const handleAttach = () => {
@@ -860,7 +897,16 @@ function ChatBarComponent(props: ChatBarProps) {
 
   const pickPhoto = async () => {
     closeAttachPicker();
-    const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], base64: true, quality: 0.8 });
+    if (attachments.length >= MAX_ATTACHED_IMAGES) {
+      Alert.alert('Attachment limit', `Attach up to ${MAX_ATTACHED_IMAGES} images at a time.`);
+      return;
+    }
+    const r = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      base64: false,
+      exif: false,
+      quality: 0.8,
+    });
     if (!r.canceled && r.assets[0]) {
       try {
         const attachment = await prepareImageAttachment(r.assets[0], 'image');
@@ -875,8 +921,12 @@ function ChatBarComponent(props: ChatBarProps) {
   };
   const pickCamera = async () => {
     closeAttachPicker();
+    if (attachments.length >= MAX_ATTACHED_IMAGES) {
+      Alert.alert('Attachment limit', `Attach up to ${MAX_ATTACHED_IMAGES} images at a time.`);
+      return;
+    }
     const perm = await ImagePicker.requestCameraPermissionsAsync(); if (!perm.granted) return;
-    const r = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.8 });
+    const r = await ImagePicker.launchCameraAsync({ base64: false, exif: false, quality: 0.8 });
     if (!r.canceled && r.assets[0]) {
       try {
         const attachment = await prepareImageAttachment(r.assets[0], 'photo');
@@ -896,20 +946,33 @@ function ChatBarComponent(props: ChatBarProps) {
   };
 
   // Unified action button: mic when empty, send when has text, stop when streaming/recording
-  const handleActionBtn = () => {
-    if (isStreaming) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop(); return; }
-    if (isRecording) { toggleRecording(); return; }
-    if (canSend) { handleSend(); return; }
-    toggleRecording(); // empty state = start recording
-  };
+  const handleActionBtn = useCallback(() => {
+    if (isStreamingRef.current) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      onStopRef.current();
+      return;
+    }
+    if (isRecordingRef.current) {
+      void toggleRecording();
+      return;
+    }
+    const canSendNow =
+      !disabledRef.current &&
+      (textRef.current.trim().length > 0 || attachmentsRef.current.length > 0);
+    if (canSendNow) {
+      handleSend();
+      return;
+    }
+    void toggleRecording();
+  }, [handleSend, toggleRecording]);
 
-  const handleTextChange = (value: string) => {
+  const handleTextChange = useCallback((value: string) => {
     textRef.current = value;
     setText(value);
     if (!value) {
       setInputContentHeight(0);
     }
-  };
+  }, []);
 
   const toggleAccordion = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -940,7 +1003,7 @@ function ChatBarComponent(props: ChatBarProps) {
     modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
     modelPopoverOpacity.value = withTiming(1, { duration: 140 });
   };
-  const closeModelPicker = () => {
+  const closeModelPicker = useCallback(() => {
     clearModelCloseTimer();
     setModelRailOpen(false);
     modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
@@ -950,7 +1013,7 @@ function ChatBarComponent(props: ChatBarProps) {
       setSelectedProviderFilter(null);
       modelCloseTimerRef.current = null;
     }, 180);
-  };
+  }, [clearModelCloseTimer, modelPopoverOpacity, modelPopoverScale]);
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
     opacity: modelPopoverOpacity.value,
@@ -958,9 +1021,9 @@ function ChatBarComponent(props: ChatBarProps) {
   }));
 
   const handleModelSelectFromPicker = useCallback((modelId: string) => {
-    onModelSelect(modelId);
+    onModelSelectRef.current(modelId);
     closeModelPicker();
-  }, [onModelSelect]);
+  }, [closeModelPicker]);
 
   const closeExpandedEditor = useCallback(() => {
     setExpandedEditorOpen(false);
@@ -1052,7 +1115,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   // The activity line is a screen-edge indicator, independent of the composer
   // safe-area inset. Keep it flush with the bottom edge on every platform.
-  const runLineBottom = 0;
   // Prefer measured column width over viewport so split/toolbox/resize stay in-bounds.
   const bandWidth =
     measuredRootWidth > 0
@@ -1427,56 +1489,24 @@ function ChatBarComponent(props: ChatBarProps) {
       ) : null}
 
       {/* Composer status row — sits in safe area zone below input */}
-      <View
-        pointerEvents="none"
-        style={[styles.metaRow, !isDesktop && styles.metaRowMobile]}
-      >
-        <View style={styles.metaLeft}>
-          <View style={styles.gaugeRing}>
-            <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
-              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
-              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
-                strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
-                rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
-              />
-            </Svg>
-            <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
-              {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
-            </Text>
-          </View>
-          {workspaceContext ? (
-            <View style={styles.metaWorkspace}>
-              {workspaceContext.hasBranch ? (
-                <GitBranch size={12} color={t.mutedForeground} strokeWidth={1.8} />
-              ) : (
-                <Folder size={12} color={t.mutedForeground} strokeWidth={1.8} />
-              )}
-              <Text
-                style={[styles.metaWorkspaceText, { color: t.mutedForeground }]}
-                numberOfLines={1}
-              >
-                {workspaceContext.label}
-              </Text>
-            </View>
-          ) : null}
-        </View>
-        <View style={styles.metaRight}>
-          <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
-            {currentModelLabel}
-          </Text>
-          <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
-            |
-          </Text>
-          <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
-            {thinkingLabel}
-          </Text>
-        </View>
-      </View>
+      <ChatBarMetaRow
+        isDesktop={isDesktop}
+        gaugeTokens={gaugeTokens}
+        gaugeRadius={gaugeRadius}
+        gaugeStroke={gaugeStroke}
+        gaugeCircumference={gaugeCircumference}
+        gaugeOffset={gaugeOffset}
+        gaugeColor={gaugeColor}
+        mutedForeground={t.mutedForeground}
+        workspaceContext={workspaceContext}
+        currentModelLabel={currentModelLabel}
+        thinkingLabel={thinkingLabel}
+      />
       <ChatBarRunningLine
         active={isStreaming}
         width={bandWidth}
         cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
-        style={[styles.runLineEdge, { bottom: runLineBottom }]}
+        style={styles.runLineEdge}
       />
       <ImagePreviewModal
         visible={Boolean(previewAttachment)}
@@ -1615,70 +1645,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0,
   },
-  // Composer status row
-  metaRow: {
-    height: META_ROW_HEIGHT + GAUGE_TOP_GAP,
-    paddingTop: GAUGE_TOP_GAP,
-    paddingHorizontal: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  metaRowMobile: {
-    paddingHorizontal: 26,
-  },
-  metaLeft: {
-    flex: 1,
-    maxWidth: '54%',
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  metaRight: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 10,
-  },
-  metaWorkspace: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  metaWorkspaceText: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0,
-  },
-  metaModel: {
-    flexShrink: 1,
-    minWidth: 0,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0,
-    textAlign: 'right',
-  },
-  metaDivider: {
-    flexShrink: 0,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0,
-  },
-  metaThinking: {
-    flexShrink: 0,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0,
-  },
-  gaugeRing: { width: GAUGE_SIZE, height: GAUGE_SIZE, alignItems: 'center', justifyContent: 'center' },
-  gaugeLabel: { position: 'absolute', fontSize: 7, fontWeight: '600', letterSpacing: 0 },
 });
 
 export const ChatBar = memo(ChatBarComponent);

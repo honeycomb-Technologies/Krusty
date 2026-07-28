@@ -143,4 +143,24 @@ const styles = StyleSheet.create({
   },
 });
 
-export const ChatBarExpandedEditor = memo(ChatBarExpandedEditorComponent);
+export const ChatBarExpandedEditor = memo(
+  ChatBarExpandedEditorComponent,
+  (previous, next) => {
+    if (!previous.visible && !next.visible) return true;
+    return (
+      previous.visible === next.visible &&
+      previous.text === next.text &&
+      previous.onChangeText === next.onChangeText &&
+      previous.onClose === next.onClose &&
+      previous.onSend === next.onSend &&
+      previous.canSend === next.canSend &&
+      previous.disabled === next.disabled &&
+      previous.placeholder === next.placeholder &&
+      previous.mutedForeground === next.mutedForeground &&
+      previous.foreground === next.foreground &&
+      previous.userMessage === next.userMessage &&
+      previous.border === next.border &&
+      previous.keyboardAppearance === next.keyboardAppearance
+    );
+  },
+);

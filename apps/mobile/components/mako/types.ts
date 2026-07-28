@@ -1,5 +1,4 @@
 import type {
-  ChatMessage,
   MakoChannelsResponse,
   MakoCrewDocumentKind,
   MakoCrewResponse,
@@ -44,7 +43,6 @@ export type { MakoCurrentRunSummary };
 export interface MakoChatContext {
   sessionId: string | null;
   title: string | null;
-  messages: ChatMessage[];
   error: string | null;
   isLoading: boolean;
   isStreaming: boolean;

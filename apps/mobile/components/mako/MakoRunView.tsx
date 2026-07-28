@@ -36,6 +36,7 @@ import {
 } from "./utils";
 import type { MakoChatContext, MakoCurrentRunSummary } from "./types";
 import type { ChatMessage, MakoCrewRuntimeMember } from "@krusty/api";
+import { useMakoSessionView } from "./hooks/useMakoSessionView";
 
 interface MakoRunViewProps {
   runId: string;
@@ -157,6 +158,7 @@ export function MakoRunView({
   onBack,
   onDeleteRun,
 }: MakoRunViewProps) {
+  const sessionView = useMakoSessionView();
   const { client } = useConnection();
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -202,7 +204,7 @@ export function MakoRunView({
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
   const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
   const showResume = runtimeStatus !== "running";
-  const recentMessages = chat.messages.slice(-3);
+  const recentMessages = sessionView.messages.slice(-3);
   const artifactTasks = (status?.tasks ?? []).filter((task) => task.result);
 
   useEffect(() => {
@@ -330,10 +332,10 @@ export function MakoRunView({
 
         <View style={styles.chatWrap}>
           <ChatTranscript
-            messages={chat.messages}
-            sessionId={chat.sessionId}
-            isStreaming={chat.isStreaming}
-            isThinking={chat.isThinking}
+            messages={sessionView.messages}
+            sessionId={sessionView.sessionId}
+            isStreaming={sessionView.isStreaming}
+            isThinking={sessionView.isThinking}
             activeToolCallId={chat.activeToolCallId}
             onApproveTool={chat.onApproveTool}
             onDenyTool={chat.onDenyTool}

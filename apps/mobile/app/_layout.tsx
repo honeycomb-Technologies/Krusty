@@ -11,8 +11,13 @@ import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
 import { NotificationProvider } from '../hooks/useNotifications';
+import { configureKrustyPerformance } from '@krusty/state';
 
 const BOOT_BACKGROUND = '#0b1119';
+
+configureKrustyPerformance(
+  __DEV__ || process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
+);
 
 LogBox.ignoreLogs([
   'Invalid DOM property `%s`. Did you mean `%s`? transform-origin transformOrigin',

@@ -34,6 +34,7 @@ interface NativeTerminalTab {
   id: string;
   label: string;
   html: string;
+  revision?: number;
 }
 
 const MAX_TERMINAL_TABS = 4;
@@ -77,7 +78,7 @@ function NativeTerminal({ visible }: { visible: boolean }) {
         cursor: t.userMessage,
       });
       setActiveTab(id);
-      return [...prev, { id, label: `Terminal ${prev.length + 1}`, html }];
+      return [...prev, { id, label: `Terminal ${prev.length + 1}`, html, revision: 0 }];
     });
   }, [serverToken, serverUrl, t.background, t.foreground, t.userMessage]);
 
@@ -123,14 +124,14 @@ function NativeTerminal({ visible }: { visible: boolean }) {
       <View style={styles.terminalArea}>
         {WebViewComponent && visible
           ? tabs.map((tab) => {
-              // Keep only the active tab process warm while toolbox is open.
-              // Fully freeze (unmount) all WebViews when the toolbox is closed.
+              // Tab metadata survives closure. The WebView/websocket/PTY is a
+              // deliberate cold restore so hidden terminals consume no CPU.
               if (tab.id !== activeTab) {
                 return null;
               }
               return (
                 <View
-                  key={tab.id}
+                  key={`${tab.id}:${tab.revision ?? 0}`}
                   pointerEvents="auto"
                   style={styles.webviewHost}
                 >
@@ -140,6 +141,18 @@ function NativeTerminal({ visible }: { visible: boolean }) {
                     originWhitelist={['*']}
                     javaScriptEnabled
                     domStorageEnabled
+                    onContentProcessDidTerminate={() => {
+                      setTabs((current) => current.map((candidate) =>
+                        candidate.id === tab.id
+                          ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
+                          : candidate));
+                    }}
+                    onRenderProcessGone={() => {
+                      setTabs((current) => current.map((candidate) =>
+                        candidate.id === tab.id
+                          ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
+                          : candidate));
+                    }}
                   />
                 </View>
               );

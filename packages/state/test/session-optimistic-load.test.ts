@@ -230,3 +230,73 @@ Deno.test("loadSession activates the destination shell before the network resolv
 	);
 	store.getState().cleanup();
 });
+
+Deno.test("unresolved A to B to A navigation honors the latest selection intent", async () => {
+	const firstA = deferred<ReturnType<typeof sessionResponse>>();
+	const secondA = deferred<ReturnType<typeof sessionResponse>>();
+	const sessionB = deferred<ReturnType<typeof sessionResponse>>();
+	let aRequests = 0;
+
+	const client = {
+		getSession: (sessionId: string) => {
+			if (sessionId === "session-a") {
+				aRequests += 1;
+				return aRequests === 1 ? firstA.promise : secondA.promise;
+			}
+			if (sessionId === "session-b") return sessionB.promise;
+			throw new Error(`unexpected session ${sessionId}`);
+		},
+		getSessionState: async () => ({
+			id: "ignored",
+			agent_state: "idle",
+			started_at: null,
+			last_event_at: null,
+			mode: "build",
+			permission_mode: "autonomous",
+			recovery: null,
+			live_partial_assistant: null,
+			pending_interactions: [],
+			delegated_tools: [],
+			recent_delegated_runs: [],
+			last_event_sequence: null,
+		}),
+		heartbeatSessionPresence: async () => ({}),
+		removeSessionPresence: async () => ({}),
+		updateSession: async () => ({}),
+		setCurrentModel: async () => ({}),
+	};
+
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore([
+			{ id: "session-a", title: "Alpha", session_type: "chat", mode: "build", permission_mode: "autonomous" },
+			{ id: "session-b", title: "Beta", session_type: "chat", mode: "build", permission_mode: "autonomous" },
+		]) as never,
+		createPlanStore() as never,
+	);
+
+	const loadFirstA = store.getState().loadSession("session-a");
+	const loadB = store.getState().loadSession("session-b");
+	const loadLatestA = store.getState().loadSession("session-a");
+
+	assertEquals(store.getState().sessionId, "session-a", "latest selection should activate A immediately");
+	assertEquals(aRequests, 2, "returning to unresolved A needs a request owned by the latest intent");
+
+	firstA.resolve(sessionResponse("session-a", "Stale Alpha", "stale a"));
+	sessionB.resolve(sessionResponse("session-b", "Beta", "stale b"));
+	await Promise.all([loadFirstA, loadB]);
+	assertEquals(store.getState().sessionId, "session-a", "stale requests must not replace latest A shell");
+	assertEquals(store.getState().messages.length, 0, "stale first A response must not hydrate latest A intent");
+
+	secondA.resolve(sessionResponse("session-a", "Latest Alpha", "latest a"));
+	await loadLatestA;
+	assertEquals(store.getState().title, "Latest Alpha", "latest A response should own hydration");
+	assertEquals(
+		store.getState().messages.some((message) => message.content.includes("latest a")),
+		true,
+		"latest A transcript should hydrate",
+	);
+	store.getState().cleanup();
+});

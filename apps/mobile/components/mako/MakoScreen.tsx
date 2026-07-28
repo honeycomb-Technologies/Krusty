@@ -57,13 +57,6 @@ export function MakoScreen({
       : null;
 
   useEffect(() => {
-    if (!navigation.selectedRunId) {
-      void current.refresh();
-      void home.refresh();
-    }
-  }, [current.refresh, home.refresh, navigation.selectedRunId]);
-
-  useEffect(() => {
     if (!requestedTopLevel) {
       return;
     }

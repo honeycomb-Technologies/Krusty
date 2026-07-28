@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ActivityIndicator, View, Text, Pressable, StyleSheet, Platform } from 'react-native';
 import { Plus, X } from 'lucide-react-native';
 import type { WebViewProps } from 'react-native-webview';
 import type { PortEntry, PreviewSettings } from '@krusty/api';
+import { trackKrustyPerformanceResource } from '@krusty/state';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
@@ -21,6 +22,7 @@ interface PreviewTab {
   id: string;
   port: number | null;
   label: string;
+  revision?: number;
 }
 
 const MAX_BROWSER_TABS = 4;
@@ -64,6 +66,8 @@ function NativeBrowser({ visible }: { visible: boolean }) {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(browserSession.error);
+  const loadPromiseRef = useRef<Promise<void> | null>(null);
+  const loadGenerationRef = useRef(0);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
 
@@ -91,45 +95,83 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     [ports],
   );
 
-  const loadPorts = useCallback(async (background = false) => {
-    if (!client) return;
+  const loadPorts = useCallback((background = false) => {
+    if (!client) return Promise.resolve();
+    if (loadPromiseRef.current) return loadPromiseRef.current;
 
+    const generation = loadGenerationRef.current;
+    const releaseRequest = trackKrustyPerformanceResource('toolbox_requests');
     if (background) {
       setRefreshing(true);
     } else {
       setLoading(true);
     }
 
-    try {
-      const response = await client.getPorts();
-      setPorts(response.ports);
-      setSettings(response.settings);
-      setError(response.discovery_error ?? null);
-      setTabs((current) =>
-        current.map((tab) => {
-          if (tab.port === null) return tab;
-          const match = response.ports.find((port) => port.port === tab.port);
-          return match ? { ...tab, label: match.name } : tab;
-        }),
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load preview ports.');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    const request = (async () => {
+      try {
+        const response = await client.getPorts();
+        if (generation !== loadGenerationRef.current) return;
+        setPorts((current) => JSON.stringify(current) === JSON.stringify(response.ports)
+          ? current
+          : response.ports);
+        setSettings((current) => JSON.stringify(current) === JSON.stringify(response.settings)
+          ? current
+          : response.settings);
+        setError((current) => current === (response.discovery_error ?? null)
+          ? current
+          : response.discovery_error ?? null);
+        setTabs((current) => {
+          let changed = false;
+          const next = current.map((tab) => {
+            if (tab.port === null) return tab;
+            const match = response.ports.find((port) => port.port === tab.port);
+            if (!match || match.name === tab.label) return tab;
+            changed = true;
+            return { ...tab, label: match.name };
+          });
+          return changed ? next : current;
+        });
+      } catch (err) {
+        if (generation !== loadGenerationRef.current) return;
+        setError(err instanceof Error ? err.message : 'Failed to load preview ports.');
+      } finally {
+        releaseRequest();
+        if (generation === loadGenerationRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    })();
+    loadPromiseRef.current = request;
+    void request.finally(() => {
+      if (loadPromiseRef.current === request) loadPromiseRef.current = null;
+    });
+    return request;
   }, [client]);
 
   useEffect(() => {
     if (!client || !visible) return;
 
-    void loadPorts();
-    const intervalMs = Math.max(2, settings?.auto_refresh_secs ?? 5) * 1000;
-    const interval = setInterval(() => {
-      void loadPorts(true);
-    }, intervalMs);
-    return () => clearInterval(interval);
-  }, [client, loadPorts, settings?.auto_refresh_secs, visible]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    loadGenerationRef.current += 1;
+    const poll = async (background: boolean) => {
+      await loadPorts(background);
+      if (cancelled) return;
+      const intervalMs = Math.max(
+        2,
+        browserSession.settings?.auto_refresh_secs ?? settings?.auto_refresh_secs ?? 5,
+      ) * 1000;
+      timer = setTimeout(() => void poll(true), intervalMs);
+    };
+    void poll(false);
+    return () => {
+      cancelled = true;
+      loadGenerationRef.current += 1;
+      loadPromiseRef.current = null;
+      if (timer) clearTimeout(timer);
+    };
+  }, [client, loadPorts, visible]);
 
   const createBlankTab = useCallback(() => {
     setTabs((current) => {
@@ -142,6 +184,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
         id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         port: null,
         label: 'New Tab',
+        revision: 0,
       };
       setActiveTabId(tab.id);
       return [...current, tab];
@@ -156,6 +199,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
       id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       port: null,
       label: 'New Tab',
+      revision: 0,
     };
     setTabs([tab]);
     setActiveTabId(tab.id);
@@ -189,6 +233,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
         id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         port: port.port,
         label: port.name || `Port ${port.port}`,
+        revision: 0,
       };
       setActiveTabId(tab.id);
       return [...prev, tab];
@@ -207,6 +252,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
           id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
           port: null,
           label: 'New Tab',
+          revision: 0,
         };
         setActiveTabId(blankTab.id);
         return [blankTab];
@@ -252,8 +298,8 @@ function NativeBrowser({ visible }: { visible: boolean }) {
           ? tabs
               .filter((tab) => tab.port !== null && tab.id === activeTabId)
               .map((tab) => {
-                // Freeze all browser WebViews when toolbox is closed. Keep only
-                // the active tab process warm while open.
+                // Tab metadata survives closure, but native WebViews are
+                // deliberately cold-restored to avoid hidden WebContent CPU.
                 const uri = serverUrl
                   ? `${serverUrl.replace(/\/+$/, '')}/api/ports/${tab.port}/proxy`
                   : null;
@@ -262,7 +308,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
                 }
                 return (
                   <View
-                    key={tab.id}
+                    key={`${tab.id}:${tab.revision ?? 0}`}
                     pointerEvents="auto"
                     style={styles.webviewHost}
                   >
@@ -277,6 +323,18 @@ function NativeBrowser({ visible }: { visible: boolean }) {
                       originWhitelist={['*']}
                       javaScriptEnabled
                       domStorageEnabled
+                      onContentProcessDidTerminate={() => {
+                        setTabs((current) => current.map((candidate) =>
+                          candidate.id === tab.id
+                            ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
+                            : candidate));
+                      }}
+                      onRenderProcessGone={() => {
+                        setTabs((current) => current.map((candidate) =>
+                          candidate.id === tab.id
+                            ? { ...candidate, revision: (candidate.revision ?? 0) + 1 }
+                            : candidate));
+                      }}
                     />
                   </View>
                 );

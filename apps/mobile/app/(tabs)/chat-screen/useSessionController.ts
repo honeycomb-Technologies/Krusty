@@ -3,6 +3,7 @@ import { AppState } from "react-native";
 
 import type { ModelInfo, ModelKey, SessionResponse, SessionType } from "@krusty/api";
 import {
+  modelKeysEqual,
   resolveUsableModel,
 } from "@krusty/state";
 
@@ -10,12 +11,22 @@ import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
 import * as SecureStore from "../../../platform/secure-store";
 import { normalizeProviderId, SELECTED_MODEL_KEY } from "./helpers";
+import { resolveModeLifecyclePolicy } from "./modeLifecyclePolicy";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
 type SessionStoreApi = LoadedStores["session"];
 type SessionsStoreApi = LoadedStores["sessions"];
 type ModeStores = LoadedStores["modes"];
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 
 interface UseSessionControllerArgs {
   client: ConnectionClient;
@@ -55,6 +66,7 @@ export function useSessionController({
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
 
   const sessionsRefreshInFlightRef = useRef(false);
+  const persistedResolvedModelRef = useRef<string | null | undefined>(undefined);
   const attemptedWorkspaceSessionHydrationRef = useRef<
     Record<SessionType, string | null>
   >({
@@ -82,10 +94,16 @@ export function useSessionController({
     const nextConfiguredProviders = credentials
       .filter((provider) => provider.configured || provider.has_oauth)
       .map((provider) => normalizeProviderId(provider.name));
-    setModels(response.models);
-    setDefaultModelId(response.default_model ?? null);
-    setDefaultModelKey(response.default_model_key ?? null);
-    setConfiguredProviders(nextConfiguredProviders);
+    setModels((current) => jsonEqual(current, response.models) ? current : response.models);
+    setDefaultModelId((current) => current === (response.default_model ?? null)
+      ? current
+      : response.default_model ?? null);
+    setDefaultModelKey((current) => modelKeysEqual(current, response.default_model_key ?? null)
+      ? current
+      : response.default_model_key ?? null);
+    setConfiguredProviders((current) => stringArraysEqual(current, nextConfiguredProviders)
+      ? current
+      : nextConfiguredProviders);
     return {
       response,
       configuredProviders: nextConfiguredProviders,
@@ -122,15 +140,30 @@ export function useSessionController({
     );
 
     if (selectedModel) {
-      targetStore
-        .getState()
-        .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
-      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
+      const state = targetStore.getState();
+      const nextProvider = selectedModel.provider ?? null;
+      if (
+        state.model !== selectedModel.id
+        || !modelKeysEqual(state.modelKey, selectedModel.key ?? null)
+        || state.modelProvider !== nextProvider
+        || !jsonEqual(state.modelInfo, selectedModel)
+      ) {
+        state.setModel(selectedModel.id, nextProvider, selectedModel);
+      }
+      if (persistedResolvedModelRef.current !== selectedModel.id) {
+        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
+        persistedResolvedModelRef.current = selectedModel.id;
+      }
       return selectedModel.id;
     }
 
-    targetStore.getState().setModel(null);
-    await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
+    if (targetStore.getState().model !== null) {
+      targetStore.getState().setModel(null);
+    }
+    if (persistedResolvedModelRef.current !== null) {
+      await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
+      persistedResolvedModelRef.current = null;
+    }
     return null;
   }, [
     configuredProviders,
@@ -141,17 +174,46 @@ export function useSessionController({
     sessionStore,
   ]);
 
-  // Connect warmup: list sessions + resolve the visible mode model path.
+  // Connect warmup: list sessions once per connection. Model catalog refreshes
+  // must not turn into unrelated session-list reloads.
   useEffect(() => {
     if (!client || !isConnected) {
       return;
     }
 
     void sessionsStore.getState().loadSessions();
+  }, [client, isConnected, sessionsStore]);
+
+  // Resolve only the visible mode model path. Background modes remain lazy.
+  useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
     // Warm only the active mode model path on connect. Background modes can
     // resolve models when first focused / first used.
     void ensureModelReady(modeStores[activeMode].session);
-  }, [activeMode, client, ensureModelReady, isConnected, modeStores, sessionsStore]);
+  }, [activeMode, client, ensureModelReady, isConnected, modeStores]);
+
+  // Exactly one visible mode advertises presence. Hidden streams keep their
+  // transport/recovery poll alive; hidden idle modes release both timers.
+  useEffect(() => {
+    for (const mode of ["chat", "code", "mako"] as const) {
+      const state = modeStores[mode].session.getState();
+      const policy = resolveModeLifecyclePolicy(
+        activeMode,
+        mode,
+        state.isStreaming,
+      );
+      if (policy.keepPresence && state.sessionId) {
+        state.startPresenceHeartbeat(state.sessionId);
+      } else {
+        state.stopPresenceHeartbeat(state.sessionId);
+      }
+      if (!policy.keepPolling) {
+        state.stopStatePolling();
+      }
+    }
+  }, [activeMode, modeStores]);
 
   // Periodic model catalog refresh while the app is foregrounded.
   useEffect(() => {
@@ -248,6 +310,10 @@ export function useSessionController({
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") {
+        for (const mode of ["chat", "code", "mako"] as const) {
+          const state = modeStores[mode].session.getState();
+          state.stopPresenceHeartbeat(state.sessionId);
+        }
         return;
       }
 
@@ -255,6 +321,9 @@ export function useSessionController({
       const currentSessionId =
         activeSlot.session.getState().sessionId ??
         activeSlot.workspace.getState().sessionId;
+      if (currentSessionId) {
+        activeSlot.session.getState().startPresenceHeartbeat(currentSessionId);
+      }
       if (
         currentSessionId &&
         !activeSlot.session.getState().isStreaming

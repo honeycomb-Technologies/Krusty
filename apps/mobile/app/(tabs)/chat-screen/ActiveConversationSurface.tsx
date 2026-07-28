@@ -1,18 +1,12 @@
-import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
 import type { SessionType } from "@krusty/api";
 
 import { ChatTranscript } from "../../../components/chat/ChatTranscript";
-import { getToolDiffStats } from "../../../components/chat/toolDiffModel";
 import { KrustyLogo } from "../../../components/ui/KrustyLogo";
 import { useSessionStore } from "../../../hooks/useStores";
 import { useThemeContext } from "../../../hooks/useTheme";
-import {
-  flattenToolCalls,
-  getActiveToolCall,
-  getLastAssistantMessage,
-} from "./helpers";
 import { styles } from "./styles";
 
 interface ActiveConversationSurfaceProps {
@@ -28,21 +22,6 @@ interface ActiveConversationSurfaceProps {
   onDenyTool: (sessionId: string, toolCallId: string) => void;
   onSubmitToolResult: (toolCallId: string, result: string) => void;
   onPlanConfirm: (toolCallId: string, choice: "execute" | "abandon") => void;
-  /**
-   * Optional bridge for shell-level side effects that still need semantic
-   * stream summaries (live activity / approvals). Keep this narrow.
-   */
-  onStreamSemantics?: (semantics: {
-    sessionId: string | null;
-    isStreaming: boolean;
-    isThinking: boolean;
-    title: string | null;
-    tokenCount: number;
-    lastAssistantSnippet: string;
-    awaitingApprovalCalls: ReturnType<typeof flattenToolCalls>;
-    activeToolCall: ReturnType<typeof getActiveToolCall>;
-    activityDiff: { additions: number; deletions: number };
-  }) => void;
   emptyState?: ReactNode;
 }
 
@@ -59,28 +38,17 @@ function ActiveConversationSurfaceComponent({
   onDenyTool,
   onSubmitToolResult,
   onPlanConfirm,
-  onStreamSemantics,
   emptyState,
 }: ActiveConversationSurfaceProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const toolActivityRef = useRef<{
-    signature: string;
-    toolCalls: ReturnType<typeof flattenToolCalls>;
-    awaitingApprovalCalls: ReturnType<typeof flattenToolCalls>;
-    activeToolCall: ReturnType<typeof getActiveToolCall>;
-    activityDiff: { additions: number; deletions: number };
-  } | null>(null);
-
   // Messages live here only. The outer shell must not subscribe to them.
   const sessionView = useSessionStore(
     useShallow((state) => ({
       sessionId: state.sessionId,
-      title: state.title,
       messages: state.messages,
       isStreaming: state.isStreaming,
       isThinking: state.isThinking,
-      tokenCount: state.tokenCount,
       error: state.error,
       isLoading: state.isLoading,
     })),
@@ -93,78 +61,6 @@ function ActiveConversationSurfaceComponent({
   const isThinking = sessionView.isThinking ?? false;
   const isLoading = sessionView.isLoading ?? false;
   const error = sessionView.error ?? null;
-  const tokenCount = sessionView.tokenCount ?? 0;
-  const title = sessionView.title ?? null;
-
-  const toolActivity = useMemo(() => {
-    const toolCalls = flattenToolCalls(messages);
-    const previous = toolActivityRef.current;
-    const signature = toolCalls
-      .map((toolCall) =>
-        [
-          toolCall.id,
-          toolCall.status,
-          toolCall.output?.length ?? 0,
-          toolCall.delegated?.thinking?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|");
-    if (previous && previous.signature === signature) {
-      return previous;
-    }
-    const next = {
-      signature,
-      toolCalls,
-      awaitingApprovalCalls: toolCalls.filter(
-        (toolCall) => toolCall.status === "awaiting_approval",
-      ),
-      activeToolCall: getActiveToolCall(toolCalls),
-      activityDiff: toolCalls.reduce(
-        (total, toolCall) => {
-          const stats = getToolDiffStats(toolCall);
-          if (stats) {
-            total.additions += stats.additions;
-            total.deletions += stats.deletions;
-          }
-          return total;
-        },
-        { additions: 0, deletions: 0 },
-      ),
-    };
-    toolActivityRef.current = next;
-    return next;
-  }, [messages]);
-
-  const lastAssistantSnippet = useMemo(() => {
-    const last = getLastAssistantMessage(messages);
-    const content = last?.content?.trim() ?? "";
-    return content.length > 180 ? `${content.slice(0, 177)}...` : content;
-  }, [messages]);
-
-  // Publish narrow semantics without forcing parent message subscription.
-  useEffect(() => {
-    onStreamSemantics?.({
-      sessionId,
-      isStreaming,
-      isThinking,
-      title,
-      tokenCount,
-      lastAssistantSnippet,
-      awaitingApprovalCalls: toolActivity.awaitingApprovalCalls,
-      activeToolCall: toolActivity.activeToolCall,
-      activityDiff: toolActivity.activityDiff,
-    });
-  }, [
-    isStreaming,
-    isThinking,
-    lastAssistantSnippet,
-    onStreamSemantics,
-    sessionId,
-    title,
-    tokenCount,
-    toolActivity,
-  ]);
-
   const showTranscriptError = Boolean(error) && showErrorBanner;
 
   return (

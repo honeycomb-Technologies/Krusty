@@ -7,6 +7,10 @@ import {
   type LiveActivitySemanticState,
 } from './presentationCadence';
 import { useConnection } from './useConnection';
+import {
+  beginKrustyPerformanceSpan,
+  trackKrustyPerformanceResource,
+} from '@krusty/state';
 
 // Native-only imports — loaded dynamically to avoid crash on web
 let addUserInteractionListener: any = () => ({ remove: () => {} });
@@ -192,6 +196,13 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     pendingUpdateUrgentRef.current = false;
     updateInFlightRef.current = true;
     lastUpdateStartedAtRef.current = Date.now();
+    const finishUpdateSpan = beginKrustyPerformanceSpan(
+      'live_activity.update',
+      sessionIdRef.current ?? undefined,
+    );
+    const releaseUpdateResource = trackKrustyPerformanceResource(
+      'live_activity_updates',
+    );
 
     void activity.update(content).then(() => {
       const pushToken = pushTokenRef.current;
@@ -204,6 +215,8 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
         );
       }
     }).catch(() => {}).finally(() => {
+      finishUpdateSpan();
+      releaseUpdateResource();
       updateInFlightRef.current = false;
       if (pendingUpdateRef.current && activityRef.current) {
         schedulePendingUpdate(pendingUpdateUrgentRef.current);

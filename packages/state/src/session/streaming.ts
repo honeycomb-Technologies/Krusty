@@ -10,6 +10,7 @@ import {
 } from "./constants";
 import type { createPlanStore } from "../plan";
 import type { createSessionsStore } from "../sessions";
+import { beginKrustyPerformanceSpan } from "../performance";
 import {
 	applyDelegatedProgress,
 	createDelegatedArtifactState,
@@ -46,6 +47,8 @@ interface StreamCallbackDependencies {
 		getState: () => SessionStoreState,
 		mode: SessionMode,
 	) => Promise<void>;
+	isActive?: () => boolean;
+	onFirstEvent?: () => void;
 }
 
 function appendBounded(existing: string, delta: string, max: number): string {
@@ -122,7 +125,13 @@ export function createStreamCallbacks(
 	ref: AssistantMessageRef,
 	set: SessionStateSetter,
 	get: () => SessionStoreState,
-	{ planStore, sessionsStore, persistSessionMode }: StreamCallbackDependencies,
+	{
+		planStore,
+		sessionsStore,
+		persistSessionMode,
+		isActive = () => true,
+		onFirstEvent,
+	}: StreamCallbackDependencies,
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
 	let compactedInPlace = false;
@@ -131,6 +140,15 @@ export function createStreamCallbacks(
 	let pendingThinkingDelta = "";
 	const pendingToolOutputDeltas = new Map<string, string>();
 	let streamFlushScheduled = false;
+	let firstEventPending = true;
+	const finishFirstEventSpan = beginKrustyPerformanceSpan("stream.first_event");
+
+	function noteFirstEvent() {
+		if (!firstEventPending) return;
+		firstEventPending = false;
+		finishFirstEventSpan();
+		onFirstEvent?.();
+	}
 
 	function updateLastAssistantMessage(
 		updater?: (state: SessionStoreState) => Partial<SessionStoreState>,
@@ -144,6 +162,13 @@ export function createStreamCallbacks(
 	}
 
 	function flushPendingDeltas() {
+		if (!isActive()) {
+			pendingTextDelta = "";
+			pendingThinkingDelta = "";
+			pendingToolOutputDeltas.clear();
+			return;
+		}
+		const finishFlushSpan = beginKrustyPerformanceSpan("stream.flush");
 		let changed = false;
 		let flushedText = false;
 		let flushedThinking = false;
@@ -221,7 +246,10 @@ export function createStreamCallbacks(
 			changed = changed || toolCallsChanged;
 		}
 
-		if (!changed) return;
+		if (!changed) {
+			finishFlushSpan();
+			return;
+		}
 		updateLastAssistantMessage(() => ({
 			...(flushedText
 				? { isLoading: false, isThinking: false }
@@ -233,6 +261,7 @@ export function createStreamCallbacks(
 					}
 				: {}),
 		}));
+		finishFlushSpan();
 	}
 
 	function scheduleStreamFlush() {
@@ -247,6 +276,12 @@ export function createStreamCallbacks(
 			: (callback) => setTimeout(() => callback(Date.now()), 16);
 		schedule(() => {
 			streamFlushScheduled = false;
+			if (!isActive()) {
+				pendingTextDelta = "";
+				pendingThinkingDelta = "";
+				pendingToolOutputDeltas.clear();
+				return;
+			}
 			flushPendingDeltas();
 		});
 	}
@@ -266,6 +301,7 @@ export function createStreamCallbacks(
 
 	return {
 		onTextDelta: (delta) => {
+			noteFirstEvent();
 			if (pendingThinkingDelta || pendingToolOutputDeltas.size > 0) {
 				flushPendingDeltas();
 			}
@@ -274,6 +310,7 @@ export function createStreamCallbacks(
 		},
 
 		onThinkingDelta: (thinking) => {
+			noteFirstEvent();
 			if (pendingTextDelta || pendingToolOutputDeltas.size > 0) {
 				flushPendingDeltas();
 			}
@@ -282,6 +319,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolCallStart: (id, name) => {
+			noteFirstEvent();
 			flushPendingDeltas();
 			if ((ref.current.toolCalls || []).some((toolCall) => toolCall.id === id)) {
 				appendToolRenderPart(ref, id);
@@ -366,6 +404,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolOutputDelta: (id, delta) => {
+			noteFirstEvent();
 			if (pendingTextDelta || pendingThinkingDelta) {
 				flushPendingDeltas();
 			}
