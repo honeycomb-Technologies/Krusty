@@ -591,15 +591,28 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
     return null;
   }
 
-  // Keep the browser pane mounted across toolbox tab switches so previews
-  // do not reload every time Browser is re-selected.
+  // Keep tab metadata warm across toolbox open/close, but freeze live preview
+  // content while hidden so port polling/WebViews do not keep burning.
+  if (!visible) {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.container,
+          { backgroundColor: t.background, borderTopColor: t.border },
+          styles.hiddenSurface,
+          style,
+        ]}
+      />
+    );
+  }
+
   return (
     <View
-      pointerEvents={visible ? 'auto' : 'none'}
+      pointerEvents="auto"
       style={[
         styles.container,
         { backgroundColor: t.background, borderTopColor: t.border },
-        !visible && styles.hiddenSurface,
         style,
       ]}
     >

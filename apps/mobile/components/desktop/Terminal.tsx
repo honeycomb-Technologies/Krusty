@@ -140,15 +140,28 @@ export function Terminal({ visible, style }: TerminalProps) {
     return null;
   }
 
-  // Stay mounted while the toolbox tab is hidden so switching back does not
-  // recreate xterm sessions / websocket connections.
+  // Keep tab metadata warm, but freeze live xterm/websocket processes while
+  // the toolbox is closed to avoid background CPU/memory tax.
+  if (!visible) {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.container,
+          { backgroundColor: t.background, borderTopColor: t.border },
+          styles.hiddenSurface,
+          style,
+        ]}
+      />
+    );
+  }
+
   return (
     <View
-      pointerEvents={visible ? 'auto' : 'none'}
+      pointerEvents="auto"
       style={[
         styles.container,
         { backgroundColor: t.background, borderTopColor: t.border },
-        !visible && styles.hiddenSurface,
         style,
       ]}
     >

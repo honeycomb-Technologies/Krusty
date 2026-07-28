@@ -23,15 +23,36 @@ export interface SessionsStoreState {
   error: string | null;
   loadSessions: () => Promise<void>;
   loadDirectories: () => Promise<void>;
+  /** Local list patch used by optimistic create/bootstrap paths. */
+  upsertSession: (session: SessionListItem) => void;
   createSession: (title?: string, workingDir?: string, targetBranch?: string | null) => Promise<SessionListItem | null>;
   deleteSession: (id: string) => Promise<boolean>;
   selectSession: (id: string) => Promise<void>;
+}
+
+function sessionsListSignature(sessions: SessionListItem[]): string {
+  // Cheap structural fingerprint so soft polls do not replace identical arrays
+  // and re-render every closed drawer / shell consumer.
+  return sessions
+    .map((session) =>
+      [
+        session.id,
+        session.updated_at,
+        session.title ?? '',
+        session.token_count ?? '',
+        session.session_type ?? '',
+        session.project_dir ?? session.working_dir ?? '',
+      ].join('\u001f'),
+    )
+    .join('\u001e');
 }
 
 export function createSessionsStore(
   client: KrustyClient,
   workspace: ReturnType<typeof createWorkspaceStore>,
 ) {
+  let loadSessionsInFlight: Promise<void> | null = null;
+
   return create<SessionsStoreState>((set, get) => ({
     sessions: [],
     directories: [],
@@ -39,6 +60,10 @@ export function createSessionsStore(
     error: null,
 
     async loadSessions() {
+      if (loadSessionsInFlight) {
+        return loadSessionsInFlight;
+      }
+
       // Only show list loading chrome on the first fill. Soft refreshes should
       // not flash/disable the drawer while chat is active.
       set((s) => ({
@@ -47,20 +72,38 @@ export function createSessionsStore(
         error: null,
       }));
 
-      try {
-        const data = await client.getSessions();
-        set((s) => ({
-          ...s,
-          sessions: data as SessionListItem[],
-          isLoading: false,
-        }));
-      } catch (err) {
-        set((s) => ({
-          ...s,
-          isLoading: false,
-          error: err instanceof Error ? err.message : 'Failed to load sessions',
-        }));
-      }
+      loadSessionsInFlight = (async () => {
+        try {
+          const data = (await client.getSessions()) as SessionListItem[];
+          set((s) => {
+            const nextSignature = sessionsListSignature(data);
+            const prevSignature = sessionsListSignature(s.sessions);
+            if (nextSignature === prevSignature) {
+              return {
+                ...s,
+                isLoading: false,
+                error: null,
+              };
+            }
+            return {
+              ...s,
+              sessions: data,
+              isLoading: false,
+              error: null,
+            };
+          });
+        } catch (err) {
+          set((s) => ({
+            ...s,
+            isLoading: false,
+            error: err instanceof Error ? err.message : 'Failed to load sessions',
+          }));
+        } finally {
+          loadSessionsInFlight = null;
+        }
+      })();
+
+      return loadSessionsInFlight;
     },
 
     async loadDirectories() {
@@ -70,6 +113,21 @@ export function createSessionsStore(
       } catch {
         // Silently fail
       }
+    },
+
+    upsertSession(session: SessionListItem) {
+      set((s) => {
+        const existingIndex = s.sessions.findIndex((item) => item.id === session.id);
+        if (existingIndex === -1) {
+          return {
+            ...s,
+            sessions: [session, ...s.sessions],
+          };
+        }
+        const next = s.sessions.slice();
+        next[existingIndex] = { ...next[existingIndex], ...session };
+        return { ...s, sessions: next };
+      });
     },
 
     async createSession(title?: string, workingDir?: string, targetBranch?: string | null) {

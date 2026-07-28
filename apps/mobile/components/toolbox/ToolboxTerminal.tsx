@@ -111,14 +111,18 @@ function NativeTerminal({ visible }: { visible: boolean }) {
       </View>
 
       <View style={styles.terminalArea}>
-        {WebViewComponent
+        {WebViewComponent && visible
           ? tabs.map((tab) => {
-              const isActive = visible && tab.id === activeTab;
+              // Keep only the active tab process warm while toolbox is open.
+              // Fully freeze (unmount) all WebViews when the toolbox is closed.
+              if (tab.id !== activeTab) {
+                return null;
+              }
               return (
                 <View
                   key={tab.id}
-                  pointerEvents={isActive ? 'auto' : 'none'}
-                  style={[styles.webviewHost, !isActive && styles.hiddenSurface]}
+                  pointerEvents="auto"
+                  style={styles.webviewHost}
                 >
                   <WebViewComponent
                     source={{ html: tab.html }}

@@ -226,11 +226,12 @@ function NativeBrowser({ visible }: { visible: boolean }) {
       </View>
 
       <View style={styles.previewArea}>
-        {WebViewComponent
+        {WebViewComponent && visible
           ? tabs
-              .filter((tab) => tab.port !== null)
+              .filter((tab) => tab.port !== null && tab.id === activeTabId)
               .map((tab) => {
-                const isActive = visible && tab.id === activeTabId;
+                // Freeze all browser WebViews when toolbox is closed. Keep only
+                // the active tab process warm while open.
                 const uri = serverUrl
                   ? `${serverUrl.replace(/\/+$/, '')}/api/ports/${tab.port}/proxy`
                   : null;
@@ -240,8 +241,8 @@ function NativeBrowser({ visible }: { visible: boolean }) {
                 return (
                   <View
                     key={tab.id}
-                    pointerEvents={isActive ? 'auto' : 'none'}
-                    style={[styles.webviewHost, !isActive && styles.hiddenSurface]}
+                    pointerEvents="auto"
+                    style={styles.webviewHost}
                   >
                     <WebViewComponent
                       source={{

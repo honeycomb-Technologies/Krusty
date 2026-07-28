@@ -25,8 +25,6 @@ import {
   useWorkspaceStore,
 } from "../../hooks/useStores";
 import { useShallow } from "zustand/react/shallow";
-import { ChatTranscript } from "../../components/chat/ChatTranscript";
-import { KrustyLogo } from "../../components/ui/KrustyLogo";
 import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
 import {
   ChatBar,
@@ -73,7 +71,6 @@ import {
   SELECTED_MODEL_KEY,
   flattenToolCalls,
   getActiveToolCall,
-  getLastAssistantMessage,
   normalizeProviderId,
   sessionTypeForTab,
   tabForSessionType,
@@ -85,9 +82,12 @@ import {
   styles,
 } from "./chat-screen/styles";
 import { useSessionActions } from "./chat-screen/useSessionActions";
+import { ActiveConversationSurface } from "./chat-screen/ActiveConversationSurface";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type MobileSheet = "threads" | "toolbox" | null;
+
+const EMPTY_MESSAGES: never[] = [];
 
 export default function ChatScreen() {
   const {
@@ -150,16 +150,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  // Subscribe once per active mode. Streaming text still re-renders this shell
-  // when messages change (needed for tool approvals / live activity), but we
-  // avoid 14 independent store subscriptions re-firing the whole screen.
+  // Shell chrome only. Live transcript messages stay in ActiveConversationSurface
+  // so stream tokens do not re-render the whole product shell.
   const sessionView = useSessionStore(
     useShallow((state) => ({
       sessionId: state.sessionId,
       title: state.title,
-      messages: state.messages,
       isStreaming: state.isStreaming,
-      isThinking: state.isThinking,
       model: state.model,
       modelKey: state.modelKey,
       thinkingLevel: state.thinkingLevel,
@@ -168,15 +165,26 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       mode: state.mode,
       tokenCount: state.tokenCount,
       error: state.error,
-      isLoading: state.isLoading,
     })),
+    activeMode,
+  );
+  // Mako surfaces still need messages; isolate that subscription so chat/code
+  // shell chrome does not pay for every stream delta.
+  const makoMessages = useSessionStore(
+    (state) => (activeMode === "mako" ? state.messages : EMPTY_MESSAGES),
+    activeMode,
+  );
+  const makoThinking = useSessionStore(
+    (state) => (activeMode === "mako" ? state.isThinking : false),
+    activeMode,
+  );
+  const makoLoading = useSessionStore(
+    (state) => (activeMode === "mako" ? state.isLoading : false),
     activeMode,
   );
   const sessionId = sessionView.sessionId ?? null;
   const sessionTitle = sessionView.title ?? null;
-  const messages = sessionView.messages ?? [];
   const isStreaming = sessionView.isStreaming ?? false;
-  const isThinking = sessionView.isThinking ?? false;
   const model = sessionView.model ?? null;
   const modelKey = sessionView.modelKey ?? null;
   const thinkingLevel = sessionView.thinkingLevel ?? "medium";
@@ -185,7 +193,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const mode = sessionView.mode ?? "build";
   const tokenCount = sessionView.tokenCount ?? 0;
   const error = sessionView.error ?? null;
-  const isLoading = sessionView.isLoading ?? false;
   const workspaceDirectory =
     useWorkspaceStore((state) => state.directory, activeMode) ?? null;
   const workspaceTargetBranch =
@@ -278,59 +285,52 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     code: null,
     mako: null,
   });
-  const lastAssistantMessage = useMemo(
-    () => getLastAssistantMessage(messages),
-    [messages],
+  // Semantic stream summary published by ActiveConversationSurface / mako path.
+  // This avoids shell-level messages subscription while preserving Live Activity.
+  const [streamSemantics, setStreamSemantics] = useState({
+    sessionId: null as string | null,
+    isStreaming: false,
+    isThinking: false,
+    title: null as string | null,
+    tokenCount: 0,
+    lastAssistantSnippet: "",
+    awaitingApprovalCalls: [] as ReturnType<typeof flattenToolCalls>,
+    activeToolCall: null as ReturnType<typeof getActiveToolCall>,
+    activityDiff: { additions: 0, deletions: 0 },
+  });
+  const handleStreamSemantics = useCallback(
+    (next: typeof streamSemantics) => {
+      setStreamSemantics((prev) => {
+        if (
+          prev.sessionId === next.sessionId &&
+          prev.isStreaming === next.isStreaming &&
+          prev.isThinking === next.isThinking &&
+          prev.title === next.title &&
+          prev.tokenCount === next.tokenCount &&
+          prev.lastAssistantSnippet === next.lastAssistantSnippet &&
+          prev.awaitingApprovalCalls === next.awaitingApprovalCalls &&
+          prev.activeToolCall === next.activeToolCall &&
+          prev.activityDiff.additions === next.activityDiff.additions &&
+          prev.activityDiff.deletions === next.activityDiff.deletions
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    },
+    [],
   );
-  const toolActivity = useMemo(() => {
-    const toolCalls = flattenToolCalls(messages);
-    const previous = toolActivityRef.current;
-    const signature = toolCalls
-      .map((toolCall) =>
-        [
-          toolCall.id,
-          toolCall.status,
-          toolCall.output?.length ?? 0,
-          toolCall.delegated?.thinking?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|");
-    if (previous && previous.signature === signature) {
-      return previous;
-    }
-
-    const next = {
-      signature,
-      toolCalls,
-      awaitingApprovalCalls: toolCalls.filter(
-        (toolCall) => toolCall.status === "awaiting_approval",
-      ),
-      activeToolCall: getActiveToolCall(toolCalls),
-      activityDiff: toolCalls.reduce(
-        (total, toolCall) => {
-          const stats = getToolDiffStats(toolCall);
-          if (stats) {
-            total.additions += stats.additions;
-            total.deletions += stats.deletions;
-          }
-          return total;
-        },
-        { additions: 0, deletions: 0 },
-      ),
-    };
-    toolActivityRef.current = next;
-    return next;
-  }, [messages]);
-  const {
-    toolCalls,
-    awaitingApprovalCalls,
-    activeToolCall,
-    activityDiff,
-  } = toolActivity;
-
-  const lastAssistantSnippet =
-    lastAssistantMessage?.content?.slice(0, 200) ?? "";
-  const showTranscriptError = Boolean(error && messages.length > 0);
+  const awaitingApprovalCalls = streamSemantics.awaitingApprovalCalls;
+  const activeToolCall = streamSemantics.activeToolCall;
+  const activityDiff = streamSemantics.activityDiff;
+  const lastAssistantSnippet = streamSemantics.lastAssistantSnippet;
+  const toolCalls = useMemo(
+    () =>
+      activeMode === "mako"
+        ? flattenToolCalls(makoMessages as never[])
+        : [],
+    [activeMode, makoMessages],
+  );
 
   const handleToolApprovalAction = useCallback(
     async (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -532,10 +532,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
 
     void sessionsStore.getState().loadSessions();
-    for (const type of ["chat", "code", "mako"] as const) {
-      void ensureModelReady(stores.modes[type].session);
-    }
-  }, [client, ensureModelReady, isConnected, sessionsStore, stores.modes]);
+    // Warm only the active mode model path on connect. Background modes can
+    // resolve models when first focused / first used.
+    void ensureModelReady(stores.modes[activeMode].session);
+  }, [activeMode, client, ensureModelReady, isConnected, sessionsStore, stores.modes]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -684,7 +684,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       updateActivity({
         chatTitle: sessionTitle || "Chat",
         status: awaitingApproval ? "needs_input" : "working",
-        toolCount: toolCalls.length,
+        toolCount: awaitingApprovalCalls.length + (activeToolCall ? 1 : 0),
         filesAdded: activityDiff.additions,
         filesRemoved: activityDiff.deletions,
         toolApprovalId: awaitingApproval?.id,
@@ -737,7 +737,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionTitle,
     startActivity,
     tokenCount,
-    toolCalls.length,
+    awaitingApprovalCalls.length + (activeToolCall ? 1 : 0),
     updateActivity,
   ]);
 
@@ -1081,70 +1081,27 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // One transcript tree only. Keeping three absolute FlatLists mounted for
   // "warm modes" crashed native on mode switch (especially leaving chat).
   // Session switches still avoid remount via no key + scroll restore.
+  // Messages subscription is isolated inside ActiveConversationSurface.
   const chatTranscriptSurface = (
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <ChatTranscript
-          messages={messages}
-          sessionId={sessionId}
+        <ActiveConversationSurface
+          activeMode={activeMode}
           sessionType={activeMode === "code" ? "code" : "chat"}
-          scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
-          isStreaming={isStreaming}
-          isThinking={isThinking}
-          isLoading={isLoading}
           activeToolCallId={activeToolCallId}
+          bottomPadding={composerReserveHeight}
+          hideJumpToLatest={bottomControlsOpen}
+          errorBannerHeight={errorBannerHeight}
+          onErrorBannerHeightChange={(nextHeight) => {
+            setErrorBannerHeight((current) =>
+              current === nextHeight ? current : nextHeight,
+            );
+          }}
           onApproveTool={handleApproveTranscriptTool}
           onDenyTool={handleDenyTranscriptTool}
           onSubmitToolResult={handleSubmitTranscriptTool}
           onPlanConfirm={handleTranscriptPlanConfirm}
-          emptyState={
-            <View style={styles.empty}>
-              <KrustyLogo />
-              {error ? (
-                <Text style={[styles.emptyHint, { color: t.error }]}>
-                  {error}
-                </Text>
-              ) : null}
-            </View>
-          }
-          bottomPadding={
-            composerReserveHeight
-            + (showTranscriptError ? errorBannerHeight + 10 : 0)
-          }
-          hideJumpToLatest={bottomControlsOpen}
+          onStreamSemantics={handleStreamSemantics}
         />
-
-        {showTranscriptError ? (
-          <View
-            accessibilityRole="alert"
-            accessibilityLiveRegion="polite"
-            onLayout={(event) => {
-              const nextHeight = Math.ceil(event.nativeEvent.layout.height);
-              setErrorBannerHeight((current) =>
-                current === nextHeight ? current : nextHeight,
-              );
-            }}
-            style={[
-              styles.errorBanner,
-              {
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: composerReserveHeight + 10,
-                marginBottom: 0,
-                zIndex: 30,
-                borderColor: `${t.error}40`,
-                backgroundColor: `${t.error}14`,
-              },
-            ]}
-          >
-            <Text
-              selectable
-              style={[styles.errorBannerText, { color: t.error }]}
-            >
-              {error}
-            </Text>
-          </View>
-        ) : null}
       </Animated.View>
   );
 
@@ -1287,11 +1244,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const makoChat: MakoChatContext = {
     sessionId,
     title: sessionTitle,
-    messages,
+    messages: makoMessages as never[],
     error,
-    isLoading,
+    isLoading: makoLoading,
     isStreaming,
-    isThinking,
+    isThinking: makoThinking,
     activeToolCallId,
     thinkingLevel: thinkingLevel as ThinkingLevel,
     permissionMode: permissionMode as PermissionMode,

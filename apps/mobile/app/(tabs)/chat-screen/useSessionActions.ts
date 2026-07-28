@@ -95,6 +95,7 @@ export function useSessionActions({
       const workspaceMode = (session.workspace_mode ??
         getWorkspaceMode(directory)) as WorkspaceMode;
 
+      // Bind durable identity immediately so the empty shell is interactive.
       target.session
         .getState()
         .initSession(
@@ -116,6 +117,8 @@ export function useSessionActions({
         const modelInfo = currentModelInfo
           ?? models.find((candidate) => candidate.id === currentModel)
           ?? null;
+        // Keep create path local-first; setModel may persist, but we already
+        // have a usable model for the empty composer.
         target.session
           .getState()
           .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);
@@ -124,7 +127,21 @@ export function useSessionActions({
         target.session.getState().setThinkingLevel(currentThinkingLevel);
       }
 
-      await sessionsStore.getState().loadSessions();
+      // Optimistic list patch + soft refresh. Never block New Chat on GET /sessions.
+      sessionsStore.getState().upsertSession({
+        id: session.id,
+        title: session.title || "",
+        updated_at: session.updated_at,
+        token_count: session.token_count ?? null,
+        parent_session_id: session.parent_session_id ?? null,
+        working_dir: session.working_dir ?? null,
+        project_dir: session.project_dir ?? null,
+        workspace_mode: session.workspace_mode,
+        session_type: session.session_type,
+        target_branch: session.target_branch ?? null,
+        permission_mode: session.permission_mode,
+      });
+      void sessionsStore.getState().loadSessions();
     },
     [modeStores, models, sessionsStore],
   );
@@ -141,12 +158,36 @@ export function useSessionActions({
 
       const targetType = requestedType ?? sessionTypeForTab(activeTab);
       const targetStore = modeStores[targetType].session;
+
+      // Instant local shell: close chrome and clear previous session without
+      // waiting on network. Composer becomes empty/interactive immediately.
+      setDrawerOpen(false);
+      setActiveTab(tabForSessionType(targetType));
+      setActiveToolCallId(null);
       if (targetStore.getState().sessionId) {
         targetStore.getState().detachSession();
       }
+      // Clear to a blank local draft shell before durable id arrives.
+      targetStore.setState({
+        sessionId: null,
+        title: "",
+        messages: [],
+        isLoading: true,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        error: null,
+        tokenCount: 0,
+        queuedMessages: [],
+      } as never);
 
       try {
-        await ensureModelReady(targetStore);
+        // Only hard-wait for a model when none is already usable.
+        if (!targetStore.getState().model) {
+          await ensureModelReady(targetStore);
+        } else {
+          void ensureModelReady(targetStore);
+        }
         const session = await client.createSession(
           undefined,
           directory,
@@ -157,14 +198,15 @@ export function useSessionActions({
         );
         await bootstrapSession(session);
         lastSessionIdByTypeRef.current[session.session_type] = session.id;
-        setActiveTab(tabForSessionType(session.session_type));
-        setActiveToolCallId(null);
-        setDrawerOpen(false);
         void Haptics.notificationAsync(
           Haptics.NotificationFeedbackType.Success,
         );
         return session;
       } catch {
+        targetStore.setState({
+          isLoading: false,
+          error: "Failed to create session",
+        } as never);
         return null;
       }
     },
