@@ -229,6 +229,8 @@ export function ToolboxPanel({
       </View>
     );
   } else if (sessionType === "code") {
+    // Keep browser/terminal mounted while the toolbox is open so tab switches
+    // only hide them. Destroying WebViews on every switch looked like a reopen.
     body = (
       <View style={styles.body}>
         <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
@@ -284,6 +286,8 @@ export function ToolboxPanel({
       footer={drawerDock}
       accessibilityLabel={`${sessionType} toolbox`}
       testID="mobile-toolbox-sheet"
+      // Code toolbox hosts browser/terminal: mount once, then keep warm.
+      retainContent={sessionType === 'code'}
     >
       {content}
     </AppBottomSheet>

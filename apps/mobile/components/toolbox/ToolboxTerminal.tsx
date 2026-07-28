@@ -33,23 +33,43 @@ export function ToolboxTerminal({ visible }: ToolboxTerminalProps) {
 interface NativeTerminalTab {
   id: string;
   label: string;
+  html: string;
 }
+
+// Survive toolbox sheet unmount so reopening Terminal keeps existing sessions.
+const terminalSession: {
+  tabs: NativeTerminalTab[];
+  activeTab: string | null;
+} = {
+  tabs: [],
+  activeTab: null,
+};
 
 function NativeTerminal({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
   const { serverUrl, serverToken } = useConnection();
   const t = theme.colors;
 
-  const [tabs, setTabs] = useState<NativeTerminalTab[]>([]);
-  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<NativeTerminalTab[]>(terminalSession.tabs);
+  const [activeTab, setActiveTab] = useState<string | null>(terminalSession.activeTab);
+
+  useEffect(() => {
+    terminalSession.tabs = tabs;
+    terminalSession.activeTab = activeTab;
+  }, [activeTab, tabs]);
 
   const createTab = useCallback(() => {
     if (!serverUrl) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const id = createTerminalId();
-    setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}` }]);
+    const html = getTerminalHtml(buildTerminalWebSocketUrl(serverUrl, serverToken), {
+      background: t.background,
+      foreground: t.foreground,
+      cursor: t.userMessage,
+    });
+    setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}`, html }]);
     setActiveTab(id);
-  }, [serverUrl]);
+  }, [serverToken, serverUrl, t.background, t.foreground, t.userMessage]);
 
   const closeTab = useCallback((id: string) => {
     setTabs(prev => {
@@ -64,18 +84,6 @@ function NativeTerminal({ visible }: { visible: boolean }) {
       createTab();
     }
   }, [visible, createTab, serverUrl, tabs.length]);
-
-  const wsUrl = serverUrl && activeTab
-    ? buildTerminalWebSocketUrl(serverUrl, serverToken)
-    : '';
-
-  const html = activeTab
-    ? getTerminalHtml(wsUrl, {
-        background: t.background,
-        foreground: t.foreground,
-        cursor: t.userMessage,
-      })
-    : '';
 
   return (
     <View style={[styles.container, { backgroundColor: t.background }]}>
@@ -103,16 +111,28 @@ function NativeTerminal({ visible }: { visible: boolean }) {
       </View>
 
       <View style={styles.terminalArea}>
-        {activeTab && visible && WebViewComponent ? (
-          <WebViewComponent
-            key={activeTab}
-            source={{ html }}
-            style={{ flex: 1, backgroundColor: t.background }}
-            originWhitelist={['*']}
-            javaScriptEnabled
-            domStorageEnabled
-          />
-        ) : (
+        {WebViewComponent
+          ? tabs.map((tab) => {
+              const isActive = visible && tab.id === activeTab;
+              return (
+                <View
+                  key={tab.id}
+                  pointerEvents={isActive ? 'auto' : 'none'}
+                  style={[styles.webviewHost, !isActive && styles.hiddenSurface]}
+                >
+                  <WebViewComponent
+                    source={{ html: tab.html }}
+                    style={{ flex: 1, backgroundColor: t.background }}
+                    originWhitelist={['*']}
+                    javaScriptEnabled
+                    domStorageEnabled
+                  />
+                </View>
+              );
+            })
+          : null}
+
+        {!activeTab || !visible || !WebViewComponent ? (
           <View style={styles.empty}>
             <TerminalSquare size={32} color={t.mutedForeground} strokeWidth={1.5} />
             <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
@@ -125,7 +145,7 @@ function NativeTerminal({ visible }: { visible: boolean }) {
                     : 'No terminal open'}
             </Text>
           </View>
-        )}
+        ) : null}
       </View>
     </View>
   );
@@ -161,6 +181,12 @@ const styles = StyleSheet.create({
   },
   terminalArea: {
     flex: 1,
+  },
+  webviewHost: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  hiddenSurface: {
+    opacity: 0,
   },
   empty: {
     flex: 1,

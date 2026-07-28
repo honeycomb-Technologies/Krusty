@@ -587,12 +587,22 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
     updateTabNavigation,
   ]);
 
-  if (!isWeb || !visible) {
+  if (!isWeb) {
     return null;
   }
 
+  // Keep the browser pane mounted across toolbox tab switches so previews
+  // do not reload every time Browser is re-selected.
   return (
-    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
+    <View
+      pointerEvents={visible ? 'auto' : 'none'}
+      style={[
+        styles.container,
+        { backgroundColor: t.background, borderTopColor: t.border },
+        !visible && styles.hiddenSurface,
+        style,
+      ]}
+    >
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
         {previewTabs.map((tab) => {
           const active = activeTabId === tab.id;
@@ -890,6 +900,9 @@ const styles = StyleSheet.create({
   container: {
     height: 380,
     borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  hiddenSurface: {
+    opacity: 0,
   },
   tabBar: {
     flexDirection: "row",

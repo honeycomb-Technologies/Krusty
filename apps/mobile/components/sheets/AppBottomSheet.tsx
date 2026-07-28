@@ -27,8 +27,14 @@ import * as Haptics from "../../platform/haptics";
 import { resolveAppBottomSheetHeight } from "./sheetMetrics";
 
 const SPRING = { damping: 24, stiffness: 300, mass: 0.82 };
-const CLOSE_DISTANCE = 56;
-const CLOSE_VELOCITY = 650;
+/** Absolute drag distance that commits a dismiss. */
+const CLOSE_DISTANCE = 88;
+/** Fast fling that commits even before the distance threshold. */
+const CLOSE_VELOCITY = 900;
+/** Fraction of sheet height that also commits a dismiss. */
+const CLOSE_FRACTION = 0.18;
+/** Keep the sheet mounted briefly so the close animation can finish. */
+const CLOSE_UNMOUNT_MS = 260;
 
 interface AppBottomSheetProps {
   visible: boolean;
@@ -38,6 +44,11 @@ interface AppBottomSheetProps {
   accessibilityLabel: string;
   contentStyle?: StyleProp<ViewStyle>;
   testID?: string;
+  /**
+   * When true, the sheet chrome can hide while children stay mounted after the
+   * first open. Use for expensive interactive surfaces (browser/terminal).
+   */
+  retainContent?: boolean;
 }
 
 export function AppBottomSheet({
@@ -48,6 +59,7 @@ export function AppBottomSheet({
   accessibilityLabel,
   contentStyle,
   testID,
+  retainContent = false,
 }: AppBottomSheetProps) {
   const { theme } = useThemeContext();
   const { height: windowHeight } = useWindowDimensions();
@@ -55,27 +67,65 @@ export function AppBottomSheet({
   const [mounted, setMounted] = useState(visible);
   const progress = useSharedValue(visible ? 1 : 0);
   const dragOffset = useSharedValue(0);
+  const isClosing = useSharedValue(0);
   const sheetHeight = resolveAppBottomSheetHeight(windowHeight, insets.top);
   const t = theme.colors;
+
+  const finishClose = useCallback(() => {
+    // Normalize to the closed resting pose. For retained content this keeps the
+    // host mounted off-screen without snapping back open after a drag dismiss.
+    progress.value = 0;
+    dragOffset.value = 0;
+    isClosing.value = 0;
+    if (!retainContent) {
+      setMounted(false);
+    }
+  }, [dragOffset, isClosing, progress, retainContent]);
+
+  const animateClosed = useCallback(() => {
+    isClosing.value = 1;
+    progress.value = withTiming(
+      0,
+      {
+        duration: 210,
+        easing: Easing.out(Easing.cubic),
+      },
+      (finished) => {
+        if (finished) {
+          runOnJS(finishClose)();
+        }
+      },
+    );
+  }, [finishClose, isClosing, progress]);
 
   useEffect(() => {
     if (visible) {
       setMounted(true);
+      isClosing.value = 0;
       dragOffset.value = 0;
       progress.value = withSpring(1, SPRING);
       return;
     }
 
-    progress.value = withTiming(0, {
-      duration: 210,
-      easing: Easing.out(Easing.cubic),
-    });
+    // If a gesture already drove the sheet off-screen, just unmount.
+    if (isClosing.value === 1) {
+      const timer = setTimeout(() => {
+        if (!visible) {
+          finishClose();
+        }
+      }, CLOSE_UNMOUNT_MS);
+      return () => clearTimeout(timer);
+    }
+
+    // Programmatic close (backdrop / button): animate progress only.
+    animateClosed();
     const timer = setTimeout(() => {
-      dragOffset.value = 0;
-      setMounted(false);
-    }, 230);
+      if (!visible) {
+        finishClose();
+      }
+    }, CLOSE_UNMOUNT_MS);
     return () => clearTimeout(timer);
-  }, [dragOffset, progress, visible]);
+  }, [animateClosed, dragOffset, finishClose, isClosing, progress, visible]);
 
   const close = useCallback(() => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -109,6 +159,7 @@ export function AppBottomSheet({
 
   const panelStyle = useAnimatedStyle(() => {
     const downwardDrag = Math.max(0, Math.min(dragOffset.value, sheetHeight));
+    // progress owns open/close; dragOffset only tracks the live finger offset.
     const translateY =
       interpolate(progress.value, [0, 1], [sheetHeight, 0]) + downwardDrag;
     return {
@@ -127,18 +178,44 @@ export function AppBottomSheet({
   const dragGesture = Gesture.Pan()
     .activeOffsetY([-10, 10])
     .failOffsetX([-24, 24])
+    .onBegin(() => {
+      // A new gesture cancels any stale close-in-progress flag.
+      isClosing.value = 0;
+    })
     .onUpdate((event) => {
       dragOffset.value = Math.max(0, event.translationY);
     })
     .onEnd((event) => {
-      if (
+      const shouldClose =
         event.translationY > CLOSE_DISTANCE ||
-        event.velocityY > CLOSE_VELOCITY
-      ) {
-        runOnJS(close)();
+        event.translationY > sheetHeight * CLOSE_FRACTION ||
+        event.velocityY > CLOSE_VELOCITY;
+
+      if (shouldClose) {
+        // Finish from the current finger position. Keep progress at 1 and only
+        // animate dragOffset so we do not double-count the sheet height.
+        isClosing.value = 1;
+        const remaining = Math.max(0, sheetHeight - dragOffset.value);
+        const projected = Math.min(
+          280,
+          Math.max(140, remaining / Math.max(event.velocityY / 1000, 1.2)),
+        );
+        dragOffset.value = withTiming(
+          sheetHeight,
+          {
+            duration: projected,
+            easing: Easing.out(Easing.cubic),
+          },
+          (finished) => {
+            if (finished) {
+              runOnJS(close)();
+            }
+          },
+        );
         return;
       }
       dragOffset.value = withSpring(0, SPRING);
+      isClosing.value = 0;
     });
 
   if (!mounted) {
@@ -148,7 +225,10 @@ export function AppBottomSheet({
   const isDark = theme.scheme === "dark";
 
   return (
-    <View style={styles.root} pointerEvents="box-none">
+    <View
+      style={styles.root}
+      pointerEvents={visible ? 'box-none' : retainContent ? 'none' : 'box-none'}
+    >
       <Animated.View style={[styles.backdrop, backdropStyle]}>
         <Pressable
           accessibilityRole="button"

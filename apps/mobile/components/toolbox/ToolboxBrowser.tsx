@@ -23,6 +23,21 @@ interface PreviewTab {
   label: string;
 }
 
+// Survive toolbox sheet unmount so reopening Browser does not look like a fresh launch.
+const browserSession: {
+  ports: PortEntry[];
+  settings: PreviewSettings | null;
+  tabs: PreviewTab[];
+  activeTabId: string | null;
+  error: string | null;
+} = {
+  ports: [],
+  settings: null,
+  tabs: [],
+  activeTabId: null,
+  error: null,
+};
+
 interface ToolboxBrowserProps {
   visible: boolean;
 }
@@ -40,15 +55,24 @@ function NativeBrowser({ visible }: { visible: boolean }) {
   const { client, serverUrl, serverToken } = useConnection();
   const t = theme.colors;
 
-  const [ports, setPorts] = useState<PortEntry[]>([]);
-  const [settings, setSettings] = useState<PreviewSettings | null>(null);
-  const [tabs, setTabs] = useState<PreviewTab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [ports, setPorts] = useState<PortEntry[]>(browserSession.ports);
+  const [settings, setSettings] = useState<PreviewSettings | null>(browserSession.settings);
+  const [tabs, setTabs] = useState<PreviewTab[]>(browserSession.tabs);
+  const [activeTabId, setActiveTabId] = useState<string | null>(browserSession.activeTabId);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(browserSession.error);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+
+  useEffect(() => {
+    browserSession.ports = ports;
+    browserSession.settings = settings;
+    browserSession.tabs = tabs;
+    browserSession.activeTabId = activeTabId;
+    browserSession.error = error;
+  }, [activeTabId, error, ports, settings, tabs]);
+
 
   const previewUrl = useMemo(() => {
     if (!serverUrl || activeTab?.port === null || activeTab?.port === undefined) {
@@ -202,19 +226,41 @@ function NativeBrowser({ visible }: { visible: boolean }) {
       </View>
 
       <View style={styles.previewArea}>
-        {previewUrl && visible && WebViewComponent ? (
-          <WebViewComponent
-            key={activeTab?.id}
-            source={{
-              uri: previewUrl,
-              headers: serverToken ? { Authorization: `Bearer ${serverToken}` } : undefined,
-            }}
-            style={{ flex: 1 }}
-            originWhitelist={['*']}
-            javaScriptEnabled
-            domStorageEnabled
-          />
-        ) : (
+        {WebViewComponent
+          ? tabs
+              .filter((tab) => tab.port !== null)
+              .map((tab) => {
+                const isActive = visible && tab.id === activeTabId;
+                const uri = serverUrl
+                  ? `${serverUrl.replace(/\/+$/, '')}/api/ports/${tab.port}/proxy`
+                  : null;
+                if (!uri) {
+                  return null;
+                }
+                return (
+                  <View
+                    key={tab.id}
+                    pointerEvents={isActive ? 'auto' : 'none'}
+                    style={[styles.webviewHost, !isActive && styles.hiddenSurface]}
+                  >
+                    <WebViewComponent
+                      source={{
+                        uri,
+                        headers: serverToken
+                          ? { Authorization: `Bearer ${serverToken}` }
+                          : undefined,
+                      }}
+                      style={{ flex: 1 }}
+                      originWhitelist={['*']}
+                      javaScriptEnabled
+                      domStorageEnabled
+                    />
+                  </View>
+                );
+              })
+          : null}
+
+        {!previewUrl || !WebViewComponent ? (
           <View style={styles.quickPage}>
             {loading ? (
               <>
@@ -250,7 +296,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
               </Text>
             )}
           </View>
-        )}
+        ) : null}
       </View>
     </View>
   );
@@ -291,6 +337,12 @@ const styles = StyleSheet.create({
   },
   previewArea: {
     flex: 1,
+  },
+  webviewHost: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  hiddenSurface: {
+    opacity: 0,
   },
   quickPage: {
     flex: 1,

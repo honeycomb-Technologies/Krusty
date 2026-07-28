@@ -127,6 +127,7 @@ export function SessionDrawer({
 
   const pickerProgress = useSharedValue(0);
   const [pickerVisible, setPickerVisible] = useState(false);
+  const pickerHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickerPath, setPickerPath] = useState("");
   const [pickerParent, setPickerParent] = useState<string | null>(null);
   const [pickerDirs, setPickerDirs] = useState<DirEntry[]>([]);
@@ -235,9 +236,23 @@ export function SessionDrawer({
 
   useEffect(() => {
     if (!isOpen) {
+      if (pickerHideTimerRef.current) {
+        clearTimeout(pickerHideTimerRef.current);
+        pickerHideTimerRef.current = null;
+      }
       pickerProgress.value = withTiming(0, { duration: 150 });
-      const timer = setTimeout(() => setPickerVisible(false), 160);
-      return () => clearTimeout(timer);
+      // Fully dismiss the directory slide when threads close so it cannot
+      // reappear half-open on the next threads open.
+      pickerHideTimerRef.current = setTimeout(() => {
+        setPickerVisible(false);
+        pickerHideTimerRef.current = null;
+      }, 160);
+      return () => {
+        if (pickerHideTimerRef.current) {
+          clearTimeout(pickerHideTimerRef.current);
+          pickerHideTimerRef.current = null;
+        }
+      };
     }
   }, [isOpen, pickerProgress]);
 
@@ -274,6 +289,10 @@ export function SessionDrawer({
   );
 
   const showPicker = useCallback(() => {
+    if (pickerHideTimerRef.current) {
+      clearTimeout(pickerHideTimerRef.current);
+      pickerHideTimerRef.current = null;
+    }
     setPickerVisible(true);
     pickerProgress.value = withSpring(1, {
       damping: 20,
@@ -284,11 +303,18 @@ export function SessionDrawer({
   }, [loadPickerRoot, pickerProgress]);
 
   const hidePicker = useCallback(() => {
+    if (pickerHideTimerRef.current) {
+      clearTimeout(pickerHideTimerRef.current);
+      pickerHideTimerRef.current = null;
+    }
     pickerProgress.value = withTiming(0, {
       duration: 200,
       easing: Easing.out(Easing.cubic),
     });
-    setTimeout(() => setPickerVisible(false), 210);
+    pickerHideTimerRef.current = setTimeout(() => {
+      setPickerVisible(false);
+      pickerHideTimerRef.current = null;
+    }, 210);
   }, [pickerProgress]);
 
   const pickerStyle = useAnimatedStyle(() => ({
@@ -515,6 +541,8 @@ export function SessionDrawer({
       footer={footer}
       accessibilityLabel={modeTitle(activeMode)}
       testID="mobile-threads-sheet"
+      // Threads + directory picker should fully unmount when closed.
+      retainContent={false}
     >
       <View style={styles.content}>
         <View style={styles.heading}>
