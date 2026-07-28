@@ -82,6 +82,27 @@ Deno.test('equal-length finalized replacements invalidate the transcript cache',
   );
 });
 
+Deno.test('returning to an unchanged transcript reuses exact turn identities', () => {
+  const messages = [
+    message('u1', 'user', 'first'),
+    message('a1', 'assistant', 'answer'),
+    message('u2', 'user', 'second'),
+    message('a2', 'assistant', 'answer two'),
+  ];
+  const initial = splitTranscriptTurnsCached(messages, false);
+  const restored = splitTranscriptTurnsCached(messages, false, initial.cache);
+
+  assert(
+    restored.historicalTurns === initial.historicalTurns,
+    'unchanged history should keep the exact FlatList data identity',
+  );
+  assert(
+    restored.liveTurn === initial.liveTurn,
+    'unchanged latest turn should keep its render signature and identity',
+  );
+  assert(restored.cache === initial.cache, 'exact reuse should not allocate a replacement cache');
+});
+
 Deno.test('a new user boundary rebuilds turn grouping and retention', () => {
   const initialMessages = [
     message('u1', 'user', 'first'),

@@ -16,6 +16,7 @@ import { useSegments } from 'expo-router';
 import {
   MobileDiagnosticRecorder,
   buildDiagnosticUploadBatch,
+  createStressDiagnosticRecorder,
   getKrustyPerformanceSnapshot,
   type DiagnosticBatch,
   type DiagnosticMode,
@@ -45,6 +46,7 @@ interface DiagnosticsContextValue {
   nativePayloadCount: number;
   approximateBytes: number;
   uploadState: 'idle' | 'pending' | 'uploading' | 'uploaded' | 'failed' | 'unavailable';
+  completionPending: boolean;
   startStressRun: (durationMs?: number) => void;
   stopStressRun: () => Promise<boolean>;
   flush: (completed?: boolean) => Promise<boolean>;
@@ -57,6 +59,7 @@ const DiagnosticsContext = createContext<DiagnosticsContextValue>({
   nativePayloadCount: 0,
   approximateBytes: 0,
   uploadState: 'idle',
+  completionPending: false,
   startStressRun: () => {},
   stopStressRun: async () => false,
   flush: async () => false,
@@ -92,6 +95,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
   const [nativePayloadCount, setNativePayloadCount] = useState(0);
   const [uploadState, setUploadState] = useState<DiagnosticsContextValue['uploadState']>('idle');
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const persistedRunIdRef = useRef<string | null>(null);
   const persistedRevisionRef = useRef(-1);
   const persistPromiseRef = useRef<Promise<boolean> | null>(null);
   const uploadingRef = useRef(false);
@@ -165,18 +169,22 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     };
   }, []);
 
-  const persist = useCallback((): Promise<boolean> => {
+  const persist = useCallback((targetRecorder = recorder): Promise<boolean> => {
     const previous = persistPromiseRef.current ?? Promise.resolve(true);
     const operation = previous.then(async () => {
-      if (!recorder || persistedRevisionRef.current === recorder.getRevision()) return true;
-      const revision = recorder.getRevision();
-      const mode = recorder.getMode();
+      if (!targetRecorder) return true;
+      if (
+        persistedRunIdRef.current === targetRecorder.runId
+        && persistedRevisionRef.current === targetRecorder.getRevision()
+      ) return true;
+      const revision = targetRecorder.getRevision();
+      const mode = targetRecorder.getMode();
       const completionPending = pendingCompletionRef.current
-        || recorder.isStressCompletionPending();
+        || targetRecorder.isStressCompletionPending();
       const retainFullRun = completionPending || mode === 'stress';
       const batch = retainFullRun
-        ? recorder.createCompletionPersistenceBatch()
-        : recorder.createPersistenceBatch();
+        ? targetRecorder.createCompletionPersistenceBatch()
+        : targetRecorder.createPersistenceBatch();
       try {
         if (!batch) {
           await AsyncStorage.removeItem(PENDING_KEY);
@@ -185,12 +193,13 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
             schemaVersion: 2,
             batch,
             completionPending,
-            completedAtMs: recorder.getStressCompletedAtMs(),
+            completedAtMs: targetRecorder.getStressCompletedAtMs(),
             mode,
-            stressEndsAtMs: recorder.getStressEndsAtMs(),
+            stressEndsAtMs: targetRecorder.getStressEndsAtMs(),
           };
           await AsyncStorage.setItem(PENDING_KEY, JSON.stringify(state));
         }
+        persistedRunIdRef.current = targetRecorder.runId;
         persistedRevisionRef.current = revision;
         return true;
       } catch {
@@ -280,6 +289,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
           runId: createPseudonymousId('run'),
         });
         next.record('app', { name: 'diagnostics.ready' });
+        persistedRunIdRef.current = null;
         persistedRevisionRef.current = -1;
         installMobileDiagnosticRecorder(next);
         setRecorder(next);
@@ -298,12 +308,29 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
   }, [client, isConnected, persist, recorder]);
 
   const startStressRun = useCallback((durationMs?: number) => {
-    if (pendingCompletionRef.current) return;
-    recorder?.startStressRun(durationMs);
+    if (!recorder || pendingCompletionRef.current || uploadingRef.current) return;
+    const next = createStressDiagnosticRecorder({
+      installationId: recorder.installationId,
+      runId: createPseudonymousId('run'),
+      durationMs,
+    });
     pendingCompletionRef.current = false;
+    persistedRunIdRef.current = null;
+    persistedRevisionRef.current = -1;
+    installMobileDiagnosticRecorder(next);
+    setRecorder(next);
     setUploadState('idle');
-    setMode(recorder?.getMode() ?? 'baseline');
-  }, [recorder]);
+    setMode(next.getMode());
+    const snapshot = next.snapshot();
+    setSummary({
+      eventCount: snapshot.eventCount,
+      approximateBytes: snapshot.approximateBytes,
+    });
+    // Persist the run envelope immediately. Periodic uploads may acknowledge
+    // every queued event while capture remains active; the empty envelope must
+    // still retain the run identity, mode, and deadline across force-quit.
+    void persist(next);
+  }, [persist, recorder]);
 
   const stopStressRun = useCallback(async () => {
     recorder?.stopStressRun();
@@ -321,6 +348,8 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     nativePayloadCount,
     approximateBytes: summary.approximateBytes,
     uploadState,
+    completionPending: pendingCompletionRef.current
+      || Boolean(recorder?.isStressCompletionPending()),
     startStressRun,
     stopStressRun,
     flush,
@@ -329,6 +358,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     mode,
     nativePayloadCount,
     recorder?.runId,
+    recorder,
     startStressRun,
     stopStressRun,
     summary.approximateBytes,

@@ -11,10 +11,11 @@ import { styles } from "./styles";
 
 interface ActiveConversationSurfaceProps {
   activeMode: SessionType;
-  sessionType: "chat" | "code";
+  sessionType: SessionType;
   activeToolCallId: string | null;
   bottomPadding: number;
   hideJumpToLatest?: boolean;
+  showPlanTracker?: boolean;
   showErrorBanner?: boolean;
   errorBannerHeight: number;
   onErrorBannerHeightChange: (height: number) => void;
@@ -31,6 +32,7 @@ function ActiveConversationSurfaceComponent({
   activeToolCallId,
   bottomPadding,
   hideJumpToLatest = false,
+  showPlanTracker = true,
   showErrorBanner = true,
   errorBannerHeight,
   onErrorBannerHeightChange,
@@ -92,6 +94,7 @@ function ActiveConversationSurfaceComponent({
           bottomPadding + (showTranscriptError ? errorBannerHeight + 10 : 0)
         }
         hideJumpToLatest={hideJumpToLatest}
+        showPlanTracker={showPlanTracker}
       />
 
       {showTranscriptError ? (

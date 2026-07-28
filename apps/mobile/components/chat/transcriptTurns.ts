@@ -29,6 +29,7 @@ export interface SplitTranscriptTurns {
 export interface TranscriptTurnsCache {
   sourceMessages: ChatMessage[];
   liveStartIndex: number;
+  isStreaming: boolean;
   split: SplitTranscriptTurns;
 }
 
@@ -71,6 +72,13 @@ export function splitTranscriptTurnsCached(
   isStreaming: boolean,
   previous?: TranscriptTurnsCache | null,
 ): CachedSplitTranscriptTurns {
+  if (
+    previous
+    && previous.sourceMessages === messages
+    && previous.isStreaming === isStreaming
+  ) {
+    return { ...previous.split, cache: previous };
+  }
   if (previous && canReuseFinalizedPrefix(previous, messages)) {
     const tailMessages = messages.slice(previous.liveStartIndex);
     // A new user message creates a new turn and changes the rich-retention
@@ -90,6 +98,7 @@ export function splitTranscriptTurnsCached(
         cache: {
           sourceMessages: messages,
           liveStartIndex: previous.liveStartIndex,
+          isStreaming,
           split,
         },
       };
@@ -145,7 +154,12 @@ function buildTranscriptTurnsFromScratch(
     };
     return {
       ...split,
-      cache: { sourceMessages: messages, liveStartIndex: 0, split },
+      cache: {
+        sourceMessages: messages,
+        liveStartIndex: 0,
+        isStreaming,
+        split,
+      },
     };
   }
 
@@ -161,6 +175,7 @@ function buildTranscriptTurnsFromScratch(
     cache: {
       sourceMessages: messages,
       liveStartIndex: groupStartIndexes[groupStartIndexes.length - 1] ?? 0,
+      isStreaming,
       split,
     },
   };

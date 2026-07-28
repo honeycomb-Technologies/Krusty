@@ -70,7 +70,6 @@ export function useSessionActions({
   const sessionCreationCoordinatorRef = useRef(
     createSessionCreationCoordinator<SessionResponse | null>(),
   );
-
   const stopCurrentStream = useCallback(
     (suppressCompletion = true) => {
       if (sessionStore.getState().isStreaming) {
@@ -622,14 +621,8 @@ export function useSessionActions({
     sessionStore.getState().toggleFastMode();
   }, [models, sessionStore]);
 
-  const handleTabChange = useCallback(
-    async (index: number) => {
-      const nextType = sessionTypeForTab(index);
-      if (index === activeTab) {
-        setDrawerOpen(false);
-        return;
-      }
-      setActiveTab(index);
+  const activateSessionType = useCallback(
+    (nextType: SessionType) => {
       setDrawerOpen(false);
 
       // Warm the destination mode only when focused. Keep this off the critical
@@ -646,9 +639,7 @@ export function useSessionActions({
     },
     [
       lastSessionIdByTypeRef,
-      activeTab,
       modeStores,
-      setActiveTab,
       setDrawerOpen,
     ],
   );
@@ -668,6 +659,6 @@ export function useSessionActions({
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    handleTabChange,
+    activateSessionType,
   };
 }

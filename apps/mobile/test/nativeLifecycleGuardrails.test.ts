@@ -93,3 +93,72 @@ Deno.test("browser close does not release an unsettled single-flight request", a
     "reopen must join the active request",
   );
 });
+
+Deno.test("rapid mode input defers heavy activation to the latest requested mode", async () => {
+  const screen = await Deno.readTextFile(
+    new URL("../app/(tabs)/index.tsx", import.meta.url).pathname,
+  );
+  const actions = await Deno.readTextFile(
+    new URL("../app/(tabs)/chat-screen/useSessionActions.ts", import.meta.url).pathname,
+  );
+
+  assert(
+    screen.includes("useDeferredValue(requestedMode)"),
+    "heavy mode activation must use React's interruptible deferred value",
+  );
+  assert(
+    screen.includes("modeForHorizontalSwipe(\n        requestedMode,"),
+    "rapid swipes must advance from the latest intent instead of stale deferred content",
+  );
+  assert(
+    screen.includes("mode={requestedMode}"),
+    "the visible tab selection must respond before deferred surface activation",
+  );
+  assert(
+    screen.includes("const activeTab = tabForSessionType(activeMode)"),
+    "composer and session actions must remain bound to the committed deferred mode",
+  );
+  assert(
+    screen.includes("activateSessionType(activeMode)"),
+    "session warming must follow only the deferred winning mode",
+  );
+  assert(
+    !screen.includes("modeIntentRef") && !screen.includes("commitModeIntent"),
+    "mode changes must not drain a serialized commit backlog",
+  );
+  assert(
+    screen.includes("sessionType={activeMode}")
+      && !screen.includes('activeMode === "mako" ? ('),
+    "Chat, Code, and Mako must reconcile through one stable mobile transcript tree",
+  );
+  assert(
+    !actions.includes("requestedTabRef"),
+    "the lower session action layer must not own a competing intent deduper",
+  );
+  assert(
+    !actions.includes("if (index === activeTab)"),
+    "rapid duplicate suppression must not compare against stale rendered state",
+  );
+});
+
+Deno.test("pending diagnostic completion cannot expose an actionable start button", async () => {
+  const provider = await Deno.readTextFile(
+    new URL("../diagnostics/MobileDiagnosticsProvider.tsx", import.meta.url).pathname,
+  );
+  const settings = await Deno.readTextFile(
+    new URL("../components/settings/sections.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    provider.includes("completionPending: pendingCompletionRef.current"),
+    "the diagnostics context must expose durable completion ownership",
+  );
+  assert(
+    settings.includes('disabled={!runId || completionPending || uploadState === "uploading"}'),
+    "Start capture must be disabled until completion and any prior upload are settled",
+  );
+  assert(
+    provider.includes("pendingCompletionRef.current || uploadingRef.current"),
+    "capture rotation must reject an in-flight old-recorder upload",
+  );
+});

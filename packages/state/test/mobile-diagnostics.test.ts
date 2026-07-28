@@ -1,5 +1,6 @@
 import {
   buildDiagnosticUploadBatch,
+  createStressDiagnosticRecorder,
   MobileDiagnosticRecorder,
   sanitizeDiagnosticFields,
 } from '../src/diagnostics/index.ts';
@@ -63,6 +64,28 @@ Deno.test('stress mode is explicit, time bounded, and returns to baseline', () =
   assert(recorder.getMode() === 'baseline', 'stress run expires automatically');
   assert(recorder.consumeStressCompletion(), 'automatic expiry requests final upload once');
   assert(!recorder.consumeStressCompletion(), 'stress completion signal is one-shot');
+});
+
+Deno.test('each explicit stress capture starts with a fresh run identity and event ring', () => {
+  let now = 30_000;
+  const baseline = new MobileDiagnosticRecorder({
+    installationId: 'install-12345678',
+    runId: 'run-baseline123',
+    now: () => now,
+  });
+  baseline.record('navigation', { name: '(tabs)>settings' });
+
+  const stress = createStressDiagnosticRecorder({
+    installationId: baseline.installationId,
+    runId: 'run-stress456',
+    durationMs: 10_000,
+    now: () => now,
+  });
+
+  assert(stress.runId !== baseline.runId, 'stress capture must not reuse the baseline run id');
+  assert(stress.getMode() === 'stress', 'fresh stress recorder starts in stress mode');
+  assert(stress.snapshot().eventCount === 1, 'fresh capture contains only its stress-start event');
+  assert(baseline.snapshot().eventCount === 1, 'baseline events cannot leak into the stress ring');
 });
 
 Deno.test('upload batches are bounded and acknowledgements retain the remainder', () => {
@@ -141,6 +164,36 @@ Deno.test('active stress deadline and run identity survive recorder restart', ()
   now = deadline + 1;
   assert(resumed.getMode() === 'baseline', 'restored capture expires on its original deadline');
   assert(resumed.consumeStressCompletion(), 'restored expiry requests completion upload');
+});
+
+Deno.test('active stress envelope survives after every event is acknowledged', () => {
+  let now = 30_000;
+  const source = new MobileDiagnosticRecorder({
+    installationId: 'install-12345678',
+    runId: 'run-emptyactive',
+    now: () => now,
+  });
+  source.startStressRun(10_000);
+  const upload = source.createBatch();
+  assert(upload !== null, 'stress start produces an uploadable event');
+  source.acknowledge(upload.events.map((event) => event.id));
+  assert(source.snapshot().eventCount === 0, 'periodic upload can empty the event queue');
+
+  const envelope = source.createCompletionPersistenceBatch();
+  const deadline = source.getStressEndsAtMs();
+  assert(envelope.events.length === 0, 'run metadata remains persistable without pending events');
+  assert(deadline !== null, 'active run keeps its original deadline');
+
+  const resumed = new MobileDiagnosticRecorder({
+    installationId: envelope.installationId,
+    runId: envelope.runId,
+    startedAtMs: envelope.runStartedAtMs,
+    now: () => now,
+  });
+  resumed.resumeActiveStress(deadline);
+  resumed.restore(envelope);
+  assert(resumed.getMode() === 'stress', 'empty active capture restores in stress mode');
+  assert(resumed.runId === source.runId, 'empty active capture preserves run identity');
 });
 
 Deno.test('pending recovery re-sanitizes fields, deduplicates, and rejects stale batches', () => {

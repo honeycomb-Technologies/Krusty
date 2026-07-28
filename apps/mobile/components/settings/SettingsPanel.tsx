@@ -643,6 +643,7 @@ export function SettingsPanel({
 				nativePayloadCount={diagnostics.nativePayloadCount}
 				approximateBytes={diagnostics.approximateBytes}
 				uploadState={diagnostics.uploadState}
+				completionPending={diagnostics.completionPending}
 				isConnected={isConnected}
 				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
 				onStopAndUpload={() => void diagnostics.stopStressRun()}

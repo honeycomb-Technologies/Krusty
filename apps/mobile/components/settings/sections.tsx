@@ -82,6 +82,7 @@ export function DiagnosticsSection({
   nativePayloadCount,
   approximateBytes,
   uploadState,
+  completionPending,
   isConnected,
   onStart,
   onStopAndUpload,
@@ -93,6 +94,7 @@ export function DiagnosticsSection({
   nativePayloadCount: number;
   approximateBytes: number;
   uploadState: "idle" | "pending" | "uploading" | "uploaded" | "failed" | "unavailable";
+  completionPending: boolean;
   isConnected: boolean;
   onStart: () => void;
   onStopAndUpload: () => void;
@@ -151,7 +153,7 @@ export function DiagnosticsSection({
             ) : (
               <Pressable
                 onPress={onStart}
-                disabled={!runId || uploadState === "pending"}
+                disabled={!runId || completionPending || uploadState === "uploading"}
                 style={[styles.smallActionBtn, { borderColor: t.border }]}
               >
                 <Play size={14} color={t.userMessage} strokeWidth={1.8} />

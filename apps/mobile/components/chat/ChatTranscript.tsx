@@ -36,6 +36,8 @@ import type { ChatMessage } from "@krusty/api";
 import type { SessionType } from "@krusty/api";
 import { beginKrustyPerformanceSpan } from "@krusty/state";
 
+const MAX_COMMITTED_TRANSCRIPT_CACHES = 4;
+
 interface ChatTranscriptProps {
   messages: ChatMessage[];
   sessionId?: string | null;
@@ -209,10 +211,9 @@ function ChatTranscriptComponent({
       ? `${scrollStateKey}::${sessionId ?? "new"}`
       : null,
   );
-  const committedTurnCacheRef = useRef<{
-    key: string;
-    cache: TranscriptTurnsCache;
-  } | null>(null);
+  const committedTurnCachesRef = useRef(
+    new Map<string, TranscriptTurnsCache>(),
+  );
   const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
@@ -234,17 +235,22 @@ function ChatTranscriptComponent({
   const transcriptCacheKey = `${scrollStateKey}::${sessionId ?? "new"}`;
   const turnSplit = useMemo(
     () => {
+      const previous = committedTurnCachesRef.current.get(transcriptCacheKey);
+      const cacheState = !previous
+        ? "miss"
+        : previous.sourceMessages === messages
+          && previous.isStreaming === isStreaming
+          ? "hit"
+          : "tail";
       const finishDeriveSpan = beginKrustyPerformanceSpan(
         "transcript.derive",
-        transcriptCacheKey,
+        `${sessionType}:${cacheState}`,
       );
       try {
         return splitTranscriptTurnsCached(
           messages,
           isStreaming,
-          committedTurnCacheRef.current?.key === transcriptCacheKey
-            ? committedTurnCacheRef.current.cache
-            : null,
+          previous,
         );
       } finally {
         finishDeriveSpan();
@@ -254,10 +260,14 @@ function ChatTranscriptComponent({
   );
   const { historicalTurns, liveTurn } = turnSplit;
   useEffect(() => {
-    committedTurnCacheRef.current = {
-      key: transcriptCacheKey,
-      cache: turnSplit.cache,
-    };
+    const caches = committedTurnCachesRef.current;
+    caches.delete(transcriptCacheKey);
+    caches.set(transcriptCacheKey, turnSplit.cache);
+    while (caches.size > MAX_COMMITTED_TRANSCRIPT_CACHES) {
+      const oldestKey = caches.keys().next().value;
+      if (oldestKey === undefined) break;
+      caches.delete(oldestKey);
+    }
   }, [transcriptCacheKey, turnSplit.cache]);
   useLayoutEffect(() => {
     finishFirstPaintSpanRef.current?.();

@@ -28,6 +28,19 @@ export interface DiagnosticRecorderOptions {
   now?: () => number;
 }
 
+export interface StressDiagnosticRecorderOptions extends DiagnosticRecorderOptions {
+  durationMs?: number;
+}
+
+/** Start an explicitly bounded capture with a fresh identity and empty event ring. */
+export function createStressDiagnosticRecorder(
+  options: StressDiagnosticRecorderOptions,
+): MobileDiagnosticRecorder {
+  const recorder = new MobileDiagnosticRecorder(options);
+  recorder.startStressRun(options.durationMs);
+  return recorder;
+}
+
 export class MobileDiagnosticRecorder {
   readonly installationId: string;
   readonly runId: string;
@@ -212,8 +225,7 @@ export class MobileDiagnosticRecorder {
   }
 
   /** Full bounded recorder state for restart-safe completion draining. */
-  createCompletionPersistenceBatch(): DiagnosticBatch | null {
-    if (this.events.length === 0) return null;
+  createCompletionPersistenceBatch(): DiagnosticBatch {
     return {
       schemaVersion: 1,
       installationId: this.installationId,

@@ -1,4 +1,11 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import {
+  useState,
+  useRef,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+} from "react";
 import {
   View,
   Text,
@@ -32,7 +39,6 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
-import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
@@ -122,16 +128,22 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
 
-  const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
+  // Header selection responds immediately; heavy surface/store work can skip
+  // superseded intermediate requests and settle on the latest mode.
+  const activeMode = useDeferredValue(requestedMode);
   useMobileDiagnosticMode(activeMode);
   const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
   const finishToolboxOpenSpanRef = useRef<(() => number | null) | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
+  // Every action/store binding follows the committed deferred mode. Only the
+  // header reflects requestedMode immediately, so a rapid send can never pair
+  // the destination tab with the previous mode's session store.
   const activeTab = tabForSessionType(activeMode);
   const setActiveTab = useCallback((index: number) => {
-    setActiveMode(sessionTypeForTab(index));
+    setRequestedMode(sessionTypeForTab(index));
   }, []);
   const {
     session: sessionStore,
@@ -198,10 +210,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const toolboxOpen = isDesktop
     ? desktopToolboxOpen
     : activeSheet === "toolbox";
-  useEffect(() => {
-    finishModeSwitchSpanRef.current?.();
-    finishModeSwitchSpanRef.current = null;
-  }, [activeMode]);
   useEffect(() => {
     if (!toolboxOpen) return;
     finishToolboxOpenSpanRef.current?.();
@@ -385,7 +393,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    handleTabChange,
+    activateSessionType,
   } = useSessionActions({
     client,
     activeTab,
@@ -499,23 +507,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     ],
   );
 
-  const handleNewMakoSession = useCallback(() => {
-    setActiveMode("mako");
-    setActiveSheet(null);
-    const makoStore = stores.modes.mako.session;
-    makoStore.getState().detachSession();
-    makoStore.getState().clearSession();
-  }, [stores.modes]);
-
-  const handleSelectMakoView = useCallback(
-    (view: MakoTopLevelView) => {
-      handleTabChange(2);
-      setMakoTopLevel(view);
-      setDrawerOpen(false);
-    },
-    [handleTabChange],
-  );
-
   const handleRenameSession = useCallback(() => {
     if (!sessionId) {
       return;
@@ -593,23 +584,43 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const handleModeChange = useCallback(
     (mode: SessionType) => {
-      if (mode === activeMode) {
-        return;
-      }
+      if (mode === requestedMode) return;
       finishModeSwitchSpanRef.current?.();
       finishModeSwitchSpanRef.current = beginKrustyPerformanceSpan(
         "mode.switch",
         `${activeMode}->${mode}`,
       );
       setActiveSheet(null);
-      void handleTabChange(tabForSessionType(mode));
+      setActiveTab(tabForSessionType(mode));
     },
-    [activeMode, handleTabChange],
+    [activeMode, requestedMode, setActiveTab],
+  );
+  useEffect(() => {
+    finishModeSwitchSpanRef.current?.();
+    finishModeSwitchSpanRef.current = null;
+    activateSessionType(activeMode);
+  }, [activateSessionType, activeMode]);
+
+  const handleNewMakoSession = useCallback(() => {
+    handleModeChange("mako");
+    setActiveSheet(null);
+    const makoStore = stores.modes.mako.session;
+    makoStore.getState().detachSession();
+    makoStore.getState().clearSession();
+  }, [handleModeChange, stores.modes]);
+
+  const handleSelectMakoView = useCallback(
+    (view: MakoTopLevelView) => {
+      handleModeChange("mako");
+      setMakoTopLevel(view);
+      setDrawerOpen(false);
+    },
+    [handleModeChange],
   );
   const handleModeSwipe = useCallback(
     (translationX: number, velocityX: number) => {
       const nextMode = modeForHorizontalSwipe(
-        activeMode,
+        requestedMode,
         translationX,
         velocityX,
       );
@@ -619,7 +630,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       handleModeChange(nextMode);
     },
-    [activeMode, handleModeChange],
+    [handleModeChange, requestedMode],
   );
   const modeSwipeGesture = useMemo(
     () =>
@@ -716,7 +727,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   ) : (
     <Animated.View style={entrance.topBarStyle}>
       <MobileAppHeader
-        mode={activeMode}
+        mode={requestedMode}
         title={displayTitle}
         onModeChange={handleModeChange}
         onOpenThreads={() => setActiveSheet("threads")}
@@ -738,10 +749,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
         <ActiveConversationSurface
           activeMode={activeMode}
-          sessionType={activeMode === "code" ? "code" : "chat"}
+          sessionType={activeMode}
           activeToolCallId={activeToolCallId}
           bottomPadding={composerReserveHeight}
           hideJumpToLatest={bottomControlsOpen}
+          showPlanTracker={activeMode !== "mako"}
           errorBannerHeight={errorBannerHeight}
           onErrorBannerHeightChange={(nextHeight) => {
             setErrorBannerHeight((current) =>
@@ -963,17 +975,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             backgroundColor: t.background,
           }}
         >
-          {/* Single active surface only. Multi-mounted absolute FlatLists were
-              crashing on mode switch in 0.9.18. */}
-          {activeMode === "mako" ? (
-            <MakoThreadSurface
-              chat={makoChat}
-              showComposer={false}
-              externalBottomPadding={composerReserveHeight}
-            />
-          ) : (
-            chatTranscriptSurface
-          )}
+          {/* One stable native transcript tree for every mobile mode. Parallel
+              FlatLists crashed under New Architecture, while swapping the
+              Mako tree forced expensive Fabric unmount/mount transactions. */}
+          {chatTranscriptSurface}
         </View>
       </View>
     </GestureDetector>
@@ -1084,7 +1089,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       onDeleteSession={handleDeleteSession}
       onOpenSettings={() => router.navigate("/(tabs)/settings")}
       activeTab={activeTab}
-      onTabChange={handleTabChange}
+      onTabChange={(index) => handleModeChange(sessionTypeForTab(index))}
       activeMakoView={makoTopLevel}
       onSelectMakoView={handleSelectMakoView}
     >
