@@ -61,6 +61,7 @@ export interface ChatBarRunningLineProps {
   active: boolean;
   width: number;
   cornerClimb: number;
+  theme?: 'dark' | 'light';
   style?: StyleProp<ViewStyle>;
 }
 

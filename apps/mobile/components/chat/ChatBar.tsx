@@ -1506,6 +1506,7 @@ function ChatBarComponent(props: ChatBarProps) {
         active={isStreaming}
         width={bandWidth}
         cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
+        theme={theme.scheme}
         style={styles.runLineEdge}
       />
       <ImagePreviewModal

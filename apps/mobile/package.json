@@ -19,6 +19,7 @@
     "@shikijs/core": "4.3.1",
     "@shikijs/langs": "4.3.1",
     "@shikijs/themes": "4.3.1",
+    "@shopify/react-native-skia": "2.4.18",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@xterm/addon-fit": "^0.11.0",
     "diff": "9.0.0",
