@@ -163,10 +163,23 @@ function NativeBrowser({ visible }: { visible: boolean }) {
 
   const openPort = useCallback((port: PortEntry) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setTabs(prev => {
+    setTabs((prev) => {
       if (activeTab?.port === null) {
         return prev.map((tab) =>
           tab.id === activeTab.id
+            ? { ...tab, port: port.port, label: port.name || `Port ${port.port}` }
+            : tab,
+        );
+      }
+
+      // Cap concurrent browser tabs so inactive WebViews stay frozen and budgets
+      // do not grow unbounded. Prefer reusing the active tab when full.
+      if (prev.length >= MAX_BROWSER_TABS) {
+        if (!activeTabId) {
+          return prev;
+        }
+        return prev.map((tab) =>
+          tab.id === activeTabId
             ? { ...tab, port: port.port, label: port.name || `Port ${port.port}` }
             : tab,
         );
@@ -183,7 +196,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     if (activeTab?.port === null) {
       setActiveTabId(activeTab.id);
     }
-  }, [activeTab]);
+  }, [activeTab, activeTabId]);
 
   const closeTab = useCallback((tabId: string) => {
     setTabs(prev => {

@@ -1,6 +1,4 @@
 import {
-  type ComponentType,
-  type PropsWithChildren,
   useState,
   useRef,
   useEffect,
@@ -19,13 +17,11 @@ import {
   Keyboard,
   LayoutAnimation,
   Image,
-  FlatList,
   Alert,
-  Modal,
   useWindowDimensions,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { ArrowUp, Folder, GitBranch, Maximize2, X, Mic } from 'lucide-react-native';
+import { Folder, GitBranch, Maximize2, X } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -33,31 +29,26 @@ import * as SecureStore from '../../platform/secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
-  cancelAnimation,
   useSharedValue,
   useAnimatedStyle,
-  useAnimatedProps,
   withSpring,
   withTiming,
-  Easing,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls } from './AccordionControls';
+import { ChatBarActionButton } from './ChatBarActionButton';
+import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
+import { ChatBarModelPopover } from './ChatBarModelPopover';
+import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
-import { AppBottomSheet } from '../sheets/AppBottomSheet';
 import Svg, {
   Circle,
-  Defs,
-  FeGaussianBlur,
-  Filter,
-  LinearGradient as SvgLinearGradient,
   Path,
   Polygon,
-  Stop,
 } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
@@ -150,16 +141,6 @@ const CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP = 28;
 const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
-const RUN_LINE_HEIGHT = 3;
-const RUN_LINE_BEAM_WIDTH = 370;
-const RUN_LINE_SOFTNESS = 3;
-const RUN_LINE_TAIL_SOFTNESS = 8;
-const RUN_LINE_STROKE_WIDTH = 14;
-const RUN_LINE_CORNER_CLIMB = 35;
-const RUN_LINE_CORNER_RADIUS = 44;
-const RUN_LINE_EDGE_INSET = 2;
-const RUN_LINE_EXIT_EXTENSION = 18;
-const RUN_LINE_EXIT_RISE = 10;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
 const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 /**
@@ -436,204 +417,6 @@ function ProviderLogo({
         <Text style={[styles.providerInitials, { color }]}>{providerInitials(label)}</Text>
       );
   }
-}
-
-const AnimatedPath = Animated.createAnimatedComponent(Path);
-const SvgDefs = Defs as unknown as ComponentType<PropsWithChildren>;
-const normalizedPathLength = { pathLength: 1 };
-const RUN_LINE_DURATION_MS = 1700;
-const RUN_LINE_TONAL_STOPS = [
-  // The gradient is anchored to the screen, not the moving dash. Keep its
-  // opacity even so the rounded side sections do not disappear at x=0/width;
-  // the blurred round dash caps provide the moving wash's soft tails.
-  ['0', '#a55322', 0.82],
-  ['0.08', '#a95724', 0.82],
-  ['0.18', '#b75f27', 0.82],
-  ['0.28', '#c5682a', 0.82],
-  ['0.37', '#d2702d', 0.82],
-  ['0.44', '#dd772f', 0.82],
-  ['0.5', '#e17a30', 0.82],
-  ['0.56', '#dc762f', 0.82],
-  ['0.63', '#d06f2d', 0.82],
-  ['0.72', '#c36729', 0.82],
-  ['0.82', '#b55e26', 0.82],
-  ['0.92', '#a95724', 0.82],
-  ['1', '#a55322', 0.82],
-] as const;
-
-function RunningGradientLine({
-  active,
-  width,
-  cornerClimb,
-  style,
-}: {
-  active: boolean;
-  width: number;
-  cornerClimb: number;
-  style?: any;
-}) {
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    if (!active) {
-      cancelAnimation(progress);
-      progress.value = 0;
-      return;
-    }
-
-    // Explicitly reset every pass instead of relying on Reanimated's repeat
-    // wrapper. react-native-svg can retain the terminal animated dash props on
-    // iOS, which makes subsequent passes look like only the end is looping.
-    const restart = () => {
-      cancelAnimation(progress);
-      progress.value = 0;
-      progress.value = withTiming(1, {
-        duration: RUN_LINE_DURATION_MS,
-        easing: Easing.linear,
-      });
-    };
-
-    restart();
-    const interval = setInterval(restart, RUN_LINE_DURATION_MS);
-    return () => {
-      clearInterval(interval);
-      cancelAnimation(progress);
-    };
-  }, [active, progress]);
-
-  const safeWidth = Math.max(width, 1);
-  const pathHeight = Math.max(
-    RUN_LINE_HEIGHT,
-    cornerClimb + RUN_LINE_EXIT_RISE + RUN_LINE_HEIGHT,
-  );
-  const strokeInset = RUN_LINE_HEIGHT / 2;
-  const baseline = pathHeight - strokeInset;
-  const curveTop = baseline - cornerClimb;
-  const cornerRadius = Math.min(
-    RUN_LINE_CORNER_RADIUS,
-    Math.max(0, safeWidth / 2 - strokeInset),
-  );
-  const effectiveClimb = Math.min(cornerClimb, cornerRadius);
-  const sideInset =
-    cornerRadius > 0
-      ? cornerRadius -
-        Math.sqrt(
-          Math.max(
-            0,
-            cornerRadius ** 2 - (cornerRadius - effectiveClimb) ** 2,
-          ),
-        )
-      : strokeInset;
-  const visibleSideInset = sideInset + RUN_LINE_EDGE_INSET;
-  const visibleCornerRadius = cornerRadius + RUN_LINE_EDGE_INSET;
-  const cornerArcLength =
-    cornerRadius > 0
-      ? cornerRadius *
-        Math.acos((cornerRadius - effectiveClimb) / cornerRadius)
-      : 0;
-  const exitLength = Math.hypot(
-    visibleSideInset + RUN_LINE_EXIT_EXTENSION,
-    curveTop - strokeInset,
-  );
-  const pathLength = Math.max(
-    1,
-    safeWidth -
-      cornerRadius * 2 +
-      cornerArcLength * 2 +
-      exitLength * 2,
-  );
-  const beamLength = Math.min(
-    RUN_LINE_BEAM_WIDTH,
-    Math.max(160, pathLength * 0.8),
-    pathLength * 0.92,
-  );
-  // Web SVG honors pathLength normalization; react-native-svg on iOS does not.
-  // Keep both renderers on the same visual geometry using their native units.
-  const beamFraction = Math.min(0.92, Math.max(0.5, beamLength / pathLength));
-  const usesNormalizedDashUnits = Platform.OS === 'web';
-  const dashPathLengthProps = usesNormalizedDashUnits
-    ? normalizedPathLength
-    : {};
-  const pathUnits = usesNormalizedDashUnits ? 1 : pathLength;
-  const beamUnits = usesNormalizedDashUnits ? beamFraction : beamLength;
-  const beamTravel = pathUnits + beamUnits;
-  const edgePath =
-    effectiveClimb > 0
-      ? [
-          `M ${-RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
-          `L ${visibleSideInset} ${curveTop}`,
-          `C ${visibleSideInset + (visibleCornerRadius - visibleSideInset) * 0.25}`,
-          `${curveTop + effectiveClimb * 0.6}`,
-          `${visibleCornerRadius - (visibleCornerRadius - visibleSideInset) * 0.22}`,
-          `${baseline}`,
-          `${visibleCornerRadius} ${baseline}`,
-          `H ${safeWidth - visibleCornerRadius}`,
-          `C ${safeWidth - visibleCornerRadius + (visibleCornerRadius - visibleSideInset) * 0.22}`,
-          `${baseline}`,
-          `${safeWidth - visibleSideInset - (visibleCornerRadius - visibleSideInset) * 0.25}`,
-          `${curveTop + effectiveClimb * 0.6}`,
-          `${safeWidth - visibleSideInset} ${curveTop}`,
-          `L ${safeWidth + RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
-        ].join(' ')
-      : `M ${strokeInset} ${baseline} H ${safeWidth - strokeInset}`;
-
-  const washProps = useAnimatedProps(() => ({
-    strokeDashoffset:
-      beamUnits - progress.value * beamTravel,
-  }));
-  if (!active) return null;
-
-  return (
-    <View
-      pointerEvents="none"
-      style={[styles.runLineTrack, { height: pathHeight }, style]}
-    >
-      <Svg width={safeWidth} height={pathHeight}>
-        <SvgDefs>
-          <SvgLinearGradient
-            id="auroraGlassBeam"
-            x1={0}
-            y1={0}
-            x2={safeWidth}
-            y2={0}
-            gradientUnits="userSpaceOnUse"
-          >
-            {RUN_LINE_TONAL_STOPS.map(([offset, color, opacity]) => (
-              <Stop
-                key={offset}
-                offset={offset}
-                stopColor={color}
-                stopOpacity={opacity}
-              />
-            ))}
-          </SvgLinearGradient>
-          <Filter
-            id="auroraGlassSoftness"
-            x="-20%"
-            y="-160%"
-            width="140%"
-            height="420%"
-          >
-            <FeGaussianBlur
-              stdDeviation={`${RUN_LINE_TAIL_SOFTNESS} ${RUN_LINE_SOFTNESS}`}
-            />
-          </Filter>
-        </SvgDefs>
-        <AnimatedPath
-          animatedProps={washProps}
-          d={edgePath}
-          {...dashPathLengthProps}
-          fill="none"
-          stroke="url(#auroraGlassBeam)"
-          filter="url(#auroraGlassSoftness)"
-          strokeOpacity={0.86}
-          strokeWidth={RUN_LINE_STROKE_WIDTH}
-          strokeLinecap="round"
-          strokeDasharray={`${beamUnits} ${beamTravel - beamUnits}`}
-        />
-      </Svg>
-    </View>
-  );
 }
 
 async function prepareClipboardImageAttachment(file: File, index: number): Promise<Attachment> {
@@ -1174,6 +957,15 @@ function ChatBarComponent(props: ChatBarProps) {
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
 
+  const handleModelSelectFromPicker = useCallback((modelId: string) => {
+    onModelSelect(modelId);
+    closeModelPicker();
+  }, [onModelSelect]);
+
+  const closeExpandedEditor = useCallback(() => {
+    setExpandedEditorOpen(false);
+  }, []);
+
   const openAttachPicker = () => {
     clearModelCloseTimer();
     if (modelPickerOpen) {
@@ -1522,27 +1314,16 @@ function ChatBarComponent(props: ChatBarProps) {
                   keyboardAppearance={theme.scheme}
                 />
             }
-            <Pressable
+            <ChatBarActionButton
+              isStreaming={isStreaming}
+              isRecording={isRecording}
+              canSend={canSend}
+              mutedForeground={t.mutedForeground}
+              userMessage={t.userMessage}
+              error={t.error}
               onPress={handleActionBtn}
-              onLongPress={canSend ? toggleRecording : undefined}
-              delayLongPress={300}
-              style={({ pressed }) => [styles.actionBtn, {
-                backgroundColor: isRecording
-                  ? t.error
-                  : canSend
-                    ? pressed ? t.userMessage + 'cc' : isStreaming ? t.error : t.userMessage
-                    : 'transparent',
-              }]}
-            >
-              {isStreaming
-                ? <View style={styles.stopGlyph} />
-                : isRecording
-                  ? <View style={styles.stopGlyph} />
-                  : canSend
-                    ? <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
-                    : <Mic size={18} color={t.mutedForeground} strokeWidth={1.8} />
-              }
-            </Pressable>
+              onLongPress={toggleRecording}
+            />
           </View>
         </View>
 
@@ -1621,95 +1402,29 @@ function ChatBarComponent(props: ChatBarProps) {
       ) : null}
 
       {/* Model popover — under the filter row, same width + right edge */}
-      {showComposerChrome && modelPickerOpen && modelPopoverHeight > 0 && (
-        <View
-          style={
-            isDesktop && modelPopoverWidth != null
-              ? {
-                  position: 'absolute' as const,
-                  // Stay below the bot + provider filter row so filters stay visible.
-                  bottom: desktopModelListBottom,
-                  height: modelPopoverHeight,
-                  right: dockRightInset,
-                  width: modelPopoverWidth,
-                  overflow: 'hidden' as const,
-                  // The list does not overlap the FAB/filter hit areas, so it
-                  // can safely sit above their full-width responder shell.
-                  zIndex: MODEL_POPOVER_Z_INDEX,
-                  elevation: MODEL_POPOVER_Z_INDEX,
-                }
-              : [
-                  styles.modelClip,
-                  {
-                    bottom: overlayBottom,
-                    height: modelPopoverHeight,
-                  },
-                ]
-          }
-        >
-          <Animated.View
-            style={[
-              styles.modelPopover,
-              modelPopoverStyle,
-              { borderColor: t.glass.border },
-            ]}
-          >
-            <BlurView
-              intensity={composerBlur}
-              tint={pillTint}
-              style={StyleSheet.absoluteFill}
-            />
-            <View
-              style={[
-                StyleSheet.absoluteFill,
-                {
-                  backgroundColor: isDark
-                    ? 'rgba(14, 20, 30, 0.92)'
-                    : 'rgba(255, 255, 255, 0.92)',
-                  borderRadius: RADIUS,
-                },
-              ]}
-            />
-            <FlatList
-              data={filteredModels}
-              keyExtractor={(m: ModelInfo) => m.id}
-              style={styles.modelList}
-              contentContainerStyle={styles.modelListContent}
-              extraData={model}
-              nestedScrollEnabled
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="none"
-              showsVerticalScrollIndicator={false}
-              renderItem={({ item }: { item: ModelInfo }) => (
-                <Pressable
-                  onPress={() => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    onModelSelect(item.id);
-                    closeModelPicker();
-                  }}
-                  style={({ pressed }) => [
-                    styles.modelItem,
-                    item.id === model && { backgroundColor: t.glass.backgroundElevated },
-                    pressed && { backgroundColor: t.glass.backgroundPressed },
-                  ]}
-                >
-                  <View style={styles.modelRow}>
-                    <View style={styles.modelInfo}>
-                      <Text style={[styles.modelName, { color: t.foreground }]} numberOfLines={1}>
-                        {item.display_name}
-                      </Text>
-                      <Text style={[styles.modelMeta, { color: t.mutedForeground }]}>{item.provider}</Text>
-                    </View>
-                    {item.id === model && (
-                      <Text style={[styles.modelCheck, { color: t.thinking }]}>✓</Text>
-                    )}
-                  </View>
-                </Pressable>
-              )}
-            />
-          </Animated.View>
-        </View>
-      )}
+      {showComposerChrome && modelPickerOpen ? (
+        <ChatBarModelPopover
+          isDesktop={isDesktop}
+          modelPopoverWidth={modelPopoverWidth}
+          desktopModelListBottom={desktopModelListBottom}
+          modelPopoverHeight={modelPopoverHeight}
+          dockRightInset={dockRightInset}
+          overlayBottom={overlayBottom}
+          modelPopoverStyle={modelPopoverStyle}
+          borderColor={t.glass.border}
+          composerBlur={composerBlur}
+          pillTint={pillTint}
+          isDark={isDark}
+          foreground={t.foreground}
+          mutedForeground={t.mutedForeground}
+          thinking={t.thinking}
+          backgroundElevated={t.glass.backgroundElevated}
+          backgroundPressed={t.glass.backgroundPressed}
+          filteredModels={filteredModels}
+          model={model}
+          onSelectModel={handleModelSelectFromPicker}
+        />
+      ) : null}
 
       {/* Composer status row — sits in safe area zone below input */}
       <View
@@ -1757,7 +1472,7 @@ function ChatBarComponent(props: ChatBarProps) {
           </Text>
         </View>
       </View>
-      <RunningGradientLine
+      <ChatBarRunningLine
         active={isStreaming}
         width={bandWidth}
         cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
@@ -1769,64 +1484,21 @@ function ChatBarComponent(props: ChatBarProps) {
         title={previewAttachment?.name}
         onClose={() => setPreviewAttachment(null)}
       />
-      <Modal
+      <ChatBarExpandedEditor
         visible={expandedEditorOpen}
-        transparent
-        animationType="none"
-        onRequestClose={() => setExpandedEditorOpen(false)}
-      >
-        <View style={styles.expandedEditorModal}>
-          <AppBottomSheet
-            visible={expandedEditorOpen}
-            onClose={() => setExpandedEditorOpen(false)}
-            accessibilityLabel="expanded message editor"
-            contentStyle={styles.expandedEditorContent}
-            footer={
-              <View style={styles.expandedEditorFooter}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Send expanded message"
-                  accessibilityState={{ disabled: !canSend }}
-                  disabled={!canSend}
-                  onPress={handleSend}
-                  style={({ pressed }) => [
-                    styles.expandedEditorSend,
-                    {
-                      backgroundColor: canSend
-                        ? pressed
-                          ? `${t.userMessage}cc`
-                          : t.userMessage
-                        : t.border,
-                    },
-                  ]}
-                >
-                  <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
-                </Pressable>
-              </View>
-            }
-          >
-            <TextInput
-              autoFocus
-              value={text}
-              onChangeText={handleTextChange}
-              placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
-              placeholderTextColor={`${t.mutedForeground}70`}
-              multiline
-              maxLength={500000}
-              editable={!disabled}
-              keyboardAppearance={theme.scheme}
-              textAlignVertical="top"
-              style={[
-                styles.expandedEditorInput,
-                WEB_INPUT_STYLE,
-                {
-                  color: t.foreground,
-                },
-              ]}
-            />
-          </AppBottomSheet>
-        </View>
-      </Modal>
+        text={text}
+        onChangeText={handleTextChange}
+        onClose={closeExpandedEditor}
+        onSend={handleSend}
+        canSend={canSend}
+        disabled={disabled}
+        placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
+        mutedForeground={t.mutedForeground}
+        foreground={t.foreground}
+        userMessage={t.userMessage}
+        border={t.border}
+        keyboardAppearance={theme.scheme}
+      />
     </View>
   );
 }
@@ -1848,10 +1520,6 @@ const styles = StyleSheet.create({
   attachHoverOverlay: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2 },
   attachName: { fontSize: 9, paddingHorizontal: 3, textAlign: 'center' },
   attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 2 },
-  runLineTrack: {
-    height: RUN_LINE_HEIGHT,
-    overflow: 'visible',
-  },
   runLineEdge: {
     position: 'absolute',
     left: 0,
@@ -1894,13 +1562,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.06)',
   },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
-  actionBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
-  stopGlyph: {
-    width: 12,
-    height: 12,
-    borderRadius: 2,
-    backgroundColor: '#fff',
-  },
   input: {
     flex: 1,
     fontSize: 16,
@@ -1918,35 +1579,6 @@ const styles = StyleSheet.create({
     paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
     paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
     textAlignVertical: 'top',
-  },
-  expandedEditorModal: {
-    flex: 1,
-  },
-  expandedEditorContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-  },
-  expandedEditorInput: {
-    flex: 1,
-    minHeight: 220,
-    paddingHorizontal: 2,
-    paddingVertical: 10,
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  expandedEditorFooter: {
-    minHeight: 64,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-  },
-  expandedEditorSend: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   kCol: {
     width: PILL,
@@ -1978,54 +1610,11 @@ const styles = StyleSheet.create({
   },
   kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  // Clip container — hides the popover as it slides from behind accordion.
-  // Mobile: full width under the bar. Desktop: right-aligned dock width.
-  modelClip: {
-    position: 'absolute',
-    left: ROOT_HORIZONTAL_PADDING,
-    right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
-    height: 4 * PILL + 3 * GAP,
-    overflow: 'hidden',
-    zIndex: MODEL_POPOVER_Z_INDEX,
-    elevation: MODEL_POPOVER_Z_INDEX,
-  },
-  // Model popover — slides out from behind accordion
-  modelPopover: {
-    width: '100%',
-    height: '100%',
-    borderRadius: RADIUS,
-    overflow: 'hidden',
-    borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.28,
-    shadowRadius: 20,
-    elevation: 12,
-  },
   providerInitials: {
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0,
   },
-  modelList: {
-    flex: 1,
-    paddingHorizontal: 8,
-  },
-  modelListContent: {
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
-  modelItem: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginBottom: 4,
-  },
-  modelRow: { flexDirection: 'row', alignItems: 'center' },
-  modelInfo: { flex: 1 },
-  modelName: { fontSize: 15, fontWeight: '500' },
-  modelMeta: { fontSize: 12, marginTop: 2 },
-  modelCheck: { fontSize: 18, fontWeight: '700', marginLeft: 8 },
   // Composer status row
   metaRow: {
     height: META_ROW_HEIGHT + GAUGE_TOP_GAP,

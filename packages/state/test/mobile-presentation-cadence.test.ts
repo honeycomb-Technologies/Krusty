@@ -1,5 +1,6 @@
 import {
   liveActivityStateEqual,
+  resolveLiveActivityTransition,
   shouldSyncChatWidget,
   type ChatWidgetCadenceState,
   type LiveActivitySemanticState,
@@ -70,5 +71,40 @@ Deno.test("chat widget syncs lifecycle transitions and settled content", () => {
       sessionId: "session-2",
     }),
     "session changes must publish a new widget snapshot",
+  );
+});
+
+Deno.test("Live Activity transition batching prefers update over recreate", () => {
+  assert(
+    resolveLiveActivityTransition({
+      trackedSessionId: "session-1",
+      focusedSessionId: "session-1",
+      shouldKeepFocused: true,
+    }).action === "update",
+    "same active session should update in place",
+  );
+  assert(
+    resolveLiveActivityTransition({
+      trackedSessionId: "session-1",
+      focusedSessionId: "session-2",
+      shouldKeepFocused: true,
+    }).action === "start",
+    "focused active session switch should start the new activity",
+  );
+  assert(
+    resolveLiveActivityTransition({
+      trackedSessionId: "session-1",
+      focusedSessionId: "session-2",
+      shouldKeepFocused: false,
+    }).action === "none",
+    "leaving a streaming session for an idle one should not thrash end/create",
+  );
+  assert(
+    resolveLiveActivityTransition({
+      trackedSessionId: "session-1",
+      focusedSessionId: "session-1",
+      shouldKeepFocused: false,
+    }).action === "end",
+    "focused idle session should end its own activity",
   );
 });

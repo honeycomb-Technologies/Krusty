@@ -95,7 +95,7 @@ function MakoToolboxBody({
 
   return (
     <View style={styles.body}>
-      {activeTab === 0 ? (
+      {visible && activeTab === 0 ? (
         <View style={styles.tabContent}>
           <MakoScheduleView
             state={current}
@@ -104,12 +104,12 @@ function MakoToolboxBody({
           />
         </View>
       ) : null}
-      {activeTab === 1 ? (
+      {visible && activeTab === 1 ? (
         <View style={styles.tabContent}>
           <MakoRunsView state={current} onSelectRun={openRun} />
         </View>
       ) : null}
-      {activeTab === 2 ? (
+      {visible && activeTab === 2 ? (
         <View style={styles.tabContent}>
           <MakoMemoryView
             workspaceDirectory={workspaceDirectory}

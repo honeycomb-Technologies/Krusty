@@ -23,9 +23,9 @@ import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
 import {
-  buildTranscriptTurns,
-  splitTranscriptTurns,
   findTurnIndexForMessage,
+  splitTranscriptTurns,
+  turnContainsMessage,
   type TranscriptTurn,
 } from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
@@ -77,6 +77,10 @@ const BOTTOM_CONTROL_INSET = 10;
 const BOTTOM_CONTROL_SIZE = 56;
 const BOTTOM_CONTROL_RADIUS = 18;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
+/** Coalesce streaming stick-to-bottom work onto one rAF per animation frame. */
+const STREAM_STICK_MIN_INTERVAL_MS = 32;
+/** One delayed measurement pass after stream layout settles. */
+const STREAM_STICK_FALLBACK_MS = 120;
 
 interface CachedTranscriptScrollState {
   offset: number;
@@ -172,14 +176,12 @@ function ChatTranscriptComponent({
   const restoredScrollStateRef = useRef(
     transcriptScrollCache.get(scrollStateKey) ?? null,
   );
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlatList<TranscriptTurn>>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
   const scrollOffsetRef = useRef(
     restoredScrollStateRef.current?.offset ?? 0,
   );
-  const lastStickBottomAtRef = useRef(0);
-  const stickBottomFrameRef = useRef<number | null>(null);
   const autoFollowRef = useRef(
     restoredScrollStateRef.current?.autoFollow ?? true,
   );
@@ -187,8 +189,15 @@ function ChatTranscriptComponent({
   const pendingAutoScrollAnimatedRef = useRef(false);
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
+  const streamStickFrameRef = useRef<number | null>(null);
+  const streamStickFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const streamStickPendingRef = useRef(false);
+  const lastStreamStickAtRef = useRef(0);
   const isUserDraggingRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
+  const isStreamingRef = useRef(isStreaming);
   const loadedSessionIdRef = useRef<string | null>(
     restoredScrollStateRef.current
       ? `${scrollStateKey}::${sessionId ?? "new"}`
@@ -208,8 +217,10 @@ function ChatTranscriptComponent({
   const jumpOverlay =
     theme.scheme === "dark" ? "rgba(11,17,25,0.6)" : "rgba(255,255,255,0.6)";
 
+  isStreamingRef.current = isStreaming;
+
   const messageCount = messages.length;
-  const { historicalTurns, liveTurn, turns } = useMemo(
+  const { historicalTurns, liveTurn } = useMemo(
     () => splitTranscriptTurns(messages, isStreaming),
     [isStreaming, messages],
   );
@@ -244,6 +255,15 @@ function ChatTranscriptComponent({
       cancelAnimationFrame(bottomAnchorFrameRef.current);
       bottomAnchorFrameRef.current = null;
     }
+    if (streamStickFrameRef.current !== null) {
+      cancelAnimationFrame(streamStickFrameRef.current);
+      streamStickFrameRef.current = null;
+    }
+    if (streamStickFallbackRef.current !== null) {
+      clearTimeout(streamStickFallbackRef.current);
+      streamStickFallbackRef.current = null;
+    }
+    streamStickPendingRef.current = false;
   }, []);
 
   const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
@@ -275,8 +295,90 @@ function ChatTranscriptComponent({
     flatListRef.current?.scrollToOffset({ animated, offset: targetOffset });
   }, [markProgrammaticScroll]);
 
+  const stickToBottomNow = useCallback(
+    (animated: boolean) => {
+      if (!autoFollowRef.current || isUserDraggingRef.current) {
+        return;
+      }
+      scrollToBottom(animated);
+    },
+    [scrollToBottom],
+  );
+
+  /**
+   * Streaming stick path: coalesce content-size / layout / delta noise into at
+   * most one rAF stick per interval while auto-follow remains enabled.
+   */
+  const requestStreamStick = useCallback(() => {
+    if (!autoFollowRef.current || isUserDraggingRef.current) {
+      return;
+    }
+
+    streamStickPendingRef.current = true;
+
+    const runStick = () => {
+      if (!autoFollowRef.current || isUserDraggingRef.current) {
+        streamStickPendingRef.current = false;
+        return;
+      }
+      streamStickPendingRef.current = false;
+      lastStreamStickAtRef.current = Date.now();
+      stickToBottomNow(false);
+    };
+
+    const scheduleFrame = () => {
+      if (streamStickFrameRef.current !== null) {
+        return;
+      }
+      streamStickFrameRef.current = requestAnimationFrame(() => {
+        streamStickFrameRef.current = null;
+        if (!streamStickPendingRef.current) {
+          return;
+        }
+        runStick();
+      });
+    };
+
+    const elapsed = Date.now() - lastStreamStickAtRef.current;
+    if (elapsed >= STREAM_STICK_MIN_INTERVAL_MS) {
+      scheduleFrame();
+    } else if (streamStickFrameRef.current === null) {
+      // Throttle: wait out the remainder of the interval, then stick once.
+      const delay = STREAM_STICK_MIN_INTERVAL_MS - elapsed;
+      if (streamStickFallbackRef.current === null) {
+        streamStickFallbackRef.current = setTimeout(() => {
+          streamStickFallbackRef.current = null;
+          if (!streamStickPendingRef.current) {
+            return;
+          }
+          scheduleFrame();
+        }, delay);
+      }
+    }
+
+    // One delayed measurement pass for late Markdown/layout growth. Reuse the
+    // same fallback timer slot only when idle so we do not stack storms.
+    if (streamStickFallbackRef.current === null) {
+      streamStickFallbackRef.current = setTimeout(() => {
+        streamStickFallbackRef.current = null;
+        if (!autoFollowRef.current || isUserDraggingRef.current) {
+          return;
+        }
+        streamStickPendingRef.current = true;
+        scheduleFrame();
+      }, STREAM_STICK_FALLBACK_MS);
+    }
+  }, [stickToBottomNow]);
+
   const scheduleBottomAnchor = useCallback(
     (animated: boolean) => {
+      // Streaming auto-follow uses the throttled rAF stick path so content-size
+      // blips do not issue a scroll storm.
+      if (isStreamingRef.current) {
+        requestStreamStick();
+        return;
+      }
+
       clearBottomAnchorTimers();
 
       const anchor = (useAnimated: boolean) => {
@@ -294,38 +396,16 @@ function ChatTranscriptComponent({
       // One bounded fallback catches delayed Markdown measurement without
       // issuing a multi-frame scroll storm for every streamed delta.
       bottomAnchorTimersRef.current = [
-        setTimeout(() => anchor(false), 120),
+        setTimeout(() => anchor(false), STREAM_STICK_FALLBACK_MS),
       ];
     },
-    [clearBottomAnchorTimers, scrollToBottom],
+    [clearBottomAnchorTimers, requestStreamStick, scrollToBottom],
   );
 
   const queueAutoScroll = useCallback((animated: boolean) => {
     pendingAutoScrollRef.current = true;
     pendingAutoScrollAnimatedRef.current = animated;
   }, []);
-
-  const stickToBottomThrottled = useCallback((animated: boolean) => {
-    if (!autoFollowRef.current || isUserDraggingRef.current) {
-      return;
-    }
-    const now = Date.now();
-    // While streaming, stick at most ~8 times/sec to avoid contentSize thrash.
-    if (now - lastStickBottomAtRef.current < 120) {
-      if (stickBottomFrameRef.current != null) {
-        return;
-      }
-      stickBottomFrameRef.current = requestAnimationFrame(() => {
-        stickBottomFrameRef.current = null;
-        lastStickBottomAtRef.current = Date.now();
-        queueAutoScroll(animated);
-      });
-      return;
-    }
-    lastStickBottomAtRef.current = now;
-    queueAutoScroll(animated);
-  }, [queueAutoScroll]);
-
 
   const updateNearBottom = useCallback((
     offsetY = scrollOffsetRef.current,
@@ -462,31 +542,40 @@ function ChatTranscriptComponent({
       return;
     }
 
-    if (autoFollowRef.current) {
-      stickToBottomThrottled(!isStreaming);
-      scheduleBottomAnchor(!isStreaming);
+    if (!autoFollowRef.current) {
+      return;
     }
+
+    // While streaming, only queue/coalesce stick work. Avoid dual schedule
+    // from both layoutSignature ticks and onContentSizeChange.
+    if (isStreaming) {
+      queueAutoScroll(false);
+      requestStreamStick();
+      return;
+    }
+
+    queueAutoScroll(true);
+    scheduleBottomAnchor(true);
   }, [
     clearBottomAnchorTimers,
     isActive,
     isStreaming,
     layoutSignature,
     messageCount,
-    stickToBottomThrottled,
+    queueAutoScroll,
+    requestStreamStick,
     scheduleBottomAnchor,
   ]);
 
   useEffect(() => {
-    return () => {
-      if (stickBottomFrameRef.current != null) {
-        cancelAnimationFrame(stickBottomFrameRef.current);
-        stickBottomFrameRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!isActive || messageCount === 0 || !autoFollowRef.current) {
+      return;
+    }
+
+    // Padding/tracker geometry changes still need an immediate re-anchor, but
+    // stream mode stays on the coalesced stick path.
+    if (isStreaming) {
+      requestStreamStick();
       return;
     }
 
@@ -494,9 +583,11 @@ function ChatTranscriptComponent({
   }, [
     bottomPadding,
     isActive,
+    isStreaming,
     listTopPadding,
     messageCount,
     planTrackerHeight,
+    requestStreamStick,
     scheduleBottomAnchor,
   ]);
 
@@ -505,7 +596,21 @@ function ChatTranscriptComponent({
       return;
     }
 
-    const targetIndex = findTurnIndexForMessage(turns, scrollToMessageId);
+    if (turnContainsMessage(liveTurn, scrollToMessageId)) {
+      autoFollowRef.current = false;
+      requestAnimationFrame(() => {
+        markProgrammaticScroll();
+        // Live turn is rendered outside FlatList rows as a footer.
+        flatListRef.current?.scrollToEnd({ animated: true });
+        onScrollTargetHandled?.();
+      });
+      return;
+    }
+
+    const targetIndex = findTurnIndexForMessage(
+      historicalTurns,
+      scrollToMessageId,
+    );
     if (targetIndex < 0) {
       onScrollTargetHandled?.();
       return;
@@ -521,17 +626,52 @@ function ChatTranscriptComponent({
       });
       onScrollTargetHandled?.();
     });
-  }, [isActive, markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
+  }, [
+    historicalTurns,
+    isActive,
+    liveTurn,
+    markProgrammaticScroll,
+    onScrollTargetHandled,
+    scrollToMessageId,
+  ]);
 
-  const renderTurn = useCallback(
-    ({ item, index }: { item: TranscriptTurn; index: number }) => {
-      const isLastTurn = false; // live turn is rendered in the footer
-      return (
+  const renderHistoricalTurn = useCallback(
+    ({ item }: { item: TranscriptTurn }) => (
+      <TranscriptTurnRow
+        turn={item}
+        isLastTurn={false}
+        isStreaming={false}
+        isThinking={false}
+        activeToolCallId={activeToolCallId}
+        sessionId={sessionId}
+        onApproveTool={onApproveTool}
+        onDenyTool={onDenyTool}
+        onSubmitToolResult={onSubmitToolResult}
+        onPlanConfirm={onPlanConfirm}
+      />
+    ),
+    [
+      activeToolCallId,
+      onApproveTool,
+      onDenyTool,
+      onPlanConfirm,
+      onSubmitToolResult,
+      sessionId,
+    ],
+  );
+
+  const liveFooter = useMemo(() => {
+    if (!liveTurn) {
+      return <View style={styles.liveFooterSpacer} />;
+    }
+
+    return (
+      <View style={styles.liveFooter}>
         <TranscriptTurnRow
-          turn={item}
-          isLastTurn={isLastTurn}
-          isStreaming={isStreaming && isLastTurn}
-          isThinking={isThinking && isLastTurn}
+          turn={liveTurn}
+          isLastTurn
+          isStreaming={isStreaming}
+          isThinking={isThinking}
           activeToolCallId={activeToolCallId}
           sessionId={sessionId}
           onApproveTool={onApproveTool}
@@ -539,20 +679,19 @@ function ChatTranscriptComponent({
           onSubmitToolResult={onSubmitToolResult}
           onPlanConfirm={onPlanConfirm}
         />
-      );
-    },
-    [
-      activeToolCallId,
-      isStreaming,
-      isThinking,
-      onApproveTool,
-      onDenyTool,
-      onPlanConfirm,
-      onSubmitToolResult,
-      sessionId,
-      turns.length,
-    ],
-  );
+      </View>
+    );
+  }, [
+    activeToolCallId,
+    isStreaming,
+    isThinking,
+    liveTurn,
+    onApproveTool,
+    onDenyTool,
+    onPlanConfirm,
+    onSubmitToolResult,
+    sessionId,
+  ]);
 
   if (messages.length === 0) {
     return (
@@ -568,6 +707,8 @@ function ChatTranscriptComponent({
         ref={flatListRef}
         data={historicalTurns}
         keyExtractor={(turn) => turn.id}
+        // Historical rows are intentionally isolated from live stream ticks.
+        extraData={liveTurn?.id ?? "no-live"}
         windowSize={7}
         maxToRenderPerBatch={4}
         initialNumToRender={10}
@@ -596,23 +737,8 @@ function ChatTranscriptComponent({
           x: 0,
           y: restoredScrollStateRef.current?.offset ?? 0,
         }}
-        renderItem={renderTurn}
-        ListFooterComponent={
-          liveTurn ? (
-            <TranscriptTurnRow
-              turn={liveTurn}
-              isLastTurn
-              isStreaming={isStreaming}
-              isThinking={isThinking}
-              activeToolCallId={activeToolCallId}
-              sessionId={sessionId}
-              onApproveTool={onApproveTool}
-              onDenyTool={onDenyTool}
-              onSubmitToolResult={onSubmitToolResult}
-              onPlanConfirm={onPlanConfirm}
-            />
-          ) : null
-        }
+        renderItem={renderHistoricalTurn}
+        ListFooterComponent={liveFooter}
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -628,25 +754,47 @@ function ChatTranscriptComponent({
             autoFollowRef.current && !isUserDraggingRef.current;
           updateNearBottom();
           if (shouldMaintainBottom) {
-            scheduleBottomAnchor(false);
+            if (isStreamingRef.current) {
+              requestStreamStick();
+            } else {
+              scheduleBottomAnchor(false);
+            }
           } else {
             flushAutoScroll();
           }
         }}
         onContentSizeChange={(_width, height) => {
+          // Ignore no-op measurement blips while streaming.
+          if (
+            isStreamingRef.current &&
+            height === contentHeightRef.current
+          ) {
+            return;
+          }
           contentHeightRef.current = height;
           const shouldMaintainBottom =
             autoFollowRef.current && !isUserDraggingRef.current;
           updateNearBottom();
           if (shouldMaintainBottom) {
-            scheduleBottomAnchor(false);
+            if (isStreamingRef.current) {
+              requestStreamStick();
+            } else {
+              scheduleBottomAnchor(false);
+            }
           } else {
             flushAutoScroll();
           }
         }}
         onScrollToIndexFailed={({ index }) => {
-          const clampedIndex = Math.max(0, Math.min(index, turns.length - 1));
+          const clampedIndex = Math.max(
+            0,
+            Math.min(index, Math.max(historicalTurns.length - 1, 0)),
+          );
           requestAnimationFrame(() => {
+            if (historicalTurns.length === 0) {
+              flatListRef.current?.scrollToEnd({ animated: true });
+              return;
+            }
             flatListRef.current?.scrollToIndex({
               index: clampedIndex,
               animated: true,
@@ -855,6 +1003,12 @@ const styles = StyleSheet.create({
   },
   turnLive: {
     marginBottom: 14,
+  },
+  liveFooter: {
+    // Keep footer spacing identical to previous in-list last turn spacing.
+  },
+  liveFooterSpacer: {
+    height: 0,
   },
   edgeMask: {
     position: "absolute",
