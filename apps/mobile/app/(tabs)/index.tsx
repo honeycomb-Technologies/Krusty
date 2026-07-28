@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
-  AppState,
   View,
   Text,
   Pressable,
@@ -14,7 +13,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
-import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
 import { useConnection } from "../../hooks/useConnection";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
@@ -47,8 +45,6 @@ import { getToolDiffStats } from "../../components/chat/toolDiffModel";
 import Animated, { runOnJS } from "react-native-reanimated";
 
 import type {
-  ModelInfo,
-  ModelKey,
   SessionResponse,
   SessionType,
 } from "@krusty/api";
@@ -61,17 +57,14 @@ import type {
 } from "@krusty/state";
 import {
   modelKeysEqual,
-  resolveUsableModel,
   supportsFastMode,
 } from "@krusty/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
   CHAT_BAR_ZONE,
-  SELECTED_MODEL_KEY,
   flattenToolCalls,
   getActiveToolCall,
-  normalizeProviderId,
   sessionTypeForTab,
   tabForSessionType,
 } from "./chat-screen/helpers";
@@ -82,6 +75,7 @@ import {
   styles,
 } from "./chat-screen/styles";
 import { useSessionActions } from "./chat-screen/useSessionActions";
+import { useSessionController } from "./chat-screen/useSessionController";
 import { ActiveConversationSurface } from "./chat-screen/ActiveConversationSurface";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
@@ -197,10 +191,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     useWorkspaceStore((state) => state.directory, activeMode) ?? null;
   const workspaceTargetBranch =
     useWorkspaceStore((state) => state.targetBranch, activeMode) ?? null;
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
-  const [defaultModelKey, setDefaultModelKey] = useState<ModelKey | null>(null);
-  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
   const [desktopToolboxOpen, setDesktopToolboxOpen] = useState(false);
@@ -239,6 +229,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [errorBannerHeight, setErrorBannerHeight] = useState(0);
   /** Measured desktop chat pane width (split host, before soft-cap). */
   const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
+  const {
+    models,
+    ensureModelReady,
+    lastSessionIdByTypeRef,
+  } = useSessionController({
+    client,
+    isConnected,
+    activeMode,
+    sessionStore,
+    sessionsStore,
+    modeStores: stores.modes,
+    sessions,
+  });
+
   const selectedModelInfo = useMemo(
     () =>
       (modelKey
@@ -265,7 +269,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const liveActivitySessionIdRef = useRef<string | null>(null);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
-  const sessionsRefreshInFlightRef = useRef(false);
   const toolActivityRef = useRef<{
     signature: string;
     toolCalls: ReturnType<typeof flattenToolCalls>;
@@ -273,18 +276,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     activeToolCall: ReturnType<typeof getActiveToolCall>;
     activityDiff: { additions: number; deletions: number };
   } | null>(null);
-  const lastSessionIdByTypeRef = useRef<Record<SessionType, string | null>>({
-    chat: null,
-    code: null,
-    mako: null,
-  });
-  const attemptedWorkspaceSessionHydrationRef = useRef<
-    Record<SessionType, string | null>
-  >({
-    chat: null,
-    code: null,
-    mako: null,
-  });
   // Semantic stream summary published by ActiveConversationSurface / mako path.
   // This avoids shell-level messages subscription while preserving Live Activity.
   const [streamSemantics, setStreamSemantics] = useState({
@@ -455,188 +446,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   });
 
   const t = theme.colors;
-
-  const loadModelCatalog = useCallback(async () => {
-    if (!client || !isConnected) {
-      return null;
-    }
-
-    const [response, credentials] = await Promise.all([
-      client.getModels(),
-      client.getCredentials().catch(() => []),
-    ]);
-    const nextConfiguredProviders = credentials
-      .filter((provider) => provider.configured || provider.has_oauth)
-      .map((provider) => normalizeProviderId(provider.name));
-    setModels(response.models);
-    setDefaultModelId(response.default_model ?? null);
-    setDefaultModelKey(response.default_model_key ?? null);
-    setConfiguredProviders(nextConfiguredProviders);
-    return {
-      response,
-      configuredProviders: nextConfiguredProviders,
-    };
-  }, [client, isConnected]);
-
-  const ensureModelReady = useCallback(async (
-    targetStore: LoadedStores["session"] = sessionStore,
-  ) => {
-    const existingModel = targetStore.getState().model;
-    let catalog = models;
-    let fallbackDefault = defaultModelId;
-    let fallbackDefaultKey = defaultModelKey;
-    let allowedProviders = configuredProviders;
-
-    if (catalog.length === 0) {
-      const result = await loadModelCatalog().catch(() => null);
-      if (!result) {
-        return null;
-      }
-      catalog = result.response.models;
-      fallbackDefault = result.response.default_model ?? null;
-      fallbackDefaultKey = result.response.default_model_key ?? null;
-      allowedProviders = result.configuredProviders;
-    }
-
-    const selectedModel = resolveUsableModel(
-      existingModel,
-      fallbackDefault,
-      catalog,
-      allowedProviders,
-      targetStore.getState().modelKey,
-      fallbackDefaultKey,
-    );
-
-    if (selectedModel) {
-      targetStore
-        .getState()
-        .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
-      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
-      return selectedModel.id;
-    }
-
-    targetStore.getState().setModel(null);
-    await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
-    return null;
-  }, [
-    configuredProviders,
-    defaultModelId,
-    defaultModelKey,
-    loadModelCatalog,
-    models,
-  ]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    void sessionsStore.getState().loadSessions();
-    // Warm only the active mode model path on connect. Background modes can
-    // resolve models when first focused / first used.
-    void ensureModelReady(stores.modes[activeMode].session);
-  }, [activeMode, client, ensureModelReady, isConnected, sessionsStore, stores.modes]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    const refreshHandle = setInterval(() => {
-      if (AppState.currentState === "active") {
-        void loadModelCatalog().catch(() => null);
-      }
-    }, 5 * 60 * 1000);
-
-    return () => clearInterval(refreshHandle);
-  }, [client, isConnected, loadModelCatalog]);
-
-  useEffect(() => {
-    if (!client || !isConnected || sessions.length === 0) {
-      return;
-    }
-
-    // Eager-hydrate only the visible mode. Parallel chat/code/mako loads were a
-    // major source of resume thrash and made mode switches feel crashy under load.
-    // Background modes warm on first focus instead of all at once.
-    const type = activeMode;
-    const slot = stores.modes[type];
-    if (slot.session.getState().sessionId) {
-      return;
-    }
-    const persistedId = slot.workspace.getState().sessionId;
-    const persisted = persistedId
-      ? sessions.find(
-          (candidate) =>
-            candidate.id === persistedId && candidate.session_type === type,
-        )
-      : null;
-    const recent = sessions
-      .filter((candidate) => candidate.session_type === type)
-      .sort(
-        (left, right) =>
-          new Date(right.updated_at).getTime() -
-          new Date(left.updated_at).getTime(),
-      )[0];
-    const targetId = persisted?.id ?? recent?.id ?? null;
-    if (
-      !targetId ||
-      attemptedWorkspaceSessionHydrationRef.current[type] === targetId
-    ) {
-      return;
-    }
-
-    attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
-    lastSessionIdByTypeRef.current[type] = targetId;
-    void slot.session.getState().loadSession(targetId, true).catch(() => {
-      void sessionsStore.getState().loadSessions();
-    });
-  }, [activeMode, client, isConnected, sessions, sessionsStore, stores.modes]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    const refreshHandle = setInterval(() => {
-      if (
-        AppState.currentState !== "active" ||
-        sessionStore.getState().isStreaming ||
-        sessionsRefreshInFlightRef.current
-      ) return;
-
-      sessionsRefreshInFlightRef.current = true;
-      void sessionsStore.getState().loadSessions().finally(() => {
-        sessionsRefreshInFlightRef.current = false;
-      });
-    }, 30_000);
-
-    return () => clearInterval(refreshHandle);
-  }, [client, isConnected, sessionStore, sessionsStore]);
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState !== "active") {
-        return;
-      }
-
-      // Refresh only the active mode on resume. Background modes warm lazily
-      // when the user switches to them, which avoids a resume network storm.
-      const activeSlot = stores.modes[activeMode];
-      const currentSessionId =
-        activeSlot.session.getState().sessionId ??
-        activeSlot.workspace.getState().sessionId;
-      if (
-        currentSessionId &&
-        !activeSlot.session.getState().isStreaming
-      ) {
-        void activeSlot.session.getState().loadSession(currentSessionId, true);
-      }
-      void loadModelCatalog().catch(() => null);
-    });
-
-    return () => subscription.remove();
-  }, [activeMode, loadModelCatalog, stores.modes]);
 
   useEffect(() => {
     const nextNotifiedIds = new Set<string>();

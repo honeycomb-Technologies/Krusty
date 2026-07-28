@@ -85,7 +85,8 @@ function MakoToolboxBody({
   onOpenMakoRun?: (sessionId: string) => void;
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
 }) {
-  const current = useMakoCurrent(visible);
+  // Only fetch for the active toolbox tab. Hidden tabs should be lazy.
+  const current = useMakoCurrent(visible && (activeTab === 0 || activeTab === 1));
   const memories = useMakoMemories(
     visible && activeTab === 2,
     workspaceDirectory,
@@ -94,22 +95,28 @@ function MakoToolboxBody({
 
   return (
     <View style={styles.body}>
-      <View style={[styles.tabContent, activeTab !== 0 && styles.hidden]}>
-        <MakoScheduleView
-          state={current}
-          onSelectRun={openRun}
-          onOpenProject={onOpenProject}
-        />
-      </View>
-      <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
-        <MakoRunsView state={current} onSelectRun={openRun} />
-      </View>
-      <View style={[styles.tabContent, activeTab !== 2 && styles.hidden]}>
-        <MakoMemoryView
-          workspaceDirectory={workspaceDirectory}
-          state={memories}
-        />
-      </View>
+      {activeTab === 0 ? (
+        <View style={styles.tabContent}>
+          <MakoScheduleView
+            state={current}
+            onSelectRun={openRun}
+            onOpenProject={onOpenProject}
+          />
+        </View>
+      ) : null}
+      {activeTab === 1 ? (
+        <View style={styles.tabContent}>
+          <MakoRunsView state={current} onSelectRun={openRun} />
+        </View>
+      ) : null}
+      {activeTab === 2 ? (
+        <View style={styles.tabContent}>
+          <MakoMemoryView
+            workspaceDirectory={workspaceDirectory}
+            state={memories}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }

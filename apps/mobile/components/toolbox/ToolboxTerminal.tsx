@@ -36,6 +36,8 @@ interface NativeTerminalTab {
   html: string;
 }
 
+const MAX_TERMINAL_TABS = 4;
+
 // Survive toolbox sheet unmount so reopening Terminal keeps existing sessions.
 const terminalSession: {
   tabs: NativeTerminalTab[];
@@ -61,14 +63,22 @@ function NativeTerminal({ visible }: { visible: boolean }) {
   const createTab = useCallback(() => {
     if (!serverUrl) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const id = createTerminalId();
-    const html = getTerminalHtml(buildTerminalWebSocketUrl(serverUrl, serverToken), {
-      background: t.background,
-      foreground: t.foreground,
-      cursor: t.userMessage,
+    setTabs((prev) => {
+      if (prev.length >= MAX_TERMINAL_TABS) {
+        // Cap concurrent terminal processes. Reuse newest tab shell.
+        const active = prev[prev.length - 1];
+        if (active) setActiveTab(active.id);
+        return prev;
+      }
+      const id = createTerminalId();
+      const html = getTerminalHtml(buildTerminalWebSocketUrl(serverUrl, serverToken), {
+        background: t.background,
+        foreground: t.foreground,
+        cursor: t.userMessage,
+      });
+      setActiveTab(id);
+      return [...prev, { id, label: `Terminal ${prev.length + 1}`, html }];
     });
-    setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}`, html }]);
-    setActiveTab(id);
   }, [serverToken, serverUrl, t.background, t.foreground, t.userMessage]);
 
   const closeTab = useCallback((id: string) => {

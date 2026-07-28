@@ -228,11 +228,8 @@ export function SessionDrawer({
     }
   }, [client, pickerReady]);
 
-  useEffect(() => {
-    if (isOpen && activeMode === "code") {
-      void loadPickerRoot();
-    }
-  }, [activeMode, isOpen, loadPickerRoot]);
+  // Directory browse is explicit user cost. Do not preload on every code drawer open.
+  // loadPickerRoot still runs from showPicker().
 
   useEffect(() => {
     if (!isOpen) {

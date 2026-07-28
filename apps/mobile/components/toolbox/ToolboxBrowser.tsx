@@ -23,6 +23,8 @@ interface PreviewTab {
   label: string;
 }
 
+const MAX_BROWSER_TABS = 4;
+
 // Survive toolbox sheet unmount so reopening Browser does not look like a fresh launch.
 const browserSession: {
   ports: PortEntry[];
@@ -130,13 +132,20 @@ function NativeBrowser({ visible }: { visible: boolean }) {
   }, [client, loadPorts, settings?.auto_refresh_secs, visible]);
 
   const createBlankTab = useCallback(() => {
-    const tab: PreviewTab = {
-      id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      port: null,
-      label: 'New Tab',
-    };
-    setTabs((current) => [...current, tab]);
-    setActiveTabId(tab.id);
+    setTabs((current) => {
+      if (current.length >= MAX_BROWSER_TABS) {
+        const active = current[current.length - 1];
+        if (active) setActiveTabId(active.id);
+        return current;
+      }
+      const tab: PreviewTab = {
+        id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        port: null,
+        label: 'New Tab',
+      };
+      setActiveTabId(tab.id);
+      return [...current, tab];
+    });
     setError(null);
   }, []);
 

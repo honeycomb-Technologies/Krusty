@@ -177,6 +177,8 @@ function ChatTranscriptComponent({
   const scrollOffsetRef = useRef(
     restoredScrollStateRef.current?.offset ?? 0,
   );
+  const lastStickBottomAtRef = useRef(0);
+  const stickBottomFrameRef = useRef<number | null>(null);
   const autoFollowRef = useRef(
     restoredScrollStateRef.current?.autoFollow ?? true,
   );
@@ -301,6 +303,28 @@ function ChatTranscriptComponent({
     pendingAutoScrollRef.current = true;
     pendingAutoScrollAnimatedRef.current = animated;
   }, []);
+
+  const stickToBottomThrottled = useCallback((animated: boolean) => {
+    if (!autoFollowRef.current || isUserDraggingRef.current) {
+      return;
+    }
+    const now = Date.now();
+    // While streaming, stick at most ~8 times/sec to avoid contentSize thrash.
+    if (now - lastStickBottomAtRef.current < 120) {
+      if (stickBottomFrameRef.current != null) {
+        return;
+      }
+      stickBottomFrameRef.current = requestAnimationFrame(() => {
+        stickBottomFrameRef.current = null;
+        lastStickBottomAtRef.current = Date.now();
+        queueAutoScroll(animated);
+      });
+      return;
+    }
+    lastStickBottomAtRef.current = now;
+    queueAutoScroll(animated);
+  }, [queueAutoScroll]);
+
 
   const updateNearBottom = useCallback((
     offsetY = scrollOffsetRef.current,
@@ -438,7 +462,7 @@ function ChatTranscriptComponent({
     }
 
     if (autoFollowRef.current) {
-      queueAutoScroll(!isStreaming);
+      stickToBottomThrottled(!isStreaming);
       scheduleBottomAnchor(!isStreaming);
     }
   }, [
@@ -447,9 +471,18 @@ function ChatTranscriptComponent({
     isStreaming,
     layoutSignature,
     messageCount,
-    queueAutoScroll,
+    stickToBottomThrottled,
     scheduleBottomAnchor,
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (stickBottomFrameRef.current != null) {
+        cancelAnimationFrame(stickBottomFrameRef.current);
+        stickBottomFrameRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isActive || messageCount === 0 || !autoFollowRef.current) {

@@ -68,6 +68,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   const startTimeRef = useRef<number>(0);
   const stateRef = useRef<StreamState | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const pendingEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingUpdateRef = useRef<ActivityContentState | null>(null);
   const pendingUpdateUrgentRef = useRef(false);
   const updateInFlightRef = useRef(false);
@@ -246,31 +247,50 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     return () => sub.remove();
   }, [options?.onToolApproval]);
 
+  const clearPendingEnd = useCallback(() => {
+    if (pendingEndTimerRef.current) {
+      clearTimeout(pendingEndTimerRef.current);
+      pendingEndTimerRef.current = null;
+    }
+  }, []);
+
   const startActivity = useCallback((sessionId: string, chatTitle: string) => {
     if (Platform.OS !== 'ios' || !sessionId || !ChatStreamActivityFactory) return;
 
+    // Same session: keep existing activity.
     if (activityRef.current && sessionIdRef.current === sessionId) {
+      clearPendingEnd();
       return;
     }
 
+    clearPendingEnd();
     clearUpdateDelay();
     removePushTokenSubscription();
     updateGenerationRef.current += 1;
     pendingUpdateRef.current = null;
     pendingUpdateUrgentRef.current = false;
+
+    // Session switch: end previous activity, but prefer a short delayed end over
+    // immediate destroy/recreate thrash when the user is flipping sessions.
     if (activityRef.current) {
+      const previousActivity = activityRef.current;
       const previousSessionId = sessionIdRef.current;
       const previousPushToken = pushTokenRef.current;
-      void activityRef.current.end('immediate').catch(() => {});
-      if (previousSessionId && previousPushToken) {
-        void clientRef.current
-          ?.unregisterLiveActivity(previousSessionId, previousPushToken)
-          .catch(() => {});
-      }
       activityRef.current = null;
+      pendingEndTimerRef.current = setTimeout(() => {
+        pendingEndTimerRef.current = null;
+        void previousActivity.end('immediate').catch(() => {});
+        if (previousSessionId && previousPushToken) {
+          void clientRef.current
+            ?.unregisterLiveActivity(previousSessionId, previousPushToken)
+            .catch(() => {});
+        }
+      }, 250);
+    } else {
+      // No local activity handle, but OS may still have orphans.
+      closeExistingActivities();
     }
     pushTokenRef.current = null;
-    closeExistingActivities();
 
     startTimeRef.current = Date.now();
     sessionIdRef.current = sessionId;
@@ -328,6 +348,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
 
   }, [
     clearUpdateDelay,
+    clearPendingEnd,
     closeExistingActivities,
     registerActivityPushToken,
     removePushTokenSubscription,
@@ -353,6 +374,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   }, [schedulePendingUpdate]);
 
   const endActivity = useCallback(() => {
+    clearPendingEnd();
     clearUpdateDelay();
 
     if (!activityRef.current || !stateRef.current) return;
