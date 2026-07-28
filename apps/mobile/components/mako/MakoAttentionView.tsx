@@ -1,5 +1,6 @@
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
+import { ListRowsSkeleton } from "../ui/Skeleton";
 import { MakoAttentionItem } from "./MakoAttentionItem";
 import { useMakoAttention } from "./hooks/useMakoAttention";
 import type { MakoChatContext, MakoCurrentState } from "./types";
@@ -38,7 +39,7 @@ export function MakoAttentionView({
   if (state.isLoading && !state.current) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
+        <ListRowsSkeleton rows={5} />
       </View>
     );
   }
@@ -137,8 +138,9 @@ const styles = StyleSheet.create({
   },
   loading: {
     flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    gap: 16,
   },
   header: {
     borderBottomWidth: StyleSheet.hairlineWidth,

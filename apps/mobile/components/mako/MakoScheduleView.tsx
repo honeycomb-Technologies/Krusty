@@ -13,6 +13,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { ListRowsSkeleton } from "../ui/Skeleton";
 import type { MakoCurrentRunSummary, MakoGlobalSchedule } from "@krusty/api";
 import type { MakoCurrentState } from "./types";
 import {
@@ -856,9 +857,7 @@ export function MakoScheduleView({
           ) : null}
 
           {isLoadingCommitments && commitments.length === 0 ? (
-            <Text style={[styles.empty, { color: t.mutedForeground }]}>
-              Loading commitments...
-            </Text>
+            <ListRowsSkeleton rows={4} />
           ) : commitments.length === 0 ? (
             <Text style={[styles.empty, { color: t.mutedForeground }]}>
               Nothing is scheduled yet.

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -13,6 +12,7 @@ import * as Haptics from "../../platform/haptics";
 import type { AgentMemory, MemoryType } from "@krusty/api";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
+import { CardGridSkeleton, DetailPaneSkeleton, ListRowsSkeleton } from "../ui/Skeleton";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoKnowledgeScopeToggle } from "./MakoKnowledgeScopeToggle";
 import { MakoTopNav } from "./MakoTopNav";
@@ -259,7 +259,8 @@ export function MakoMemoryView({
   if (state.isLoading && state.memories.length === 0) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
+        <CardGridSkeleton cards={3} />
+        <ListRowsSkeleton rows={6} />
       </View>
     );
   }

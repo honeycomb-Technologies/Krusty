@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -9,6 +8,7 @@ import {
   View,
 } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
+import { ChannelsSkeleton } from "../ui/Skeleton";
 import { MakoEditorModal } from "./MakoEditorModal";
 import { MakoStatusBadge } from "./MakoStatusBadge";
 import { useMakoChannels } from "./hooks/useMakoChannels";
@@ -133,9 +133,7 @@ export function MakoChannelsView({ state }: MakoChannelsViewProps) {
       </View>
 
       {channelsState.isLoading && !channelsState.channels ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color={t.userMessage} />
-        </View>
+        <ChannelsSkeleton />
       ) : null}
 
       {channelsState.channels?.items.map((item) => (

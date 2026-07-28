@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -11,6 +10,7 @@ import type {
   MakoHomeDocumentKind,
 } from "@krusty/api";
 import { useThemeContext } from "../../hooks/useTheme";
+import { DetailPaneSkeleton, ListRowsSkeleton } from "../ui/Skeleton";
 import { MakoEditorModal } from "./MakoEditorModal";
 import { MakoStatusBadge } from "./MakoStatusBadge";
 import type { MakoHomeState } from "./types";
@@ -211,7 +211,8 @@ export function MakoPresenceDetails({
 
       {state.isLoading && !home ? (
         <View style={styles.loading}>
-          <ActivityIndicator color={t.userMessage} />
+          <DetailPaneSkeleton />
+          <ListRowsSkeleton rows={3} />
         </View>
       ) : null}
 

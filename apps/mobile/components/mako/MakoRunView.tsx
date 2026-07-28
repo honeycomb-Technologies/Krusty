@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +9,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { RunDetailSkeleton } from "../ui/Skeleton";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
 import { MakoCrewPicker } from "./MakoCrewPicker";
@@ -391,9 +391,7 @@ export function MakoRunView({
       />
 
       {isLoading && !status ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color={t.userMessage} />
-        </View>
+        <RunDetailSkeleton />
       ) : (
         <ScrollView
           style={styles.scroll}

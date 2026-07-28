@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -14,6 +13,7 @@ import type { Report } from "@krusty/api";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { DetailPaneSkeleton, ListRowsSkeleton } from "../ui/Skeleton";
 import { ReportDetailContent } from "../reports/ReportDetailContent";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoKnowledgeScopeToggle } from "./MakoKnowledgeScopeToggle";
@@ -145,7 +145,7 @@ function ReportDetailPane({
   if (isLoading) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
+        <DetailPaneSkeleton />
       </View>
     );
   }
@@ -413,7 +413,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
   if (reports.isLoading && reports.reports.length === 0) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
+        <ListRowsSkeleton rows={7} />
       </View>
     );
   }

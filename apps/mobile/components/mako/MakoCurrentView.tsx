@@ -30,13 +30,8 @@ export function MakoCurrentView({
   const { theme } = useThemeContext();
   const t = theme.colors;
 
-  if (state.isLoading && !state.current && homeState.isLoading && !homeState.home) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
-      </View>
-    );
-  }
+  const showBootstrapLoading =
+    state.isLoading && !state.current && homeState.isLoading && !homeState.home;
 
   const status = state.current?.status;
   const pendingApprovalCount = state.current?.approvals.length ?? 0;
@@ -87,8 +82,11 @@ export function MakoCurrentView({
       <View style={[styles.metaBlock, { borderBottomColor: t.border }]}>
         <View style={styles.statusLine}>
           <Text style={[styles.statusText, { color: t.mutedForeground }]}>
-            {stateBits.join(" • ")}
+            {showBootstrapLoading ? "Connecting to Mako…" : stateBits.join(" • ")}
           </Text>
+          {showBootstrapLoading || state.isRefreshing || homeState.isRefreshing ? (
+            <ActivityIndicator color={t.userMessage} size="small" />
+          ) : null}
         </View>
 
         {needsBootstrap ? (
@@ -176,6 +174,10 @@ const styles = StyleSheet.create({
   statusLine: {
     paddingTop: 4,
     paddingBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
   statusText: {
     fontSize: 12,
