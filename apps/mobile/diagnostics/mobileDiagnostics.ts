@@ -42,8 +42,17 @@ export function recordRequestDiagnostic(
   name: string,
   outcome: 'start' | 'complete' | 'cancel' | 'error',
   durationMs?: number,
+  code?: string,
 ): void {
-  recordMobileDiagnostic('request', { name, outcome, durationMs });
+  if (!activeRecorder || name === 'api.mobile_diagnostics') return;
+  const mode = activeRecorder.getMode();
+  if (outcome === 'start' && mode !== 'stress') return;
+  if (
+    outcome === 'complete'
+    && mode !== 'stress'
+    && (durationMs === undefined || durationMs < 1_000)
+  ) return;
+  activeRecorder.record('request', { name, outcome, durationMs, code });
 }
 
 export function recordWebViewDiagnostic(

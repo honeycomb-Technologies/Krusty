@@ -79,6 +79,7 @@ export default function OnboardingScreen() {
           <View style={[styles.inputGroup, { backgroundColor: g.background, borderColor: g.border }]}>
             <Text style={[styles.label, { color: t.mutedForeground }]}>Server URL</Text>
             <TextInput
+              accessibilityLabel="Server URL"
               style={[styles.input, { color: t.foreground }]}
               value={serverUrl}
               onChangeText={setServerUrl}
@@ -94,6 +95,7 @@ export default function OnboardingScreen() {
           <View style={[styles.inputGroup, { backgroundColor: g.background, borderColor: g.border }]}>
             <Text style={[styles.label, { color: t.mutedForeground }]}>Remote Access Token</Text>
             <TextInput
+              accessibilityLabel="Remote access token"
               style={[styles.input, { color: t.foreground }]}
               value={token}
               onChangeText={setToken}
@@ -110,6 +112,8 @@ export default function OnboardingScreen() {
           )}
 
           <Pressable
+            accessibilityLabel="Connect to server"
+            accessibilityRole="button"
             style={({ pressed }) => [
               styles.button,
               {

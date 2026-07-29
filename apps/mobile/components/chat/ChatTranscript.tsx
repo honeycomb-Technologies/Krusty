@@ -28,8 +28,13 @@ import {
   splitTranscriptTurnsCached,
   turnContainsMessage,
   type TranscriptTurnsCache,
-  type TranscriptTurn,
 } from "./transcriptTurns";
+import {
+  findTranscriptRowIndex,
+  splitTranscriptRowsCached,
+  type TranscriptMessageRow,
+  type TranscriptRowsCache,
+} from "./transcriptRows";
 import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@krusty/api";
@@ -188,7 +193,7 @@ function ChatTranscriptComponent({
   const restoredScrollStateRef = useRef(
     transcriptScrollCache.get(scrollStateKey) ?? null,
   );
-  const flatListRef = useRef<FlatList<TranscriptTurn>>(null);
+  const flatListRef = useRef<FlatList<TranscriptMessageRow>>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
   const scrollOffsetRef = useRef(
@@ -221,6 +226,9 @@ function ChatTranscriptComponent({
   );
   const committedTurnCachesRef = useRef(
     new Map<string, TranscriptTurnsCache>(),
+  );
+  const committedRowCachesRef = useRef(
+    new Map<string, TranscriptRowsCache>(),
   );
   const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
   const firstPaintGenerationRef = useRef(0);
@@ -298,6 +306,15 @@ function ChatTranscriptComponent({
       historicalTurns,
     ],
   );
+  const rowSplit = useMemo(
+    () => splitTranscriptRowsCached(
+      visibleHistoricalTurns,
+      liveTurn,
+      committedRowCachesRef.current.get(transcriptCacheKey),
+    ),
+    [liveTurn, transcriptCacheKey, visibleHistoricalTurns],
+  );
+  const { rows: transcriptRows, liveFooterRow } = rowSplit;
   const visibleLatestTurn =
     liveTurn
     ?? visibleHistoricalTurns[visibleHistoricalTurns.length - 1]
@@ -384,6 +401,16 @@ function ChatTranscriptComponent({
       caches.delete(oldestKey);
     }
   }, [transcriptCacheKey, turnSplit.cache]);
+  useEffect(() => {
+    const caches = committedRowCachesRef.current;
+    caches.delete(transcriptCacheKey);
+    caches.set(transcriptCacheKey, rowSplit.cache);
+    while (caches.size > MAX_COMMITTED_TRANSCRIPT_CACHES) {
+      const oldestKey = caches.keys().next().value;
+      if (oldestKey === undefined) break;
+      caches.delete(oldestKey);
+    }
+  }, [rowSplit.cache, transcriptCacheKey]);
   const finishFirstPaint = useCallback((generation?: number) => {
     if (
       generation !== undefined
@@ -850,8 +877,20 @@ function ChatTranscriptComponent({
       autoFollowRef.current = false;
       requestAnimationFrame(() => {
         markProgrammaticScroll();
-        // Live turn is rendered outside FlatList rows as a footer.
-        flatListRef.current?.scrollToEnd({ animated: true });
+        const rowIndex = findTranscriptRowIndex(
+          transcriptRows,
+          scrollToMessageId,
+        );
+        if (rowIndex >= 0) {
+          flatListRef.current?.scrollToIndex({
+            index: rowIndex,
+            animated: true,
+            viewPosition: 0.35,
+          });
+        } else {
+          // Only the actively changing tail message remains in the footer.
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }
         onScrollTargetHandled?.();
       });
       return;
@@ -881,8 +920,16 @@ function ChatTranscriptComponent({
     autoFollowRef.current = false;
     requestAnimationFrame(() => {
       markProgrammaticScroll();
+      const visibleRowIndex = findTranscriptRowIndex(
+        transcriptRows,
+        scrollToMessageId,
+      );
+      if (visibleRowIndex < 0) {
+        onScrollTargetHandled?.();
+        return;
+      }
       flatListRef.current?.scrollToIndex({
-        index: targetIndex - firstVisibleHistoricalIndex,
+        index: visibleRowIndex,
         animated: true,
         viewPosition: 0.35,
       });
@@ -895,15 +942,16 @@ function ChatTranscriptComponent({
     markProgrammaticScroll,
     onScrollTargetHandled,
     scrollToMessageId,
+    transcriptRows,
     transcriptCacheKey,
     visibleHistoricalTurns.length,
   ]);
 
-  const renderHistoricalTurn = useCallback(
-    ({ item }: { item: TranscriptTurn }) => (
-      <TranscriptTurnRow
-        turn={item}
-        isLastTurn={false}
+  const renderTranscriptRow = useCallback(
+    ({ item }: { item: TranscriptMessageRow }) => (
+      <TranscriptMessageRowView
+        row={item}
+        isLastTranscriptMessage={false}
         isStreaming={false}
         isThinking={false}
         activeToolCallId={activeToolCallId}
@@ -925,15 +973,15 @@ function ChatTranscriptComponent({
   );
 
   const liveFooter = useMemo(() => {
-    if (!liveTurn) {
+    if (!liveFooterRow) {
       return <View style={styles.liveFooterSpacer} />;
     }
 
     return (
       <View style={styles.liveFooter}>
-        <TranscriptTurnRow
-          turn={liveTurn}
-          isLastTurn
+        <TranscriptMessageRowView
+          row={liveFooterRow}
+          isLastTranscriptMessage
           isStreaming={isStreaming}
           isThinking={isThinking}
           activeToolCallId={activeToolCallId}
@@ -949,7 +997,7 @@ function ChatTranscriptComponent({
     activeToolCallId,
     isStreaming,
     isThinking,
-    liveTurn,
+    liveFooterRow,
     onApproveTool,
     onDenyTool,
     onPlanConfirm,
@@ -969,10 +1017,10 @@ function ChatTranscriptComponent({
     <View style={styles.flex}>
       <FlatList
         ref={flatListRef}
-        data={visibleHistoricalTurns}
-        keyExtractor={(turn) => turn.id}
-        // Historical rows are intentionally isolated from live stream ticks.
-        extraData={liveTurn?.id ?? "no-live"}
+        data={transcriptRows}
+        keyExtractor={(row) => row.id}
+        // Completed messages are isolated from live tail stream ticks.
+        extraData={liveFooterRow?.id ?? "no-live"}
         windowSize={3}
         maxToRenderPerBatch={1}
         initialNumToRender={1}
@@ -1005,7 +1053,7 @@ function ChatTranscriptComponent({
           x: 0,
           y: restoredScrollStateRef.current?.offset ?? 0,
         }}
-        renderItem={renderHistoricalTurn}
+        renderItem={renderTranscriptRow}
         ListFooterComponent={liveFooter}
         maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         style={styles.flex}
@@ -1059,10 +1107,10 @@ function ChatTranscriptComponent({
         onScrollToIndexFailed={({ index }) => {
           const clampedIndex = Math.max(
             0,
-            Math.min(index, Math.max(visibleHistoricalTurns.length - 1, 0)),
+            Math.min(index, Math.max(transcriptRows.length - 1, 0)),
           );
           requestAnimationFrame(() => {
-            if (visibleHistoricalTurns.length === 0) {
+            if (transcriptRows.length === 0) {
               flatListRef.current?.scrollToEnd({ animated: true });
               return;
             }
@@ -1179,9 +1227,9 @@ function ChatTranscriptComponent({
 
 export const ChatTranscript = memo(ChatTranscriptComponent);
 
-interface TranscriptTurnRowProps {
-  turn: TranscriptTurn;
-  isLastTurn: boolean;
+interface TranscriptMessageRowViewProps {
+  row: TranscriptMessageRow;
+  isLastTranscriptMessage: boolean;
   isStreaming: boolean;
   isThinking?: boolean;
   activeToolCallId?: string | null;
@@ -1198,9 +1246,9 @@ interface TranscriptTurnRowProps {
   ) => void | Promise<void>;
 }
 
-const TranscriptTurnRow = memo(function TranscriptTurnRow({
-  turn,
-  isLastTurn,
+const TranscriptMessageRowView = memo(function TranscriptMessageRowView({
+  row,
+  isLastTranscriptMessage,
   isStreaming,
   isThinking,
   activeToolCallId,
@@ -1209,39 +1257,40 @@ const TranscriptTurnRow = memo(function TranscriptTurnRow({
   onDenyTool,
   onSubmitToolResult,
   onPlanConfirm,
-}: TranscriptTurnRowProps) {
+}: TranscriptMessageRowViewProps) {
   return (
-    <View style={[styles.turn, turn.isLive && styles.turnLive]}>
-      {turn.messages.map((message, messageIndex) => {
-        const isLastMessageInTurn = messageIndex === turn.messages.length - 1;
-        return (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            isLast={isLastTurn && isLastMessageInTurn}
-            isStreaming={isStreaming && isLastMessageInTurn}
-            isThinking={isThinking && isLastMessageInTurn}
-            activeToolCallId={activeToolCallId}
-            onApproveTool={
-              sessionId && onApproveTool
-                ? (toolCallId) => onApproveTool(sessionId, toolCallId)
-                : undefined
-            }
-            onDenyTool={
-              sessionId && onDenyTool
-                ? (toolCallId) => onDenyTool(sessionId, toolCallId)
-                : undefined
-            }
-            onSubmitToolResult={onSubmitToolResult}
-            onPlanConfirm={onPlanConfirm}
-          />
-        );
-      })}
+    <View
+      style={[
+        row.isLastMessageInTurn && styles.turn,
+        row.isLastMessageInTurn && row.isLive && styles.turnLive,
+      ]}
+    >
+      <MessageBubble
+        message={row.message}
+        isLast={isLastTranscriptMessage}
+        isStreaming={isStreaming}
+        isThinking={isThinking}
+        activeToolCallId={activeToolCallId}
+        onApproveTool={
+          sessionId && onApproveTool
+            ? (toolCallId) => onApproveTool(sessionId, toolCallId)
+            : undefined
+        }
+        onDenyTool={
+          sessionId && onDenyTool
+            ? (toolCallId) => onDenyTool(sessionId, toolCallId)
+            : undefined
+        }
+        onSubmitToolResult={onSubmitToolResult}
+        onPlanConfirm={onPlanConfirm}
+      />
     </View>
   );
 }, (previous, next) => (
-  previous.turn.renderSignature === next.turn.renderSignature &&
-  previous.isLastTurn === next.isLastTurn &&
+  previous.row.renderSignature === next.row.renderSignature &&
+  previous.row.isLive === next.row.isLive &&
+  previous.row.isLastMessageInTurn === next.row.isLastMessageInTurn &&
+  previous.isLastTranscriptMessage === next.isLastTranscriptMessage &&
   previous.isStreaming === next.isStreaming &&
   previous.isThinking === next.isThinking &&
   previous.activeToolCallId === next.activeToolCallId &&

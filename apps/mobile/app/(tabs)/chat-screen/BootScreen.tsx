@@ -59,6 +59,8 @@ export function ChatBootScreen({
                   : "Server connection is not configured.")}
             </Text>
             <Pressable
+              accessibilityLabel={isConfigured ? "Retry connection" : "Open server setup"}
+              accessibilityRole="button"
               onPress={isConfigured ? onRetryConnection : onOpenSetup}
               style={[styles.bootButton, { backgroundColor: t.userMessage }]}
             >
@@ -68,6 +70,8 @@ export function ChatBootScreen({
             </Pressable>
             {isConfigured ? (
               <Pressable
+                accessibilityLabel="Open server setup"
+                accessibilityRole="button"
                 onPress={onOpenSetup}
                 style={[
                   styles.bootButtonSecondary,

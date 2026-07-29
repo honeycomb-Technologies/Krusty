@@ -47,20 +47,19 @@ if (!globalWithKrustyLogFilter.__krustySvgWarningFilterInstalled) {
 
 function RootNavigator() {
   const { theme } = useThemeContext();
-  const { client, isConfigured } = useConnection();
+  const { client, isConfigured, hasLoadedConnection } = useConnection();
   useDeepLink();
   const router = useRouter();
   const segments = useSegments();
 
   useEffect(() => {
+    if (!hasLoadedConnection) return;
     const inOnboarding = segments[0] === 'onboarding';
 
     if (!isConfigured && !inOnboarding) {
       router.replace('/onboarding');
-    } else if (isConfigured && inOnboarding) {
-      router.replace('/(tabs)');
     }
-  }, [isConfigured, segments]);
+  }, [hasLoadedConnection, isConfigured, router, segments]);
 
   const content = (
     <>

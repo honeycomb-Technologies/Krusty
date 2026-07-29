@@ -23,6 +23,7 @@ import { useThemeContext } from '../hooks/useTheme';
 import { DetailPaneSkeleton, ListRowsSkeleton } from './ui/Skeleton';
 import { useConnection } from '../hooks/useConnection';
 import { ReportDetailContent } from './reports/ReportDetailContent';
+import { reportSummariesFromResponse } from './reports/reportResponse';
 import type { ReportSummary, Report } from '@krusty/api';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
@@ -84,7 +85,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
       setLoading(true);
       client
         .getReports()
-        .then((res) => setReports(res.reports))
+        .then((res) => setReports(reportSummariesFromResponse(res)))
         .catch(() => {})
         .finally(() => setLoading(false));
     }
@@ -254,7 +255,7 @@ export function ReportsContent({ visible }: ReportsContentProps) {
       setLoading(true);
       client
         .getReports()
-        .then((res) => setReports(res.reports))
+        .then((res) => setReports(reportSummariesFromResponse(res)))
         .catch(() => {})
         .finally(() => setLoading(false));
     }

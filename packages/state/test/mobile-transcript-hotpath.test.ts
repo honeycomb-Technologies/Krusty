@@ -3,6 +3,11 @@ import {
   splitTranscriptTurnsCached,
 } from '../../../apps/mobile/components/chat/transcriptTurns.ts';
 import {
+  findTranscriptRowIndex,
+  splitTranscriptRows,
+  splitTranscriptRowsCached,
+} from '../../../apps/mobile/components/chat/transcriptRows.ts';
+import {
   upsertTransientAssistantMessage,
 } from '../src/session/transient.ts';
 
@@ -118,6 +123,92 @@ Deno.test('a new user boundary rebuilds turn grouping and retention', () => {
   assert(next.turns.length === 2, 'a new user starts a distinct turn');
   assert(next.historicalTurns.length === 1, 'the prior turn becomes historical');
   assert(next.liveTurn?.messages[0]?.id === 'u2', 'the new turn owns the footer');
+});
+
+Deno.test('large latest turns are split into bounded message cells', () => {
+  const messages = Array.from({ length: 50 }, (_, index) =>
+    message(
+      `message-${index}`,
+      index === 0 ? 'user' : 'assistant',
+      `content-${index}`,
+    )
+  );
+  const split = splitTranscriptTurnsCached(messages, false);
+  const { rows, liveFooterRow } = splitTranscriptRows(
+    split.historicalTurns,
+    split.liveTurn,
+  );
+
+  assert(rows.length === 49, 'all completed latest-turn messages except the tail are list cells');
+  assert(liveFooterRow?.message.id === 'message-49', 'only the changing tail remains in the footer');
+  assert(
+    rows.every((row) => row.message.id && row.renderSignature === row.message),
+    'each virtualized cell renders exactly one stable message object',
+  );
+  assert(
+    findTranscriptRowIndex(rows, 'message-25') === 25,
+    'message jump targets address the flattened cell index',
+  );
+});
+
+Deno.test('live token deltas preserve exact FlatList row data identity', () => {
+  const messages = [
+    message('u1', 'user', 'first'),
+    message('tool1', 'assistant', 'settled tool'),
+    message('a1', 'assistant', 'a', 'streaming'),
+  ];
+  const initialTurns = splitTranscriptTurnsCached(messages, true);
+  const initialRows = splitTranscriptRowsCached(
+    initialTurns.historicalTurns,
+    initialTurns.liveTurn,
+  );
+  const nextTurns = splitTranscriptTurnsCached(
+    [
+      messages[0]!,
+      messages[1]!,
+      message('a1', 'assistant', 'ab', 'streaming'),
+    ],
+    true,
+    initialTurns.cache,
+  );
+  const nextRows = splitTranscriptRowsCached(
+    nextTurns.historicalTurns,
+    nextTurns.liveTurn,
+    initialRows.cache,
+  );
+
+  assert(
+    nextRows.rows === initialRows.rows,
+    'a token replacement must not invalidate virtualized completed rows',
+  );
+  assert(
+    nextRows.liveFooterRow !== initialRows.liveFooterRow,
+    'only the changing footer message receives a new render identity',
+  );
+});
+
+Deno.test('historical and live rows preserve message order and turn spacing flags', () => {
+  const messages = [
+    message('u1', 'user', 'first'),
+    message('a1', 'assistant', 'answer'),
+    message('u2', 'user', 'second'),
+    message('a2', 'assistant', 'answer two'),
+  ];
+  const split = splitTranscriptTurnsCached(messages, false);
+  const { rows, liveFooterRow } = splitTranscriptRows(
+    split.historicalTurns,
+    split.liveTurn,
+  );
+
+  assert(
+    [...rows.map((row) => row.message.id), liveFooterRow?.message.id].join(',') ===
+      'u1,a1,u2,a2',
+    'flattening must retain the visible conversation order',
+  );
+  assert(rows[0]?.isLastMessageInTurn === false, 'the first historical message keeps turn spacing open');
+  assert(rows[1]?.isLastMessageInTurn === true, 'the historical tail closes its turn spacing');
+  assert(rows[2]?.isLastMessageInTurn === false, 'the live prefix stays visually inside its turn');
+  assert(liveFooterRow?.isLastMessageInTurn === true, 'the footer closes the latest turn spacing');
 });
 
 Deno.test('transient tail replacement preserves finalized message identities', () => {

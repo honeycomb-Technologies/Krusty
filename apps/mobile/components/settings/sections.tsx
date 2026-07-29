@@ -150,6 +150,10 @@ export function DiagnosticsSection({
           <View style={styles.actionsWrap}>
             {mode === "stress" ? (
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={isConnected
+                  ? "Stop and upload diagnostic capture"
+                  : "Stop and save diagnostic capture"}
                 onPress={onStopAndUpload}
                 style={[styles.smallActionBtn, { borderColor: t.border }]}
               >
@@ -158,6 +162,8 @@ export function DiagnosticsSection({
               </Pressable>
             ) : (
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Start diagnostic capture"
                 onPress={onStart}
                 disabled={!runId || completionPending || uploadState === "uploading"}
                 style={[styles.smallActionBtn, { borderColor: t.border }]}
@@ -167,6 +173,10 @@ export function DiagnosticsSection({
               </Pressable>
             )}
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={mode === "stress"
+                ? "Upload diagnostic checkpoint"
+                : "Upload diagnostics now"}
               onPress={onUpload}
               disabled={!isConnected || uploadState === "uploading" || (eventCount === 0 && nativePayloadCount === 0)}
               style={[styles.smallActionBtn, { borderColor: t.border }]}

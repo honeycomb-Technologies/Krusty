@@ -4,6 +4,9 @@ import {
   MobileDiagnosticRecorder,
   sanitizeDiagnosticFields,
 } from '../src/diagnostics/index.ts';
+import {
+  summarizeDelayedInteractions,
+} from '../../../apps/mobile/diagnostics/performanceEntries.ts';
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
@@ -50,6 +53,19 @@ Deno.test('diagnostics schema cannot retain sensitive arbitrary values', () => {
       && structuralMetric.count === 42,
     'content-free transcript shape metrics must remain useful and numeric',
   );
+  const requestMetric = sanitizeDiagnosticFields({
+    name: 'api.sessions',
+    outcome: 'error',
+    code: 'network.error',
+    durationMs: 1_234.56,
+  });
+  assert(
+    requestMetric.name === 'api.sessions'
+      && requestMetric.outcome === 'error'
+      && requestMetric.code === 'network.error'
+      && requestMetric.durationMs === 1_234.6,
+    'sanitized request families and coarse failure classes must remain queryable',
+  );
 });
 
 Deno.test('baseline recorder enforces event and byte bounds', () => {
@@ -65,6 +81,23 @@ Deno.test('baseline recorder enforces event and byte bounds', () => {
   const snapshot = recorder.snapshot();
   assert(snapshot.eventCount <= 256, 'baseline ring must be hard capped');
   assert(snapshot.approximateBytes <= 96 * 1024, 'baseline bytes must be hard capped');
+});
+
+Deno.test('queued interaction timings collapse into one bounded stall batch', () => {
+  const summary = summarizeDelayedInteractions(
+    [
+      { duration: 2 },
+      { duration: 21_800 },
+      { duration: 21_794 },
+      { duration: Number.NaN },
+    ],
+    8,
+  );
+  assert(summary?.count === 2, 'only delayed interactions contribute to the batch');
+  assert(
+    summary.maximumDurationMs === 21_800,
+    'the batch preserves the worst observed queueing delay',
+  );
 });
 
 Deno.test('stress mode is explicit, time bounded, and returns to baseline', () => {

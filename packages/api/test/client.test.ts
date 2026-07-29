@@ -58,6 +58,102 @@ describe("KrustyClient request errors", () => {
 	});
 });
 
+describe("KrustyClient content-free request diagnostics", () => {
+	it("reports a sanitized route family and terminal timing", async () => {
+		const events: Array<{
+			name: string;
+			outcome: string;
+			durationMs?: number;
+			code?: string;
+		}> = [];
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async () => Response.json({
+				id: "session-private-id",
+				messages: [],
+			}),
+			requestObserver: (event) => events.push(event),
+		});
+
+		await client.getSession("session-private-id");
+
+		expect(events.map(({ name, outcome, code }) => ({ name, outcome, code })))
+			.toEqual([
+				{ name: "api.sessions", outcome: "start", code: undefined },
+				{ name: "api.sessions", outcome: "complete", code: "http.2xx" },
+			]);
+		expect(events[1]?.durationMs).toBeGreaterThanOrEqual(0);
+		expect(JSON.stringify(events)).not.toContain("session-private-id");
+	});
+
+	it("separates HTTP and transport failures without response content", async () => {
+		const httpEvents: Array<{ outcome: string; code?: string }> = [];
+		const httpClient = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async () => new Response("private provider detail", { status: 503 }),
+			requestObserver: (event) => httpEvents.push(event),
+		});
+		await expect(httpClient.getModels()).rejects.toBeInstanceOf(KrustyApiError);
+
+		const networkEvents: Array<{ outcome: string; code?: string }> = [];
+		const networkClient = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async () => {
+				throw new TypeError("private network detail");
+			},
+			requestObserver: (event) => networkEvents.push(event),
+		});
+		await expect(networkClient.getModels()).rejects.toBeInstanceOf(TypeError);
+
+		expect(httpEvents.at(-1)).toMatchObject({
+			outcome: "error",
+			code: "http.5xx",
+		});
+		expect(networkEvents.at(-1)).toMatchObject({
+			outcome: "error",
+			code: "network.error",
+		});
+		expect(JSON.stringify([...httpEvents, ...networkEvents]))
+			.not.toContain("private");
+	});
+
+	it("uses the configured native fetch implementation for health checks", async () => {
+		let requestUrl = "";
+		const events: string[] = [];
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async (input) => {
+				requestUrl = String(input);
+				return new Response(null, { status: 204 });
+			},
+			requestObserver: (event) =>
+				events.push(`${event.name}:${event.outcome}:${event.code ?? ""}`),
+		});
+
+		expect(await client.checkHealth()).toBe(true);
+		expect(requestUrl).toBe("http://krusty.test/health");
+		expect(events).toEqual([
+			"api.health:start:",
+			"api.health:complete:http.2xx",
+		]);
+	});
+
+	it("cannot let a diagnostics observer change request behavior", async () => {
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async () => Response.json({
+				models: [],
+				default_model: null,
+			}),
+			requestObserver: () => {
+				throw new Error("observer failure");
+			},
+		});
+
+		expect((await client.getModels()).models).toEqual([]);
+	});
+});
+
 describe("KrustyClient provider-aware model identity", () => {
 	it("sends the exact key and legacy model mirror when dispatching Mako", async () => {
 		let requestUrl = "";

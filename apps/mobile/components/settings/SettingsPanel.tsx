@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, FlatList, type ListRenderItemInfo } from "react-native";
+import { Alert, ScrollView } from "react-native";
 import {
 	Bell,
 	BellOff,
@@ -54,29 +54,6 @@ interface SettingsPanelProps {
 	onClose?: () => void;
 	showHeader?: boolean;
 }
-
-type SettingsSectionId =
-	| "connection"
-	| "providers"
-	| "mcp"
-	| "skills"
-	| "preview"
-	| "appearance"
-	| "diagnostics"
-	| "notifications"
-	| "about";
-
-const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
-	"connection",
-	"providers",
-	"mcp",
-	"skills",
-	"preview",
-	"appearance",
-	"diagnostics",
-	"notifications",
-	"about",
-];
 
 export function SettingsPanel({
 	active = true,
@@ -577,148 +554,115 @@ export function SettingsPanel({
 		[client, loadPreview],
 	);
 
-	const renderSettingsSection = ({
-		item,
-	}: ListRenderItemInfo<SettingsSectionId>) => {
-		switch (item) {
-			case "connection":
-				return (
-					<ConnectionSection
-						isConfigured={isConfigured}
-						isConnected={isConnected}
-						status={status}
-						serverUrl={serverUrl}
-						connectError={connectError}
-						inputUrl={inputUrl}
-						inputToken={inputToken}
-						isConnecting={isConnecting}
-						onInputUrlChange={setInputUrl}
-						onInputTokenChange={setInputToken}
-						onConnect={() => void handleConnect()}
-						onReconnect={() => void reconnect()}
-						onDisconnect={handleDisconnect}
-					/>
-				);
-			case "providers":
-				return (
-					<ProvidersSection
-						isConnected={isConnected}
-						providersLoading={providersLoading}
-						providers={providers}
-						providerForms={providerForms}
-						providerBusyKey={providerBusyKey}
-						providerMessage={providerMessage}
-						activeOAuthFlow={activeOAuthFlow}
-						oauthCode={oauthCode}
-						onProviderFormChange={updateProviderForm}
-						onSaveCredential={(providerId) =>
-							void handleSaveCredential(providerId)
-						}
-						onDeleteCredential={(providerId) =>
-							void handleDeleteCredential(providerId)
-						}
-						onStartOAuth={(providerId) => void handleStartOAuth(providerId)}
-						onExchangeOAuthCode={() => void handleExchangeOAuthCode()}
-						onRevokeOAuth={(providerId) => void handleRevokeOAuth(providerId)}
-						onOauthCodeChange={setOauthCode}
-					/>
-				);
-			case "mcp":
-				return (
-					<McpSection
-						isConnected={isConnected}
-						loading={mcpLoading}
-						mcpServers={mcpServers}
-						busyKey={mcpBusyKey}
-						message={mcpMessage}
-						onReload={() => void handleReloadMcp()}
-						onToggle={(server) => void handleToggleMcp(server)}
-					/>
-				);
-			case "skills":
-				return (
-					<SkillsSection
-						isConnected={isConnected}
-						loading={skillsLoading}
-						skills={skills}
-						message={skillsMessage}
-						pageStart={skillPageStart}
-						onPageStartChange={setSkillPageStart}
-					/>
-				);
-			case "preview":
-				return (
-					<PreviewSection
-						isConnected={isConnected}
-						loading={previewLoading}
-						previewSettings={previewSettings}
-						previewPorts={previewPorts}
-						previewDraft={previewDraft}
-						busyKey={previewBusyKey}
-						message={previewMessage}
-						onToggle={(patch) => void handleUpdatePreviewToggle(patch)}
-						onSaveNumbers={() => void handleSavePreviewNumbers()}
-						onDraftChange={setPreviewDraft}
-						onRefresh={() => void loadPreview()}
-						onTogglePinnedPort={(port) => void handleTogglePinnedPort(port)}
-						onHidePort={(port) => void handleHidePort(port)}
-					/>
-				);
-			case "appearance":
-				return (
-					<AppearanceSection
-						colorScheme={colorScheme as ColorScheme}
-						schemeOptions={schemeOptions}
-						onSelect={setColorScheme}
-					/>
-				);
-			case "diagnostics":
-				return (
-					<DiagnosticsSection
-						mode={diagnostics.mode}
-						runId={diagnostics.runId}
-						eventCount={diagnostics.eventCount}
-						nativePayloadCount={diagnostics.nativePayloadCount}
-						approximateBytes={diagnostics.approximateBytes}
-						uploadState={diagnostics.uploadState}
-						completionPending={diagnostics.completionPending}
-						isConnected={isConnected}
-						onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
-						onStopAndUpload={() => void diagnostics.stopStressRun()}
-						onUpload={() => void diagnostics.flush(false)}
-					/>
-				);
-			case "notifications":
-				return (
-					<NotificationsSection
-						notificationLevel={notificationLevel}
-						registrationState={registrationState}
-						lastRegistrationError={lastRegistrationError}
-						pendingActionCount={pendingActionCount}
-						notifOptions={notifOptions}
-						onSelect={(level) => void changeNotificationLevel(level)}
-					/>
-				);
-			case "about":
-				return <AboutSection />;
-		}
-	};
-
 	return (
-		<FlatList
-			data={SETTINGS_SECTION_IDS}
-			keyExtractor={(item) => item}
-			renderItem={renderSettingsSection}
-			ListHeaderComponent={
-				showHeader ? <SettingsHeader onClose={onClose} /> : null
-			}
+		<ScrollView
 			contentContainerStyle={styles.content}
-			initialNumToRender={2}
 			keyboardShouldPersistTaps="handled"
-			maxToRenderPerBatch={2}
 			showsVerticalScrollIndicator={false}
-			updateCellsBatchingPeriod={50}
-			windowSize={3}
-		/>
+		>
+			{showHeader ? <SettingsHeader onClose={onClose} /> : null}
+
+			<ConnectionSection
+				isConfigured={isConfigured}
+				isConnected={isConnected}
+				status={status}
+				serverUrl={serverUrl}
+				connectError={connectError}
+				inputUrl={inputUrl}
+				inputToken={inputToken}
+				isConnecting={isConnecting}
+				onInputUrlChange={setInputUrl}
+				onInputTokenChange={setInputToken}
+				onConnect={() => void handleConnect()}
+				onReconnect={() => void reconnect()}
+				onDisconnect={handleDisconnect}
+			/>
+
+			<ProvidersSection
+				isConnected={isConnected}
+				providersLoading={providersLoading}
+				providers={providers}
+				providerForms={providerForms}
+				providerBusyKey={providerBusyKey}
+				providerMessage={providerMessage}
+				activeOAuthFlow={activeOAuthFlow}
+				oauthCode={oauthCode}
+				onProviderFormChange={updateProviderForm}
+				onSaveCredential={(providerId) => void handleSaveCredential(providerId)}
+				onDeleteCredential={(providerId) =>
+					void handleDeleteCredential(providerId)
+				}
+				onStartOAuth={(providerId) => void handleStartOAuth(providerId)}
+				onExchangeOAuthCode={() => void handleExchangeOAuthCode()}
+				onRevokeOAuth={(providerId) => void handleRevokeOAuth(providerId)}
+				onOauthCodeChange={setOauthCode}
+			/>
+
+			<McpSection
+				isConnected={isConnected}
+				loading={mcpLoading}
+				mcpServers={mcpServers}
+				busyKey={mcpBusyKey}
+				message={mcpMessage}
+				onReload={() => void handleReloadMcp()}
+				onToggle={(server) => void handleToggleMcp(server)}
+			/>
+
+			<SkillsSection
+				isConnected={isConnected}
+				loading={skillsLoading}
+				skills={skills}
+				message={skillsMessage}
+				pageStart={skillPageStart}
+				onPageStartChange={setSkillPageStart}
+			/>
+
+			<PreviewSection
+				isConnected={isConnected}
+				loading={previewLoading}
+				previewSettings={previewSettings}
+				previewPorts={previewPorts}
+				previewDraft={previewDraft}
+				busyKey={previewBusyKey}
+				message={previewMessage}
+				onToggle={(patch) => void handleUpdatePreviewToggle(patch)}
+				onSaveNumbers={() => void handleSavePreviewNumbers()}
+				onDraftChange={setPreviewDraft}
+				onRefresh={() => void loadPreview()}
+				onTogglePinnedPort={(port) => void handleTogglePinnedPort(port)}
+				onHidePort={(port) => void handleHidePort(port)}
+			/>
+
+			<AppearanceSection
+				colorScheme={colorScheme as ColorScheme}
+				schemeOptions={schemeOptions}
+				onSelect={setColorScheme}
+			/>
+
+			<DiagnosticsSection
+				mode={diagnostics.mode}
+				runId={diagnostics.runId}
+				eventCount={diagnostics.eventCount}
+				nativePayloadCount={diagnostics.nativePayloadCount}
+				approximateBytes={diagnostics.approximateBytes}
+				uploadState={diagnostics.uploadState}
+				completionPending={diagnostics.completionPending}
+				isConnected={isConnected}
+				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
+				onStopAndUpload={() => void diagnostics.stopStressRun()}
+				onUpload={() => void diagnostics.flush(false)}
+			/>
+
+			<NotificationsSection
+				notificationLevel={notificationLevel}
+				registrationState={registrationState}
+				lastRegistrationError={lastRegistrationError}
+				pendingActionCount={pendingActionCount}
+				notifOptions={notifOptions}
+				onSelect={(level) => void changeNotificationLevel(level)}
+			/>
+
+			<AboutSection />
+		</ScrollView>
 	);
 }

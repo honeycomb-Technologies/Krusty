@@ -172,14 +172,15 @@ Deno.test("settings and transcript secondary surfaces stay bounded", async () =>
   );
 
   assert(
-    settings.includes("<FlatList")
-      && settings.includes("initialNumToRender={2}")
-      && settings.includes("windowSize={3}")
+    settings.includes("<ScrollView")
+      && !settings.includes("<FlatList")
+      && settings.includes("<ConnectionSection")
+      && settings.includes("<DiagnosticsSection")
+      && settings.indexOf("<ConnectionSection") < settings.indexOf("<DiagnosticsSection")
       && settings.includes("const [skillPageStart, setSkillPageStart] = useState(0)")
       && settings.includes("pageStart={skillPageStart}")
-      && settings.includes("onPageStartChange={setSkillPageStart}")
-      && !settings.includes("<ScrollView"),
-    "settings sections must virtualize without eagerly mounting the whole control tree or losing skill pagination when rows recycle",
+      && settings.includes("onPageStartChange={setSkillPageStart}"),
+    "settings must mount every stable section shell in one reachable scroll surface while keeping large skills data paged",
   );
   assert(
     transcript.match(/contentHeightRef\.current = 0;/g)?.length === 2
@@ -191,8 +192,10 @@ Deno.test("settings and transcript secondary surfaces stay bounded", async () =>
       && transcript.includes("sourceLength: historicalTurns.length")
       && transcript.includes("preserveRevealedWindow: true")
       && transcript.includes("current.preserveRevealedWindow")
+      && transcript.includes("data={transcriptRows}")
+      && transcript.includes("row={liveFooterRow}")
       && transcript.includes("maintainVisibleContentPosition"),
-    "transcript identity changes must discard stale height, page upward, and preserve revealed history as live turns finalize",
+    "transcript identity changes must discard stale height, page upward, virtualize completed messages, and preserve revealed history as live turns finalize",
   );
 });
 
@@ -215,5 +218,53 @@ Deno.test("pending diagnostic completion cannot expose an actionable start butto
   assert(
     provider.includes("pendingCompletionRef.current || uploadingRef.current"),
     "capture rotation must reject an in-flight old-recorder upload",
+  );
+});
+
+Deno.test("configured users can explicitly reopen server setup", async () => {
+  const layout = await Deno.readTextFile(
+    new URL("../app/_layout.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    layout.includes("if (!hasLoadedConnection) return")
+      && layout.includes("if (!isConfigured && !inOnboarding)")
+      && !layout.includes("isConfigured && inOnboarding"),
+    "the root navigator must wait for saved credentials before requiring setup, and must not redirect an explicitly opened configured setup screen",
+  );
+});
+
+Deno.test("stress controls remain native automation targets", async () => {
+  const header = await Deno.readTextFile(
+    new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url).pathname,
+  );
+  const bottomSheet = await Deno.readTextFile(
+    new URL("../components/sheets/AppBottomSheet.tsx", import.meta.url).pathname,
+  );
+  const sections = await Deno.readTextFile(
+    new URL("../components/settings/sections.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    header.includes('accessibilityLabel={`Switch to ${item.label}`}'),
+    "all mobile modes must remain independently addressable during native stress automation",
+  );
+  for (
+    const label of [
+      "Start diagnostic capture",
+      "Stop and upload diagnostic capture",
+      "Upload diagnostic checkpoint",
+    ]
+  ) {
+    assert(
+      sections.includes(label),
+      `diagnostic action ${label} must remain addressable in native automation`,
+    );
+  }
+  assert(
+    bottomSheet.includes("accessibilityHint=\"Tap or drag down\"")
+      && bottomSheet.includes("onPress={close}")
+      && !bottomSheet.includes('accessibilityRole="adjustable"'),
+    "the visible sheet grabber must expose a working tap action in addition to its pan gesture",
   );
 });

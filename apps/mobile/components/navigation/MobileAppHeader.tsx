@@ -105,8 +105,8 @@ export function MobileAppHeader({
                 <AnimatedPressable
                   key={item.id}
                   layout={modeLayoutTransition}
-                  accessibilityRole="tab"
-                  accessibilityLabel={item.label}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Switch to ${item.label}`}
                   accessibilityState={{ selected: active }}
                   onPress={() => {
                     impact();

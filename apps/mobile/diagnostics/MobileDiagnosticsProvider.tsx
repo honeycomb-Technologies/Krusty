@@ -31,6 +31,7 @@ import {
 import KrustyDiagnosticsModule, {
   type NativeMetricKitPayload,
 } from '../modules/krusty-diagnostics';
+import { summarizeDelayedInteractions } from './performanceEntries';
 
 const INSTALLATION_KEY = 'krusty:diagnostics:installation-v1';
 const PENDING_KEY = 'krusty:diagnostics:pending-v1';
@@ -87,7 +88,7 @@ interface PersistedDiagnosticsStateV2 {
 }
 
 export function MobileDiagnosticsProvider({ children }: { children: ReactNode }) {
-  const { client, isConnected } = useConnection();
+  const { client, isConnected, status } = useConnection();
   const segments = useSegments();
   const [recorder, setRecorder] = useState<MobileDiagnosticRecorder | null>(null);
   const [mode, setMode] = useState<DiagnosticMode>('baseline');
@@ -417,6 +418,14 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
 
   useEffect(() => {
     if (!recorder) return;
+    recorder.record('request', {
+      name: 'server.connection',
+      state: status,
+    });
+  }, [recorder, status]);
+
+  useEffect(() => {
+    if (!recorder) return;
     recorder.record('app_state', { state: AppState.currentState });
     const subscription = AppState.addEventListener('change', (nextState) => {
       appStateRef.current = nextState;
@@ -468,14 +477,30 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     const observe = (type: 'longtask' | 'event') => {
       try {
         const observer = new Observer((list) => {
+          if (type === 'event') {
+            const threshold = recorder.getMode() === 'stress' ? 8 : 100;
+            const delayed = summarizeDelayedInteractions(
+              list.getEntries(),
+              threshold,
+            );
+            if (delayed) {
+              // RN may deliver every input queued behind one JS stall in the
+              // same callback. Preserve the batch size and worst delay without
+              // misreporting each queued touch as an independent freeze.
+              recorder.record('event_timing', {
+                name: 'interaction',
+                durationMs: delayed.maximumDurationMs,
+                count: delayed.count,
+              });
+            }
+            return;
+          }
           for (const entry of list.getEntries()) {
             const duration = Number(entry.duration ?? 0);
-            const threshold = recorder.getMode() === 'stress'
-              ? type === 'longtask' ? 16 : 8
-              : type === 'longtask' ? 50 : 100;
+            const threshold = recorder.getMode() === 'stress' ? 16 : 50;
             if (duration < threshold) continue;
-            recorder.record(type === 'longtask' ? 'longtask' : 'event_timing', {
-              name: type === 'event' ? safeEventName(entry.name) : 'js.longtask',
+            recorder.record('longtask', {
+              name: 'js.longtask',
               durationMs: duration,
             });
           }
@@ -654,11 +679,6 @@ function createCompletionMarkerBatch(recorder: MobileDiagnosticRecorder): Diagno
 function classifyRoute(segments: string[]): string {
   const allowed = new Set(['(tabs)', 'index', 'sessions', 'settings', 'onboarding']);
   return segments.map((segment) => allowed.has(segment) ? segment : 'dynamic').join('>') || 'root';
-}
-
-function safeEventName(name: string | undefined): string {
-  return ['click', 'pointerdown', 'pointerup', 'keydown', 'keyup', 'touchstart', 'touchend']
-    .includes(name ?? '') ? name! : 'interaction';
 }
 
 function safeModeTransition(detail: string | undefined): string {

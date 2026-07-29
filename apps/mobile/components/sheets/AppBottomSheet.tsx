@@ -272,10 +272,11 @@ export function AppBottomSheet({
         />
 
         <GestureDetector gesture={dragGesture}>
-          <Animated.View
-            accessible
-            accessibilityRole="adjustable"
-            accessibilityLabel={`Drag down to close ${accessibilityLabel}`}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Close ${accessibilityLabel}`}
+            accessibilityHint="Tap or drag down"
+            onPress={close}
             style={styles.handleZone}
           >
             <View
@@ -284,7 +285,7 @@ export function AppBottomSheet({
                 { backgroundColor: t.mutedForeground },
               ]}
             />
-          </Animated.View>
+          </Pressable>
         </GestureDetector>
 
         <View style={[styles.content, contentStyle]}>{children}</View>
