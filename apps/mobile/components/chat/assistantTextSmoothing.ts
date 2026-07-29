@@ -1,0 +1,216 @@
+import type { ToolCall } from "@krusty/api";
+
+export type AssistantVisualSegment =
+  | {
+      type: "thinking";
+      id: string;
+      content: string;
+    }
+  | {
+      type: "text";
+      id: string;
+      content: string;
+    }
+  | {
+      type: "attachments";
+      id: string;
+    }
+  | {
+      type: "tool";
+      id: string;
+      toolCall: ToolCall;
+    }
+  | {
+      type: "exploration";
+      id: string;
+      tools: ToolCall[];
+    };
+
+function isSoftInterruption(segment: AssistantVisualSegment): boolean {
+  // Only tool-like interruptions should rejoin split prose.
+  // Thinking is a real phase boundary and must stay sticky.
+  return segment.type === "exploration" || segment.type === "tool";
+}
+
+export function startsLikeNewBlock(content: string): boolean {
+  return /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|```|>|<\w)/.test(content);
+}
+
+/** Exported for unit tests — mid-stream tool interruptions rejoin prose. */
+export function shouldMergeContinuationText(
+  previousContent: string,
+  nextContent: string,
+  interveningSegments: AssistantVisualSegment[],
+): boolean {
+  return shouldMergeContinuationTextState(
+    previousContent,
+    nextContent,
+    interveningSegments.length > 0,
+    interveningSegments.every(isSoftInterruption),
+  );
+}
+
+function shouldMergeContinuationTextState(
+  previousContent: string,
+  nextContent: string,
+  hasInterveningSegments: boolean,
+  interveningSegmentsAreSoft: boolean,
+): boolean {
+  if (!hasInterveningSegments || !interveningSegmentsAreSoft) return false;
+
+  const previous = previousContent.trimEnd();
+  const next = nextContent.trimStart();
+  if (!previous || !next || startsLikeNewBlock(next)) return false;
+
+  // Do not glue across closed code fences / list boundaries left unfinished.
+  if (/```\s*$/.test(previous) || /^```/.test(next)) return false;
+
+  const previousLooksUnfinished =
+    /[A-Za-z0-9_/'")\]]$/.test(previous) || /[A-Za-z0-9]\s+$/u.test(previousContent);
+  // Lowercase continuation, punctuation, or a short trailing fragment after a tool.
+  const nextLooksContinued =
+    /^[a-z,.;:!?'"()\]}]/.test(next) ||
+    (/^[A-Za-z][A-Za-z0-9/_-]*[.!?]?$/.test(next) && previousLooksUnfinished);
+
+  return previousLooksUnfinished && nextLooksContinued;
+}
+
+export function appendContinuationText(previous: string, next: string): string {
+  if (!previous) return next;
+  if (!next) return previous;
+  if (/\s$/.test(previous) || /^\s/.test(next)) return previous + next;
+
+  const left = previous[previous.length - 1] ?? "";
+  const right = next.trimStart()[0] ?? "";
+  // "we only" + "skimmed." / "server/mobile" + "edges." need a joining space.
+  if (/[A-Za-z0-9_/'")\]]/.test(left) && /[A-Za-z0-9("'[]/.test(right)) {
+    return `${previous} ${next.trimStart()}`;
+  }
+  return previous + next.trimStart();
+}
+
+interface ActiveTextAccumulator {
+  index: number;
+  chunks: string[];
+  trimmedSuffix: string;
+  endsWithWhitespace: boolean;
+}
+
+function createTextAccumulator(
+  index: number,
+  content: string,
+): ActiveTextAccumulator {
+  return {
+    index,
+    chunks: [content],
+    trimmedSuffix: content.trimEnd().slice(-64),
+    endsWithWhitespace: /\s$/u.test(content),
+  };
+}
+
+function shouldMergeAccumulator(
+  accumulator: ActiveTextAccumulator,
+  nextContent: string,
+  hasInterveningSegments: boolean,
+  interveningSegmentsAreSoft: boolean,
+): boolean {
+  if (!hasInterveningSegments || !interveningSegmentsAreSoft) return false;
+  const next = nextContent.trimStart();
+  const previous = accumulator.trimmedSuffix;
+  if (!previous || !next || startsLikeNewBlock(next)) return false;
+  if (previous.endsWith("```") || next.startsWith("```")) return false;
+
+  const previousLast = previous[previous.length - 1] ?? "";
+  const previousLooksUnfinished = /[A-Za-z0-9_/'")\]]/.test(previousLast);
+  const nextLooksContinued =
+    /^[a-z,.;:!?'"()\]}]/.test(next)
+    || (/^[A-Za-z][A-Za-z0-9/_-]*[.!?]?$/.test(next)
+      && previousLooksUnfinished);
+  return previousLooksUnfinished && nextLooksContinued;
+}
+
+function appendToAccumulator(
+  accumulator: ActiveTextAccumulator,
+  nextContent: string,
+): void {
+  let chunk: string;
+  if (accumulator.endsWithWhitespace || /^\s/u.test(nextContent)) {
+    chunk = nextContent;
+  } else {
+    const left =
+      accumulator.trimmedSuffix[accumulator.trimmedSuffix.length - 1] ?? "";
+    const trimmedNext = nextContent.trimStart();
+    const right = trimmedNext[0] ?? "";
+    chunk =
+      /[A-Za-z0-9_/'")\]]/.test(left) && /[A-Za-z0-9("'[]/.test(right)
+        ? ` ${trimmedNext}`
+        : trimmedNext;
+  }
+  accumulator.chunks.push(chunk);
+  if (chunk.length > 0) {
+    accumulator.endsWithWhitespace = /\s$/u.test(chunk);
+    accumulator.trimmedSuffix = `${accumulator.trimmedSuffix}${chunk}`
+      .trimEnd()
+      .slice(-64);
+  }
+}
+
+/**
+ * Smooth interrupted text in one pass. Tracking the last text slot and the
+ * intervening segment state avoids the former reverse scans and array slices.
+ * Merged prose is held as chunks and joined once so repeated continuations do
+ * not copy the entire accumulated message after every tool.
+ */
+export function smoothInterruptedText(
+  segments: AssistantVisualSegment[],
+): AssistantVisualSegment[] {
+  const smoothed: AssistantVisualSegment[] = [];
+  let previousTextIndex = -1;
+  let interveningSegmentCount = 0;
+  let interveningSegmentsAreSoft = true;
+  let activeText: ActiveTextAccumulator | null = null;
+  const finalizeActiveText = () => {
+    if (!activeText || activeText.chunks.length === 1) return;
+    const previousText = smoothed[activeText.index];
+    if (previousText?.type !== "text") return;
+    smoothed[activeText.index] = {
+      ...previousText,
+      content: activeText.chunks.join(""),
+    };
+  };
+
+  for (const segment of segments) {
+    if (segment.type !== "text") {
+      smoothed.push(segment);
+      if (previousTextIndex >= 0) {
+        interveningSegmentCount += 1;
+        interveningSegmentsAreSoft =
+          interveningSegmentsAreSoft && isSoftInterruption(segment);
+      }
+      continue;
+    }
+
+    if (
+      activeText
+      && shouldMergeAccumulator(
+        activeText,
+        segment.content,
+        interveningSegmentCount > 0,
+        interveningSegmentsAreSoft,
+      )
+    ) {
+      appendToAccumulator(activeText, segment.content);
+      continue;
+    }
+
+    finalizeActiveText();
+    smoothed.push(segment);
+    previousTextIndex = smoothed.length - 1;
+    activeText = createTextAccumulator(previousTextIndex, segment.content);
+    interveningSegmentCount = 0;
+    interveningSegmentsAreSoft = true;
+  }
+
+  finalizeActiveText();
+  return smoothed;
+}

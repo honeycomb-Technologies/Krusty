@@ -1,7 +1,10 @@
 import { memo, useMemo } from "react";
 import { Text, View, StyleSheet } from "react-native";
 import { MarkdownContent } from "./MarkdownContent";
-import { assistantRenderSegments } from "./assistantSegments";
+import {
+  assistantRenderSegments,
+  shouldSegmentAssistantContent,
+} from "./assistantSegments";
 import { useThemeContext } from "../../hooks/useTheme";
 
 interface AssistantSegmentedContentProps {
@@ -15,10 +18,15 @@ export function AssistantSegmentedContent({
   content,
   isStreaming = false,
 }: AssistantSegmentedContentProps) {
+  const shouldSegment = shouldSegmentAssistantContent(isStreaming);
   const segments = useMemo(
-    () => assistantRenderSegments(messageId, content),
-    [content, messageId],
+    () => shouldSegment ? assistantRenderSegments(messageId, content) : [],
+    [content, messageId, shouldSegment],
   );
+
+  if (!shouldSegment) {
+    return <MarkdownContent content={content} />;
+  }
 
   return (
     <View style={styles.container}>

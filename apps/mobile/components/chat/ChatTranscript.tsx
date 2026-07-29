@@ -34,7 +34,11 @@ import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@krusty/api";
 import type { SessionType } from "@krusty/api";
-import { beginKrustyPerformanceSpan } from "@krusty/state";
+import {
+  beginKrustyPerformanceSpan,
+  recordKrustyPerformanceMetric,
+} from "@krusty/state";
+import { summarizeTranscriptRenderBudget } from "./transcriptRenderBudget";
 
 const MAX_COMMITTED_TRANSCRIPT_CACHES = 4;
 
@@ -294,6 +298,32 @@ function ChatTranscriptComponent({
       historicalTurns,
     ],
   );
+  const visibleLatestTurn =
+    liveTurn
+    ?? visibleHistoricalTurns[visibleHistoricalTurns.length - 1]
+    ?? null;
+  const visibleLatestTurnBudget = useMemo(
+    () =>
+      visibleLatestTurn
+        ? summarizeTranscriptRenderBudget(visibleLatestTurn.messages)
+        : null,
+    [visibleLatestTurn],
+  );
+  useEffect(() => {
+    if (isStreaming || !visibleLatestTurnBudget) return;
+    recordKrustyPerformanceMetric("transcript.visible_messages", {
+      count: visibleLatestTurnBudget.messageCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_render_parts", {
+      count: visibleLatestTurnBudget.renderPartCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_tools", {
+      count: visibleLatestTurnBudget.toolCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_markdown_characters", {
+      count: visibleLatestTurnBudget.markdownCharacterCount,
+    });
+  }, [isStreaming, visibleLatestTurnBudget]);
   useEffect(() => {
     setHistoryWindow((current) => {
       if (current.key !== transcriptCacheKey) {

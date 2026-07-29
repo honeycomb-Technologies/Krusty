@@ -41,6 +41,15 @@ Deno.test('diagnostics schema cannot retain sensitive arbitrary values', () => {
     performancePhase.name === 'session.snapshot_transform',
     'known content-free performance phases must retain their useful labels',
   );
+  const structuralMetric = sanitizeDiagnosticFields({
+    name: 'transcript.visible_tools',
+    count: 42,
+  });
+  assert(
+    structuralMetric.name === 'transcript.visible_tools'
+      && structuralMetric.count === 42,
+    'content-free transcript shape metrics must remain useful and numeric',
+  );
 });
 
 Deno.test('baseline recorder enforces event and byte bounds', () => {

@@ -1,3 +1,4 @@
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -49,6 +50,12 @@ import {
   previewStatusText,
 } from "./shared";
 import { styles } from "./styles";
+import {
+  clampSkillPageStart,
+  nextSkillPageStart,
+  previousSkillPageStart,
+  SKILL_PAGE_SIZE,
+} from "./skillWindow";
 
 export function SettingsHeader({ onClose }: { onClose?: () => void }) {
   const { theme } = useThemeContext();
@@ -668,6 +675,26 @@ export function SkillsSection({
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
+  const [skillPageStart, setSkillPageStart] = useState(0);
+  const clampedSkillPageStart = clampSkillPageStart(
+    skillPageStart,
+    skills.length,
+  );
+  const visibleSkills = useMemo(
+    () =>
+      skills.slice(
+        clampedSkillPageStart,
+        clampedSkillPageStart + SKILL_PAGE_SIZE,
+      ),
+    [clampedSkillPageStart, skills],
+  );
+  const skillPageEnd = clampedSkillPageStart + visibleSkills.length;
+  const hasPreviousSkillPage = clampedSkillPageStart > 0;
+  const hasNextSkillPage = skillPageEnd < skills.length;
+
+  useEffect(() => {
+    setSkillPageStart(0);
+  }, [skills]);
 
   return (
     <>
@@ -689,40 +716,89 @@ export function SkillsSection({
             {skills.length === 0 ? (
               <Text style={[styles.emptyText, { color: t.mutedForeground }]}>No skills reported by the current server.</Text>
             ) : (
-              skills.map((skill) => (
-                <View
+              visibleSkills.map((skill) => (
+                <SkillRow
                   key={`${skill.source}:${skill.name}`}
-                  style={[styles.subsection, { borderColor: t.border }]}
-                >
-                  <View style={styles.subsectionHeader}>
-                    <View style={styles.rowContent}>
-                      <Text style={[styles.rowTitle, { color: t.foreground }]}>{skill.name}</Text>
-                      <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}> 
-                        {skill.description}
-                      </Text>
-                    </View>
-                    <Pill
-                      label={skill.source}
-                      tone={skill.source === "project" ? "info" : "neutral"}
-                    />
-                  </View>
-
-                  <View style={styles.pillRow}>
-                    {skill.version ? <Pill label={`v${skill.version}`} /> : null}
-                    {skill.author ? <Pill label={skill.author} /> : null}
-                    {skill.tags.slice(0, 4).map((tag) => (
-                      <Pill key={tag} label={`#${tag}`} tone="info" />
-                    ))}
-                  </View>
-                </View>
+                  skill={skill}
+                />
               ))
             )}
+            {hasPreviousSkillPage || hasNextSkillPage ? (
+              <View style={styles.actionsWrap}>
+                {hasPreviousSkillPage ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Show previous skills"
+                    onPress={() =>
+                      setSkillPageStart((current) =>
+                        previousSkillPageStart(current),
+                      )
+                    }
+                    style={[styles.smallActionBtn, { borderColor: t.border }]}
+                  >
+                    <Text style={[styles.smallActionText, { color: t.userMessage }]}>
+                      Previous
+                    </Text>
+                  </Pressable>
+                ) : null}
+                <Pill
+                  label={`${clampedSkillPageStart + 1}-${skillPageEnd} of ${skills.length}`}
+                  tone="info"
+                />
+                {hasNextSkillPage ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Show next skills"
+                    onPress={() =>
+                      setSkillPageStart((current) =>
+                        nextSkillPageStart(current, skills.length),
+                      )
+                    }
+                    style={[styles.smallActionBtn, { borderColor: t.border }]}
+                  >
+                    <Text style={[styles.smallActionText, { color: t.userMessage }]}>
+                      Next
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
           </View>
         )}
       </GlassCard>
     </>
   );
 }
+
+const SkillRow = memo(function SkillRow({ skill }: { skill: SkillInfo }) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <View style={[styles.subsection, { borderColor: t.border }]}>
+      <View style={styles.subsectionHeader}>
+        <View style={styles.rowContent}>
+          <Text style={[styles.rowTitle, { color: t.foreground }]}>{skill.name}</Text>
+          <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+            {skill.description}
+          </Text>
+        </View>
+        <Pill
+          label={skill.source}
+          tone={skill.source === "project" ? "info" : "neutral"}
+        />
+      </View>
+
+      <View style={styles.pillRow}>
+        {skill.version ? <Pill label={`v${skill.version}`} /> : null}
+        {skill.author ? <Pill label={skill.author} /> : null}
+        {skill.tags.slice(0, 4).map((tag) => (
+          <Pill key={tag} label={`#${tag}`} tone="info" />
+        ))}
+      </View>
+    </View>
+  );
+});
 
 export function PreviewSection({
   isConnected,

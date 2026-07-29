@@ -1094,10 +1094,19 @@ export function createSessionStore(
               }
             }
 
-            const { data, serverStateResult } = await getSessionHydration(
-              sessionId,
-              hasPrefetchedServerState ? prefetchedServerState : undefined,
-            );
+            const { data, serverStateResult } = await (async () => {
+              const finishFetchDecodeSpan = beginKrustyPerformanceSpan(
+                'session.fetch_decode',
+              );
+              try {
+                return await getSessionHydration(
+                  sessionId,
+                  hasPrefetchedServerState ? prefetchedServerState : undefined,
+                );
+              } finally {
+                finishFetchDecodeSpan();
+              }
+            })();
             if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
@@ -1150,88 +1159,97 @@ export function createSessionStore(
             const serverState = serverStateResult.ok ? serverStateResult.state : null;
             rememberServerState(sessionId, serverState);
 
-            const snapshot = buildSessionSnapshotFromResponse(
-              data,
-              processedMessages,
-              serverState,
-            );
-
             const previousModel = get().model;
             const previousModelKey = get().modelKey;
-            const hydratedMessages = applyDelegatedSessionState(
-              applyLivePartialAssistant(
-                applyRecoveryParity(
-                  snapshot.messages,
-                  serverState?.recovery,
-                  serverState?.agent_state ?? "idle",
-                ),
-                serverState?.live_partial_assistant,
-                serverState?.agent_state ?? "idle",
-                pendingInteractionsFromSnapshot(serverState),
-              ),
-              serverState?.delegated_tools,
-              serverState?.recent_delegated_runs,
+            const finishSnapshotPublishSpan = beginKrustyPerformanceSpan(
+              'session.snapshot_publish',
             );
+            const snapshot = (() => {
+              try {
+                const nextSnapshot = buildSessionSnapshotFromResponse(
+                  data,
+                  processedMessages,
+                  serverState,
+                );
+                const hydratedMessages = applyDelegatedSessionState(
+                  applyLivePartialAssistant(
+                    applyRecoveryParity(
+                      nextSnapshot.messages,
+                      serverState?.recovery,
+                      serverState?.agent_state ?? "idle",
+                    ),
+                    serverState?.live_partial_assistant,
+                    serverState?.agent_state ?? "idle",
+                    pendingInteractionsFromSnapshot(serverState),
+                  ),
+                  serverState?.delegated_tools,
+                  serverState?.recent_delegated_runs,
+                );
 
-            set((s) => {
-              const sameExactSelection = Boolean(snapshot.modelKey)
-                && modelKeysEqual(snapshot.modelKey, s.modelKey);
-              const nextModelProvider = snapshot.model
-                ? snapshot.modelKey?.provider
-                  ?? (snapshot.model === s.model ? s.modelProvider : null)
-                : s.modelProvider;
-              const nextModelInfo = snapshot.model
-                ? sameExactSelection || (!snapshot.modelKey && snapshot.model === s.model)
-                  ? s.modelInfo
-                  : null
-                : s.modelInfo;
-              const capabilityInput = nextModelInfo ?? snapshot.model ?? s.model;
-              const nextThinkingLevel = normalizeThinkingLevel(
-                s.thinkingLevel,
-                capabilityInput,
-              );
-              const nextMode = serverState?.mode ?? snapshot.mode;
-              const nextPermissionMode =
-                serverState?.permission_mode ?? snapshot.permissionMode;
-              return {
-                ...s,
-                sessionId: snapshot.sessionId,
-                sessionType: snapshot.sessionType,
-                title: snapshot.title,
-                mode: nextMode,
-                permissionMode: nextPermissionMode,
-                model: snapshot.model ?? s.model,
-                modelKey: snapshot.model ? snapshot.modelKey : s.modelKey,
-                modelProvider: nextModelProvider,
-                modelInfo: nextModelInfo,
-                thinkingLevel: nextThinkingLevel,
-                thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
-                fastModeEnabled: snapshot.model
-                  ? s.fastModeEnabled
-                    && supportsFastMode(capabilityInput, nextModelProvider)
-                  : s.fastModeEnabled,
-                tokenCount: snapshot.tokenCount,
-                tokenUsage: null,
-                error:
-                  serverState !== null
-                    ? sessionAgentErrorMessage(serverState)
-                    : previousSessionId === snapshot.sessionId
-                      ? s.error
-                      : null,
-                messages: hydratedMessages,
-                isLoading: false,
-                isStreaming: isActiveSessionAgentState(serverState?.agent_state),
-                isThinking:
-                  serverState?.agent_state === "streaming"
-                    ? Boolean(
-                        serverState.live_partial_assistant?.thinking?.trim(),
-                      ) || s.isThinking
-                    : false,
-                thinkingContent:
-                  serverState?.live_partial_assistant?.thinking || "",
-                lastEventSequence: serverState?.last_event_sequence ?? null,
-              };
-            });
+                set((s) => {
+                  const sameExactSelection = Boolean(nextSnapshot.modelKey)
+                    && modelKeysEqual(nextSnapshot.modelKey, s.modelKey);
+                  const nextModelProvider = nextSnapshot.model
+                    ? nextSnapshot.modelKey?.provider
+                      ?? (nextSnapshot.model === s.model ? s.modelProvider : null)
+                    : s.modelProvider;
+                  const nextModelInfo = nextSnapshot.model
+                    ? sameExactSelection || (!nextSnapshot.modelKey && nextSnapshot.model === s.model)
+                      ? s.modelInfo
+                      : null
+                    : s.modelInfo;
+                  const capabilityInput = nextModelInfo ?? nextSnapshot.model ?? s.model;
+                  const nextThinkingLevel = normalizeThinkingLevel(
+                    s.thinkingLevel,
+                    capabilityInput,
+                  );
+                  const nextMode = serverState?.mode ?? nextSnapshot.mode;
+                  const nextPermissionMode =
+                    serverState?.permission_mode ?? nextSnapshot.permissionMode;
+                  return {
+                    ...s,
+                    sessionId: nextSnapshot.sessionId,
+                    sessionType: nextSnapshot.sessionType,
+                    title: nextSnapshot.title,
+                    mode: nextMode,
+                    permissionMode: nextPermissionMode,
+                    model: nextSnapshot.model ?? s.model,
+                    modelKey: nextSnapshot.model ? nextSnapshot.modelKey : s.modelKey,
+                    modelProvider: nextModelProvider,
+                    modelInfo: nextModelInfo,
+                    thinkingLevel: nextThinkingLevel,
+                    thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
+                    fastModeEnabled: nextSnapshot.model
+                      ? s.fastModeEnabled
+                        && supportsFastMode(capabilityInput, nextModelProvider)
+                      : s.fastModeEnabled,
+                    tokenCount: nextSnapshot.tokenCount,
+                    tokenUsage: null,
+                    error:
+                      serverState !== null
+                        ? sessionAgentErrorMessage(serverState)
+                        : previousSessionId === nextSnapshot.sessionId
+                          ? s.error
+                          : null,
+                    messages: hydratedMessages,
+                    isLoading: false,
+                    isStreaming: isActiveSessionAgentState(serverState?.agent_state),
+                    isThinking:
+                      serverState?.agent_state === "streaming"
+                        ? Boolean(
+                            serverState.live_partial_assistant?.thinking?.trim(),
+                          ) || s.isThinking
+                        : false,
+                    thinkingContent:
+                      serverState?.live_partial_assistant?.thinking || "",
+                    lastEventSequence: serverState?.last_event_sequence ?? null,
+                  };
+                });
+                return nextSnapshot;
+              } finally {
+                finishSnapshotPublishSpan();
+              }
+            })();
             try {
               storage.set(
                 "krusty-permission-mode",

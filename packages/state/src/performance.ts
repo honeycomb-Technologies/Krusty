@@ -7,9 +7,12 @@ export type KrustyPerformancePhase =
 	| 'stream.first_event'
 	| 'stream.flush'
 	| 'stream.finish'
+	| 'session.fetch_decode'
 	| 'session.snapshot_transform'
+	| 'session.snapshot_publish'
 	| 'session.cache_compact'
 	| 'transcript.derive'
+	| 'transcript.visual_plan'
 	| 'transcript.first_paint'
 	| 'mode.switch'
 	| 'toolbox.open'
@@ -17,7 +20,11 @@ export type KrustyPerformancePhase =
 
 export type KrustyPerformanceMetric =
 	| 'session.snapshot_max_slice'
-	| 'session.snapshot_yields';
+	| 'session.snapshot_yields'
+	| 'transcript.visible_messages'
+	| 'transcript.visible_render_parts'
+	| 'transcript.visible_tools'
+	| 'transcript.visible_markdown_characters';
 
 export type KrustyPerformanceResource =
 	| 'stream_connections'

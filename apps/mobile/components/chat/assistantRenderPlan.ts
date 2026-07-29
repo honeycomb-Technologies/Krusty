@@ -3,6 +3,18 @@ import {
   isExplorationToolName,
   isHiddenToolName,
 } from "./toolPresentation";
+import {
+  smoothInterruptedText,
+  type AssistantVisualSegment,
+} from "./assistantTextSmoothing";
+
+export {
+  appendContinuationText,
+  shouldMergeContinuationText,
+  smoothInterruptedText,
+  startsLikeNewBlock,
+} from "./assistantTextSmoothing";
+export type { AssistantVisualSegment } from "./assistantTextSmoothing";
 
 /** Keep in sync with plan/mode tools filtered from UI in core tool policy. */
 const INTERNAL_TOOL_NAMES = new Set([
@@ -14,33 +26,6 @@ const INTERNAL_TOOL_NAMES = new Set([
   "add_subtask",
   "set_dependency",
 ]);
-
-
-export type AssistantVisualSegment =
-  | {
-      type: "thinking";
-      id: string;
-      content: string;
-    }
-  | {
-      type: "text";
-      id: string;
-      content: string;
-    }
-  | {
-      type: "attachments";
-      id: string;
-    }
-  | {
-      type: "tool";
-      id: string;
-      toolCall: ToolCall;
-    }
-  | {
-      type: "exploration";
-      id: string;
-      tools: ToolCall[];
-    };
 
 export function isDelegatedTool(toolCall: ToolCall): boolean {
   return (
@@ -66,100 +51,6 @@ function isInternalTool(toolCall: ToolCall): boolean {
 
 export function isExplorationTool(toolCall: ToolCall): boolean {
   return isExplorationToolName(toolCall.name);
-}
-
-function isSoftInterruption(segment: AssistantVisualSegment): boolean {
-  // Only tool-like interruptions should rejoin split prose.
-  // Thinking is a real phase boundary and must stay sticky.
-  return segment.type === "exploration" || segment.type === "tool";
-}
-
-export function startsLikeNewBlock(content: string): boolean {
-  return /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|```|>|<\w)/.test(content);
-}
-
-/** Exported for unit tests — mid-stream tool interruptions rejoin prose. */
-export function shouldMergeContinuationText(
-  previousContent: string,
-  nextContent: string,
-  interveningSegments: AssistantVisualSegment[],
-): boolean {
-  if (interveningSegments.length === 0) return false;
-  if (!interveningSegments.every(isSoftInterruption)) return false;
-
-  const previous = previousContent.trimEnd();
-  const next = nextContent.trimStart();
-  if (!previous || !next || startsLikeNewBlock(next)) return false;
-
-  // Do not glue across closed code fences / list boundaries left unfinished.
-  if (/```\s*$/.test(previous) || /^```/.test(next)) return false;
-
-  const previousLooksUnfinished =
-    /[A-Za-z0-9_/'")\]]$/.test(previous) || /[A-Za-z0-9]\s+$/u.test(previousContent);
-  // Lowercase continuation, punctuation, or a short trailing fragment after a tool.
-  const nextLooksContinued =
-    /^[a-z,.;:!?'"()\]}]/.test(next) ||
-    (/^[A-Za-z][A-Za-z0-9/_-]*[.!?]?$/.test(next) && previousLooksUnfinished);
-
-  return previousLooksUnfinished && nextLooksContinued;
-}
-
-export function appendContinuationText(previous: string, next: string): string {
-  if (!previous) return next;
-  if (!next) return previous;
-  if (/\s$/.test(previous) || /^\s/.test(next)) return previous + next;
-
-  const left = previous[previous.length - 1] ?? "";
-  const right = next.trimStart()[0] ?? "";
-  // "we only" + "skimmed." / "server/mobile" + "edges." need a joining space.
-  if (/[A-Za-z0-9_/'")\]]/.test(left) && /[A-Za-z0-9("'[]/.test(right)) {
-    return `${previous} ${next.trimStart()}`;
-  }
-  return previous + next.trimStart();
-}
-
-/** Exported for unit tests. */
-export function smoothInterruptedText(
-  segments: AssistantVisualSegment[],
-): AssistantVisualSegment[] {
-  const smoothed: AssistantVisualSegment[] = [];
-
-  for (const segment of segments) {
-    if (segment.type !== "text") {
-      smoothed.push(segment);
-      continue;
-    }
-
-    let previousTextIndex = -1;
-    for (let index = smoothed.length - 1; index >= 0; index -= 1) {
-      if (smoothed[index]?.type === "text") {
-        previousTextIndex = index;
-        break;
-      }
-    }
-    const previousText = smoothed[previousTextIndex];
-    const interveningSegments =
-      previousTextIndex >= 0 ? smoothed.slice(previousTextIndex + 1) : [];
-
-    if (
-      previousText?.type === "text" &&
-      shouldMergeContinuationText(
-        previousText.content,
-        segment.content,
-        interveningSegments,
-      )
-    ) {
-      smoothed[previousTextIndex] = {
-        ...previousText,
-        content: appendContinuationText(previousText.content, segment.content),
-      };
-      continue;
-    }
-
-    smoothed.push(segment);
-  }
-
-  return smoothed;
 }
 
 function legacyRenderParts(

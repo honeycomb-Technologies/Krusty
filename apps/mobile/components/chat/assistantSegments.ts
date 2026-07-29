@@ -73,6 +73,10 @@ export function assistantRenderSegments(
   return nextEntry.prefixSegments.concat(nextEntry.suffixSegments);
 }
 
+export function shouldSegmentAssistantContent(isStreaming: boolean): boolean {
+  return isStreaming;
+}
+
 export function resetAssistantRenderSegments() {
   segmentCache.clear();
   accessOrder.splice(0, accessOrder.length);
