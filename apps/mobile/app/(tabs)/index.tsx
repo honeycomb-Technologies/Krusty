@@ -131,6 +131,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  const activeModeRef = useRef(activeMode);
+  activeModeRef.current = activeMode;
+  const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
   // Header selection responds immediately; heavy surface/store work can skip
   // superseded intermediate requests and settle on the latest mode. Unlike a
   // deferred value, the hard deadline prevents continuous taps from starving
@@ -143,6 +146,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       quietDelayMs: 24,
       maxDelayMs: 80,
       onFlush: (mode) => {
+        if (mode === activeModeRef.current) {
+          finishModeSwitchSpanRef.current?.();
+          finishModeSwitchSpanRef.current = null;
+          return;
+        }
         startTransition(() => setActiveMode(mode));
       },
     });
@@ -154,7 +162,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     };
   }, []);
   useMobileDiagnosticMode(activeMode);
-  const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
   const finishToolboxOpenSpanRef = useRef<(() => number | null) | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
@@ -416,7 +423,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    activateSessionType,
+    cancelPendingSessionSelection,
   } = useSessionActions({
     client,
     activeTab,
@@ -608,6 +615,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const handleModeChange = useCallback(
     (mode: SessionType) => {
       if (mode === requestedMode) return;
+      cancelPendingSessionSelection();
       finishModeSwitchSpanRef.current?.();
       finishModeSwitchSpanRef.current = beginKrustyPerformanceSpan(
         "mode.switch",
@@ -616,13 +624,17 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       setActiveSheet(null);
       setActiveTab(tabForSessionType(mode));
     },
-    [activeMode, requestedMode, setActiveTab],
+    [
+      activeMode,
+      cancelPendingSessionSelection,
+      requestedMode,
+      setActiveTab,
+    ],
   );
   useEffect(() => {
     finishModeSwitchSpanRef.current?.();
     finishModeSwitchSpanRef.current = null;
-    activateSessionType(activeMode);
-  }, [activateSessionType, activeMode]);
+  }, [activeMode]);
 
   const handleNewMakoSession = useCallback(() => {
     handleModeChange("mako");

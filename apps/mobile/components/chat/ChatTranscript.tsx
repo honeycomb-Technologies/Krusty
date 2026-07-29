@@ -86,6 +86,9 @@ const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
 const STREAM_STICK_MIN_INTERVAL_MS = 32;
 /** One delayed measurement pass after stream layout settles. */
 const STREAM_STICK_FALLBACK_MS = 120;
+/** Keep cold mode activation bounded; older turns enter only as the user scrolls up. */
+const INITIAL_HISTORICAL_TURN_COUNT = 1;
+const HISTORICAL_TURN_PAGE_SIZE = 2;
 
 interface CachedTranscriptScrollState {
   offset: number;
@@ -204,6 +207,7 @@ function ChatTranscriptComponent({
   const streamStickPendingRef = useRef(false);
   const lastStreamStickAtRef = useRef(0);
   const isUserDraggingRef = useRef(false);
+  const historyRevealArmedRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
   const isStreamingRef = useRef(isStreaming);
   const loadedSessionIdRef = useRef<string | null>(
@@ -261,6 +265,85 @@ function ChatTranscriptComponent({
     [isStreaming, messages, transcriptCacheKey],
   );
   const { historicalTurns, liveTurn } = turnSplit;
+  const cachedScrollState = transcriptScrollCache.get(scrollStateKey) ?? null;
+  const initialHistoricalTurnCount =
+    cachedScrollState?.autoFollow === false
+      ? historicalTurns.length
+      : Math.min(INITIAL_HISTORICAL_TURN_COUNT, historicalTurns.length);
+  const [historyWindow, setHistoryWindow] = useState(() => ({
+    key: transcriptCacheKey,
+    count: initialHistoricalTurnCount,
+    sourceLength: historicalTurns.length,
+    preserveRevealedWindow: cachedScrollState?.autoFollow === false,
+  }));
+  const visibleHistoricalTurnCount =
+    historyWindow.key === transcriptCacheKey
+      ? Math.min(historyWindow.count, historicalTurns.length)
+      : initialHistoricalTurnCount;
+  const hiddenHistoricalTurnCount = Math.max(
+    0,
+    historicalTurns.length - visibleHistoricalTurnCount,
+  );
+  const visibleHistoricalTurns = useMemo(
+    () =>
+      hiddenHistoricalTurnCount > 0
+        ? historicalTurns.slice(hiddenHistoricalTurnCount)
+        : historicalTurns,
+    [
+      hiddenHistoricalTurnCount,
+      historicalTurns,
+    ],
+  );
+  useEffect(() => {
+    setHistoryWindow((current) => {
+      if (current.key !== transcriptCacheKey) {
+        return {
+          key: transcriptCacheKey,
+          count: initialHistoricalTurnCount,
+          sourceLength: historicalTurns.length,
+          preserveRevealedWindow: cachedScrollState?.autoFollow === false,
+        };
+      }
+
+      if (current.sourceLength === historicalTurns.length) {
+        if (current.count === 0 && initialHistoricalTurnCount > 0) {
+          return {
+            ...current,
+            count: initialHistoricalTurnCount,
+          };
+        }
+        return current;
+      }
+
+      let count = Math.min(current.count, historicalTurns.length);
+      if (
+        historicalTurns.length > current.sourceLength
+        && current.preserveRevealedWindow
+      ) {
+        // Keep deliberately revealed rows mounted when the former live turn
+        // becomes historical. Default auto-follow stays bounded at one row;
+        // only an explicit upward page/scroll target grows with new turns.
+        count = Math.min(
+          historicalTurns.length,
+          current.count + historicalTurns.length - current.sourceLength,
+        );
+      } else if (count === 0 && initialHistoricalTurnCount > 0) {
+        count = initialHistoricalTurnCount;
+      }
+
+      return {
+        key: transcriptCacheKey,
+        count,
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: current.preserveRevealedWindow,
+      };
+    });
+  }, [
+    cachedScrollState?.autoFollow,
+    historicalTurns.length,
+    initialHistoricalTurnCount,
+    transcriptCacheKey,
+  ]);
   useEffect(() => {
     const caches = committedTurnCachesRef.current;
     caches.delete(transcriptCacheKey);
@@ -500,6 +583,37 @@ function ChatTranscriptComponent({
     pendingAutoScrollAnimatedRef.current = animated;
   }, []);
 
+  const revealOlderHistory = useCallback(() => {
+    if (
+      hiddenHistoricalTurnCount === 0
+      || !historyRevealArmedRef.current
+    ) {
+      return;
+    }
+    historyRevealArmedRef.current = false;
+
+    setHistoryWindow((current) => {
+      const currentCount =
+        current.key === transcriptCacheKey
+          ? current.count
+          : initialHistoricalTurnCount;
+      return {
+        key: transcriptCacheKey,
+        count: Math.min(
+          historicalTurns.length,
+          currentCount + HISTORICAL_TURN_PAGE_SIZE,
+        ),
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: true,
+      };
+    });
+  }, [
+    hiddenHistoricalTurnCount,
+    historicalTurns.length,
+    initialHistoricalTurnCount,
+    transcriptCacheKey,
+  ]);
+
   const updateNearBottom = useCallback((
     offsetY = scrollOffsetRef.current,
     options: { allowDisable?: boolean; allowEnable?: boolean } = {},
@@ -541,12 +655,21 @@ function ChatTranscriptComponent({
 
   const handleListScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-      updateNearBottom(event.nativeEvent.contentOffset.y, {
+      const offsetY = event.nativeEvent.contentOffset.y;
+      scrollOffsetRef.current = offsetY;
+      if (
+        isUserDraggingRef.current
+        && offsetY <= SCROLL_FOLLOW_THRESHOLD
+      ) {
+        revealOlderHistory();
+      } else if (offsetY > SCROLL_FOLLOW_THRESHOLD * 2) {
+        historyRevealArmedRef.current = true;
+      }
+      updateNearBottom(offsetY, {
         allowDisable: Date.now() >= programmaticScrollUntilRef.current,
       });
     },
-    [updateNearBottom],
+    [revealOlderHistory, updateNearBottom],
   );
 
   const handleJumpToLatest = useCallback(() => {
@@ -572,10 +695,12 @@ function ChatTranscriptComponent({
     if (!sessionId) {
       loadedSessionIdRef.current = null;
       restoredScrollStateRef.current = null;
+      historyRevealArmedRef.current = true;
       autoFollowRef.current = true;
       pendingAutoScrollRef.current = false;
       clearBottomAnchorTimers();
       scrollOffsetRef.current = 0;
+      contentHeightRef.current = 0;
       setPlanTrackerHeight(0);
       setIsNearBottom(true);
       return;
@@ -590,10 +715,12 @@ function ChatTranscriptComponent({
     const cached = transcriptScrollCache.get(scrollStateKey) ?? null;
     restoredScrollStateRef.current = cached;
     loadedSessionIdRef.current = selectionKey;
+    historyRevealArmedRef.current = true;
     autoFollowRef.current = cached?.autoFollow ?? true;
     pendingAutoScrollRef.current = false;
     clearBottomAnchorTimers();
     scrollOffsetRef.current = cached?.offset ?? 0;
+    contentHeightRef.current = 0;
     setPlanTrackerHeight(0);
     setIsNearBottom(cached?.autoFollow ?? true);
 
@@ -709,11 +836,23 @@ function ChatTranscriptComponent({
       return;
     }
 
+    const firstVisibleHistoricalIndex =
+      historicalTurns.length - visibleHistoricalTurns.length;
+    if (targetIndex < firstVisibleHistoricalIndex) {
+      setHistoryWindow({
+        key: transcriptCacheKey,
+        count: historicalTurns.length - targetIndex,
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: true,
+      });
+      return;
+    }
+
     autoFollowRef.current = false;
     requestAnimationFrame(() => {
       markProgrammaticScroll();
       flatListRef.current?.scrollToIndex({
-        index: targetIndex,
+        index: targetIndex - firstVisibleHistoricalIndex,
         animated: true,
         viewPosition: 0.35,
       });
@@ -726,6 +865,8 @@ function ChatTranscriptComponent({
     markProgrammaticScroll,
     onScrollTargetHandled,
     scrollToMessageId,
+    transcriptCacheKey,
+    visibleHistoricalTurns.length,
   ]);
 
   const renderHistoricalTurn = useCallback(
@@ -798,20 +939,24 @@ function ChatTranscriptComponent({
     <View style={styles.flex}>
       <FlatList
         ref={flatListRef}
-        data={historicalTurns}
+        data={visibleHistoricalTurns}
         keyExtractor={(turn) => turn.id}
         // Historical rows are intentionally isolated from live stream ticks.
         extraData={liveTurn?.id ?? "no-live"}
-        windowSize={5}
-        maxToRenderPerBatch={2}
-        initialNumToRender={4}
+        windowSize={3}
+        maxToRenderPerBatch={1}
+        initialNumToRender={1}
         updateCellsBatchingPeriod={80}
         // removeClippedSubviews is a known native crash source on iOS New
         // Architecture with nested message/tool cells and absolute chrome.
         removeClippedSubviews={false}
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
+          historyRevealArmedRef.current = true;
           clearBottomAnchorTimers();
+          if (scrollOffsetRef.current <= SCROLL_FOLLOW_THRESHOLD) {
+            revealOlderHistory();
+          }
           Keyboard.dismiss();
         }}
         onScrollEndDrag={() => {
@@ -832,6 +977,7 @@ function ChatTranscriptComponent({
         }}
         renderItem={renderHistoricalTurn}
         ListFooterComponent={liveFooter}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -883,10 +1029,10 @@ function ChatTranscriptComponent({
         onScrollToIndexFailed={({ index }) => {
           const clampedIndex = Math.max(
             0,
-            Math.min(index, Math.max(historicalTurns.length - 1, 0)),
+            Math.min(index, Math.max(visibleHistoricalTurns.length - 1, 0)),
           );
           requestAnimationFrame(() => {
-            if (historicalTurns.length === 0) {
+            if (visibleHistoricalTurns.length === 0) {
               flatListRef.current?.scrollToEnd({ animated: true });
               return;
             }

@@ -113,6 +113,9 @@ export function useSessionActions({
     },
     [],
   );
+  const cancelPendingSessionSelection = useCallback(() => {
+    sessionSelectionSchedulerRef.current?.cancel();
+  }, []);
   const stopCurrentStream = useCallback(
     (suppressCompletion = true) => {
       if (sessionStore.getState().isStreaming) {
@@ -665,29 +668,6 @@ export function useSessionActions({
     sessionStore.getState().toggleFastMode();
   }, [models, sessionStore]);
 
-  const activateSessionType = useCallback(
-    (nextType: SessionType) => {
-      setDrawerOpen(false);
-
-      // Warm the destination mode only when focused. Keep this off the critical
-      // path if a session is already active for that mode.
-      const targetStore = modeStores[nextType].session;
-      if (targetStore.getState().sessionId) {
-        return;
-      }
-      const rememberedId = lastSessionIdByTypeRef.current[nextType];
-      if (!rememberedId) {
-        return;
-      }
-      void targetStore.getState().loadSession(rememberedId, true);
-    },
-    [
-      lastSessionIdByTypeRef,
-      modeStores,
-      setDrawerOpen,
-    ],
-  );
-
   return {
     stopCurrentStream,
     detachCurrentSession,
@@ -703,6 +683,6 @@ export function useSessionActions({
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    activateSessionType,
+    cancelPendingSessionSelection,
   };
 }

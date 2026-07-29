@@ -339,6 +339,7 @@ export function createSessionStore(
     SessionStoreState,
     | "sendMessage"
     | "loadSession"
+    | "cancelPendingSessionLoad"
     | "ensureMakoMainSession"
     | "clearSession"
     | "initSession"
@@ -1272,6 +1273,13 @@ export function createSessionStore(
             }
           }
         },
+    cancelPendingSessionLoad() {
+      sessionSelectionGeneration += 1;
+      // Allow a newly visible consumer to join/restart immediately. The
+      // shared network hydration remains single-flight, but stale consumers
+      // will fail their generation guard before transcript processing.
+      inFlightSessionLoads.clear();
+    },
     // -- clearSession -------------------------------------------------------
 
     clearSession() {

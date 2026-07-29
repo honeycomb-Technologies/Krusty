@@ -296,6 +296,68 @@ Deno.test("unresolved A to B to A navigation honors the latest selection intent"
 	store.getState().cleanup();
 });
 
+Deno.test("hidden hydration can be invalidated and reused when the mode returns", async () => {
+	const hydration = deferred<ReturnType<typeof sessionResponse>>();
+	let requests = 0;
+	const client = {
+		getSession: () => {
+			requests += 1;
+			return hydration.promise;
+		},
+		getSessionState: async () => ({
+			id: "session-a",
+			agent_state: "idle",
+			started_at: null,
+			last_event_at: null,
+			mode: "build",
+			permission_mode: "autonomous",
+			recovery: null,
+			live_partial_assistant: null,
+			pending_interactions: [],
+			delegated_tools: [],
+			recent_delegated_runs: [],
+			last_event_sequence: null,
+		}),
+		heartbeatSessionPresence: async () => ({}),
+		removeSessionPresence: async () => ({}),
+		updateSession: async () => ({}),
+		setCurrentModel: async () => ({}),
+	};
+	const store = createSessionStore(
+		client as never,
+		createStorage(),
+		createWorkspace() as never,
+		createSessionsStore([
+			{
+				id: "session-a",
+				title: "Alpha",
+				session_type: "chat",
+				mode: "build",
+				permission_mode: "autonomous",
+			},
+		]) as never,
+		createPlanStore() as never,
+	);
+
+	const hiddenLoad = store.getState().loadSession("session-a");
+	store.getState().cancelPendingSessionLoad();
+	const visibleRetry = store.getState().loadSession("session-a", true);
+
+	hydration.resolve(sessionResponse("session-a", "Alpha", "visible transcript"));
+	await Promise.all([hiddenLoad, visibleRetry]);
+
+	assertEquals(requests, 1, "the visible retry should reuse the single-flight request");
+	assertEquals(store.getState().isLoading, false, "the visible retry should finish hydration");
+	assertEquals(
+		store.getState().messages.some((message) =>
+			message.content.includes("visible transcript")
+		),
+		true,
+		"only the latest visible hydration consumer should process the transcript",
+	);
+	store.getState().cleanup();
+});
+
 Deno.test("presence teardown is owned, idempotent, and not resurrected by hidden hydration", async () => {
 	const hydration = deferred<ReturnType<typeof sessionResponse>>();
 	const heartbeats: string[] = [];

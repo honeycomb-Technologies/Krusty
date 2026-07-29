@@ -101,6 +101,9 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
   const actions = await Deno.readTextFile(
     new URL("../app/(tabs)/chat-screen/useSessionActions.ts", import.meta.url).pathname,
   );
+  const controller = await Deno.readTextFile(
+    new URL("../app/(tabs)/chat-screen/useSessionController.ts", import.meta.url).pathname,
+  );
 
   assert(
     screen.includes("createLatestIntentScheduler")
@@ -122,8 +125,10 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
     "composer and session actions must remain bound to the committed deferred mode",
   );
   assert(
-    screen.includes("activateSessionType(activeMode)"),
-    "session warming must follow only the deferred winning mode",
+    controller.includes("VISIBLE_MODE_HYDRATION_DELAY_MS = 80")
+      && controller.includes("state.cancelPendingSessionLoad()")
+      && controller.includes("const hydrationTimer = setTimeout"),
+    "cold hydration must wait for the visible winner and invalidate hidden work",
   );
   assert(
     !screen.includes("modeIntentRef") && !screen.includes("commitModeIntent"),
@@ -145,6 +150,46 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
   assert(
     actions.includes("sessionSelectionSchedulerRef.current?.submit(intent)"),
     "rapid session selection must coalesce before expensive hydration",
+  );
+  assert(
+    screen.includes("cancelPendingSessionSelection()")
+      && !actions.includes("activateSessionType"),
+    "a newer plain mode intent must cancel pending session selection instead of hydrating twice",
+  );
+  assert(
+    screen.includes("mode === activeModeRef.current")
+      && screen.includes("finishModeSwitchSpanRef.current = null"),
+    "a burst that settles back on the active mode must close its measurement span",
+  );
+});
+
+Deno.test("settings and transcript secondary surfaces stay bounded", async () => {
+  const settings = await Deno.readTextFile(
+    new URL("../components/settings/SettingsPanel.tsx", import.meta.url).pathname,
+  );
+  const transcript = await Deno.readTextFile(
+    new URL("../components/chat/ChatTranscript.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    settings.includes("<FlatList")
+      && settings.includes("initialNumToRender={2}")
+      && settings.includes("windowSize={3}")
+      && !settings.includes("<ScrollView"),
+    "settings sections must virtualize without eagerly mounting the whole control tree",
+  );
+  assert(
+    transcript.match(/contentHeightRef\.current = 0;/g)?.length === 2
+      && transcript.includes("initialNumToRender={1}")
+      && transcript.includes("maxToRenderPerBatch={1}")
+      && transcript.includes("windowSize={3}")
+      && transcript.includes("historicalTurns.slice(hiddenHistoricalTurnCount)")
+      && transcript.includes("revealOlderHistory")
+      && transcript.includes("sourceLength: historicalTurns.length")
+      && transcript.includes("preserveRevealedWindow: true")
+      && transcript.includes("current.preserveRevealedWindow")
+      && transcript.includes("maintainVisibleContentPosition"),
+    "transcript identity changes must discard stale height, page upward, and preserve revealed history as live turns finalize",
   );
 });
 

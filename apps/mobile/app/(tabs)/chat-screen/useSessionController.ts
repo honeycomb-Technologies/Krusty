@@ -19,6 +19,8 @@ type SessionStoreApi = LoadedStores["session"];
 type SessionsStoreApi = LoadedStores["sessions"];
 type ModeStores = LoadedStores["modes"];
 
+const VISIBLE_MODE_HYDRATION_DELAY_MS = 80;
+
 function jsonEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   return JSON.stringify(left) === JSON.stringify(right);
@@ -199,6 +201,12 @@ export function useSessionController({
   useEffect(() => {
     for (const mode of ["chat", "code", "mako"] as const) {
       const state = modeStores[mode].session.getState();
+      if (mode !== activeMode && !state.isStreaming) {
+        if (state.isLoading && state.messages.length === 0) {
+          attemptedWorkspaceSessionHydrationRef.current[mode] = null;
+        }
+        state.cancelPendingSessionLoad();
+      }
       const policy = resolveModeLifecyclePolicy(
         activeMode,
         mode,
@@ -257,9 +265,18 @@ export function useSessionController({
     // first focus instead of all at once.
     const type = activeMode;
     const slot = modeStores[type];
-    if (slot.session.getState().sessionId) {
+    const sessionState = slot.session.getState();
+    let targetId = sessionState.sessionId;
+    if (targetId && (!sessionState.isLoading || sessionState.messages.length > 0)) {
       return;
     }
+    const rememberedId = lastSessionIdByTypeRef.current[type];
+    const remembered = rememberedId
+      ? sessions.find(
+          (candidate) =>
+            candidate.id === rememberedId && candidate.session_type === type,
+        )
+      : null;
     const persistedId = slot.workspace.getState().sessionId;
     const persisted = persistedId
       ? sessions.find(
@@ -274,19 +291,25 @@ export function useSessionController({
           new Date(right.updated_at).getTime() -
           new Date(left.updated_at).getTime(),
       )[0];
-    const targetId = persisted?.id ?? recent?.id ?? null;
+    targetId = targetId ?? remembered?.id ?? persisted?.id ?? recent?.id ?? null;
+    const scheduledTargetId = targetId;
     if (
-      !targetId ||
-      attemptedWorkspaceSessionHydrationRef.current[type] === targetId
+      !scheduledTargetId ||
+      attemptedWorkspaceSessionHydrationRef.current[type] === scheduledTargetId
     ) {
       return;
     }
 
-    attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
-    lastSessionIdByTypeRef.current[type] = targetId;
-    void slot.session.getState().loadSession(targetId, true).catch(() => {
-      void sessionsStore.getState().loadSessions();
-    });
+    lastSessionIdByTypeRef.current[type] = scheduledTargetId;
+    const hydrationTimer = setTimeout(() => {
+      attemptedWorkspaceSessionHydrationRef.current[type] = scheduledTargetId;
+      void slot.session.getState().loadSession(scheduledTargetId, true).catch(() => {
+        attemptedWorkspaceSessionHydrationRef.current[type] = null;
+        void sessionsStore.getState().loadSessions();
+      });
+    }, VISIBLE_MODE_HYDRATION_DELAY_MS);
+
+    return () => clearTimeout(hydrationTimer);
   }, [
     activeMode,
     client,
