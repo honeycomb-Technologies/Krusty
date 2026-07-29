@@ -1,6 +1,56 @@
+import CryptoKit
 import ExpoModulesCore
 import Foundation
 import MetricKit
+import os
+
+private final class KrustyPerformanceSignposts {
+  static let shared = KrustyPerformanceSignposts()
+
+  private let signposter = OSSignposter(
+    subsystem: Bundle.main.bundleIdentifier ?? "io.krusty.mobile",
+    category: "Performance"
+  )
+  private let lock = NSLock()
+  private var intervals: [Int: OSSignpostIntervalState] = [:]
+  private let allowedNames: Set<String> = [
+    "app.launch", "new_chat.shell", "new_chat.session_bind", "session.open",
+    "stream.connect", "stream.first_event", "stream.flush", "stream.finish",
+    "transcript.derive", "transcript.first_paint", "mode.switch", "toolbox.open",
+    "live_activity.update",
+  ]
+
+  func begin(spanId: Int, name: String) {
+    guard allowedNames.contains(name) else { return }
+    lock.lock()
+    defer { lock.unlock() }
+    guard intervals[spanId] == nil else { return }
+    intervals[spanId] = signposter.beginInterval(
+      "KrustyPerformance",
+      id: signposter.makeSignpostID(),
+      "phase=\(name, privacy: .public)"
+    )
+  }
+
+  func end(spanId: Int, name: String) {
+    guard allowedNames.contains(name) else { return }
+    lock.lock()
+    let state = intervals.removeValue(forKey: spanId)
+    lock.unlock()
+    guard let state else { return }
+    signposter.endInterval(
+      "KrustyPerformance",
+      state,
+      "phase=\(name, privacy: .public)"
+    )
+  }
+}
+
+private let maxDiagnostics = 8
+private let maxStacksPerDiagnostic = 8
+private let maxFramesPerStack = 32
+private let maxFramesPerPayload = 256
+private let maxFrameSampleCount = 1_000_000
 
 private struct StoredMetricPayload: Codable {
   let id: String
@@ -9,7 +59,41 @@ private struct StoredMetricPayload: Codable {
   let summary: MetricKitSummary
 }
 
-private struct MetricKitSummary: Codable {
+private enum MetricKitSummary: Codable {
+  case v1(MetricKitV1Summary)
+  case v2(MetricKitV2Summary)
+
+  private enum CodingKeys: String, CodingKey {
+    case summarySchemaVersion
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch try container.decode(Int.self, forKey: .summarySchemaVersion) {
+    case 1:
+      self = .v1(try MetricKitV1Summary(from: decoder))
+    case 2:
+      self = .v2(try MetricKitV2Summary(from: decoder))
+    default:
+      throw DecodingError.dataCorruptedError(
+        forKey: .summarySchemaVersion,
+        in: container,
+        debugDescription: "Unsupported MetricKit summary schema"
+      )
+    }
+  }
+
+  func encode(to encoder: Encoder) throws {
+    switch self {
+    case .v1(let summary):
+      try summary.encode(to: encoder)
+    case .v2(let summary):
+      try summary.encode(to: encoder)
+    }
+  }
+}
+
+private struct MetricKitV1Summary: Codable {
   let summarySchemaVersion: Int
   let sourcePayloadBytes: Int
   let hasApplicationLaunchMetrics: Bool
@@ -29,27 +113,79 @@ private struct MetricKitSummary: Codable {
   let diskWriteExceptionDiagnosticCount: Int
 }
 
+private struct MetricKitV2Summary: Codable {
+  let summarySchemaVersion: Int
+  let periodStartMs: Int64
+  let periodEndMs: Int64
+  let diagnostics: [MetricKitDiagnostic]
+}
+
+private struct MetricKitDiagnostic: Codable {
+  let type: String
+  let appVersion: String
+  let buildVersion: String
+  let architecture: String
+  let stacks: [MetricKitStack]
+}
+
+private struct MetricKitStack: Codable {
+  let fingerprintSha256: String
+  let threadAttributed: Bool
+  let frames: [MetricKitFrame]
+}
+
+private struct MetricKitFrame: Codable {
+  let binaryUuid: String
+  let binaryName: String
+  let offset: String
+  let sampleCount: Int
+}
+
+private struct NativeMetricFrameRecord: Record {
+  @Field var binaryUuid: String = ""
+  @Field var binaryName: String = ""
+  @Field var offset: String = ""
+  @Field var sampleCount: Int = 0
+}
+
+private struct NativeMetricStackRecord: Record {
+  @Field var fingerprintSha256: String = ""
+  @Field var threadAttributed: Bool = false
+  @Field var frames: [NativeMetricFrameRecord] = []
+}
+
+private struct NativeMetricDiagnosticRecord: Record {
+  @Field var type: String = ""
+  @Field var appVersion: String = ""
+  @Field var buildVersion: String = ""
+  @Field var architecture: String = ""
+  @Field var stacks: [NativeMetricStackRecord] = []
+}
+
 private struct NativeMetricPayloadRecord: Record {
   @Field var id: String = ""
   @Field var kind: String = ""
   @Field var receivedAtMs: Int64 = 0
   @Field var summarySchemaVersion: Int = 1
-  @Field var sourcePayloadBytes: Int = 0
-  @Field var hasApplicationLaunchMetrics: Bool = false
-  @Field var hasApplicationResponsivenessMetrics: Bool = false
-  @Field var hasMemoryMetrics: Bool = false
-  @Field var hasCpuMetrics: Bool = false
-  @Field var hasDiskIoMetrics: Bool = false
-  @Field var hasDisplayMetrics: Bool = false
-  @Field var hasNetworkTransferMetrics: Bool = false
-  @Field var hasApplicationExitMetrics: Bool = false
-  @Field var hasCellularConditionMetrics: Bool = false
-  @Field var hasLocationActivityMetrics: Bool = false
-  @Field var hasAnimationMetrics: Bool = false
-  @Field var crashDiagnosticCount: Int = 0
-  @Field var hangDiagnosticCount: Int = 0
-  @Field var cpuExceptionDiagnosticCount: Int = 0
-  @Field var diskWriteExceptionDiagnosticCount: Int = 0
+  @Field var sourcePayloadBytes: Int?
+  @Field var hasApplicationLaunchMetrics: Bool?
+  @Field var hasApplicationResponsivenessMetrics: Bool?
+  @Field var hasMemoryMetrics: Bool?
+  @Field var hasCpuMetrics: Bool?
+  @Field var hasDiskIoMetrics: Bool?
+  @Field var hasDisplayMetrics: Bool?
+  @Field var hasNetworkTransferMetrics: Bool?
+  @Field var hasApplicationExitMetrics: Bool?
+  @Field var hasCellularConditionMetrics: Bool?
+  @Field var hasLocationActivityMetrics: Bool?
+  @Field var hasAnimationMetrics: Bool?
+  @Field var crashDiagnosticCount: Int?
+  @Field var hangDiagnosticCount: Int?
+  @Field var cpuExceptionDiagnosticCount: Int?
+  @Field var diskWriteExceptionDiagnosticCount: Int?
+  @Field var periodStartMs: Int64?
+  @Field var periodEndMs: Int64?
+  @Field var diagnostics: [NativeMetricDiagnosticRecord]?
 }
 
 private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscriber {
@@ -58,7 +194,6 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
   private let queue = DispatchQueue(label: "io.krusty.mobile.metrics", qos: .utility)
   private let encoder = JSONEncoder()
   private var observing = false
-  private let maxSourcePayloadBytes = 2 * 1024 * 1024
   private let maxStoredPayloads = 16
   private let maxStoredBytes = 128 * 1024
 
@@ -83,11 +218,13 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
   }
 
   func didReceive(_ payloads: [MXMetricPayload]) {
-    persist(payloads.map { ("metric", $0.jsonRepresentation()) })
+    persist(payloads.map { ("metric", summarize(metric: $0)) })
   }
 
   func didReceive(_ payloads: [MXDiagnosticPayload]) {
-    persist(payloads.map { ("diagnostic", $0.jsonRepresentation()) })
+    persist(payloads.compactMap { payload in
+      summarize(diagnostic: payload).map { ("diagnostic", $0) }
+    })
   }
 
   func list() -> [NativeMetricPayloadRecord] {
@@ -106,23 +243,31 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
         record.id = stored.id
         record.kind = stored.kind
         record.receivedAtMs = stored.receivedAtMs
-        record.summarySchemaVersion = stored.summary.summarySchemaVersion
-        record.sourcePayloadBytes = stored.summary.sourcePayloadBytes
-        record.hasApplicationLaunchMetrics = stored.summary.hasApplicationLaunchMetrics
-        record.hasApplicationResponsivenessMetrics = stored.summary.hasApplicationResponsivenessMetrics
-        record.hasMemoryMetrics = stored.summary.hasMemoryMetrics
-        record.hasCpuMetrics = stored.summary.hasCpuMetrics
-        record.hasDiskIoMetrics = stored.summary.hasDiskIoMetrics
-        record.hasDisplayMetrics = stored.summary.hasDisplayMetrics
-        record.hasNetworkTransferMetrics = stored.summary.hasNetworkTransferMetrics
-        record.hasApplicationExitMetrics = stored.summary.hasApplicationExitMetrics
-        record.hasCellularConditionMetrics = stored.summary.hasCellularConditionMetrics
-        record.hasLocationActivityMetrics = stored.summary.hasLocationActivityMetrics
-        record.hasAnimationMetrics = stored.summary.hasAnimationMetrics
-        record.crashDiagnosticCount = stored.summary.crashDiagnosticCount
-        record.hangDiagnosticCount = stored.summary.hangDiagnosticCount
-        record.cpuExceptionDiagnosticCount = stored.summary.cpuExceptionDiagnosticCount
-        record.diskWriteExceptionDiagnosticCount = stored.summary.diskWriteExceptionDiagnosticCount
+        switch stored.summary {
+        case .v1(let summary):
+          record.summarySchemaVersion = 1
+          record.sourcePayloadBytes = summary.sourcePayloadBytes
+          record.hasApplicationLaunchMetrics = summary.hasApplicationLaunchMetrics
+          record.hasApplicationResponsivenessMetrics = summary.hasApplicationResponsivenessMetrics
+          record.hasMemoryMetrics = summary.hasMemoryMetrics
+          record.hasCpuMetrics = summary.hasCpuMetrics
+          record.hasDiskIoMetrics = summary.hasDiskIoMetrics
+          record.hasDisplayMetrics = summary.hasDisplayMetrics
+          record.hasNetworkTransferMetrics = summary.hasNetworkTransferMetrics
+          record.hasApplicationExitMetrics = summary.hasApplicationExitMetrics
+          record.hasCellularConditionMetrics = summary.hasCellularConditionMetrics
+          record.hasLocationActivityMetrics = summary.hasLocationActivityMetrics
+          record.hasAnimationMetrics = summary.hasAnimationMetrics
+          record.crashDiagnosticCount = summary.crashDiagnosticCount
+          record.hangDiagnosticCount = summary.hangDiagnosticCount
+          record.cpuExceptionDiagnosticCount = summary.cpuExceptionDiagnosticCount
+          record.diskWriteExceptionDiagnosticCount = summary.diskWriteExceptionDiagnosticCount
+        case .v2(let summary):
+          record.summarySchemaVersion = 2
+          record.periodStartMs = summary.periodStartMs
+          record.periodEndMs = summary.periodEndMs
+          record.diagnostics = summary.diagnostics.map(nativeDiagnosticRecord)
+        }
         records.append(record)
       }
       return records
@@ -144,7 +289,7 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
     }
   }
 
-  private func persist(_ payloads: [(String, Data)]) {
+  private func persist(_ payloads: [(String, MetricKitSummary)]) {
     queue.async {
       let directory = self.payloadDirectory()
       try? FileManager.default.createDirectory(
@@ -152,8 +297,7 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
         withIntermediateDirectories: true,
         attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
       )
-      for (kind, data) in payloads where data.count <= self.maxSourcePayloadBytes {
-        guard let summary = self.summarize(kind: kind, data: data) else { continue }
+      for (kind, summary) in payloads {
         let stored = StoredMetricPayload(
           id: UUID().uuidString.lowercased(),
           kind: kind,
@@ -171,42 +315,137 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
     }
   }
 
-  private func summarize(kind: String, data: Data) -> MetricKitSummary? {
+  private func summarize(metric payload: MXMetricPayload) -> MetricKitSummary {
+    .v1(MetricKitV1Summary(
+      summarySchemaVersion: 1,
+      sourcePayloadBytes: 0,
+      hasApplicationLaunchMetrics: payload.applicationLaunchMetrics != nil,
+      hasApplicationResponsivenessMetrics: payload.applicationResponsivenessMetrics != nil,
+      hasMemoryMetrics: payload.memoryMetrics != nil,
+      hasCpuMetrics: payload.cpuMetrics != nil,
+      hasDiskIoMetrics: payload.diskIOMetrics != nil,
+      hasDisplayMetrics: payload.displayMetrics != nil,
+      hasNetworkTransferMetrics: payload.networkTransferMetrics != nil,
+      hasApplicationExitMetrics: payload.applicationExitMetrics != nil,
+      hasCellularConditionMetrics: payload.cellularConditionMetrics != nil,
+      hasLocationActivityMetrics: payload.locationActivityMetrics != nil,
+      hasAnimationMetrics: payload.animationMetrics != nil,
+      crashDiagnosticCount: 0,
+      hangDiagnosticCount: 0,
+      cpuExceptionDiagnosticCount: 0,
+      diskWriteExceptionDiagnosticCount: 0
+    ))
+  }
+
+  private func summarize(diagnostic payload: MXDiagnosticPayload) -> MetricKitSummary? {
+    let periodStartMs = milliseconds(payload.timeStampBegin)
+    let periodEndMs = milliseconds(payload.timeStampEnd)
+    guard periodStartMs > 0, periodEndMs >= periodStartMs else { return nil }
+
+    var diagnostics: [MetricKitDiagnostic] = []
+    var totalFrames = 0
+
+    func append(
+      _ type: String,
+      _ diagnostic: MXDiagnostic,
+      _ callStackTree: MXCallStackTree
+    ) {
+      guard diagnostics.count < maxDiagnostics,
+            let summary = summarizeDiagnostic(
+              type: type,
+              diagnostic: diagnostic,
+              callStackTree: callStackTree,
+              totalFrames: &totalFrames
+            )
+      else { return }
+      diagnostics.append(summary)
+    }
+
+    for diagnostic in payload.crashDiagnostics ?? [] {
+      append("crash", diagnostic, diagnostic.callStackTree)
+    }
+    for diagnostic in payload.hangDiagnostics ?? [] {
+      append("hang", diagnostic, diagnostic.callStackTree)
+    }
+    for diagnostic in payload.cpuExceptionDiagnostics ?? [] {
+      append("cpu_exception", diagnostic, diagnostic.callStackTree)
+    }
+    for diagnostic in payload.diskWriteExceptionDiagnostics ?? [] {
+      append("disk_write_exception", diagnostic, diagnostic.callStackTree)
+    }
+
+    guard !diagnostics.isEmpty else { return nil }
+    return .v2(MetricKitV2Summary(
+      summarySchemaVersion: 2,
+      periodStartMs: periodStartMs,
+      periodEndMs: periodEndMs,
+      diagnostics: diagnostics
+    ))
+  }
+
+  private func summarizeDiagnostic(
+    type: String,
+    diagnostic: MXDiagnostic,
+    callStackTree: MXCallStackTree,
+    totalFrames: inout Int
+  ) -> MetricKitDiagnostic? {
     guard
-      let decoded = try? JSONSerialization.jsonObject(with: data),
-      let object = decoded as? [String: Any]
+      let appVersion = boundedLabel(diagnostic.applicationVersion, maxBytes: 32),
+      let buildVersion = boundedLabel(diagnostic.metaData.applicationBuildVersion, maxBytes: 32),
+      let architecture = boundedLabel(diagnostic.metaData.platformArchitecture, maxBytes: 16),
+      let decoded = try? JSONSerialization.jsonObject(with: callStackTree.jsonRepresentation()),
+      let wrapper = decoded as? [String: Any],
+      let tree = wrapper["callStackTree"] as? [String: Any],
+      let rawStacks = tree["callStacks"] as? [Any]
     else {
       return nil
     }
-    let isMetric = kind == "metric"
-    let isDiagnostic = kind == "diagnostic"
-    return MetricKitSummary(
-      summarySchemaVersion: 1,
-      sourcePayloadBytes: data.count,
-      hasApplicationLaunchMetrics: isMetric && object["applicationLaunchMetrics"] != nil,
-      hasApplicationResponsivenessMetrics: isMetric && object["applicationResponsivenessMetrics"] != nil,
-      hasMemoryMetrics: isMetric && object["memoryMetrics"] != nil,
-      hasCpuMetrics: isMetric && object["cpuMetrics"] != nil,
-      hasDiskIoMetrics: isMetric && object["diskIOMetrics"] != nil,
-      hasDisplayMetrics: isMetric && object["displayMetrics"] != nil,
-      hasNetworkTransferMetrics: isMetric && object["networkTransferMetrics"] != nil,
-      hasApplicationExitMetrics: isMetric && object["applicationExitMetrics"] != nil,
-      hasCellularConditionMetrics: isMetric && object["cellularConditionMetrics"] != nil,
-      hasLocationActivityMetrics: isMetric && object["locationActivityMetrics"] != nil,
-      hasAnimationMetrics: isMetric && object["animationMetrics"] != nil,
-      crashDiagnosticCount: isDiagnostic
-        ? boundedCollectionCount(object["crashDiagnostics"])
-        : 0,
-      hangDiagnosticCount: isDiagnostic
-        ? boundedCollectionCount(object["hangDiagnostics"])
-        : 0,
-      cpuExceptionDiagnosticCount: isDiagnostic
-        ? boundedCollectionCount(object["cpuExceptionDiagnostics"])
-        : 0,
-      diskWriteExceptionDiagnosticCount: isDiagnostic
-        ? boundedCollectionCount(object["diskWriteExceptionDiagnostics"])
-        : 0
+
+    var stacks: [MetricKitStack] = []
+    for rawStack in rawStacks.prefix(maxStacksPerDiagnostic) {
+      guard totalFrames < maxFramesPerPayload,
+            let stackObject = rawStack as? [String: Any],
+            let roots = stackObject["callStackRootFrames"] as? [Any]
+      else { continue }
+      var frames: [MetricKitFrame] = []
+      collectFrames(roots, frames: &frames, totalFrames: &totalFrames)
+      guard !frames.isEmpty else { continue }
+      let threadAttributed = stackObject["threadAttributed"] as? Bool ?? false
+      stacks.append(MetricKitStack(
+        fingerprintSha256: stackFingerprint(
+          threadAttributed: threadAttributed,
+          frames: frames
+        ),
+        threadAttributed: threadAttributed,
+        frames: frames
+      ))
+    }
+    guard !stacks.isEmpty else { return nil }
+    return MetricKitDiagnostic(
+      type: type,
+      appVersion: appVersion,
+      buildVersion: buildVersion,
+      architecture: architecture,
+      stacks: stacks
     )
+  }
+
+  private func collectFrames(
+    _ nodes: [Any],
+    frames: inout [MetricKitFrame],
+    totalFrames: inout Int
+  ) {
+    for rawNode in nodes {
+      guard frames.count < maxFramesPerStack, totalFrames < maxFramesPerPayload else { return }
+      guard let node = rawNode as? [String: Any] else { continue }
+      if let frame = metricFrame(node) {
+        frames.append(frame)
+        totalFrames += 1
+      }
+      if let subframes = node["subFrames"] as? [Any] {
+        collectFrames(subframes, frames: &frames, totalFrames: &totalFrames)
+      }
+    }
   }
 
   private func enforceBounds() {
@@ -238,9 +477,110 @@ private final class KrustyMetricKitCollector: NSObject, MXMetricManagerSubscribe
   }
 }
 
-private func boundedCollectionCount(_ value: Any?) -> Int {
-  guard let collection = value as? [Any] else { return 0 }
-  return min(collection.count, 1_000)
+private func nativeDiagnosticRecord(_ diagnostic: MetricKitDiagnostic) -> NativeMetricDiagnosticRecord {
+  var record = NativeMetricDiagnosticRecord()
+  record.type = diagnostic.type
+  record.appVersion = diagnostic.appVersion
+  record.buildVersion = diagnostic.buildVersion
+  record.architecture = diagnostic.architecture
+  record.stacks = diagnostic.stacks.map { stack in
+    var stackRecord = NativeMetricStackRecord()
+    stackRecord.fingerprintSha256 = stack.fingerprintSha256
+    stackRecord.threadAttributed = stack.threadAttributed
+    stackRecord.frames = stack.frames.map { frame in
+      var frameRecord = NativeMetricFrameRecord()
+      frameRecord.binaryUuid = frame.binaryUuid
+      frameRecord.binaryName = frame.binaryName
+      frameRecord.offset = frame.offset
+      frameRecord.sampleCount = frame.sampleCount
+      return frameRecord
+    }
+    return stackRecord
+  }
+  return record
+}
+
+private func metricFrame(_ object: [String: Any]) -> MetricKitFrame? {
+  guard
+    let rawUuid = object["binaryUUID"] as? String,
+    let uuid = UUID(uuidString: rawUuid)?.uuidString.lowercased(),
+    let rawName = object["binaryName"] as? String,
+    let binaryName = boundedBasename(rawName),
+    let offset = decimalUInt64(object["offsetIntoBinaryTextSegment"]),
+    let sampleCount = boundedUInt64(object["sampleCount"], maximum: UInt64(maxFrameSampleCount))
+  else {
+    return nil
+  }
+  return MetricKitFrame(
+    binaryUuid: uuid,
+    binaryName: binaryName,
+    offset: offset,
+    sampleCount: Int(sampleCount)
+  )
+}
+
+private func decimalUInt64(_ value: Any?) -> String? {
+  guard let number = value as? NSNumber,
+        CFGetTypeID(number) != CFBooleanGetTypeID()
+  else { return nil }
+  let text = number.stringValue
+  guard !text.isEmpty,
+        text.allSatisfy(\.isNumber),
+        let parsed = UInt64(text)
+  else { return nil }
+  return String(parsed)
+}
+
+private func boundedUInt64(_ value: Any?, maximum: UInt64) -> UInt64? {
+  guard let text = decimalUInt64(value),
+        let parsed = UInt64(text),
+        parsed <= maximum
+  else { return nil }
+  return parsed
+}
+
+private func boundedBasename(_ value: String) -> String? {
+  let basename = (value as NSString).lastPathComponent
+  guard !basename.isEmpty,
+        basename.utf8.count <= 96,
+        !basename.contains("/"),
+        !basename.contains("\\"),
+        !basename.contains("?"),
+        !basename.contains("://"),
+        !basename.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  else { return nil }
+  return basename
+}
+
+private func boundedLabel(_ value: String, maxBytes: Int) -> String? {
+  guard !value.isEmpty,
+        value.utf8.count <= maxBytes,
+        value.utf8.allSatisfy({ byte in
+          (byte >= 48 && byte <= 57)
+            || (byte >= 65 && byte <= 90)
+            || (byte >= 97 && byte <= 122)
+            || byte == 45
+            || byte == 46
+            || byte == 95
+        })
+  else { return nil }
+  return value
+}
+
+private func stackFingerprint(
+  threadAttributed: Bool,
+  frames: [MetricKitFrame]
+) -> String {
+  let canonical = ([threadAttributed ? "1" : "0"] + frames.map { frame in
+    "\(frame.binaryUuid)|\(frame.binaryName)|\(frame.offset)|\(frame.sampleCount)"
+  }).joined(separator: "\n")
+  return SHA256.hash(data: Data(canonical.utf8))
+    .map { String(format: "%02x", $0) }
+    .joined()
+}
+
+private func milliseconds(_ date: Date) -> Int64 {
+  Int64((date.timeIntervalSince1970 * 1_000).rounded())
 }
 
 public class KrustyDiagnosticsModule: Module {
@@ -257,6 +597,18 @@ public class KrustyDiagnosticsModule: Module {
 
     Function("isMetricKitAvailable") { () -> Bool in
       true
+    }
+
+    Function("getBuildNumber") { () -> String? in
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    }
+
+    Function("beginPerformanceSpan") { (spanId: Int, name: String) -> Void in
+      KrustyPerformanceSignposts.shared.begin(spanId: spanId, name: name)
+    }
+
+    Function("endPerformanceSpan") { (spanId: Int, name: String) -> Void in
+      KrustyPerformanceSignposts.shared.end(spanId: spanId, name: name)
     }
 
     AsyncFunction("listMetricKitPayloads") { () -> [NativeMetricPayloadRecord] in

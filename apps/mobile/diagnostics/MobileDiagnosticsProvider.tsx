@@ -229,6 +229,9 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     uploadingRef.current = true;
     setUploadState('uploading');
     try {
+      const completionRequested = () => (
+        pendingCompletionRef.current || recorder.isStressCompletionPending()
+      );
       let nativePayloads: NativeMetricKitPayload[] = KrustyDiagnosticsModule
         ? await KrustyDiagnosticsModule.listMetricKitPayloads().catch(() => [])
         : [];
@@ -237,27 +240,26 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
         recorder.record('diagnostic', { name: 'native.payloads', count: nativePayloads.length });
       }
       let batch = recorder.createBatch() ?? createNativeOnlyBatch(recorder, nativePayloads);
-      if (!batch) {
-        setUploadState('uploaded');
-        return true;
-      }
+      const buildNumber = KrustyDiagnosticsModule?.getBuildNumber()
+        ?? Constants.nativeBuildVersion
+        ?? 'unknown';
       // Calling through the configured KrustyClient preserves its authenticated
       // transport. There is deliberately no raw URL/token fallback here.
-      const completesRun = completed || pendingCompletionRef.current;
       while (batch) {
-        const isFinalBatch = batch.events.length === recorder.snapshot().eventCount;
-        const completesThisBatch = completesRun && isFinalBatch;
         await upload.call(client, buildDiagnosticUploadBatch(batch, {
           appVersion: Constants.nativeAppVersion ?? Constants.expoConfig?.version ?? 'unknown',
-          buildNumber: Constants.nativeBuildVersion ?? 'unknown',
+          buildNumber,
           platform: Platform.OS === 'ios' || Platform.OS === 'android'
             ? Platform.OS
             : 'web',
           osVersion: String(Platform.Version ?? 'unknown'),
           deviceClass: Platform.OS === 'web' ? 'web' : 'mobile',
-          captureLevel: completesRun ? 'stress' : recorder.getMode(),
-          completed: completesThisBatch,
-          endedAtMs: completesThisBatch ? recorder.getStressCompletedAtMs() : null,
+          captureLevel: completionRequested() ? 'stress' : recorder.getMode(),
+          // Checkpoints never close a run. A stop can arrive while this
+          // request is in flight, so completion is decided only after every
+          // queued checkpoint has been acknowledged.
+          completed: false,
+          endedAtMs: null,
         }, nativePayloads));
         recorder.acknowledge(batch.events.map((event) => event.id));
         if (KrustyDiagnosticsModule && nativePayloads.length > 0) {
@@ -273,10 +275,26 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
           }
         }
         await persist();
-        if (!completesRun) break;
         batch = recorder.createBatch();
       }
-      if (completesRun) {
+
+      if (completionRequested()) {
+        // A completion marker is intentionally separate from checkpoint data:
+        // a reconnect can resume the remaining checkpoints before exactly one
+        // empty completed marker closes this run.
+        const marker = createCompletionMarkerBatch(recorder);
+        await upload.call(client, buildDiagnosticUploadBatch(marker, {
+          appVersion: Constants.nativeAppVersion ?? Constants.expoConfig?.version ?? 'unknown',
+          buildNumber,
+          platform: Platform.OS === 'ios' || Platform.OS === 'android'
+            ? Platform.OS
+            : 'web',
+          osVersion: String(Platform.Version ?? 'unknown'),
+          deviceClass: Platform.OS === 'web' ? 'web' : 'mobile',
+          captureLevel: 'stress',
+          completed: true,
+          endedAtMs: recorder.getStressCompletedAtMs(),
+        }));
         try {
           await AsyncStorage.removeItem(PENDING_KEY);
         } catch {
@@ -306,6 +324,15 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
       uploadingRef.current = false;
     }
   }, [client, isConnected, persist, recorder]);
+
+  useEffect(() => {
+    if (!recorder || !isConnected) return;
+    if (!pendingCompletionRef.current && !recorder.isStressCompletionPending()) return;
+    // Pending completions may have been restored after a force-quit or held
+    // while the connection was down. Retrying here avoids waiting for the
+    // periodic active-app checkpoint timer.
+    void flush(true);
+  }, [flush, isConnected, recorder]);
 
   const startStressRun = useCallback((durationMs?: number) => {
     if (!recorder || pendingCompletionRef.current || uploadingRef.current) return;
@@ -599,6 +626,17 @@ function createNativeOnlyBatch(
   payloads: readonly NativeMetricKitPayload[],
 ): DiagnosticBatch | null {
   if (payloads.length === 0) return null;
+  return {
+    schemaVersion: 1,
+    installationId: recorder.installationId,
+    runId: recorder.runId,
+    runStartedAtMs: recorder.startedAtMs,
+    createdAtMs: Date.now(),
+    events: [],
+  };
+}
+
+function createCompletionMarkerBatch(recorder: MobileDiagnosticRecorder): DiagnosticBatch {
   return {
     schemaVersion: 1,
     installationId: recorder.installationId,

@@ -312,6 +312,123 @@ Deno.test('MetricKit uploads contain only fixed summaries and stay below the rou
   assert(!('exceptionReason' in summary), 'exception reasons are not representable');
 });
 
+Deno.test('MetricKit v2 uploads retain only bounded symbolication fields', () => {
+  const recorder = new MobileDiagnosticRecorder({
+    installationId: 'install-12345678',
+    runId: 'run-12345678',
+  });
+  recorder.record('heartbeat', { durationMs: 100 });
+  const batch = recorder.createBatch();
+  assert(batch !== null, 'batch exists');
+
+  const upload = buildDiagnosticUploadBatch(
+    batch,
+    {
+      appVersion: '0.9.20',
+      buildNumber: '261',
+      platform: 'ios',
+      osVersion: '26.6',
+      deviceClass: 'mobile',
+      captureLevel: 'baseline',
+    },
+    [{
+      id: 'native-v2',
+      kind: 'diagnostic',
+      receivedAtMs: 2_000,
+      summarySchemaVersion: 2,
+      periodStartMs: 1_000,
+      periodEndMs: 2_000,
+      diagnostics: [{
+        type: 'crash',
+        appVersion: '0.9.20',
+        buildVersion: '261',
+        architecture: 'arm64',
+        stacks: [{
+          fingerprintSha256: 'a'.repeat(64),
+          threadAttributed: true,
+          frames: [{
+            ...{ address: '0xfeedface' },
+            binaryUuid: '70b89f27-1634-3580-a695-57cdb41d7743',
+            binaryName: 'Krusty',
+            offset: '18446744073709551615',
+            sampleCount: 1_000_000,
+          }],
+          ...{ rawTree: { private: true } },
+        }],
+        ...{ exceptionReason: 'private crash reason' },
+      }],
+      ...{ metadata: { device: 'private' } },
+    }],
+  );
+
+  const encoded = upload.native_payloads[0]?.payload_json ?? '';
+  const summary = JSON.parse(encoded);
+  assert(summary.schema_version === 2, 'v2 schema is explicit');
+  assert(summary.period_start_ms === 1_000, 'typed period start remains available');
+  assert(summary.diagnostics[0].type === 'crash', 'allowlisted diagnostic type remains');
+  assert(
+    summary.diagnostics[0].stacks[0].frames[0].offset === '18446744073709551615',
+    'u64 offsets remain lossless decimal strings',
+  );
+  assert(new TextEncoder().encode(encoded).byteLength <= 16 * 1024, 'v2 summary stays within 16 KiB');
+  assert(!encoded.includes('address'), 'raw addresses are not representable');
+  assert(!encoded.includes('exceptionReason'), 'exception reasons are not representable');
+  assert(!encoded.includes('metadata'), 'raw metadata is not representable');
+  assert(!encoded.includes('rawTree'), 'raw call stack trees are not representable');
+});
+
+Deno.test('MetricKit v2 uploads reject invalid types and aggregate bounds', () => {
+  const recorder = new MobileDiagnosticRecorder({
+    installationId: 'install-12345678',
+    runId: 'run-12345678',
+  });
+  recorder.record('heartbeat', { durationMs: 100 });
+  const batch = recorder.createBatch();
+  assert(batch !== null, 'batch exists');
+  const diagnostic = {
+    type: 'hang' as const,
+    appVersion: '0.9.20',
+    buildVersion: '261',
+    architecture: 'arm64',
+    stacks: [{
+      fingerprintSha256: 'b'.repeat(64),
+      threadAttributed: false,
+      frames: [{
+        binaryUuid: '70b89f27-1634-3580-a695-57cdb41d7743',
+        binaryName: 'Krusty',
+        offset: '0',
+        sampleCount: 1,
+      }],
+    }],
+  };
+  let rejected = false;
+  try {
+    buildDiagnosticUploadBatch(
+      batch,
+      {
+        appVersion: '0.9.20',
+        buildNumber: '261',
+        platform: 'ios',
+        osVersion: '26.6',
+        deviceClass: 'mobile',
+        captureLevel: 'baseline',
+      },
+      [{
+        id: 'native-v2-overflow',
+        kind: 'diagnostic',
+        receivedAtMs: 2_000,
+        summarySchemaVersion: 2,
+        periodStartMs: 1_000,
+        periodEndMs: 2_000,
+        diagnostics: Array.from({ length: 9 }, () => diagnostic),
+      }],
+    );
+  } catch {
+    rejected = true;
+  }
+  assert(rejected, 'more than eight diagnostics is rejected');
+});
+
 Deno.test('MetricKit uploads reject native payload overflow instead of silently omitting IDs', () => {
   const recorder = new MobileDiagnosticRecorder({
     installationId: 'install-12345678',

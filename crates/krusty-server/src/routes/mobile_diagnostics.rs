@@ -22,9 +22,14 @@ use crate::AppState;
 const MAX_BATCH_BYTES: usize = 512 * 1024;
 const MAX_EVENTS_PER_BATCH: usize = 256;
 const MAX_NATIVE_PAYLOADS_PER_BATCH: usize = 16;
-const MAX_NATIVE_PAYLOAD_BYTES: usize = 4 * 1024;
+const MAX_NATIVE_PAYLOAD_BYTES: usize = 16 * 1024;
 const MAX_NATIVE_SOURCE_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_NATIVE_DIAGNOSTIC_COUNT: u64 = 1_000;
+const MAX_METRICKIT_DIAGNOSTICS: usize = 8;
+const MAX_METRICKIT_STACKS: usize = 8;
+const MAX_METRICKIT_FRAMES_PER_STACK: usize = 32;
+const MAX_METRICKIT_FRAMES: usize = 256;
+const MAX_METRICKIT_SAMPLE_COUNT: u64 = 1_000_000;
 const RETENTION_DAYS: i64 = 14;
 
 pub fn router() -> Router<AppState> {
@@ -168,6 +173,16 @@ async fn ingest_batch(
         if !parsed.is_object() {
             return Err(AppError::BadRequest(
                 "MetricKit payload must be a JSON object".to_string(),
+            ));
+        }
+        if parsed
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+            && native.kind != "diagnostic"
+        {
+            return Err(AppError::BadRequest(
+                "MetricKit v2 summaries must be diagnostic payloads".to_string(),
             ));
         }
         let sanitized_payload = sanitize_native_summary(&parsed)?;
@@ -462,16 +477,21 @@ fn sanitize_native_summary(value: &serde_json::Value) -> Result<serde_json::Valu
     let source = value.as_object().ok_or_else(|| {
         AppError::BadRequest("MetricKit summary must be a JSON object".to_string())
     })?;
-    if source
+    match source
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(1)
     {
-        return Err(AppError::BadRequest(
+        Some(1) => sanitize_native_v1_summary(source),
+        Some(2) => sanitize_native_v2_summary(source),
+        _ => Err(AppError::BadRequest(
             "unsupported MetricKit summary schema".to_string(),
-        ));
+        )),
     }
+}
 
+fn sanitize_native_v1_summary(
+    source: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, AppError> {
     let mut clean = serde_json::Map::new();
     clean.insert("schema_version".to_string(), serde_json::json!(1));
     insert_bounded_native_integer(
@@ -510,6 +530,203 @@ fn sanitize_native_summary(value: &serde_json::Value) -> Result<serde_json::Valu
         insert_bounded_native_integer(source, &mut clean, key, MAX_NATIVE_DIAGNOSTIC_COUNT)?;
     }
     Ok(serde_json::Value::Object(clean))
+}
+
+fn sanitize_native_v2_summary(
+    source: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, AppError> {
+    let period_start_ms = source
+        .get("period_start_ms")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            AppError::BadRequest("invalid MetricKit summary field: period_start_ms".to_string())
+        })?;
+    let period_end_ms = source
+        .get("period_end_ms")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= period_start_ms)
+        .ok_or_else(|| {
+            AppError::BadRequest("invalid MetricKit summary field: period_end_ms".to_string())
+        })?;
+    let diagnostics = source
+        .get("diagnostics")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= MAX_METRICKIT_DIAGNOSTICS)
+        .ok_or_else(|| {
+            AppError::BadRequest("invalid MetricKit summary field: diagnostics".to_string())
+        })?;
+
+    let mut total_frames = 0usize;
+    let mut clean_diagnostics = Vec::with_capacity(diagnostics.len());
+    for diagnostic in diagnostics {
+        clean_diagnostics.push(sanitize_native_diagnostic(diagnostic, &mut total_frames)?);
+    }
+
+    Ok(serde_json::json!({
+        "schema_version": 2,
+        "period_start_ms": period_start_ms,
+        "period_end_ms": period_end_ms,
+        "diagnostics": clean_diagnostics,
+    }))
+}
+
+fn sanitize_native_diagnostic(
+    value: &serde_json::Value,
+    total_frames: &mut usize,
+) -> Result<serde_json::Value, AppError> {
+    let source = value.as_object().ok_or_else(|| {
+        AppError::BadRequest("MetricKit diagnostic must be a JSON object".to_string())
+    })?;
+    let diagnostic_type = source
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            matches!(
+                *value,
+                "crash" | "hang" | "cpu_exception" | "disk_write_exception"
+            )
+        })
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit diagnostic type".to_string()))?;
+    let app_version = native_label(source, "app_version", 32)?;
+    let build_version = native_label(source, "build_version", 32)?;
+    let architecture = native_label(source, "architecture", 16)?;
+    let stacks = source
+        .get("stacks")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= MAX_METRICKIT_STACKS)
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit stack count".to_string()))?;
+
+    let mut clean_stacks = Vec::with_capacity(stacks.len());
+    for stack in stacks {
+        clean_stacks.push(sanitize_native_stack(stack, total_frames)?);
+    }
+    Ok(serde_json::json!({
+        "type": diagnostic_type,
+        "app_version": app_version,
+        "build_version": build_version,
+        "architecture": architecture,
+        "stacks": clean_stacks,
+    }))
+}
+
+fn sanitize_native_stack(
+    value: &serde_json::Value,
+    total_frames: &mut usize,
+) -> Result<serde_json::Value, AppError> {
+    let source = value
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("MetricKit stack must be a JSON object".to_string()))?;
+    let fingerprint = source
+        .get("fingerprint_sha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit stack fingerprint".to_string()))?;
+    let thread_attributed = source
+        .get("thread_attributed")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit thread attribution".to_string()))?;
+    let frames = source
+        .get("frames")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= MAX_METRICKIT_FRAMES_PER_STACK)
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit frame count".to_string()))?;
+    *total_frames += frames.len();
+    if *total_frames > MAX_METRICKIT_FRAMES {
+        return Err(AppError::BadRequest(
+            "MetricKit payload exceeds the aggregate frame limit".to_string(),
+        ));
+    }
+
+    let clean_frames = frames
+        .iter()
+        .map(sanitize_native_frame)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({
+        "fingerprint_sha256": fingerprint,
+        "thread_attributed": thread_attributed,
+        "frames": clean_frames,
+    }))
+}
+
+fn sanitize_native_frame(value: &serde_json::Value) -> Result<serde_json::Value, AppError> {
+    let source = value
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("MetricKit frame must be a JSON object".to_string()))?;
+    let binary_uuid = source
+        .get("binary_uuid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_canonical_uuid(value))
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit binary UUID".to_string()))?;
+    let binary_name = source
+        .get("binary_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_native_basename(value))
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit binary name".to_string()))?;
+    let offset = source
+        .get("offset")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_decimal_u64(value))
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit frame offset".to_string()))?;
+    let sample_count = source
+        .get("sample_count")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value <= MAX_METRICKIT_SAMPLE_COUNT)
+        .ok_or_else(|| AppError::BadRequest("invalid MetricKit sample count".to_string()))?;
+    Ok(serde_json::json!({
+        "binary_uuid": binary_uuid,
+        "binary_name": binary_name,
+        "offset": offset,
+        "sample_count": sample_count,
+    }))
+}
+
+fn native_label<'a>(
+    source: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    maximum: usize,
+) -> Result<&'a str, AppError> {
+    source
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= maximum
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+        })
+        .ok_or_else(|| AppError::BadRequest(format!("invalid MetricKit summary field: {key}")))
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
+        })
+}
+
+fn is_native_basename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && !value.chars().any(char::is_control)
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('?')
+        && !value.contains("://")
+}
+
+fn is_decimal_u64(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+        && value.parse::<u64>().is_ok()
 }
 
 fn insert_bounded_native_integer(
@@ -622,5 +839,110 @@ mod tests {
             "disk_write_exception_diagnostic_count": 0
         });
         assert!(sanitize_native_summary(&invalid).is_err());
+    }
+
+    #[test]
+    fn native_v2_summary_keeps_only_bounded_symbolication_fields() {
+        let payload = serde_json::json!({
+            "schema_version": 2,
+            "period_start_ms": 1_000,
+            "period_end_ms": 2_000,
+            "diagnostics": [{
+                "type": "crash",
+                "app_version": "0.9.20",
+                "build_version": "261",
+                "architecture": "arm64",
+                "exception_reason": "private crash reason",
+                "metadata": { "device": "private" },
+                "stacks": [{
+                    "fingerprint_sha256": "a".repeat(64),
+                    "thread_attributed": true,
+                    "raw_tree": { "private": true },
+                    "frames": [{
+                        "binary_uuid": "70b89f27-1634-3580-a695-57cdb41d7743",
+                        "binary_name": "Krusty",
+                        "offset": "18446744073709551615",
+                        "sample_count": 1_000_000,
+                        "address": 7_170_808_612_u64,
+                        "path": "/Users/private/Krusty"
+                    }]
+                }]
+            }],
+            "content": "private prompt"
+        });
+        let clean = sanitize_native_summary(&payload).expect("sanitized v2");
+        let encoded = serde_json::to_string(&clean).expect("serialized");
+        assert_eq!(clean["schema_version"], 2);
+        assert_eq!(clean["period_start_ms"], 1_000);
+        assert_eq!(
+            clean["diagnostics"][0]["stacks"][0]["frames"][0]["offset"],
+            "18446744073709551615"
+        );
+        for forbidden in [
+            "address",
+            "exception_reason",
+            "metadata",
+            "path",
+            "content",
+            "raw_tree",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+        assert!(encoded.len() <= MAX_NATIVE_PAYLOAD_BYTES);
+        assert_eq!(MAX_NATIVE_PAYLOAD_BYTES, 16 * 1024);
+    }
+
+    #[test]
+    fn native_v2_summary_rejects_invalid_type_offset_and_bounds() {
+        let valid_frame = serde_json::json!({
+            "binary_uuid": "70b89f27-1634-3580-a695-57cdb41d7743",
+            "binary_name": "Krusty",
+            "offset": "0",
+            "sample_count": 1
+        });
+        let valid_stack = serde_json::json!({
+            "fingerprint_sha256": "b".repeat(64),
+            "thread_attributed": false,
+            "frames": [valid_frame]
+        });
+        let valid_diagnostic = serde_json::json!({
+            "type": "hang",
+            "app_version": "0.9.20",
+            "build_version": "261",
+            "architecture": "arm64",
+            "stacks": [valid_stack]
+        });
+        let mut too_many_diagnostics = Vec::new();
+        for _ in 0..=MAX_METRICKIT_DIAGNOSTICS {
+            too_many_diagnostics.push(valid_diagnostic.clone());
+        }
+        assert!(sanitize_native_summary(&serde_json::json!({
+            "schema_version": 2,
+            "period_start_ms": 1_000,
+            "period_end_ms": 2_000,
+            "diagnostics": too_many_diagnostics
+        }))
+        .is_err());
+
+        let mut invalid_type = valid_diagnostic.clone();
+        invalid_type["type"] = serde_json::json!("app_launch");
+        assert!(sanitize_native_summary(&serde_json::json!({
+            "schema_version": 2,
+            "period_start_ms": 1_000,
+            "period_end_ms": 2_000,
+            "diagnostics": [invalid_type]
+        }))
+        .is_err());
+
+        let mut invalid_offset = valid_diagnostic;
+        invalid_offset["stacks"][0]["frames"][0]["offset"] =
+            serde_json::json!("18446744073709551616");
+        assert!(sanitize_native_summary(&serde_json::json!({
+            "schema_version": 2,
+            "period_start_ms": 1_000,
+            "period_end_ms": 2_000,
+            "diagnostics": [invalid_offset]
+        }))
+        .is_err());
     }
 }

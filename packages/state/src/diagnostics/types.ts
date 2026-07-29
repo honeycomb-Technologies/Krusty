@@ -97,10 +97,17 @@ export interface DiagnosticUploadBatch {
   completed: boolean;
 }
 
-export interface DiagnosticNativePayload {
+export interface DiagnosticNativePayloadBase {
   id: string;
   kind: 'metric' | 'diagnostic';
   receivedAtMs: number;
+}
+
+export type DiagnosticNativePayload =
+  | DiagnosticNativeV1Payload
+  | DiagnosticNativeV2Payload;
+
+export interface DiagnosticNativeV1Payload extends DiagnosticNativePayloadBase {
   summarySchemaVersion: 1;
   sourcePayloadBytes: number;
   hasApplicationLaunchMetrics: boolean;
@@ -118,6 +125,42 @@ export interface DiagnosticNativePayload {
   hangDiagnosticCount: number;
   cpuExceptionDiagnosticCount: number;
   diskWriteExceptionDiagnosticCount: number;
+}
+
+export interface DiagnosticNativeV2Payload extends DiagnosticNativePayloadBase {
+  kind: 'diagnostic';
+  summarySchemaVersion: 2;
+  periodStartMs: number;
+  periodEndMs: number;
+  diagnostics: DiagnosticNativeMetricKitDiagnostic[];
+}
+
+export type DiagnosticNativeMetricKitType =
+  | 'crash'
+  | 'hang'
+  | 'cpu_exception'
+  | 'disk_write_exception';
+
+export interface DiagnosticNativeMetricKitDiagnostic {
+  type: DiagnosticNativeMetricKitType;
+  appVersion: string;
+  buildVersion: string;
+  architecture: string;
+  stacks: DiagnosticNativeMetricKitStack[];
+}
+
+export interface DiagnosticNativeMetricKitStack {
+  fingerprintSha256: string;
+  threadAttributed: boolean;
+  frames: DiagnosticNativeMetricKitFrame[];
+}
+
+export interface DiagnosticNativeMetricKitFrame {
+  binaryUuid: string;
+  binaryName: string;
+  /** Unsigned 64-bit offset encoded in canonical base-10 to avoid JS precision loss. */
+  offset: string;
+  sampleCount: number;
 }
 
 export interface DiagnosticUploadClient {

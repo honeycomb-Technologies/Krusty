@@ -43,6 +43,10 @@ interface PerformanceLike {
 
 interface KrustyPerformanceGlobal {
 	performance?: PerformanceLike;
+	__KRUSTY_NATIVE_PERFORMANCE__?: {
+		begin(spanId: number, name: KrustyPerformancePhase): void;
+		end(spanId: number, name: KrustyPerformancePhase): void;
+	};
 	__KRUSTY_PERFORMANCE__?: {
 		snapshot: () => KrustyPerformanceSnapshot;
 		reset: () => void;
@@ -105,6 +109,7 @@ export function beginKrustyPerformanceSpan(
 	const startMark = `krusty.${name}.${spanId}.start`;
 	const endMark = `krusty.${name}.${spanId}.end`;
 	root.performance?.mark?.(startMark);
+	root.__KRUSTY_NATIVE_PERFORMANCE__?.begin(spanId, name);
 	let ended = false;
 
 	return () => {
@@ -115,6 +120,7 @@ export function beginKrustyPerformanceSpan(
 		root.performance?.measure?.(`krusty.${name}`, startMark, endMark);
 		root.performance?.clearMarks?.(startMark);
 		root.performance?.clearMarks?.(endMark);
+		root.__KRUSTY_NATIVE_PERFORMANCE__?.end(spanId, name);
 		entries.push({ name, durationMs, startedAtMs, detail });
 		if (entries.length > MAX_ENTRIES) {
 			entries.splice(0, entries.length - MAX_ENTRIES);

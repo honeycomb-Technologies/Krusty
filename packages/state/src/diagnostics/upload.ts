@@ -7,8 +7,14 @@ import type {
 } from './types';
 
 const MAX_NATIVE_PAYLOADS_PER_BATCH = 16;
-const MAX_NATIVE_SUMMARY_BYTES = 4 * 1024;
+const MAX_NATIVE_SUMMARY_BYTES = 16 * 1024;
 const MAX_UPLOAD_BATCH_BYTES = 480 * 1024;
+const MAX_METRICKIT_DIAGNOSTICS = 8;
+const MAX_METRICKIT_STACKS = 8;
+const MAX_METRICKIT_FRAMES_PER_STACK = 32;
+const MAX_METRICKIT_FRAMES = 256;
+const MAX_METRICKIT_SAMPLE_COUNT = 1_000_000;
+const MAX_U64_DECIMAL = '18446744073709551615';
 
 export function buildDiagnosticUploadBatch(
   batch: DiagnosticBatch,
@@ -60,7 +66,18 @@ export function buildDiagnosticUploadBatch(
 }
 
 function serializeNativeSummary(payload: DiagnosticNativePayload): string {
-  const summary = {
+  const summary = payload.summarySchemaVersion === 1
+    ? serializeNativeV1Summary(payload)
+    : serializeNativeV2Summary(payload);
+  const encoded = JSON.stringify(summary);
+  if (utf8ByteLength(encoded) > MAX_NATIVE_SUMMARY_BYTES) {
+    throw new Error('MetricKit summary exceeds the safe payload budget');
+  }
+  return encoded;
+}
+
+function serializeNativeV1Summary(payload: Extract<DiagnosticNativePayload, { summarySchemaVersion: 1 }>) {
+  return {
     schema_version: 1,
     source_payload_bytes: boundedInteger(payload.sourcePayloadBytes, 0, 2 * 1024 * 1024),
     has_application_launch_metrics: Boolean(payload.hasApplicationLaunchMetrics),
@@ -83,11 +100,109 @@ function serializeNativeSummary(payload: DiagnosticNativePayload): string {
       1_000,
     ),
   };
-  const encoded = JSON.stringify(summary);
-  if (utf8ByteLength(encoded) > MAX_NATIVE_SUMMARY_BYTES) {
-    throw new Error('MetricKit summary exceeds the safe payload budget');
+}
+
+function serializeNativeV2Summary(payload: Extract<DiagnosticNativePayload, { summarySchemaVersion: 2 }>) {
+  const periodStartMs = requiredInteger(payload.periodStartMs, 1, Number.MAX_SAFE_INTEGER, 'period start');
+  const periodEndMs = requiredInteger(payload.periodEndMs, periodStartMs, Number.MAX_SAFE_INTEGER, 'period end');
+  if (payload.diagnostics.length === 0 || payload.diagnostics.length > MAX_METRICKIT_DIAGNOSTICS) {
+    throw new Error('MetricKit diagnostic count is out of bounds');
   }
-  return encoded;
+
+  let totalFrames = 0;
+  const diagnostics = payload.diagnostics.map((diagnostic) => {
+    if (!['crash', 'hang', 'cpu_exception', 'disk_write_exception'].includes(diagnostic.type)) {
+      throw new Error('MetricKit diagnostic type is invalid');
+    }
+    if (diagnostic.stacks.length === 0 || diagnostic.stacks.length > MAX_METRICKIT_STACKS) {
+      throw new Error('MetricKit stack count is out of bounds');
+    }
+    return {
+      type: diagnostic.type,
+      app_version: nativeLabel(diagnostic.appVersion, 32, 'app version'),
+      build_version: nativeLabel(diagnostic.buildVersion, 32, 'build version'),
+      architecture: nativeLabel(diagnostic.architecture, 16, 'architecture'),
+      stacks: diagnostic.stacks.map((stack) => {
+        if (!/^[0-9a-f]{64}$/.test(stack.fingerprintSha256)) {
+          throw new Error('MetricKit stack fingerprint is invalid');
+        }
+        if (stack.frames.length === 0 || stack.frames.length > MAX_METRICKIT_FRAMES_PER_STACK) {
+          throw new Error('MetricKit frame count is out of bounds');
+        }
+        totalFrames += stack.frames.length;
+        if (totalFrames > MAX_METRICKIT_FRAMES) {
+          throw new Error('MetricKit payload exceeds the aggregate frame limit');
+        }
+        return {
+          fingerprint_sha256: stack.fingerprintSha256,
+          thread_attributed: Boolean(stack.threadAttributed),
+          frames: stack.frames.map((frame) => ({
+            binary_uuid: canonicalUuid(frame.binaryUuid),
+            binary_name: nativeBasename(frame.binaryName),
+            offset: decimalU64(frame.offset),
+            sample_count: requiredInteger(
+              frame.sampleCount,
+              0,
+              MAX_METRICKIT_SAMPLE_COUNT,
+              'sample count',
+            ),
+          })),
+        };
+      }),
+    };
+  });
+
+  return {
+    schema_version: 2,
+    period_start_ms: periodStartMs,
+    period_end_ms: periodEndMs,
+    diagnostics,
+  };
+}
+
+function requiredInteger(value: number, minimum: number, maximum: number, field: string): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`MetricKit ${field} is invalid`);
+  }
+  return value;
+}
+
+function nativeLabel(value: string, maximumBytes: number, field: string): string {
+  if (!/^[a-zA-Z0-9._-]+$/.test(value) || utf8ByteLength(value) > maximumBytes) {
+    throw new Error(`MetricKit ${field} is invalid`);
+  }
+  return value;
+}
+
+function nativeBasename(value: string): string {
+  if (
+    !value ||
+    utf8ByteLength(value) > 96 ||
+    /[\\/\u0000-\u001f\u007f]/.test(value) ||
+    value.includes('://') ||
+    value.includes('?')
+  ) {
+    throw new Error('MetricKit binary name is invalid');
+  }
+  return value;
+}
+
+function canonicalUuid(value: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+    throw new Error('MetricKit binary UUID is invalid');
+  }
+  return value;
+}
+
+function decimalU64(value: string): string {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error('MetricKit frame offset is invalid');
+  }
+  if (value.length > MAX_U64_DECIMAL.length ||
+      (value.length === MAX_U64_DECIMAL.length && value > MAX_U64_DECIMAL)) {
+    throw new Error('MetricKit frame offset is invalid');
+  }
+  return value;
 }
 
 function boundedInteger(value: number, minimum: number, maximum: number): number {

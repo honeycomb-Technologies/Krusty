@@ -144,7 +144,6 @@ export function DiagnosticsSection({
             {mode === "stress" ? (
               <Pressable
                 onPress={onStopAndUpload}
-                disabled={uploadState === "uploading"}
                 style={[styles.smallActionBtn, { borderColor: t.border }]}
               >
                 <Square size={14} color={t.warning} strokeWidth={1.8} />
@@ -170,7 +169,9 @@ export function DiagnosticsSection({
               ) : (
                 <Upload size={14} color={t.foreground} strokeWidth={1.8} />
               )}
-              <Text style={[styles.smallActionText, { color: t.foreground }]}>Upload now</Text>
+              <Text style={[styles.smallActionText, { color: t.foreground }]}>
+                {mode === "stress" ? "Upload checkpoint" : "Upload now"}
+              </Text>
             </Pressable>
           </View>
         </View>

@@ -4,13 +4,31 @@ import type {
   DiagnosticSnapshot,
   MobileDiagnosticRecorder,
 } from '@krusty/state';
+import KrustyDiagnosticsModule from '../modules/krusty-diagnostics';
 
 let activeRecorder: MobileDiagnosticRecorder | null = null;
+
+interface NativePerformanceGlobal {
+  __KRUSTY_NATIVE_PERFORMANCE__?: {
+    begin(spanId: number, name: string): void;
+    end(spanId: number, name: string): void;
+  };
+}
 
 export function installMobileDiagnosticRecorder(
   recorder: MobileDiagnosticRecorder | null,
 ): void {
   activeRecorder = recorder;
+  const root = globalThis as typeof globalThis & NativePerformanceGlobal;
+  const nativeModule = KrustyDiagnosticsModule;
+  if (recorder && nativeModule) {
+    root.__KRUSTY_NATIVE_PERFORMANCE__ = {
+      begin: (spanId, name) => nativeModule.beginPerformanceSpan(spanId, name),
+      end: (spanId, name) => nativeModule.endPerformanceSpan(spanId, name),
+    };
+  } else {
+    delete root.__KRUSTY_NATIVE_PERFORMANCE__;
+  }
 }
 
 export function recordMobileDiagnostic(

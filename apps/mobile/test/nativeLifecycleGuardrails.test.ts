@@ -103,8 +103,11 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
   );
 
   assert(
-    screen.includes("useDeferredValue(requestedMode)"),
-    "heavy mode activation must use React's interruptible deferred value",
+    screen.includes("createLatestIntentScheduler")
+      && screen.includes("quietDelayMs: 24")
+      && screen.includes("maxDelayMs: 80")
+      && screen.includes("startTransition(() => setActiveMode(mode))"),
+    "heavy mode activation must coalesce to the latest intent with a hard deadline",
   );
   assert(
     screen.includes("modeForHorizontalSwipe(\n        requestedMode,"),
@@ -138,6 +141,10 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
   assert(
     !actions.includes("if (index === activeTab)"),
     "rapid duplicate suppression must not compare against stale rendered state",
+  );
+  assert(
+    actions.includes("sessionSelectionSchedulerRef.current?.submit(intent)"),
+    "rapid session selection must coalesce before expensive hydration",
   );
 });
 

@@ -2,9 +2,9 @@ import {
   useState,
   useRef,
   useCallback,
-  useDeferredValue,
   useEffect,
   useMemo,
+  startTransition,
 } from "react";
 import {
   View,
@@ -42,6 +42,7 @@ import { MakoScreen } from "../../components/mako/MakoScreen";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
+import { createLatestIntentScheduler } from "../../components/navigation/latestIntentScheduler";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
@@ -129,9 +130,29 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const entrance = useEntranceAnimation(splashDone);
 
   const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
+  const [activeMode, setActiveMode] = useState<SessionType>("chat");
   // Header selection responds immediately; heavy surface/store work can skip
-  // superseded intermediate requests and settle on the latest mode.
-  const activeMode = useDeferredValue(requestedMode);
+  // superseded intermediate requests and settle on the latest mode. Unlike a
+  // deferred value, the hard deadline prevents continuous taps from starving
+  // the destination surface forever.
+  const modeIntentSchedulerRef = useRef<ReturnType<
+    typeof createLatestIntentScheduler<SessionType>
+  > | null>(null);
+  if (!modeIntentSchedulerRef.current) {
+    modeIntentSchedulerRef.current = createLatestIntentScheduler({
+      quietDelayMs: 24,
+      maxDelayMs: 80,
+      onFlush: (mode) => {
+        startTransition(() => setActiveMode(mode));
+      },
+    });
+  }
+  useEffect(() => {
+    const scheduler = modeIntentSchedulerRef.current;
+    return () => {
+      scheduler?.cancel();
+    };
+  }, []);
   useMobileDiagnosticMode(activeMode);
   const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
   const finishToolboxOpenSpanRef = useRef<(() => number | null) | null>(null);
@@ -143,7 +164,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // the destination tab with the previous mode's session store.
   const activeTab = tabForSessionType(activeMode);
   const setActiveTab = useCallback((index: number) => {
-    setRequestedMode(sessionTypeForTab(index));
+    const mode = sessionTypeForTab(index);
+    setRequestedMode(mode);
+    modeIntentSchedulerRef.current?.submit(mode);
   }, []);
   const {
     session: sessionStore,
@@ -617,8 +640,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     },
     [handleModeChange],
   );
+  const modeSwipeBlocked =
+    isDesktop || drawerOpen || toolboxOpen || bottomControlsOpen;
+  const modeSwipeBlockedRef = useRef(modeSwipeBlocked);
+  modeSwipeBlockedRef.current = modeSwipeBlocked;
   const handleModeSwipe = useCallback(
     (translationX: number, velocityX: number) => {
+      // A pan can begin before a drawer, toolbox, or composer overlay claims
+      // the interaction. Re-check current ownership when its native end event
+      // returns to JS so stale gestures cannot close newly opened chrome.
+      if (modeSwipeBlockedRef.current) return;
       const nextMode = modeForHorizontalSwipe(
         requestedMode,
         translationX,
@@ -635,23 +666,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const modeSwipeGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(
-          !isDesktop &&
-            !drawerOpen &&
-            !toolboxOpen &&
-            !bottomControlsOpen,
-        )
+        .enabled(!modeSwipeBlocked)
         .activeOffsetX([-28, 28])
         .failOffsetY([-20, 20])
         .onEnd((event) => {
           runOnJS(handleModeSwipe)(event.translationX, event.velocityX);
         }),
     [
-      bottomControlsOpen,
-      drawerOpen,
       handleModeSwipe,
-      isDesktop,
-      toolboxOpen,
+      modeSwipeBlocked,
     ],
   );
 

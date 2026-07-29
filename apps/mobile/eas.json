@@ -16,6 +16,11 @@
       "distribution": "internal"
     },
     "production": {
+      "buildArtifactPaths": [
+        "ios/build/**/*.dSYM",
+        "ios/build/**/*.dSYM.zip",
+        "ios/build/**/*.xcarchive/dSYMs/**"
+      ],
       "env": {
         "EXPO_PUBLIC_KRUSTY_PERFORMANCE": "1"
       },

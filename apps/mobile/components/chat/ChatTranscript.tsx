@@ -215,6 +215,9 @@ function ChatTranscriptComponent({
     new Map<string, TranscriptTurnsCache>(),
   );
   const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
+  const firstPaintGenerationRef = useRef(0);
+  const firstPaintFrameRef = useRef<number | null>(null);
+  const firstPaintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
     restoredScrollStateRef.current?.autoFollow ?? true,
@@ -268,17 +271,55 @@ function ChatTranscriptComponent({
       caches.delete(oldestKey);
     }
   }, [transcriptCacheKey, turnSplit.cache]);
-  useLayoutEffect(() => {
+  const finishFirstPaint = useCallback((generation?: number) => {
+    if (
+      generation !== undefined
+      && generation !== firstPaintGenerationRef.current
+    ) {
+      return;
+    }
+    if (firstPaintFrameRef.current !== null) {
+      cancelAnimationFrame(firstPaintFrameRef.current);
+      firstPaintFrameRef.current = null;
+    }
+    if (firstPaintTimeoutRef.current !== null) {
+      clearTimeout(firstPaintTimeoutRef.current);
+      firstPaintTimeoutRef.current = null;
+    }
     finishFirstPaintSpanRef.current?.();
+    finishFirstPaintSpanRef.current = null;
+  }, []);
+  const markFirstPaintReady = useCallback(() => {
+    if (
+      !finishFirstPaintSpanRef.current
+      || firstPaintFrameRef.current !== null
+    ) {
+      return;
+    }
+    const generation = firstPaintGenerationRef.current;
+    firstPaintFrameRef.current = requestAnimationFrame(() => {
+      firstPaintFrameRef.current = null;
+      finishFirstPaint(generation);
+    });
+  }, [finishFirstPaint]);
+  useLayoutEffect(() => {
+    finishFirstPaint();
+    const generation = firstPaintGenerationRef.current + 1;
+    firstPaintGenerationRef.current = generation;
     finishFirstPaintSpanRef.current = beginKrustyPerformanceSpan(
       "transcript.first_paint",
       transcriptCacheKey,
     );
+    // A stable same-size FlatList may not emit another layout callback. Never
+    // let a stale span survive until an unrelated session change.
+    firstPaintTimeoutRef.current = setTimeout(
+      () => finishFirstPaint(generation),
+      1_000,
+    );
     return () => {
-      finishFirstPaintSpanRef.current?.();
-      finishFirstPaintSpanRef.current = null;
+      finishFirstPaint(generation);
     };
-  }, [transcriptCacheKey]);
+  }, [finishFirstPaint, transcriptCacheKey]);
   const layoutSignature = useMemo(
     () => lastMessageLayoutSignature(messages),
     [messages],
@@ -761,10 +802,10 @@ function ChatTranscriptComponent({
         keyExtractor={(turn) => turn.id}
         // Historical rows are intentionally isolated from live stream ticks.
         extraData={liveTurn?.id ?? "no-live"}
-        windowSize={7}
-        maxToRenderPerBatch={4}
-        initialNumToRender={10}
-        updateCellsBatchingPeriod={50}
+        windowSize={5}
+        maxToRenderPerBatch={2}
+        initialNumToRender={4}
+        updateCellsBatchingPeriod={80}
         // removeClippedSubviews is a known native crash source on iOS New
         // Architecture with nested message/tool cells and absolute chrome.
         removeClippedSubviews={false}
@@ -801,8 +842,7 @@ function ChatTranscriptComponent({
           },
         ]}
         onLayout={(event) => {
-          finishFirstPaintSpanRef.current?.();
-          finishFirstPaintSpanRef.current = null;
+          markFirstPaintReady();
           listHeightRef.current = event.nativeEvent.layout.height;
           const shouldMaintainBottom =
             autoFollowRef.current && !isUserDraggingRef.current;
@@ -818,6 +858,7 @@ function ChatTranscriptComponent({
           }
         }}
         onContentSizeChange={(_width, height) => {
+          markFirstPaintReady();
           // Ignore no-op measurement blips while streaming.
           if (
             isStreamingRef.current &&
