@@ -2,7 +2,7 @@
 name = "krusty-mako-protocol"
 version = "0.1.0"
 edition = "2021"
-description = "Private Unix IPC protocol shared by the Krusty server and Mako daemon"
+description = "Private Unix IPC protocol shared by the Mitsuro server and Hive service"
 
 [dependencies]
 hmac = "0.12"

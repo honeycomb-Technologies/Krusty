@@ -204,7 +204,7 @@ pub fn detect_repeated_validation_sequence(
 
     if *count >= REPEATED_VALIDATION_SEQUENCE_THRESHOLD {
         return Some(format!(
-            "Validation completed successfully. Krusty stopped the same successful validation pattern after {} consecutive runs without new changes; no further validation was necessary.",
+            "Validation completed successfully. Agent stopped the same successful validation pattern after {} consecutive runs without new changes; no further validation was necessary.",
             *count,
         ));
     }

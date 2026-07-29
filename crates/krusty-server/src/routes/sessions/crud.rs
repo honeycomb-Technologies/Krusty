@@ -158,7 +158,7 @@ pub(super) async fn create_session(
     let session_type = req.session_type.unwrap_or(SessionType::Code);
     if session_type == SessionType::Mako {
         return Err(AppError::Conflict(
-            "Mako sessions must be created through POST /mako/dispatch so the daemon owns the durable controller".into(),
+            "Hive sessions must be created through POST /mako/dispatch so the background service owns the durable controller".into(),
         ));
     }
     let session_manager = open_session_manager(&state)?;
@@ -291,7 +291,7 @@ pub(super) async fn update_session(
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
     if session.session_type == SessionType::Mako {
         return Err(AppError::Conflict(
-            "Mako session metadata is daemon-owned and cannot be changed through /sessions".into(),
+            "Hive session metadata is background-service-owned and cannot be changed through /sessions".into(),
         ));
     }
     let workspace_scope = request_workspace_scope(&state, user.as_ref());

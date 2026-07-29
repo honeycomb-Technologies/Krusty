@@ -100,7 +100,7 @@ async fn proxy_request(input: ProxyRequest) -> Result<Response<axum::body::Body>
     }
     if port == state.server_port {
         return Err(AppError::BadRequest(
-            "Refusing to proxy the Krusty server port".to_string(),
+            "Refusing to proxy the Mitsuro server port".to_string(),
         ));
     }
     if settings.is_blocked(port) {

@@ -34,12 +34,12 @@ export interface ChatBarModelPopoverProps {
   borderColor: string;
   composerBlur: number;
   pillTint: 'systemMaterialDark' | 'systemMaterialLight';
-  isDark: boolean;
   foreground: string;
   mutedForeground: string;
   thinking: string;
   backgroundElevated: string;
   backgroundPressed: string;
+  surfaceOverlayElevated: string;
   filteredModels: ModelInfo[];
   model: string | null;
   onSelectModel: (modelId: string) => void;
@@ -56,12 +56,12 @@ function ChatBarModelPopoverComponent({
   borderColor,
   composerBlur,
   pillTint,
-  isDark,
   foreground,
   mutedForeground,
   thinking,
   backgroundElevated,
   backgroundPressed,
+  surfaceOverlayElevated,
   filteredModels,
   model,
   onSelectModel,
@@ -110,9 +110,7 @@ function ChatBarModelPopoverComponent({
           style={[
             StyleSheet.absoluteFill,
             {
-              backgroundColor: isDark
-                ? 'rgba(14, 20, 30, 0.92)'
-                : 'rgba(255, 255, 255, 0.92)',
+              backgroundColor: surfaceOverlayElevated,
               borderRadius: RADIUS,
             },
           ]}

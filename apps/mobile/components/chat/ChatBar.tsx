@@ -150,7 +150,7 @@ const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 const MODEL_POPOVER_Z_INDEX = 45;
 /** Matches AccordionControls PROVIDER_PILL_STEP (56 + 8 gap). */
 const PROVIDER_PILL_STEP = 64;
-/** Gap between provider dock / model list and the bot+crab FAB column. */
+/** Gap between provider dock / model list and the Agent FAB column. */
 const DOCK_TO_FAB_GAP = 10;
 const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
 const WEB_INPUT_STYLE = Platform.OS === 'web'
@@ -691,9 +691,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
-  const bgOverlay = isDark
-    ? 'rgba(14, 20, 30, 0.88)'
-    : 'rgba(255, 255, 255, 0.88)';
+  const bgOverlay = t.surfaceOverlay;
   const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
   const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
   const composerBlur = Math.max(theme.colors.glassBlur ?? 20, isDesktop ? 48 : 40);
@@ -1105,9 +1103,9 @@ function ChatBarComponent(props: ChatBarProps) {
   const metaReserveHeight = showComposerChrome
     ? META_ROW_HEIGHT + GAUGE_TOP_GAP
     : 0;
-  // Distance from root bottom to the top of the input/crab row.
+  // Distance from root bottom to the top of the input/Agent row.
   const inputRowBottom = bottomOffset + metaReserveHeight;
-  // Accordion sits just above the crab FAB.
+  // Accordion sits just above the Agent FAB.
   const controlsLayerBottom = showComposerChrome
     ? inputRowBottom + PILL + GAP
     : inputRowBottom;
@@ -1179,7 +1177,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
   // Align under the filter strip (same right edge as filters).
   // controlsLayer is already right-aligned at ROOT_HORIZONTAL_PADDING; bot is the
-  // rightmost control, filters sit 8px left of bot — do NOT also add crab width.
+  // rightmost control, filters sit 8px left of Agent — do NOT add FAB width again.
   const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
@@ -1413,7 +1411,7 @@ function ChatBarComponent(props: ChatBarProps) {
       </View>
 
       {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
-          56px crab column (WebKit clips overflow from that narrow column). */}
+          56px Agent column (WebKit clips overflow from that narrow column). */}
       {showComposerChrome && accordionVisible ? (
         <View
           pointerEvents="box-none"
@@ -1476,12 +1474,12 @@ function ChatBarComponent(props: ChatBarProps) {
           borderColor={t.glass.border}
           composerBlur={composerBlur}
           pillTint={pillTint}
-          isDark={isDark}
           foreground={t.foreground}
           mutedForeground={t.mutedForeground}
           thinking={t.thinking}
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
+          surfaceOverlayElevated={t.surfaceOverlayElevated}
           filteredModels={filteredModels}
           model={model}
           onSelectModel={handleModelSelectFromPicker}

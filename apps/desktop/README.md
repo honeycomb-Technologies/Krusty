@@ -1,11 +1,11 @@
-# Desktop App
+# Mitsuro Desktop
 
 This directory is reserved for desktop packaging around the React/Expo web client.
 
 ## Scope
 - Native wrapper and packaging
 - OS integration (notifications, file dialogs, autostart)
-- Local connection config to self-hosted `krusty-server`
+- Local connection configuration for the Mitsuro self-hosted runtime (`krusty-server` compatibility crate)
 
 ## Active Scaffold
 - `shell/` contains a Tauri wrapper targeting `apps/mobile`.

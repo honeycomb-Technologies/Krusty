@@ -1,6 +1,6 @@
 # Game Boy Color Extension
 
-Krusty ships a built-in **Game Boy Color** plugin (`gameboy-color`) backed by libretro cores. It runs user-provided `.gb` and `.gbc` ROMs, including Pokémon Yellow (`.gb`), without bundling ROMs or Nintendo BIOS files.
+Mitsuro ships a built-in **Game Boy Color** plugin (`gameboy-color`) backed by libretro cores. It runs user-provided `.gb` and `.gbc` ROMs, including Pokémon Yellow (`.gb`), without bundling ROMs or Nintendo BIOS files.
 
 ## Core discovery
 
@@ -23,7 +23,7 @@ Recognized core filenames/hints include `gambatte_libretro.so`, `sameboy_libretr
 
 ## Runtime data
 
-Krusty creates and uses:
+Mitsuro creates and uses:
 
 - ROMs: `~/.config/krusty/gameboy-color/roms`
 - Per-core system data: `~/.config/krusty/gameboy-color/system`

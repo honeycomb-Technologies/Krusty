@@ -1,18 +1,18 @@
-# What Is Krusty?
+# What Is Mitsuro?
 
-Krusty is an AI coding assistant that lives where you work. It runs as a single binary on your machine and gives you access to large language models — like Claude, GPT, and others — through whatever interface fits your workflow: a terminal, a web browser, a mobile app, or directly inside your code editor.
+Mitsuro is an AI coding assistant that lives where you work. It runs as a single binary on your machine and gives you access to large language models — like Claude, GPT, and others — through whatever interface fits your workflow: a terminal, a web browser, a mobile app, or directly inside your code editor.
 
-What makes Krusty different from a chatbot is that it can actually do things. It can read your files, edit your code, run shell commands, search your codebase, and manage background processes. It plans complex tasks, breaks them into phases, and executes them with your oversight. It's not just answering questions — it's an agent that takes action.
+What makes Mitsuro different from a chatbot is that it can actually do things. It can read your files, edit your code, run shell commands, search your codebase, and manage background processes. It plans complex tasks, breaks them into phases, and executes them with your oversight. It's not just answering questions — it's an agent that takes action.
 
 ## The Problem It Solves
 
 Modern AI coding tools tend to lock you into one interface and one AI provider. You use one tool in your terminal, another in your browser, and yet another in your editor — and they don't share context, sessions, or configuration. Switching between them means losing your conversation, re-explaining your project, and managing multiple API keys.
 
-Krusty solves this by being a unified platform. One binary, one configuration, one set of sessions — accessible from anywhere. Start a conversation in the terminal, continue it from your phone, or hand it off to an autonomous agent that works while you sleep.
+Mitsuro solves this by being a unified platform. One binary, one configuration, one set of sessions — accessible from anywhere. Start a conversation in the terminal, continue it from your phone, or hand it off to an autonomous agent that works while you sleep.
 
 ## The Four Interfaces
 
-Krusty exposes the same core engine through four different surfaces. They all share the same agent orchestrator, tool system, storage, and configuration — the only difference is how you interact with them.
+Mitsuro exposes the same core engine through four different surfaces. They all share the same agent orchestrator, tool system, storage, and configuration — the only difference is how you interact with them.
 
 ### 1. Terminal UI (TUI)
 
@@ -24,19 +24,19 @@ This is the interface for engineers who live in the terminal. It's fast, keyboar
 
 Run `krusty serve` and the binary launches an HTTP server with an embedded web frontend. The same React-based UI that powers the mobile app gets served directly from the binary — no separate frontend deployment needed. The API exposes REST endpoints and SSE streaming for chat, plus WebSocket support for terminal emulation.
 
-This is the interface for when you want a graphical UI, or when you need to access Krusty from another device on your network. If Tailscale is installed, it automatically configures remote HTTPS access so you can reach your Krusty instance from anywhere.
+This is the interface for when you want a graphical UI, or when you need to access Mitsuro from another device on your network. If Tailscale is installed, it automatically configures remote HTTPS access so you can reach your Mitsuro instance from anywhere.
 
 ### 3. Editor Integration (ACP)
 
-Run `krusty acp` and it becomes an Agent Client Protocol server that communicates over JSON-RPC via stdin/stdout. This lets code editors — Zed, Neovim, JetBrains, and others — spawn Krusty as a subprocess and interact with it through a standardized protocol. The editor sends prompts and receives structured responses, including tool calls that the editor can render natively.
+Run `krusty acp` and it becomes an Agent Client Protocol server that communicates over JSON-RPC via stdin/stdout. This lets code editors — Zed, Neovim, JetBrains, and others — spawn Mitsuro as a subprocess and interact with it through a standardized protocol. The editor sends prompts and receives structured responses, including tool calls that the editor can render natively.
 
 This is the interface for when you want AI assistance without leaving your editor.
 
-### 4. Mako (Autonomous Agent)
+### 4. Hive (Autonomous Agent)
 
-Mako is Krusty's autonomous mode. You submit a task — "refactor the authentication module" or "write integration tests for the API" — and Mako works on it in the background. It has a tick-based execution engine that wakes up, does work, sleeps, and repeats. You can attach to its event stream, pause it, resume it, or cancel it from the CLI.
+Hive is Mitsuro's autonomous mode. You submit a task — "refactor the authentication module" or "write integration tests for the API" — and Hive works on it in the background. It has a tick-based execution engine that wakes up, does work, sleeps, and repeats. You can attach to its event stream, pause it, resume it, or cancel it from the CLI.
 
-Mako operates through the same tool system as interactive sessions, but with an auto-classifier that evaluates each tool call for safety and appropriateness without requiring human approval for every step.
+Hive operates through the same tool system as interactive sessions, but with an auto-classifier that evaluates each tool call for safety and appropriateness without requiring human approval for every step.
 
 This is the interface for tasks that are well-defined enough to delegate but would take too long to babysit.
 
@@ -50,7 +50,7 @@ At the heart of everything is the **agent orchestrator**. This is a loop that:
 4. When the AI wants to use a tool (read a file, run a command, etc.), pauses the stream, executes the tool, and feeds the result back
 5. Repeats until the AI is done or the user interrupts
 
-The orchestrator doesn't know or care which interface is using it. It emits events (`LoopEvent`) and accepts inputs (`LoopInput`). The TUI maps those events to terminal rendering. The web server maps them to SSE messages. The ACP server maps them to JSON-RPC notifications. Mako maps them to its tick engine. Same brain, different faces.
+The orchestrator doesn't know or care which interface is using it. It emits events (`LoopEvent`) and accepts inputs (`LoopInput`). The TUI maps those events to terminal rendering. The web server maps them to SSE messages. The ACP server maps them to JSON-RPC notifications. Hive maps them to its tick engine. Same brain, different faces.
 
 Surrounding the orchestrator are the supporting systems:
 
@@ -58,7 +58,7 @@ Surrounding the orchestrator are the supporting systems:
 
 - **Tool Registry** — Manages 50+ built-in tools (file I/O, shell execution, code search, sub-agent spawning) plus any tools discovered via MCP servers. Each tool has permission policies, pre/post hooks, and truncation rules.
 
-- **Storage** — SQLite database that persists everything: conversation sessions, user preferences, API credentials, plan state, push notification subscriptions, and runtime traces for Mako.
+- **Storage** — SQLite database that persists everything: conversation sessions, user preferences, API credentials, plan state, push notification subscriptions, and runtime traces for Hive.
 
 - **Extension System** — A WebAssembly runtime (using Wasmtime) that can load Zed-compatible extensions for language server support and other capabilities.
 
@@ -94,11 +94,11 @@ packages/
   ui/              Design tokens and theme definitions shared between mobile and desktop.
 ```
 
-The key insight is that `krusty-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Mako all import `krusty-core` and use the same orchestrator, the same tools, and the same storage.
+The key insight is that `krusty-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Hive all import `krusty-core` and use the same orchestrator, the same tools, and the same storage.
 
 ## Multi-Provider AI
 
-Krusty doesn't tie you to one AI provider. It supports:
+Mitsuro doesn't tie you to one AI provider. It supports:
 
 - **Anthropic** — Live Claude catalog via direct API or OAuth, with curated Opus/Fable/Sonnet/Haiku fallbacks
 - **OpenAI** — GPT and Codex catalogs via API key or account-scoped ChatGPT OAuth
@@ -119,6 +119,6 @@ A few architectural choices worth noting:
 
 **Presentation-agnostic core.** The orchestrator loop is completely decoupled from how you interact with it. This means adding a new interface (say, a Slack bot or a VS Code extension) requires writing only the thin presentation layer — the entire agent capability comes for free.
 
-**Real tool execution.** Unlike chatbots that can only generate text, Krusty actually executes tools in your environment. It reads and writes files, runs shell commands, searches codebases, and manages processes. The safety model is permission-based: in supervised mode, write operations require your approval; in autonomous mode, the AI operates freely.
+**Real tool execution.** Unlike chatbots that can only generate text, Mitsuro actually executes tools in your environment. It reads and writes files, runs shell commands, searches codebases, and manages processes. The safety model is permission-based: in supervised mode, write operations require your approval; in autonomous mode, the AI operates freely.
 
-**WASM extensions.** The extension system uses WebAssembly with the same interface definitions as Zed editor extensions. This means the growing ecosystem of Zed extensions — language servers, formatters, linters — can potentially run inside Krusty without modification.
+**WASM extensions.** The extension system uses WebAssembly with the same interface definitions as Zed editor extensions. This means the growing ecosystem of Zed extensions — language servers, formatters, linters — can potentially run inside Mitsuro without modification.

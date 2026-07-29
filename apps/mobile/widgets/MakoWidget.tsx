@@ -66,7 +66,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       <AccessoryBackground>
         <VStack alignment="center">
           <Image
-            systemName={status === "offline" ? "bolt.slash.fill" : "bolt.fill"}
+            systemName="hexagon"
             modifiers={[font({ size: 16 })]}
           />
           <Text modifiers={[font({ size: 8, weight: "semibold" })]}>Hive</Text>
@@ -80,7 +80,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       <AccessoryBackground>
         <VStack alignment="leading">
           <HStack>
-            <Image systemName="bolt.fill" modifiers={[font({ size: 10 })]} />
+            <Image systemName="hexagon" modifiers={[font({ size: 10 })]} />
             <Text modifiers={[font({ size: 12, weight: "semibold" })]}>
               Hive — {statusLabel}
             </Text>
@@ -96,7 +96,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
   if (family === "accessoryInline") {
     return (
       <HStack>
-        <Image systemName="bolt.fill" />
+        <Image systemName="hexagon" />
         <Text>Hive: {statusLabel}</Text>
       </HStack>
     );
@@ -114,7 +114,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       >
         <HStack>
           <Image
-            systemName="bolt.fill"
+            systemName="hexagon"
             modifiers={[foregroundStyle(statusColor), font({ size: 14 })]}
           />
           <Text modifiers={[font({ size: 13, weight: "bold" })]}>Hive</Text>
@@ -145,7 +145,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       >
         <HStack>
           <Image
-            systemName="bolt.fill"
+            systemName="hexagon"
             modifiers={[foregroundStyle(statusColor), font({ size: 16 })]}
           />
           <Text modifiers={[font({ size: 15, weight: "bold" })]}>
@@ -213,7 +213,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
     >
       <HStack>
         <Image
-          systemName="bolt.fill"
+          systemName="hexagon"
           modifiers={[foregroundStyle(statusColor), font({ size: 18 })]}
         />
         <Text modifiers={[font({ size: 17, weight: "bold" })]}>Hive Agent</Text>

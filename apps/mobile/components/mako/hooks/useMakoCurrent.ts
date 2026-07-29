@@ -89,7 +89,7 @@ export function useMakoCurrent(enabled: boolean) {
         setError(
           dispatchError instanceof Error
             ? dispatchError.message
-            : "Failed to set course",
+            : "Failed to start Hive run",
         );
         return null;
       } finally {

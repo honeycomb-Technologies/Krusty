@@ -169,10 +169,10 @@ async fn send_test(
         .ok_or_else(|| AppError::Internal("APNs not configured".into()))?;
 
     let user_id = user.and_then(|u| u.0.user_id);
-    let title = req.title.unwrap_or_else(|| "Krusty".into());
+    let title = req.title.unwrap_or_else(|| "Mitsuro".into());
     let body = req
         .body
-        .unwrap_or_else(|| "Test notification from Krusty".into());
+        .unwrap_or_else(|| "Test notification from Mitsuro".into());
 
     let stats = apns_service
         .notify_user(

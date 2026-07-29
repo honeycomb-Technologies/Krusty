@@ -1,18 +1,18 @@
 # Storage & Persistence
 
-Krusty uses SQLite as its persistence layer. Everything that needs to survive between sessions -- conversations, plans, credentials, preferences, agent state -- lives in a single database file on disk. There is no external database server to install, no connection string to configure, and no network dependency. The binary ships with SQLite compiled in via the `rusqlite` crate, so persistence works out of the box the moment you run Krusty for the first time.
+Mitsuro uses SQLite as its persistence layer. Everything that needs to survive between sessions -- conversations, plans, credentials, preferences, agent state -- lives in a single database file on disk. There is no external database server to install, no connection string to configure, and no network dependency. The binary ships with SQLite compiled in via the `rusqlite` crate, so persistence works out of the box the moment you run Mitsuro for the first time.
 
 ## Why SQLite
 
-The decision to use SQLite comes down to three properties that align with how Krusty is designed.
+The decision to use SQLite comes down to three properties that align with how Mitsuro is designed.
 
-**Local-first.** Krusty runs on your machine, not in the cloud. SQLite is an embedded database -- it lives inside the process, reads and writes directly to a file, and never opens a network socket. This means Krusty works offline, on airplanes, on machines with no internet at all.
+**Local-first.** Mitsuro runs on your machine, not in the cloud. SQLite is an embedded database -- it lives inside the process, reads and writes directly to a file, and never opens a network socket. This means Mitsuro works offline, on airplanes, on machines with no internet at all.
 
-**Zero-config.** There is no setup step. The first time Krusty starts, it creates the database file automatically, runs all schema migrations, and is ready to go. Users never interact with the database directly.
+**Zero-config.** There is no setup step. The first time Mitsuro starts, it creates the database file automatically, runs all schema migrations, and is ready to go. Users never interact with the database directly.
 
 **Single-file.** The entire database is one file: `~/.krusty/krusty.db`. Backing it up means copying one file. Moving it to another machine means copying one file. Deleting it resets everything cleanly. This makes the operational model as simple as it gets.
 
-SQLite also brings WAL (Write-Ahead Logging) mode, which Krusty enables on every connection. WAL allows concurrent reads while a write is in progress, preventing lock contention when the server and CLI access the database simultaneously. A 5-second busy timeout is configured so that brief lock conflicts resolve automatically rather than failing immediately.
+SQLite also brings WAL (Write-Ahead Logging) mode, which Mitsuro enables on every connection. WAL allows concurrent reads while a write is in progress, preventing lock contention when the server and CLI access the database simultaneously. A 5-second busy timeout is configured so that brief lock conflicts resolve automatically rather than failing immediately.
 
 ## The Database Wrapper
 
@@ -42,11 +42,11 @@ The schema evolves through numbered migrations. A `schema_version` table tracks 
 
 Migrations handle the full range of schema changes: creating tables, adding columns, creating indexes, renaming tables, and backfilling data. Each migration checks the current version before running, so they are safe to re-run. A helper method `column_exists()` enables safe `ALTER TABLE` operations that skip columns already present.
 
-This approach means upgrading Krusty is seamless. The new binary starts, detects an older schema, and migrates it forward automatically.
+This approach means upgrading Mitsuro is seamless. The new binary starts, detects an older schema, and migrates it forward automatically.
 
 ## The Manager Pattern
 
-Rather than funneling all SQL through a single monolithic class, Krusty gives each table domain its own manager struct. Each manager borrows or owns a `Database` and provides typed methods for that domain's operations.
+Rather than funneling all SQL through a single monolithic class, Mitsuro gives each table domain its own manager struct. Each manager borrows or owns a `Database` and provides typed methods for that domain's operations.
 
 The pattern looks like this:
 
@@ -82,10 +82,10 @@ The current set of managers:
 | `FileActivityTracker` | File access tracking | Record reads/writes/edits, rank by importance |
 | `ReportStore` | Research reports | Create, list, search, delete reports |
 | `RuntimeTraceStore` | Runtime diagnostics | Append events, load traces, compute summaries |
-| `AutonomousTaskStore` | Mako task coordination | Create, claim, complete, fail tasks |
+| `AutonomousTaskStore` | Hive task coordination | Create, claim, complete, fail tasks |
 | `PushSubscriptionStore` | Push notification subscriptions | Upsert, remove, mark success/failure |
 | `PushDeliveryAttemptStore` | Delivery tracking | Record attempts, compute summaries |
-| `MakoRuntimeStateStore` | Mako daemon state | Get/set/upsert runtime state, list recoverable |
+| `MakoRuntimeStateStore` | Hive daemon state | Get/set/upsert runtime state, list recoverable |
 | `ProjectSettings` | Per-project overrides | Load from `.krusty/settings.json` |
 
 This structure keeps each file focused. Adding a new storage domain means creating a new file with a new manager struct, not modifying a central class.
@@ -111,19 +111,19 @@ As the conversation progresses, messages are saved via `MessageStore`, plans via
 
 ### Resumption
 
-When you reopen Krusty and select an existing session, `SessionManager::get_session()` loads the session metadata, then `MessageStore::load_session_messages()` reconstructs the conversation history. Messages are stored as JSON-serialized content arrays, preserving full fidelity of text, tool calls, and structured content blocks.
+When you reopen Mitsuro and select an existing session, `SessionManager::get_session()` loads the session metadata, then `MessageStore::load_session_messages()` reconstructs the conversation history. Messages are stored as JSON-serialized content arrays, preserving full fidelity of text, tool calls, and structured content blocks.
 
 Message loading supports pagination through `load_session_messages_paginated()`, which accepts offset and limit parameters for sessions with long histories.
 
 ### Recovery
 
-If Krusty crashes or is interrupted mid-stream, the recovery system kicks in. A `SessionRecoveryState` is stored as JSON in the session's `recovery_json` column. This captures:
+If Mitsuro crashes or is interrupted mid-stream, the recovery system kicks in. A `SessionRecoveryState` is stored as JSON in the session's `recovery_json` column. This captures:
 
 - What the agent was doing when interrupted (streaming, executing a tool).
 - Any partial assistant output (text, thinking, in-flight tool calls).
 - A decision about whether the session can be safely resumed, along with the user's last objective if resumption is possible.
 
-On next startup, Krusty reads this state and either auto-resumes the session or explains why it cannot. This keeps work from being lost to crashes.
+On next startup, Mitsuro reads this state and either auto-resumes the session or explains why it cannot. This keeps work from being lost to crashes.
 
 ## Message Storage
 
@@ -158,7 +158,7 @@ The store tracks which providers have keys configured and provides a unified `ha
 - **Recent models** -- An ordered list of up to 10 recently used models, stored as JSON.
 - **Model cache** -- Cached model catalogs from dynamic providers like OpenRouter, with TTL-based staleness detection and fingerprint validation to detect catalog drift.
 - **Custom models** -- User-defined model entries for any provider, persisted as JSON arrays.
-- **Git identity** -- How Krusty identifies itself in commits (co-author mode by default).
+- **Git identity** -- How Mitsuro identifies itself in commits (co-author mode by default).
 - **Active plugin** -- The currently selected plugin ID.
 
 Preferences support multi-tenant mode through an optional `user_id` parameter. When set, all reads and writes are scoped to that user. When unset (single-tenant mode), preferences are global.
@@ -178,7 +178,7 @@ When a session is deleted, its plan is automatically removed via cascade.
 
 ## Push Notifications
 
-Krusty supports Web Push notifications for alerting users when background tasks complete. Two stores handle this:
+Mitsuro supports Web Push notifications for alerting users when background tasks complete. Two stores handle this:
 
 **`PushSubscriptionStore`** manages subscription records. Each subscription holds the Web Push endpoint, encryption keys (`p256dh` and `auth`), and health metadata. Subscriptions are upserted by endpoint, so re-subscribing from the same browser replaces the old record and resets failure counters. The store tracks success and failure timestamps, along with a failure count, allowing the system to identify degraded subscriptions.
 
@@ -186,13 +186,13 @@ Krusty supports Web Push notifications for alerting users when background tasks 
 
 APNs device tokens for iOS push notifications are tracked in a separate `apns_devices` table with similar health metadata.
 
-## Mako-Specific Storage
+## Hive-Specific Storage
 
-Mako is Krusty's autonomous agent system, and it has three dedicated storage domains.
+Hive is Mitsuro's autonomous agent system, and it has three dedicated storage domains.
 
 ### Autonomous Tasks
 
-`AutonomousTaskStore` manages the task list that the Mako orchestrator works through. Each task has a subject, description, status (`pending`, `in_progress`, `completed`, `failed`), an optional owner (which sub-agent claimed it), and a list of blocker task IDs.
+`AutonomousTaskStore` manages the task list that the Hive orchestrator works through. Each task has a subject, description, status (`pending`, `in_progress`, `completed`, `failed`), an optional owner (which sub-agent claimed it), and a list of blocker task IDs.
 
 The key scheduling method is `get_available_tasks()`, which returns pending tasks whose blockers have all completed. This allows the orchestrator to execute tasks in dependency order without manual scheduling.
 
@@ -202,9 +202,9 @@ The key scheduling method is `get_available_tasks()`, which returns pending task
 
 Traces serve two purposes: post-mortem diagnostics (understanding what went wrong) and replay gating (deciding whether a previously failed run should be retried based on its failure pattern).
 
-### Mako Runtime State
+### Hive Runtime State
 
-`MakoRuntimeStateStore` persists the daemon-level runtime state for autonomous sessions. Each Mako session has a status (`idle`, `running`, `sleeping`, `awaiting_input`, `paused`, `error`, `cancelled`), an optional next wake time, a sleep reason, the current run ID, and the last wake reason.
+`MakoRuntimeStateStore` persists the daemon-level runtime state for autonomous sessions. Each Hive session has a status (`idle`, `running`, `sleeping`, `awaiting_input`, `paused`, `error`, `cancelled`), an optional next wake time, a sleep reason, the current run ID, and the last wake reason.
 
 The `list_recoverable_states()` method returns sessions in `running` or `sleeping` status, which the daemon uses on startup to resume work that was interrupted when the process last stopped.
 
@@ -216,7 +216,7 @@ This data feeds an importance scoring algorithm used during context preservation
 
 ## Reports
 
-`ReportStore` persists research reports produced by Chat sessions (with the research toggle) and Mako sessions. Each report has a title, content, summary, tags, sources, and an optional project directory. Reports are stored both in SQLite and as Markdown files on disk -- in `.krusty/reports/` within the project directory when one exists, or in `~/.krusty/reports/` otherwise.
+`ReportStore` persists research reports produced by Chat sessions (with the research toggle) and Hive sessions. Each report has a title, content, summary, tags, sources, and an optional project directory. Reports are stored both in SQLite and as Markdown files on disk -- in `.krusty/reports/` within the project directory when one exists, or in `~/.krusty/reports/` otherwise.
 
 Reports support listing by project directory and searching by title or tags.
 
@@ -224,7 +224,7 @@ Reports support listing by project directory and searching by title or tags.
 
 `ProjectSettings` loads per-project overrides from `.krusty/settings.json` within any project directory. Unlike the other storage domains, this is a read-only JSON file rather than a database table. It supports overriding the model, permission mode, system prompt, subagent turn limits, conventions, and disabled tools. All fields are optional -- only specified values override the defaults.
 
-The loading is deliberately forgiving: a missing file returns defaults, invalid JSON returns defaults, and unknown fields are silently ignored. This matches the graceful-degradation pattern used throughout Krusty's configuration loading.
+The loading is deliberately forgiving: a missing file returns defaults, invalid JSON returns defaults, and unknown fields are silently ignored. This matches the graceful-degradation pattern used throughout Mitsuro's configuration loading.
 
 ## File Paths
 
@@ -255,4 +255,4 @@ Per-project state lives under `<project>/.krusty/`:
   mailbox/               # Inter-agent messaging (delegated runs)
 ```
 
-The `Database` constructor automatically creates the parent directory if it does not exist, so there is no manual setup step. The first time Krusty runs, the directory tree is created on demand.
+The `Database` constructor automatically creates the parent directory if it does not exist, so there is no manual setup step. The first time Mitsuro runs, the directory tree is created on demand.

@@ -1119,7 +1119,9 @@ export function AboutSection() {
           <Cpu size={20} color={t.mutedForeground} strokeWidth={1.8} />
           <View style={styles.rowContent}>
             <Text style={[styles.rowTitle, { color: t.foreground }]}>Mitsuro</Text>
-            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>Expo mobile + web surface</Text>
+            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+              By Honeycomb Technologies
+            </Text>
           </View>
         </View>
       </GlassCard>

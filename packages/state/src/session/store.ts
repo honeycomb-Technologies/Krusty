@@ -837,7 +837,7 @@ export function createSessionStore(
         const mainId = main.session_id?.trim();
         if (!mainId) {
           set({
-            error: "Mako companion session is unavailable.",
+            error: "Hive companion session is unavailable.",
             isLoading: false,
           });
           return null;
@@ -863,7 +863,7 @@ export function createSessionStore(
       } catch (err) {
         set({
           isLoading: false,
-          error: toErrorMessage(err, "Failed to open Mako companion"),
+          error: toErrorMessage(err, "Failed to open Hive companion"),
         });
         return null;
       }

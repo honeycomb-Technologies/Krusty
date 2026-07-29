@@ -8,18 +8,18 @@ pub fn summarize_channel_bindings(profile: &MakoHomeProfile) -> Vec<MakoChannelB
         label: "Main thread".to_string(),
         kind: MakoChannelKind::MainThread,
         enabled: true,
-        detail: "Primary controller conversation inside Krusty.".to_string(),
+        detail: "Primary Hive conversation inside Mitsuro.".to_string(),
         source: "system",
     }];
 
     if !profile.crew.is_empty() {
         bindings.push(MakoChannelBinding {
             id: "crew-handoff".to_string(),
-            label: "Crew handoff".to_string(),
+            label: "Agent handoff".to_string(),
             kind: MakoChannelKind::Crew,
             enabled: true,
             detail: format!(
-                "{} crew member{} can route updates back through Mako.",
+                "{} Hive agent{} can route updates back to this thread.",
                 profile.crew.len(),
                 if profile.crew.len() == 1 { "" } else { "s" }
             ),

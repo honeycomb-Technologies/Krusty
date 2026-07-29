@@ -610,7 +610,7 @@ function createNativeOnlyBatch(
 }
 
 function classifyRoute(segments: string[]): string {
-  const allowed = new Set(['(tabs)', 'index', 'sessions', 'settings', 'onboarding', 'navigation-preview']);
+  const allowed = new Set(['(tabs)', 'index', 'sessions', 'settings', 'onboarding']);
   return segments.map((segment) => allowed.has(segment) ? segment : 'dynamic').join('>') || 'root';
 }
 

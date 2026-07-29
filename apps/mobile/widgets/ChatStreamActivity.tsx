@@ -63,7 +63,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
     toolApprovalSessionId,
   } = props;
   const statusColor =
-    status === "needs_input" ? "#b89a61" : status === "completed" ? "#7f9a86" : "#7f7485";
+    status === "needs_input" ? "#b89a61" : status === "completed" ? "#7f9a86" : "#75617e";
   const timerColor = "#b89a61";
   const statusLabel =
     status === "needs_input" ? "Needs input" : status === "completed" ? "Completed" : "Working";
@@ -187,7 +187,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
         <HStack>
           {metrics}
           <Spacer />
-          <Image systemName="chevron.right" size={9} color="#8b93a1" />
+          <Image systemName="chevron.right" size={9} color="#9e98a3" />
         </HStack>
         {status === "needs_input" && approvalTarget && (
           <VStack spacing={6}>

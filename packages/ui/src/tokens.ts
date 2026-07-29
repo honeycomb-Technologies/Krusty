@@ -3,27 +3,39 @@
 export const colors = {
   // Core
   background: '#0e0e11',
+  surface: '#141519',
+  surfaceElevated: '#19181d',
+  surfaceStrong: '#222027',
+  surfaceOverlaySubtle: 'rgba(14, 14, 17, 0.60)',
+  surfaceOverlay: 'rgba(14, 14, 17, 0.88)',
+  surfaceOverlayElevated: 'rgba(14, 14, 17, 0.92)',
+  surfaceOverlayStrong: 'rgba(14, 14, 17, 0.96)',
+  codeSurface: '#141519',
   foreground: '#e8e5ea',
   primary: '#e8e5ea',
   primaryMuted: 'rgba(232, 229, 234, 0.70)',
+  accent: '#75617e',
+  accentPressed: '#66536f',
+  accentSurface: 'rgba(117, 97, 126, 0.22)',
+  onAccent: '#f7f4f8',
 
   // Messages
-  userMessage: '#7f7485',
-  userMessageBg: 'rgba(127, 116, 133, 0.22)',
+  userMessage: '#75617e',
+  userMessageBg: 'rgba(117, 97, 126, 0.22)',
   aiMessage: 'rgba(232, 229, 234, 0.045)',
-  thinking: '#b89a61',
-  thinkingBg: 'rgba(184, 154, 97, 0.12)',
+  thinking: '#9a82a5',
+  thinkingBg: 'rgba(154, 130, 165, 0.14)',
 
   // Status
   success: '#7f9a86',
   error: '#b06f73',
   warning: '#b89a61',
-  info: '#7f8fa3',
+  info: '#9a82a5',
 
   // Surfaces
   card: 'rgba(232, 229, 234, 0.045)',
   muted: '#25282c',
-  mutedForeground: '#9e9ba0',
+  mutedForeground: '#9e98a3',
   border: 'rgba(232, 229, 234, 0.10)',
   destructive: '#5f3035',
   destructiveForeground: '#d9a4a7',
@@ -42,13 +54,21 @@ export const colors = {
   // Light mode overrides
   light: {
     background: '#e6e3de',
+    surface: '#f0ede8',
+    surfaceElevated: '#f6f3ee',
+    surfaceStrong: '#d7d3cd',
+    surfaceOverlaySubtle: 'rgba(246, 243, 238, 0.60)',
+    surfaceOverlay: 'rgba(246, 243, 238, 0.88)',
+    surfaceOverlayElevated: 'rgba(246, 243, 238, 0.92)',
+    surfaceOverlayStrong: 'rgba(246, 243, 238, 0.96)',
+    codeSurface: '#f3f0eb',
     foreground: '#242326',
     primary: '#242326',
     card: 'rgba(36, 35, 38, 0.045)',
     muted: '#d7d3cd',
     mutedForeground: '#716d72',
     border: 'rgba(36, 35, 38, 0.11)',
-    userMessageBg: 'rgba(127, 116, 133, 0.16)',
+    userMessageBg: 'rgba(117, 97, 126, 0.16)',
     aiMessage: 'rgba(36, 35, 38, 0.04)',
     glass: {
       background: 'rgba(246, 243, 238, 0.62)',

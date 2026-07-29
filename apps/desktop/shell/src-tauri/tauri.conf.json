@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Krusty Desktop",
+  "productName": "Mitsuro",
   "version": "0.9.14",
   "identifier": "io.krusty.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Krusty Desktop",
+        "title": "Mitsuro",
         "width": 1280,
         "height": 860,
         "minWidth": 1024,
@@ -31,13 +31,15 @@
       "icons/icon-128.png",
       "icons/icon-256.png",
       "icons/icon-512.png",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
-    "publisher": "Krusty",
+    "publisher": "Honeycomb Technologies",
     "homepage": "https://github.com/honeycomb-Technologies/Krusty",
     "category": "DeveloperTool",
-    "shortDescription": "Native Linux desktop shell for the Krusty coding assistant.",
-    "longDescription": "Krusty Desktop packages the Krusty app in a native Linux shell and starts the embedded local server runtime for coding, chat, and project operations.",
+    "shortDescription": "Mitsuro, a local-first AI coding assistant.",
+    "longDescription": "Mitsuro packages Agent and Hive in a native desktop shell with an embedded local runtime for coding, chat, and project operations.",
     "license": "MIT",
     "licenseFile": "../../../../LICENSE",
     "linux": {

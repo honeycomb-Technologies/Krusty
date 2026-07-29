@@ -1,6 +1,6 @@
 # Core remediation: one run contract, exact models, semantic progress
 
-This change is a targeted simplification of Krusty's existing core, not a
+This change is a targeted simplification of Mitsuro's existing core, not a
 greenfield rewrite. The failure being corrected was architectural: mutable
 model slugs, duplicated entry-point defaults, and output-sensitive loop
 heuristics allowed the same apparent action to be prepared differently or to
@@ -19,8 +19,8 @@ The comparison was refreshed from clean Honey checkouts on 2026-07-21:
 | Codex | [`bdd3118`](https://github.com/openai/codex/commit/bdd3118c71a29f26b9df3a47f91efea38a0d58bd) | A session owns immutable turn context, model-family behavior, tool routing/lifecycle, and conversation history; observable events come from those canonical boundaries. |
 
 None of these harnesses is simple because it has fewer files. Their useful
-simplicity is that there is one owner for each decision. Krusty legitimately
-has more surface area—TUI, ACP, HTTP/mobile, Mako, extensions, multi-tenant
+simplicity is that there is one owner for each decision. Mitsuro legitimately
+has more surface area—TUI, ACP, HTTP/mobile, Hive, extensions, multi-tenant
 storage, and several provider auth modes—but those surfaces do not need their
 own definitions of model identity, request policy, or loop termination.
 
@@ -32,7 +32,7 @@ correctly: prompt construction, model identity, planning, streaming, tools,
 processes, cancellation, delegation, persistence, and client projection.
 Source links are pinned to the revisions above.
 
-| Contract | Pi | OpenCode | Goose | Codex | Repaired Krusty |
+| Contract | Pi | OpenCode | Goose | Codex | Repaired Mitsuro |
 | --- | --- | --- | --- | --- | --- |
 | Turn owner | [`agent-loop.ts`](https://github.com/badlogic/pi-mono/blob/dd6bea41efa8caa7a10fe5a6401676dc5699f83f/packages/agent/src/agent-loop.ts) owns the provider/tool continuation; [`agent-session.ts`](https://github.com/badlogic/pi-mono/blob/dd6bea41efa8caa7a10fe5a6401676dc5699f83f/packages/coding-agent/src/core/agent-session.ts) owns persistence, retry, and compaction around it. | [`prompt.ts`](https://github.com/anomalyco/opencode/blob/4438f69aac46806c631866489a26b644488a784e/packages/opencode/src/session/prompt.ts) drives the session and defaults agent steps to infinity; [`processor.ts`](https://github.com/anomalyco/opencode/blob/4438f69aac46806c631866489a26b644488a784e/packages/opencode/src/session/processor.ts) owns one streamed response/tool lifecycle. | [`Agent::reply_internal`](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/crates/goose/src/agents/agent.rs) owns the reply loop. It has an overrideable 1,000-turn resource ceiling, not a 50-turn product default. | Session state and immutable per-turn context are separated in [`state/session.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/state/session.rs) and [`session/turn_context.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/session/turn_context.rs). | `RunSpec` is the only production constructor for the parent streaming kernel. Interactive parent and ACP runs default to unlimited; the separately governed delegated kernel also defaults to unlimited. A typed budget is an explicit resource policy in both. |
 | Prompt and model-family instructions | [`system-prompt.ts`](https://github.com/badlogic/pi-mono/blob/dd6bea41efa8caa7a10fe5a6401676dc5699f83f/packages/coding-agent/src/core/system-prompt.ts) builds one compact prompt from the active tools and loaded resources; provider adapters own wire conversion rather than changing agent policy. | [`system.ts`](https://github.com/anomalyco/opencode/blob/4438f69aac46806c631866489a26b644488a784e/packages/opencode/src/session/system.ts) selects model-family prompt text, while the session request boundary layers instructions and tools in a stable order. | [`prompt_manager.rs`](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/crates/goose/src/agents/prompt_manager.rs) composes the base prompt with enabled extension instructions; provider code receives the resulting typed request. | Session initialization resolves model-owned base instructions in [`session/mod.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/session/mod.rs), then turn context layers workspace, permission, skill, plugin, and mode instructions without rewriting the model identity. | `ModelProfile` selects the prompt family. One prompt-section builder produces a diagnostic manifest, and streaming, simple, and delegated calls use the same immutable model runtime rather than provider-local prompt patches. |
@@ -47,12 +47,12 @@ Source links are pinned to the revisions above.
 | Tools and governance | A deliberately small default coding tool set; extensions wrap definitions/execution. | Tools are filtered by agent permission and the final map is stable; task delegation creates a first-class child session. | Tool inspection composes security, egress, adversary, permission, and optional repetition checks before execution. | [`tools/orchestrator.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/tools/orchestrator.rs), routing, lifecycle, approvals, and sandbox policy are distinct typed layers. | Parent and delegated paths inherit one permission/turn contract at execution time. Filesystem policy stays in `ToolContext`; mutation tools publish structured `changed` evidence. |
 | Subagents, concurrency, and resumability | Pi intentionally omits built-in subagents; packages may implement them without enlarging the base loop. | [`task.ts`](https://github.com/anomalyco/opencode/blob/4438f69aac46806c631866489a26b644488a784e/packages/opencode/src/tool/task.ts) creates a linked child session with an explicit agent/permission envelope, making child history and continuation first-class session state. | [`subagent_execution_tool`](https://github.com/block/goose/tree/3065c9701fdccd020f86f263c74ae4934a1333b8/crates/goose/src/agents/subagent_execution_tool) and `subagent_handler` own scoped child work with explicit task configuration, provider/extensions, turn budget, notifications, and cancellation; it remains a distinct agent path rather than the parent reply loop. | [`session/multi_agents.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/session/multi_agents.rs) creates governed child threads through the session runtime with parent linkage, events, and cancellation. | `AgentScheduler` provides adaptive queued concurrency and inherited permission/path/tool/budget ceilings. Delegated runs persist lifecycle artifacts and can seed a later related run, but execution is a separate non-streaming mini-kernel: it does not yet share the parent `RunSpec`, full streaming trace, or crash-continuation state. |
 | Bash and process lifecycle | The built-in Bash tool is foreground-only, bounds output, and terminates the process tree through the turn's abort signal; background Bash is deliberately left to extensions or external tools. | [`shell.ts`](https://github.com/anomalyco/opencode/blob/4438f69aac46806c631866489a26b644488a784e/packages/opencode/src/tool/shell.ts) centralizes shell parsing, permission arity, process spawning, streaming output, and truncation. | The built-in [Developer shell](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/crates/goose/src/agents/platform_extensions/developer/shell.rs) owns shell selection, subprocess execution, output, and cancellation as an extension tool. | Unified exec has typed execute/write/wait handlers backed by [`tools/runtimes/unified_exec.rs`](https://github.com/openai/codex/blob/bdd3118c71a29f26b9df3a47f91efea38a0d58bd/codex-rs/core/src/tools/runtimes/unified_exec.rs), so long work is polled or resumed instead of relaunched. | Foreground Bash publishes only bounded positive state evidence. `ProcessRegistry` owns background launch deduplication, per-owner active/history caps, bounded output tails, process-tree termination, and reuse; Plan mode exposes no free-form shell. |
-| Persistence and observation | JSONL session entries, explicit events, usage, compaction, and retry state are owned by `AgentSession`. | Message parts are the durable lifecycle; session processor updates them as streaming/tool states change. | Session manager persists conversation and usage; `AgentEvent` is the frontend boundary. | Session/turn items and tool lifecycle events are canonical; telemetry is emitted from those owners. | Canonical `LoopEvent` is persisted as a compact runtime trace and projected to SSE, TUI, ACP, extensions, and Mako. Model key, request policy, budget source, progress action, and typed stop reason are inspectable without raw prompts or credentials. |
+| Persistence and observation | JSONL session entries, explicit events, usage, compaction, and retry state are owned by `AgentSession`. | Message parts are the durable lifecycle; session processor updates them as streaming/tool states change. | Session manager persists conversation and usage; `AgentEvent` is the frontend boundary. | Session/turn items and tool lifecycle events are canonical; telemetry is emitted from those owners. | Canonical `LoopEvent` is persisted as a compact runtime trace and projected to SSE, TUI, ACP, extensions, and Hive. Model key, request policy, budget source, progress action, and typed stop reason are inspectable without raw prompts or credentials. |
 | CLI, server, mobile, and ACP projection | Interactive, print, RPC, and SDK modes consume `AgentSession` events; the small harness does not claim a multi-tenant shared server core. | Durable session/message parts feed the CLI, HTTP server, SDK, and ACP adapters instead of each surface owning another agent loop. | The same `Agent`/session manager events feed CLI, desktop/API, and [`acp/server`](https://github.com/block/goose/tree/3065c9701fdccd020f86f263c74ae4934a1333b8/crates/goose/src/acp/server); adapters translate protocol state rather than provider policy. | Session items and events are projected through app-server and TUI protocol layers; clients do not reconstruct the turn policy. | TUI, server/mobile, and ACP each resolve inputs into `RunSpec`, then consume canonical `LoopEvent`s. Ownership, exact model identity, tool scope, work mode, and continuation state remain core/server contracts rather than client heuristics. |
 
 The upstream review therefore did **not** justify copying one harness or doing a
 fresh rewrite. It identified the same recurring technique: keep each mutable
-decision behind one narrow owner. Krusty's excess complexity was not Rust, its
+decision behind one narrow owner. Mitsuro's excess complexity was not Rust, its
 number of providers, or its product surfaces; it was allowing those surfaces to
 re-resolve the same decisions independently.
 
@@ -62,7 +62,7 @@ The repaired parent streaming path implements that ownership model now:
 `ResolvedModelRuntime`, `RunSpec`, the prompt/history/request pipeline,
 mode-aware tools, `ProgressLedger`, `ProcessRegistry`, durable continuation
 claims, and `LoopEvent` each have one canonical owner. Server, TUI, ACP, and
-Mako inputs may differ, but they cannot independently redefine those contracts.
+Hive inputs may differ, but they cannot independently redefine those contracts.
 
 Delegated execution is deliberately narrower, not falsely described as the
 same kernel. Explorer, plan, verify, and builder workers share the exact parent
@@ -72,7 +72,7 @@ non-streaming provider/tool mini-kernel and persist delegated lifecycle
 artifacts rather than full child session recovery and canonical streaming
 traces. Unifying that boundary may be worthwhile, but it is a bounded follow-up
 refactor—not evidence that the provider, storage, tool, and client core should
-be rewritten. Mako is the other explicit exception: `RunSpec` resolves its
+be rewritten. Hive is the other explicit exception: `RunSpec` resolves its
 inner-run contract before the higher-order tick driver owns scheduling.
 
 ## Rotten contracts removed
@@ -84,7 +84,7 @@ Before this remediation:
   again later;
 - OpenAI API-key and ChatGPT OAuth rows with the same slug could overwrite one
   another;
-- server, TUI, ACP, and Mako assembled orchestration settings separately;
+- server, TUI, ACP, and Hive assembled orchestration settings separately;
 - the primary loop had a default 50-turn ceiling even when useful work was
   continuing;
 - repeated read-only Bash calls could look productive when timestamps, PIDs,
@@ -102,7 +102,7 @@ The repaired flow is:
 2. Freeze its catalog row as `ResolvedModelRuntime`, including context/output
    limits, tools, vision, reasoning controls, source, and revision.
 3. Build one `AiClient` whose configured transport must match that runtime.
-4. Resolve a validated `RunSpec` for server, TUI, ACP, or Mako. It owns session
+4. Resolve a validated `RunSpec` for server, TUI, ACP, or Hive. It owns session
    identity, canonical workspace, permission mode, run budget, timeout, work
    mode, cache/session key, and canonicalized request options.
 5. Start the streaming orchestrator only through `RunSpec`. Direct
@@ -126,7 +126,7 @@ Turn count is now a resource limit, not a loop detector.
 - Every surface normalizes any compatibility setting into a typed per-run
   budget before `RunSpec`; that explicit budget overrides the project budget,
   which otherwise resolves to unlimited.
-- Mako keeps an explicit finite per-tick budget because it is a scheduler, not
+- Hive keeps an explicit finite per-tick budget because it is a scheduler, not
   an interactive session.
 - A configured budget of `N` permits exactly `N` provider calls.
 
@@ -151,7 +151,7 @@ Loop convergence is semantic:
 The registry indexes exact keys and uses bare IDs only as a migration path that
 succeeds when exactly one row matches. Ambiguity fails closed. Catalog refresh
 preserves same-slug API-key and OAuth variants. Preferences, sessions, ACP
-opaque model IDs, server requests, mobile/client state, and durable Mako work
+opaque model IDs, server requests, mobile/client state, and durable Hive work
 carry exact keys plus catalog revision.
 
 Capability policy comes from the frozen row. Unknown custom models receive a

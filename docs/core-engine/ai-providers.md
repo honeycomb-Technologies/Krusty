@@ -1,18 +1,18 @@
 # Multi-Provider AI Layer
 
-Krusty exposes six selectable AI providers -- MiniMax, Anthropic, OpenAI, Grok, Z.ai, and OpenRouter -- through a single unified interface. Google/Gemini remains a supported wire format inside the abstraction layer, but it is not a selectable `ProviderId`. This document explains how the system works, from the high-level abstraction down to SSE byte parsing.
+Mitsuro exposes six selectable AI providers -- MiniMax, Anthropic, OpenAI, Grok, Z.ai, and OpenRouter -- through a single unified interface. Google/Gemini remains a supported wire format inside the abstraction layer, but it is not a selectable `ProviderId`. This document explains how the system works, from the high-level abstraction down to SSE byte parsing.
 
 ## The Problem
 
 Every AI provider invented its own API. Anthropic uses a Messages API with content blocks and `x-api-key` authentication. OpenAI uses Chat Completions (and now a Responses API) with Bearer tokens and a completely different message shape. Google's Gemini API uses `contents` with `parts` and `functionDeclarations`. Compatibility surfaces still have provider-specific contracts: MiniMax is Anthropic-compatible, Z.ai's Coding Plan is OpenAI Chat Completions-compatible, OpenRouter uses its own Messages schema, and Grok's subscription proxy uses an OpenAI Responses-style transport.
 
-Without an abstraction layer, every feature in Krusty would need provider-specific branches: separate code for sending messages, separate code for parsing streaming responses, separate code for tool calls, separate code for extended thinking. That sprawl would make adding a new provider a multi-week project touching dozens of files.
+Without an abstraction layer, every feature in Mitsuro would need provider-specific branches: separate code for sending messages, separate code for parsing streaming responses, separate code for tool calls, separate code for extended thinking. That sprawl would make adding a new provider a multi-week project touching dozens of files.
 
-Krusty solves this with a layered architecture: a unified type system at the bottom, format handlers in the middle, and a single `AiClient` at the top that the rest of the application talks to.
+Mitsuro solves this with a layered architecture: a unified type system at the bottom, format handlers in the middle, and a single `AiClient` at the top that the rest of the application talks to.
 
 ## The Type System
 
-Everything starts with the types defined under `crates/krusty-core/src/ai/types/`. These are Krusty's internal representation of conversations, completely independent of any provider's wire format.
+Everything starts with the types defined under `crates/krusty-core/src/ai/types/`. These are Mitsuro's internal representation of conversations, completely independent of any provider's wire format.
 
 The core types are:
 
@@ -45,7 +45,7 @@ The key method is `canonicalized_for()`, which normalizes a `CallOptions` for a 
 
 The format layer (in `crates/krusty-core/src/ai/format/`) is where provider differences get absorbed. The `FormatHandler` trait defines three methods:
 
-- `convert_messages()` -- Transform Krusty's `ModelMessage` values into provider-specific JSON.
+- `convert_messages()` -- Transform Mitsuro's `ModelMessage` values into provider-specific JSON.
 - `convert_tools()` -- Transform `AiTool` definitions into the provider's tool format.
 - `build_request_body()` -- Assemble the complete request JSON with model, messages, options, and provider-specific fields.
 
@@ -84,7 +84,7 @@ The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/
 
 `ModelProfile` (in `crates/krusty-core/src/ai/model_profile/profile/mod.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
 
-Each profile also controls the layered system prompt: a base prompt (Krusty's operating contract), a provider guidance overlay (Anthropic gets "keep tool and plan state explicit"; OpenAI gets "preserve exact task continuity"), a model family overlay (Codex gets "continue through tool-use loops"; Gemini gets "ground decisions in explicit file evidence"), and a capability overlay based on context window size and API format. When a custom system prompt is provided, it replaces the entire layered stack.
+Each profile also controls the layered system prompt: a base prompt (Mitsuro's operating contract), a provider guidance overlay (Anthropic gets "keep tool and plan state explicit"; OpenAI gets "preserve exact task continuity"), a model family overlay (Codex gets "continue through tool-use loops"; Gemini gets "ground decisions in explicit file evidence"), and a capability overlay based on context window size and API format. When a custom system prompt is provided, it replaces the entire layered stack.
 
 ## Streaming: SSE Parsing and Buffer Management
 
@@ -109,7 +109,7 @@ The request encoding is provider-specific:
 - **OpenAI/ChatGPT** uses OpenAI reasoning effort. Entitlement-specific ChatGPT catalog levels are authoritative.
 - **Anthropic adaptive families** use `thinking: { type: "adaptive" }` plus `output_config.effort`; Sonnet 5 sends `thinking: { type: "disabled" }` for an explicit Off selection because omission enables thinking on that family, while always-on Fable 5 cannot be disabled. Older families retain budget-based thinking and the interleaved-thinking beta.
 - **OpenRouter Messages** uses `thinking: { type: "enabled" }` plus `output_config.effort`, regardless of the routed upstream provider.
-- **MiniMax M3** uses the Anthropic-compatible `thinking: { type: "adaptive" }` toggle without an effort or token budget. M2-family reasoning is mandatory, so Krusty omits a conflicting optional thinking object.
+- **MiniMax M3** uses the Anthropic-compatible `thinking: { type: "adaptive" }` toggle without an effort or token budget. M2-family reasoning is mandatory, so Mitsuro omits a conflicting optional thinking object.
 - **Z.ai** uses top-level `thinking: { type: "enabled" | "disabled" }`; `reasoning_effort` accompanies it only for models such as GLM 5.2 whose catalog metadata exposes graded effort. It never receives an Anthropic budget object.
 - **Grok classic subscription rows** (`grok-build`, Composer) can return reasoning output, but explicit effort controls stay suppressed (`OutputOnly`).
 - **Grok 4.5** (and 4.3-style IDs when present) use OpenAI-style graded effort: `reasoning.effort` = low/medium/high on the Responses transport.
@@ -132,7 +132,7 @@ More nuanced detection happens in `AiClientConfig::for_openai_with_auth_detectio
 
 The provider registry includes a model translation system. `ModelFamily` defines canonical model families and `MODEL_MAPPINGS` maps them to provider-specific IDs. `translate_model_id()` converts between providers; `translate_model_or_default()` falls back to the target provider's default model when no mapping exists. Translation is separate from live catalog metadata and must not be used to infer reasoning or Fast support.
 
-Krusty also keeps model identity separate from request speed. Standard is represented by omitting a speed override. Fast is enabled only when the selected model advertises an implementation:
+Mitsuro also keeps model identity separate from request speed. Standard is represented by omitting a speed override. Fast is enabled only when the selected model advertises an implementation:
 
 - OpenAI, OpenRouter, and MiniMax models whose catalog metadata advertises Priority send `service_tier: "priority"`.
 - Anthropic Fast Mode sends `speed: "fast"` and the `fast-mode-2026-02-01` beta header.
@@ -153,13 +153,13 @@ Catalog startup and refresh are deliberately stale-safe:
 
 Credential changes invalidate the affected provider's cache before a canonical refresh. Provider-specific singleflight locks prevent duplicate fetches, and an authentication generation check discards results that began under older credentials. OpenAI catalog rows also retain API-key or ChatGPT OAuth provenance so the selected model is routed through the transport whose capabilities were advertised instead of guessing from its slug.
 
-ChatGPT catalog requests identify themselves with a Codex protocol compatibility version rather than Krusty's package version. The stable default is `0.144.4`; set `KRUSTY_CODEX_CLIENT_VERSION` when a newer server contract requires an explicit compatibility override.
+ChatGPT catalog requests identify themselves with a Codex protocol compatibility version rather than Mitsuro's package version. The stable default is `0.144.4`; set `KRUSTY_CODEX_CLIENT_VERSION` when a newer server contract requires an explicit compatibility override.
 
 The current TTLs are 5 minutes for OpenAI, 6 hours for Anthropic and MiniMax, 12 hours for OpenRouter, and 24 hours for Grok. Cache metadata records fetch time, model count, and a fingerprint over model capabilities, auth provenance, and pricing, so missing or corrupted snapshots are treated as stale. This is a last-known-good cache, not a source of model truth: the live provider catalog wins whenever a refresh succeeds, while curated fallbacks remain the safety net when discovery is unavailable.
 
 ## How It All Fits Together
 
-When Krusty needs to send a message:
+When Mitsuro needs to send a message:
 
 1. The orchestrator builds a `Vec<ModelMessage>` from the conversation history.
 2. `CallOptions` are canonicalized for the current provider and model.
@@ -169,4 +169,4 @@ When Krusty needs to send a message:
 6. The SSE stream is parsed by the provider-specific parser, buffered for smooth rendering, and forwarded as `StreamPart` events.
 7. The orchestrator processes events -- accumulating text, executing tool calls, storing thinking blocks -- until the stream finishes or the model requests tool execution.
 
-The entire provider surface is contained within the `ai/` module. The rest of Krusty never sees Anthropic JSON, OpenAI message formats, or Google content blocks. It works exclusively with `ModelMessage`, `Content`, `StreamPart`, and `AiTool`.
+The entire provider surface is contained within the `ai/` module. The rest of Mitsuro never sees Anthropic JSON, OpenAI message formats, or Google content blocks. It works exclusively with `ModelMessage`, `Content`, `StreamPart`, and `AiTool`.

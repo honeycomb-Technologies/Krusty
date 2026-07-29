@@ -68,7 +68,7 @@ impl PluginManager {
         match tokio::time::timeout(LOCK_WAIT_TIMEOUT, acquisition).await {
             Ok(result) => result,
             Err(_) => {
-                bail!("timed out waiting for another Krusty process to finish modifying plugins")
+                bail!("timed out waiting for another Mitsuro process to finish modifying plugins")
             }
         }
     }

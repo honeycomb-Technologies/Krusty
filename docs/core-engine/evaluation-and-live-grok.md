@@ -1,6 +1,6 @@
 # Core evaluation and live Grok acceptance
 
-Krusty's core gate has two deliberately different layers:
+Mitsuro's core gate has two deliberately different layers:
 
 1. A deterministic, provider-neutral scenario corpus runs on every change. It
    proves decisions, counters, side-effect accounting, loop convergence, and
@@ -61,7 +61,7 @@ tests; the live lane remains the proof of real provider and transport behavior.
 
 ## Live Grok 4.5 provider smoke
 
-The lightweight smoke calls the Krusty `AiClient` simple and streaming paths
+The lightweight smoke calls the Mitsuro `AiClient` simple and streaming paths
 without running tools:
 
 ```bash
@@ -69,7 +69,7 @@ KRUSTY_GROK_LIVE_MODEL=grok-4.5 \
   bash scripts/core-eval.sh grok-provider-smoke
 ```
 
-It requires a real X/Grok credential already available through Krusty's
+It requires a real X/Grok credential already available through Mitsuro's
 credential store. It may consume quota. A pass proves both calls returned the
 required markers; it does not prove agent-loop behavior.
 
@@ -94,7 +94,7 @@ cargo run --release -p krusty-server --example eval_server
 
 The evaluation entrypoint bypasses the installed server PID file, uses the
 explicit disposable database and workspace above, and still resolves the real
-Honey credential store and model catalog. It also disables shared Mako daemon
+Honey credential store and model catalog. It also disables shared Hive daemon
 discovery, persistent remote-access state, project MCP auto-connect, global
 plugin/hook/skill contributions, push initialization, terminal access, and
 unneeded administrative API routes. The only intentionally shared mutable

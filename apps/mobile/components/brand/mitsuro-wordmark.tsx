@@ -20,7 +20,7 @@ interface MitsuroWordmarkProps {
 
 export function MitsuroWordmark({
   width = 220,
-  color = "#c5c1c8",
+  color = "#e8e5ea",
   style,
   testID,
 }: MitsuroWordmarkProps) {

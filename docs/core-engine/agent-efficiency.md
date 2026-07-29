@@ -1,6 +1,6 @@
 # Agent Request Efficiency and Parity
 
-Krusty's efficiency target is behavioral parity with mature coding-agent harnesses: keep the repeated request prefix small and stable, expose enough tools to act without serializing the entire catalog, measure the request that is actually rendered, and compact without losing the active objective. This is a set of implementation contracts and regression gates, not a claim that one synthetic benchmark proves overall agent quality.
+Mitsuro's efficiency target is behavioral parity with mature coding-agent harnesses: keep the repeated request prefix small and stable, expose enough tools to act without serializing the entire catalog, measure the request that is actually rendered, and compact without losing the active objective. This is a set of implementation contracts and regression gates, not a claim that one synthetic benchmark proves overall agent quality.
 
 The upstream comparison in this document is pinned to Pi commit [`b084d2f`](https://github.com/badlogic/pi-mono/tree/b084d2fb395f0f1aa924cb07b14e5d0edab115e2) and OpenCode commit [`5401eba`](https://github.com/anomalyco/opencode/tree/5401ebaededec3e2b6c1f2e0d20246ef68574598), inspected on 2026-07-13. Grok Build observations use the official 0.2.99 binary with exported local traces; the older 0.2.33 reverse-engineering artifact is not treated as current authority.
 
@@ -12,7 +12,7 @@ Pi also combines provider usage with an estimate for messages added after the la
 
 OpenCode chooses a model-family prompt, layers environment, project instructions, skills, and MCP instructions, filters tools through permission rules, and sorts the final tool map before sending it. It applies provider cache markers, uses the session ID as a provider cache key where supported, records uncached input/output/reasoning/cache-read/cache-write buckets, prunes old tool outputs, and summarizes an older head while retaining a recent tail. See OpenCode's [system prompt selection](https://github.com/anomalyco/opencode/blob/5401ebaededec3e2b6c1f2e0d20246ef68574598/packages/opencode/src/session/system.ts), [request preparation](https://github.com/anomalyco/opencode/blob/5401ebaededec3e2b6c1f2e0d20246ef68574598/packages/opencode/src/session/llm/request.ts), [provider transforms](https://github.com/anomalyco/opencode/blob/5401ebaededec3e2b6c1f2e0d20246ef68574598/packages/opencode/src/provider/transform.ts), and [compaction pipeline](https://github.com/anomalyco/opencode/blob/5401ebaededec3e2b6c1f2e0d20246ef68574598/packages/opencode/src/session/compaction.ts).
 
-Krusty follows these principles without copying either product's exact prompt or tool set. Its direct surface is larger than Pi's because user interaction, delegation, patching, search, and plan lifecycle are first-class core behaviors. It avoids paying for the rest of the registry on every turn by making specialist tools lazy. Controlled traces showed that identity/personality text was not the dominant cost: Krusty's base prompt was smaller than Pi's and substantially smaller than OpenCode's, while tool schemas and repeated action turns determined most practical overhead.
+Mitsuro follows these principles without copying either product's exact prompt or tool set. Its direct surface is larger than Pi's because user interaction, delegation, patching, search, and plan lifecycle are first-class core behaviors. It avoids paying for the rest of the registry on every turn by making specialist tools lazy. Controlled traces showed that identity/personality text was not the dominant cost: Mitsuro's base prompt was smaller than Pi's and substantially smaller than OpenCode's, while tool schemas and repeated action turns determined most practical overhead.
 
 ## Compact tool surface
 
@@ -21,7 +21,7 @@ Krusty follows these principles without copying either product's exact prompt or
 - Normal code sessions expose at most ten direct tools. GPT/Codex families receive `apply_patch` plus direct discovery tools and currently use nine slots. Grok, Claude, Gemini, Kimi, and generic families receive `edit` and `write` instead of the GPT-shaped patch grammar while retaining direct `glob`, so they can discover files without falling back to Bash.
 - Read-only plan mode exposes at most eight tools selected for inspection, questions, delegation, and leaving plan mode.
 - An active implementation plan exposes eleven direct tools so canonical task lifecycle operations cannot become unreachable behind a generic dispatcher.
-- Chat, ACP, Mako, disabled-tool, permission, and delegation rules apply their own surface-specific registrations and filters at their boundaries.
+- Chat, ACP, Hive, disabled-tool, permission, and delegation rules apply their own surface-specific registrations and filters at their boundaries.
 
 The registry still owns the complete built-in, MCP, extension, and plugin catalog. `tool_search` provides three bounded operations:
 
@@ -45,7 +45,7 @@ The repeated instruction prefix has three layers:
 
 1. The base coding contract is compact and slow-changing. A small model-family overlay adds only behavior that differs materially by provider family.
 2. Project instructions are separated from live session state so they can remain in the reusable prefix.
-3. Active plan, Mako coordinator, task, memory, report, and other volatile state is appended as current runtime context. On OpenAI Responses and Codex paths it retains `developer` authority rather than being demoted to user content.
+3. Active plan, Hive coordinator, task, memory, report, and other volatile state is appended as current runtime context. On OpenAI Responses and Codex paths it retains `developer` authority rather than being demoted to user content.
 
 Detailed tool manuals are not duplicated into the base system prompt. Direct tools rely on their function description and JSON Schema; deferred guidance is loaded only by `tool_search.describe`. Tool definitions are sorted by name before provider conversion.
 
@@ -55,7 +55,7 @@ Provider transports preserve this layering:
 - OpenAI Responses keeps base plus project instructions stable, places runtime context at the tail, supplies a normalized session cache key of at most 64 characters when enabled, and requests low text verbosity. Newer cache-option fields are model-gated. Extended retention requests 24 hours only for model families that support it; GPT-5.6+ keeps its supported 30-minute TTL.
 - ChatGPT Codex keeps a bounded session-keyed WebSocket pool with five-minute idle eviction and a maximum 55-minute reuse age. A warm request uses `previous_response_id` and sends only the new input when the stable request fingerprint, exact message prefix, prior assistant output, and runtime-context transition all match. Any incompatible change resets continuation to a full request; a missing previous response is retried once with full context.
 
-Interactive streaming setup retries only typed transient provider statuses (`429`, `500`, `502`, `503`, `504`, and overload `529`) and definite connection-establishment failures. It makes at most three retries with exponential backoff, jitter, and an eight-second cap on provider-supplied `Retry-After`; authentication, payment, permission, malformed-request, and ambiguous post-send timeout failures remain terminal. Once any text, thinking, client tool, or hosted server-tool activity has appeared, Krusty does not replay the provider call. Canceling either request setup or an open HTTP/WebSocket stream drops the upstream response promptly so hidden generation does not continue after the user stops a turn.
+Interactive streaming setup retries only typed transient provider statuses (`429`, `500`, `502`, `503`, `504`, and overload `529`) and definite connection-establishment failures. It makes at most three retries with exponential backoff, jitter, and an eight-second cap on provider-supplied `Retry-After`; authentication, payment, permission, malformed-request, and ambiguous post-send timeout failures remain terminal. Once any text, thinking, client tool, or hosted server-tool activity has appeared, Mitsuro does not replay the provider call. Canceling either request setup or an open HTTP/WebSocket stream drops the upstream response promptly so hidden generation does not continue after the user stops a turn.
 
 Request telemetry records component byte/token estimates, tool count, wire-body size, cache mode, and a SHA-256 request-shape fingerprint. The fingerprint covers stable prompt and tool material but excludes conversation history and volatile session context; logs do not contain the prompt text or schema bodies.
 
@@ -81,7 +81,7 @@ Automatic pressure, manual `/pinch`, and provider-overflow recovery share this p
 
 ## Usage semantics
 
-Krusty's normalized input and completion buckets are intentionally non-overlapping. `reasoning_tokens` is the one explicit subset, included for observability:
+Mitsuro's normalized input and completion buckets are intentionally non-overlapping. `reasoning_tokens` is the one explicit subset, included for observability:
 
 | Field | Meaning |
 | --- | --- |
@@ -122,5 +122,5 @@ Repository release validation remains broader than these focused gates: `cargo c
 
 - The byte-to-token estimator is deliberately conservative and deterministic; it is not a provider tokenizer and is calibrated by real usage only after a provider reports usage.
 - The warm-continuation test measures serialized request bytes, not latency, billed tokens, cache-hit rate, or answer quality on a live provider.
-- Matching upstream architectural behaviors does not establish that Krusty is objectively better than Pi, OpenCode, Codex, or another agent. That requires repeatable task suites, live-provider measurements, failure-rate tracking, and human evaluation.
+- Matching upstream architectural behaviors does not establish that Mitsuro is objectively better than Pi, OpenCode, Codex, or another agent. That requires repeatable task suites, live-provider measurements, failure-rate tracking, and human evaluation.
 - Cache behavior is provider- and model-dependent. A stable prefix and correct cache fields make hits possible; the provider decides whether a request actually hits.

@@ -1,6 +1,6 @@
 # WASM Extension System
 
-Krusty supports a WebAssembly-based extension system that lets third-party code run inside the application without risking the stability or security of the host process. Extensions are compiled to WASM components, loaded at runtime, and executed in a sandboxed virtual machine. They can add language servers, slash commands, context servers, debug adapters, documentation providers, and more.
+Mitsuro supports a WebAssembly-based extension system that lets third-party code run inside the application without risking the stability or security of the host process. Extensions are compiled to WASM components, loaded at runtime, and executed in a sandboxed virtual machine. They can add language servers, slash commands, context servers, debug adapters, documentation providers, and more.
 
 ## Why WebAssembly
 
@@ -8,7 +8,7 @@ Traditional plugin systems face a fundamental tension: give plugins too much acc
 
 **Safety.** A WASM module runs in its own linear memory space. It cannot read or write host memory, call arbitrary system functions, or access files outside of its designated working directory. If an extension panics, the host catches the trap and continues running.
 
-**Performance.** Wasmtime compiles WASM to native machine code ahead of time. Extensions execute at near-native speed, and Krusty caches compiled artifacts using an incremental compilation cache (capped at 64 MB) so subsequent loads are fast.
+**Performance.** Wasmtime compiles WASM to native machine code ahead of time. Extensions execute at near-native speed, and Mitsuro caches compiled artifacts using an incremental compilation cache (capped at 64 MB) so subsequent loads are fast.
 
 **Portability.** A single `.wasm` binary works on Linux, macOS, and Windows across both x86-64 and AArch64 architectures. Extension authors compile once and distribute everywhere.
 
@@ -16,7 +16,7 @@ Traditional plugin systems face a fundamental tension: give plugins too much acc
 
 ## Zed Compatibility
 
-The extension system is ported from Zed's `crates/extension` and `crates/extension_host` modules and adapted for Krusty's Tokio async runtime. The WIT interface definitions, manifest format, and API versioning scheme are all compatible with Zed's extension ecosystem. This means existing Zed extensions that compile to WASM component binaries can be loaded by Krusty without modification, provided the API version they target is supported.
+The extension system is ported from Zed's `crates/extension` and `crates/extension_host` modules and adapted for Mitsuro's Tokio async runtime. The WIT interface definitions, manifest format, and API versioning scheme are all compatible with Zed's extension ecosystem. This means existing Zed extensions that compile to WASM component binaries can be loaded by Mitsuro without modification, provided the API version they target is supported.
 
 The WIT files in the `wit/` directory at the project root mirror Zed's public interface. Internally, versioned copies of these WIT files live under `crates/krusty-core/src/extensions/wit/` in directories named by version (e.g., `since_v0.8.0/`).
 
@@ -34,7 +34,7 @@ The top-level WIT package is `zed:extension`, and the primary world is called `e
 
 **platform** -- Detect the host OS and CPU architecture. The `current-platform` function returns a tuple of the operating system (mac, linux, windows) and architecture (aarch64, x86, x86-64). Extensions use this to pick the right binary when installing tools.
 
-**nodejs** -- JavaScript runtime access. Despite the interface name, Krusty backs this with Bun rather than Node.js. The interface exposes `node-binary-path` (returns the path to the Bun binary), `npm-package-latest-version`, `npm-package-installed-version`, and `npm-install-package`. Extensions that manage JS-based language servers use these to install and update npm packages.
+**nodejs** -- JavaScript runtime access. Despite the interface name, Mitsuro backs this with Bun rather than Node.js. The interface exposes `node-binary-path` (returns the path to the Bun binary), `npm-package-latest-version`, `npm-package-installed-version`, and `npm-install-package`. Extensions that manage JS-based language servers use these to install and update npm packages.
 
 **process** -- Run shell commands. The `run-command` function takes a command name, arguments, and environment variables, executes the process on the host, and returns the exit status, stdout, and stderr. Available since API version 0.3.0.
 
@@ -126,12 +126,12 @@ Older extensions continue to work because the host translates their types into t
 
 ## The Bun Runtime
 
-Some extensions, particularly those wrapping JavaScript-based language servers, need a JS runtime to install and run npm packages. Krusty uses Bun instead of Node.js for this purpose, chosen for its faster startup and install times.
+Some extensions, particularly those wrapping JavaScript-based language servers, need a JS runtime to install and run npm packages. Mitsuro uses Bun instead of Node.js for this purpose, chosen for its faster startup and install times.
 
 The `BunRuntime` manager in `crates/krusty-core/src/extensions/bun_runtime.rs` handles Bun lifecycle:
 
 1. **System detection** -- first checks if `bun` is available on the system PATH
-2. **Managed installation** -- if no system Bun is found, downloads Bun 1.1.42 from GitHub releases, extracts it, and places it in the Krusty data directory
+2. **Managed installation** -- if no system Bun is found, downloads Bun 1.1.42 from GitHub releases, extracts it, and places it in the Mitsuro data directory
 3. **Caching** -- the detected or installed instance is cached behind an `Arc<RwLock>` so subsequent calls avoid re-detection
 
 When extensions call the `nodejs` WIT interface, the host routes those calls through BunRuntime. `node-binary-path` returns the path to the Bun binary. `npm-install-package` runs `bun add`. Package version queries use `bun pm info`. From the extension's perspective, the interface is identical to what Zed provides with Node.js.

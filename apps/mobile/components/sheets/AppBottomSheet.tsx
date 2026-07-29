@@ -266,9 +266,7 @@ export function AppBottomSheet({
           style={[
             StyleSheet.absoluteFill,
             {
-              backgroundColor: isDark
-                ? "rgba(11,17,25,0.94)"
-                : "rgba(255,255,255,0.95)",
+              backgroundColor: t.surfaceOverlayStrong,
             },
           ]}
         />

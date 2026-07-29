@@ -1,22 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const CREATURES: &[&str] = &[
-    "Horseshoe Crab",
-    "Hermit Crab",
-    "Mantis Shrimp",
-    "Nautilus",
-    "Octopus",
-    "Cuttlefish",
-    "Axolotl",
-    "Sea Otter",
-    "Gecko",
-    "Raven",
-    "Firefly",
-    "Pangolin",
-];
-
-/// Stable runtime identity for an agent. Semantic task identity and playful
-/// display identity deliberately remain separate.
+/// Stable runtime identity for an agent. `creature_name` remains serialized
+/// for compatibility, but its value is now a professional display label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentIdentity {
     pub agent_id: String,
@@ -33,7 +18,7 @@ impl AgentIdentity {
             agent_id: agent_id.into(),
             canonical_path: "/root".to_string(),
             task_name: "coordinator".to_string(),
-            creature_name: "Krusty the Krab".to_string(),
+            creature_name: "Agent".to_string(),
             role: "coordinator".to_string(),
             ordinal: 0,
         }
@@ -48,13 +33,7 @@ impl AgentIdentity {
     ) -> Self {
         let task_name = task_name.into();
         let role = role.into();
-        let creature = CREATURES[ordinal % CREATURES.len()];
-        let generation = ordinal / CREATURES.len();
-        let creature_name = if generation == 0 {
-            creature.to_string()
-        } else {
-            format!("{creature} {}", generation + 1)
-        };
+        let creature_name = format!("Hive Agent {:02}", ordinal + 1);
         let parent_path = parent_path.trim_end_matches('/');
         let path_component = canonical_component(&task_name, ordinal);
 
@@ -100,28 +79,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn root_identity_is_krusty() {
+    fn root_identity_is_agent() {
         let root = AgentIdentity::root("root-id");
-        assert_eq!(root.creature_name, "Krusty the Krab");
+        assert_eq!(root.creature_name, "Agent");
         assert_eq!(root.canonical_path, "/root");
     }
 
     #[test]
-    fn child_identity_is_deterministic_and_separates_task_from_creature() {
+    fn child_identity_is_deterministic_and_separates_task_from_display_label() {
         let first = AgentIdentity::child("id", "/root", "Honey audit", "reviewer", 0);
         let restored = AgentIdentity::child("id", "/root", "Honey audit", "reviewer", 0);
         assert_eq!(first, restored);
         assert_eq!(first.task_name, "Honey audit");
-        assert_eq!(first.creature_name, "Horseshoe Crab");
+        assert_eq!(first.creature_name, "Hive Agent 01");
         assert_eq!(
             first.display_name(),
-            "Horseshoe Crab · Honey audit [reviewer]"
+            "Hive Agent 01 · Honey audit [reviewer]"
         );
     }
 
     #[test]
-    fn creature_names_are_unique_for_the_first_generation() {
-        let identities = (0..CREATURES.len())
+    fn display_labels_are_unique() {
+        let identities = (0..24)
             .map(|ordinal| AgentIdentity::child("id", "/root", "task", "explorer", ordinal))
             .collect::<Vec<_>>();
         let mut names = identities
@@ -130,15 +109,15 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), CREATURES.len());
+        assert_eq!(names.len(), 24);
     }
 
     #[test]
     fn later_generations_remain_unique_and_stable() {
         let first = AgentIdentity::child("a", "/root", "task", "builder", 0);
         let thirteenth = AgentIdentity::child("b", "/root", "task", "builder", 12);
-        assert_eq!(first.creature_name, "Horseshoe Crab");
-        assert_eq!(thirteenth.creature_name, "Horseshoe Crab 2");
+        assert_eq!(first.creature_name, "Hive Agent 01");
+        assert_eq!(thirteenth.creature_name, "Hive Agent 13");
         assert_ne!(first.canonical_path, thirteenth.canonical_path);
     }
 }

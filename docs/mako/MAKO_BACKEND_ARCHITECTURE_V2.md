@@ -1,17 +1,17 @@
-# Mako Backend Architecture V2
+# Hive Backend Architecture V2
 
 ## Status
 
-This document is the backend contract for Mako. It supersedes descriptions in
+This document is the backend contract for Hive. It supersedes descriptions in
 older product documents that place autonomous execution inside the HTTP server.
-The frontend may present Mako in many ways, but it must not become the owner of
+The frontend may present Hive in many ways, but it must not become the owner of
 execution, schedules, identity, or recovery state.
 
 ## Outcome
 
-Mako is a long-lived, independently supervised process. It keeps working when a
-web client disconnects and can restart independently of the Krusty HTTP server.
-The HTTP server is a control-plane client, not a second Mako runtime.
+Hive is a long-lived, independently supervised process. It keeps working when a
+web client disconnects and can restart independently of the Mitsuro HTTP server.
+The HTTP server is a control-plane client, not a second Hive runtime.
 
 ```text
 CLI / mobile / web
@@ -31,7 +31,7 @@ krusty-core (orchestrator, tools, storage, providers)
 ```
 
 The daemon is the only production process allowed to claim scheduled work or
-start a Mako execution. Embedded runtime construction remains available for
+start a Hive execution. Embedded runtime construction remains available for
 focused tests, but production router construction fails closed when the daemon
 is unavailable.
 
@@ -59,7 +59,7 @@ scheduler or execution owner.
 
 ## Durable Control Model
 
-Mako separates the user's desired work from attempts to perform it:
+Hive separates the user's desired work from attempts to perform it:
 
 - **controller**: the durable objective and lifecycle requested by a user;
 - **schedule**: recurrence, timezone, misfire, overlap, and retry policy;
@@ -228,7 +228,7 @@ removed in bounded batches; pending controls are never age-pruned.
 ## Identity, Personality, and Continuity
 
 Personality is a durable product subsystem, not a decorative prompt suffix.
-Mako uses five revisioned, database-owned profile documents:
+Hive uses five revisioned, database-owned profile documents:
 
 - `SOUL`: voice, temperament, and behavioral values;
 - `IDENTITY`: name and stable self-description;
@@ -243,8 +243,8 @@ are recorded and revisioned.
 
 Prompt construction has distinct cache and trust tiers:
 
-1. base Krusty behavior and safety;
-2. stable Mako identity profile;
+1. base Mitsuro behavior and safety;
+2. stable Hive identity profile;
 3. project instructions and trusted project context;
 4. current session state, retrieved episodes, and transient steering.
 

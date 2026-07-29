@@ -187,7 +187,7 @@ function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] 
         detailParts.push(`branch ${run.target_branch}`);
       }
       if (run.runtime?.crew_slug) {
-        detailParts.push(`${run.runtime.crew_slug} crew`);
+        detailParts.push(`${run.runtime.crew_slug} agent`);
       }
 
       return [

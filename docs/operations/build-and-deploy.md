@@ -1,10 +1,10 @@
 # Building, CI/CD & Packaging
 
-This document explains how Krusty is built, tested, and distributed across all of its targets: the Rust CLI, the self-hosted server, the Expo mobile app, and the Tauri desktop shell. It covers the workspace layout, the quality gates enforced in CI, how releases are cut, and the various channels through which users can install Krusty.
+This document explains how Mitsuro is built, tested, and distributed across all of its targets: the Rust CLI, the self-hosted server, the Expo mobile app, and the Tauri desktop shell. It covers the workspace layout, the quality gates enforced in CI, how releases are cut, and the various channels through which users can install Mitsuro.
 
 ## Rust workspace
 
-The Rust side of Krusty is organized as a Cargo workspace with seven Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
+The Rust side of Mitsuro is organized as a Cargo workspace with seven Mitsuro crates plus the `grok-auth` support crate. The primary runtime boundaries are:
 
 - **krusty-cli** (`crates/krusty-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `krusty-core` and `krusty-server`.
 - **krusty-core** (`crates/krusty-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
@@ -15,8 +15,8 @@ The Rust side of Krusty is organized as a Cargo workspace with seven Krusty crat
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
-The product-facing Krusty crates and desktop bundle currently share version
-`0.8.2` and edition 2021. The internal Mako daemon/protocol crates have their
+The product-facing Mitsuro crates and desktop bundle currently share version
+`0.8.2` and edition 2021. The internal Hive daemon/protocol crates have their
 own `0.1.0` package versions; release tags are validated against the `krusty`
 package version.
 
@@ -60,7 +60,7 @@ Before routing autonomous continuation, opening broad implementation work, or va
 scripts/check-default-branch-preflight.sh
 ```
 
-The preflight compares the GitHub default branch reported by `gh repo view`, the authoritative remote HEAD from `git ls-remote --symref origin HEAD`, and the local tracking symref at `refs/remotes/origin/HEAD`. Krusty's expected default branch is `main`; if local `origin/HEAD` still points at a stale branch such as `origin/dev`, fix the local ref before using it to choose a base branch. The check is ruleset-aware: a classic branch-protection 404 is acceptable only when an active branch ruleset applies to `refs/heads/main`.
+The preflight compares the GitHub default branch reported by `gh repo view`, the authoritative remote HEAD from `git ls-remote --symref origin HEAD`, and the local tracking symref at `refs/remotes/origin/HEAD`. Mitsuro's expected default branch is `main`; if local `origin/HEAD` still points at a stale branch such as `origin/dev`, fix the local ref before using it to choose a base branch. The check is ruleset-aware: a classic branch-protection 404 is acceptable only when an active branch ruleset applies to `refs/heads/main`.
 
 The preflight is safe for validation: it reads repository metadata, remote refs, classic branch protection, and repository rulesets only. It does not push, delete branches, trigger workflows, edit settings, create releases, or read secret values.
 
@@ -78,7 +78,7 @@ Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.
 | `aarch64-apple-darwin` | `macos-latest` |
 | `x86_64-pc-windows-msvc` | `windows-latest` |
 
-Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Krusty in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
+Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Mitsuro in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
 
 **2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
 
@@ -90,7 +90,7 @@ The publish job fails closed unless GitHub reports the release tag as protected 
 
 ### Install script
 
-The fastest way to install Krusty is the one-liner:
+The fastest way to install Mitsuro is the one-liner:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh | sh
@@ -115,8 +115,8 @@ curl -fsSL ... | VERSION=v0.8.2 sh
 ## Self-hosted systemd service
 
 The checked-in user services run the HTTP control plane and the independent
-Mako autonomous backend from binaries on `PATH`. The HTTP server requires
-Mako's private socket and fails closed if it cannot complete an authenticated
+Hive autonomous backend from binaries on `PATH`. The HTTP server requires
+Hive's private socket and fails closed if it cannot complete an authenticated
 daemon handshake. Build both release binaries before installing or restarting
 the units:
 
@@ -134,20 +134,20 @@ curl --fail http://127.0.0.1:3000/health
 
 `krusty-mako.socket` starts the daemon on demand. Do not run a second manual
 daemon against the same database and socket. For deployment verification,
-confirm the three tracked unit states, an authenticated Mako diagnostics/API
+confirm the three tracked unit states, an authenticated Hive diagnostics/API
 request through the server, and a restart-recovery test; a successful Cargo
 build alone is not proof that autonomous work is live.
 
-Mako-bearing release archives include these user units. The shell installer
-links them into `~/.config/systemd/user`, and the future Mako-bearing AUR package
+Hive-bearing release archives include these user units. The shell installer
+links them into `~/.config/systemd/user`, and the future Hive-bearing AUR package
 places them in `/usr/lib/systemd/user`. The default hardening grants writes
 under `~/Work` and
-Krusty's state/cache directories; add a user-service drop-in with an additional
+Mitsuro's state/cache directories; add a user-service drop-in with an additional
 `ReadWritePaths=` entry when autonomous sessions use another project root.
 Homebrew exposes `krusty-mako` through `brew services`; the HTTP server remains
 an explicitly configured self-host service.
 
-Mako resolves `.krusty/skills` independently for each run's frozen project
+Hive resolves `.krusty/skills` independently for each run's frozen project
 root. Autonomous daemon runs intentionally do not load project `.mcp.json`
 servers yet, and MCP connections made through the HTTP `/mcp` API do not cross
 the process boundary into the daemon. This is fail-closed: project MCP will be
@@ -171,9 +171,9 @@ This repository does not automatically write to `BurgessTG/homebrew-tap`, so the
 
 The repository contains a prepared AUR recipe, but `krusty` is not currently
 published in the AUR. The checked metadata targets legacy release `v0.7.3`,
-which predates the dedicated Mako daemon and therefore installs `krusty` only.
-For the next Mako-bearing stable release, the conditional `PKGBUILD`
-(`aur/PKGBUILD`) will build and install both Krusty and Mako plus their systemd
+which predates the dedicated Hive daemon and therefore installs `krusty` only.
+For the next Hive-bearing stable release, the conditional `PKGBUILD`
+(`aur/PKGBUILD`) will build and install both Mitsuro and Hive plus their systemd
 user units. It downloads the source tarball for the release tag, verifies its
 pinned SHA-256 checksum, builds from source using Cargo with the stable
 toolchain, runs the test suite during the `check()` phase, and installs the
@@ -225,7 +225,7 @@ The mobile app lives in `apps/mobile` and is built with Expo and EAS (Expo Appli
 
 ### TestFlight deployment
 
-The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It triggers on pushes to `main` when files change under `apps/mobile/**`, `packages/**`, or `.github/workflows/mobile-testflight.yml`. The workflow can also be triggered manually via `workflow_dispatch`; choose `main` in the GitHub UI/CLI because Krusty's default branch and release governance are anchored on `main`, not on the legacy `dev` branch.
+The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It triggers on pushes to `main` when files change under `apps/mobile/**`, `packages/**`, or `.github/workflows/mobile-testflight.yml`. The workflow can also be triggered manually via `workflow_dispatch`; choose `main` in the GitHub UI/CLI because Mitsuro's default branch and release governance are anchored on `main`, not on the legacy `dev` branch.
 
 Push path filters are intentionally narrow so Rust-only, docs-only, and desktop-only changes do not start a TestFlight build. Manual `workflow_dispatch` runs do not get the same path-filter protection, so use manual dispatch only for an intentional TestFlight validation on `main`, after reviewing the diff and approvals.
 
@@ -245,7 +245,7 @@ For safe no-TestFlight validation of docs/tooling changes, inspect the workflow 
 
 ## Desktop builds
 
-The desktop app is a Tauri v2 shell (`apps/desktop/shell`) that wraps the same React frontend used by the mobile app. The Tauri process also starts the embedded Krusty server, so the desktop app is fully self-contained -- it does not require a separate server process.
+The desktop app is a Tauri v2 shell (`apps/desktop/shell`) that wraps the same React frontend used by the mobile app. The Tauri process also starts the embedded Mitsuro server, so the desktop app is fully self-contained -- it does not require a separate server process.
 
 The `tauri.conf.json` configures the build pipeline:
 
@@ -337,4 +337,4 @@ bun run ios            # Build and run on iOS simulator
 bun run android        # Build and run on Android emulator
 ```
 
-The mobile app connects to a running Krusty server instance (either local or remote) for its backend.
+The mobile app connects to a running Mitsuro server instance (either local or remote) for its backend.

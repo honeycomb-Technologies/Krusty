@@ -1,12 +1,12 @@
 # Sub-Agents and Teams
 
-Krusty is not a single agent. When a task is large enough, ambiguous enough, or parallelizable enough, the main agent spawns sub-agents to handle parts of the work. These sub-agents are lightweight, policy-bounded, and disposable. They inherit explicit tool, permission, path, and turn-budget governance, but that governance is not an operating-system sandbox; any delegated Bash access still has the authority of the server account. They do their job, report back, and disappear. This document explains how that delegation works, what kinds of sub-agents exist, how teams coordinate, and what keeps everything safe.
+Mitsuro is not a single agent. When a task is large enough, ambiguous enough, or parallelizable enough, the main agent spawns sub-agents to handle parts of the work. These sub-agents are lightweight, policy-bounded, and disposable. They inherit explicit tool, permission, path, and turn-budget governance, but that governance is not an operating-system sandbox; any delegated Bash access still has the authority of the server account. They do their job, report back, and disappear. This document explains how that delegation works, what kinds of sub-agents exist, how teams coordinate, and what keeps everything safe.
 
 ## Why Sub-Agents Exist
 
 A single agent loop works well for straightforward conversations. But some tasks don't fit that pattern. When you say "explore the entire codebase and tell me how the plugin system works," one agent reading files sequentially would be slow and expensive. When you say "build a game with separate modules for rendering, physics, and input," one agent writing all the code serially would be inefficient.
 
-Sub-agents solve both problems. For exploration, Krusty fans out multiple read-only agents that each investigate a different part of the codebase in parallel, then merges their findings. For building, it assigns each component to a separate agent that writes its own files concurrently. The main agent acts as coordinator: it decides what to delegate, spawns the workers, collects results, and synthesizes a response.
+Sub-agents solve both problems. For exploration, Mitsuro fans out multiple read-only agents that each investigate a different part of the codebase in parallel, then merges their findings. For building, it assigns each component to a separate agent that writes its own files concurrently. The main agent acts as coordinator: it decides what to delegate, spawns the workers, collects results, and synthesizes a response.
 
 ## The Sub-Agent System
 
@@ -16,7 +16,7 @@ Each sub-agent gets its own conversation with the AI model. It receives a system
 
 That boundary is intentional and explicit. Delegated workers reuse the parent's exact `AiClient`, model identity, semantic `ProgressLedger`, history shaping, cancellation tree, process registry, and inherited permission/path/tool/turn ceiling. They do not consume `RunSpec`, emit the full parent `LoopEvent` stream, or own the parent session's crash-continuation state. A delegated run has a persisted lifecycle record and final evidence artifact; a later related run may use that artifact as a resume seed, but this is not equivalent to resuming a first-class child conversation at an interrupted provider/tool boundary. Unifying the kernels remains a possible focused refactor, not a reason to duplicate or rewrite the rest of core.
 
-A sub-agent task is described by `SubAgentTask`: a struct carrying a semantic task ID and name, an optional `AgentIdentity`, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. Identity deliberately separates the canonical runtime path from the playful display name. The root is `Krusty the Krab`; children receive deterministic creature names such as `Horseshoe Crab`, `Mantis Shrimp`, or `Nautilus` while retaining task labels such as `Honey audit`. The task does not specify which model to use -- that's resolved by the pool based on the user's current model selection, making the system provider-agnostic.
+A sub-agent task is described by `SubAgentTask`: a struct carrying a semantic task ID and name, an optional `AgentIdentity`, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. Identity separates the canonical runtime path from the display name. The root identity is Agent; children receive deterministic names such as `Hive Agent 01` while retaining task labels such as `Honey audit`. The task does not specify which model to use -- that is resolved by the pool from the user's current model selection, keeping the system provider-agnostic.
 
 Results come back as `SubAgentResult`, which includes whether the task succeeded, the agent's final output, a list of files it examined, how many turns it took, wall-clock duration, any errors, and any policy violations it triggered. The `agent` tool also records delegated-run lifecycle metadata and the final structured artifact when session storage is available.
 
@@ -52,7 +52,7 @@ Build agents are submitted eagerly to the adaptive scheduler. `max_concurrency` 
 
 ## The Team System
 
-Beyond the agent tool's one-shot delegation, Krusty has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
+Beyond the agent tool's one-shot delegation, Mitsuro has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
 
 Each teammate is defined by a `TeammateConfig` with a semantic name, a role, and an optional turn budget. `TeamManager` assigns a deterministic creature identity for display and keeps the semantic name for task ownership and cancellation. There are three roles:
 
@@ -66,7 +66,7 @@ The manager provides lifecycle controls: `list_teammates` to check status, `canc
 
 ## The Auto-Classifier
 
-When Krusty operates in autonomous mode (Mako), there is no human in the loop to approve tool calls. The auto-classifier (`crates/krusty-core/src/agent/autonomy/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
+When Mitsuro operates in autonomous mode (Hive), there is no human in the loop to approve tool calls. The auto-classifier (`crates/krusty-core/src/agent/autonomy/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
 
 The classifier works in two stages:
 
@@ -101,7 +101,7 @@ Concurrent agents are bounded at multiple levels:
 
 **Turn budgets.** Sub-agents are unlimited by default. A parent or task may set an explicit finite ceiling when it is a real resource policy; when that ceiling is exhausted, the agent stops with a typed budget-exhaustion reason. Loop detection is handled separately by the semantic progress ledger.
 
-**Cancellation tokens.** Every sub-agent receives a child cancellation token from its parent. If the parent is cancelled (Ctrl+C, Mako tick interrupted, team manager shutdown), cancellation propagates to all children immediately. Each turn of the agent loop checks the token before proceeding.
+**Cancellation tokens.** Every sub-agent receives a child cancellation token from its parent. If the parent is cancelled (Ctrl+C, Hive tick interrupted, team manager shutdown), cancellation propagates to all children immediately. Each turn of the agent loop checks the token before proceeding.
 
 **Panic recovery.** Sub-agents run as tokio tasks. If a task panics, the `JoinHandle` catches it and converts it to a failed `SubAgentResult` with the panic message. The pool continues collecting results from the remaining agents.
 

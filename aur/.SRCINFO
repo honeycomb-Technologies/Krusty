@@ -1,5 +1,5 @@
 pkgbase = krusty
-	pkgdesc = The fun coding assistant
+	pkgdesc = Mitsuro multi-platform AI coding product with Agent and Hive
 	pkgver = 0.7.3
 	pkgrel = 1
 	url = https://github.com/honeycomb-Technologies/Krusty

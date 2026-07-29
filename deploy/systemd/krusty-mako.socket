@@ -1,5 +1,5 @@
 [Unit]
-Description=Krusty Mako private IPC socket
+Description=Mitsuro Hive private IPC socket
 Before=krusty-mako.service
 
 [Socket]

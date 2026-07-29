@@ -68,7 +68,7 @@ pub(super) async fn oauth_callback(
             .remove(provider_id.storage_key());
         return callback_error_page(
             provider_id.storage_key().to_string(),
-            "This sign-in session expired. Start the login again from Krusty.".to_string(),
+            "This sign-in session expired. Start the login again from Mitsuro.".to_string(),
         );
     }
 
@@ -191,7 +191,7 @@ fn callback_page(
     error: Option<String>,
 ) -> Response {
     let message = if success {
-        "You can return to Krusty now. This tab will close if your browser allows it.".to_string()
+        "You can return to Mitsuro now. This tab will close if your browser allows it.".to_string()
     } else {
         error
             .clone()
@@ -226,10 +226,10 @@ fn callback_page(
   <title>{headline_text}</title>
   <style>
     :root {{
-      color-scheme: light;
+      color-scheme: dark;
       font-family: ui-sans-serif, system-ui, sans-serif;
-      background: #f4efe7;
-      color: #1f1a17;
+      background: #0c0d10;
+      color: #e8e5ea;
     }}
     body {{
       margin: 0;
@@ -237,16 +237,16 @@ fn callback_page(
       display: grid;
       place-items: center;
       background:
-        radial-gradient(circle at top, rgba(217, 119, 6, 0.18), transparent 35%),
-        linear-gradient(180deg, #fbf7f0 0%, #f1ebe0 100%);
+        radial-gradient(circle at top, rgba(117, 97, 126, 0.22), transparent 40%),
+        linear-gradient(180deg, #141519 0%, #0c0d10 100%);
     }}
     main {{
       width: min(92vw, 30rem);
       padding: 1.5rem;
       border-radius: 1.5rem;
-      background: rgba(255, 255, 255, 0.9);
-      box-shadow: 0 20px 60px rgba(61, 42, 24, 0.16);
-      border: 1px solid rgba(95, 72, 53, 0.12);
+      background: #19181d;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(232, 229, 234, 0.12);
     }}
     h1 {{
       margin: 0 0 0.75rem;
@@ -255,7 +255,7 @@ fn callback_page(
     }}
     p {{
       margin: 0;
-      color: #5c4a3b;
+      color: #9e98a3;
       line-height: 1.5;
     }}
     .status {{
@@ -280,8 +280,8 @@ fn callback_page(
       padding: 0.75rem 1rem;
       border-radius: 999px;
       text-decoration: none;
-      color: white;
-      background: #111827;
+      color: #e8e5ea;
+      background: #75617e;
     }}
   </style>
 </head>
@@ -290,7 +290,7 @@ fn callback_page(
     <div class="{headline_class}">{provider}</div>
     <h1>{headline_text}</h1>
     <p>{message_text}</p>
-    <a href="/">Return to Krusty</a>
+    <a href="/">Return to Mitsuro</a>
   </main>
   <script>
     const payload = {payload_json};

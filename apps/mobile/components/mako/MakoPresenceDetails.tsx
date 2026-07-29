@@ -293,7 +293,7 @@ export function MakoPresenceDetails({
       ) : null}
 
       <View style={styles.sectionHeader}>
-        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Crew</Text>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Hive Agents</Text>
         <Text style={[styles.countText, { color: t.mutedForeground }]}>
           {crew.length}
         </Text>
@@ -323,7 +323,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "identity",
                 title: `Edit ${member.slug} identity`,
-                subtitle: "Name, role, and external presence for this crew member.",
+                subtitle: "Name, role, and external presence for this Hive Agent.",
                 initialValue: member.identity?.content ?? "",
               });
             }}
@@ -333,7 +333,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "soul",
                 title: `Edit ${member.slug} soul`,
-                subtitle: "How this crew member thinks, writes, and behaves.",
+                subtitle: "How this Hive Agent thinks, writes, and behaves.",
                 initialValue: member.soul?.content ?? "",
               });
             }}
@@ -343,7 +343,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "memory",
                 title: `Edit ${member.slug} memory`,
-                subtitle: "Durable notes and role-specific memory for this crew member.",
+                subtitle: "Durable notes and role-specific memory for this Hive Agent.",
                 initialValue: member.memory?.content ?? "",
               });
             }}

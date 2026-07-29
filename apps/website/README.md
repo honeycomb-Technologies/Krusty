@@ -1,6 +1,6 @@
-# Krusty Website
+# Mitsuro Website
 
-Fresh SvelteKit/Bun website for the future `krusty.dev` relaunch.
+SvelteKit/Bun product website for Mitsuro by Honeycomb Technologies.
 
 ## Commands
 

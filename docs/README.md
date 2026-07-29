@@ -1,15 +1,15 @@
-# Krusty Documentation
+# Mitsuro Documentation
 
-Welcome to the Krusty project documentation. These documents explain how every part of the system works, why specific design choices were made, and how everything connects together.
+Welcome to the Mitsuro project documentation. These documents explain how every part of the system works, why specific design choices were made, and how everything connects together.
 
 ## How to Read These Docs
 
 **If you're an investor or non-technical reader**, start with:
-1. [What Is Krusty?](architecture/overview.md) - The big picture in plain language
+1. [What Is Mitsuro?](architecture/overview.md) - The big picture in plain language
 2. [Design Decisions](architecture/design-decisions.md) - Why we built it this way
 
 **If you're an engineer evaluating the codebase**, start with:
-1. [What Is Krusty?](architecture/overview.md) - System overview
+1. [What Is Mitsuro?](architecture/overview.md) - System overview
 2. [How a Message Flows Through the System](architecture/data-flow.md) - End-to-end trace
 3. Then dive into whichever subsystem interests you
 
@@ -26,7 +26,7 @@ High-level system design and the reasoning behind it.
 
 | Document | Description |
 |----------|-------------|
-| [What Is Krusty?](architecture/overview.md) | Plain-language overview of the entire system, its four interfaces, and what problems it solves |
+| [What Is Mitsuro?](architecture/overview.md) | Plain-language overview of the entire system, its four interfaces, and what problems it solves |
 | [Data Flow](architecture/data-flow.md) | Trace a single user message from input through every subsystem to response |
 | [Design Decisions](architecture/design-decisions.md) | The 12 major architectural choices, what alternatives existed, and why we chose what we did |
 
@@ -55,27 +55,27 @@ Data persistence and state management.
 
 ## Interfaces
 
-The four ways users interact with Krusty.
+The four ways users interact with Mitsuro.
 
 | Document | Description |
 |----------|-------------|
 | [Terminal UI (TUI)](interfaces/tui.md) | Ratatui-based terminal interface: blocks, themes, input system, markdown rendering |
 | [Web Server & API](interfaces/server-api.md) | Axum HTTP/WebSocket server, REST endpoints, SSE streaming, push notifications |
 | [ACP Editor Integration](interfaces/acp-editor-integration.md) | How editors (Zed, Neovim, JetBrains) connect via the Agent Client Protocol |
-| [Mako Autonomous Mode](interfaces/mako-autonomous-mode.md) | Background autonomous agent: tick engine, swarm execution, CLI controls |
+| [Hive Autonomous Mode](interfaces/mako-autonomous-mode.md) | Background autonomous agent: tick engine, swarm execution, CLI controls |
 
-## Mako Engineering
+## Hive Engineering
 
 Implemented runtime architecture, operations, and data-handling guidance for
-the Mako surface. Superseded product plans live in the documentation archive.
+the Hive surface. Superseded product plans live in the documentation archive.
 
 | Document | Description |
 |----------|-------------|
-| [Mako Engineering Index](mako/README.md) | Current runtime architecture, autonomous-mode behavior, operations, and privacy guidance |
+| [Hive Engineering Index](mako/README.md) | Current runtime architecture, autonomous-mode behavior, operations, and privacy guidance |
 
 ## Frontends
 
-Client applications that connect to the Krusty server.
+Client applications that connect to the Mitsuro server.
 
 | Document | Description |
 |----------|-------------|
@@ -86,7 +86,7 @@ Client applications that connect to the Krusty server.
 
 ## Extensions
 
-How Krusty is extended beyond its built-in capabilities.
+How Mitsuro is extended beyond its built-in capabilities.
 
 | Document | Description |
 |----------|-------------|
@@ -94,7 +94,7 @@ How Krusty is extended beyond its built-in capabilities.
 | [Agent Extensions](extensions/agent-extensions.md) | JavaScript/TypeScript agent tools, slash commands, lifecycle events, and turn context |
 | [MCP, Plugins, Plans & Skills](extensions/mcp-and-plugins.md) | Five cooperating layers: MCP, packages, agent extensions, planning, and skills |
 | [Plugin Packages](extensions/plugin-packages.md) | Unified bundles, lifecycle, trust, permissions, and package contributions |
-| [Extensibility Parity](extensions/extensibility-parity.md) | Evidence-based OpenCode, Pi, Codex, and Krusty comparison with the 10-point completion rubric |
+| [Extensibility Parity](extensions/extensibility-parity.md) | Evidence-based OpenCode, Pi, Codex, and Mitsuro comparison with the 10-point completion rubric |
 
 ## Operations
 

@@ -58,7 +58,7 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/icons/ios-light.png",
+          "icon": "./assets/icons/mitsuro-notification.png",
           "color": "#b89a61"
         }
       ],

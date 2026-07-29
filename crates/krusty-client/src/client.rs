@@ -31,7 +31,7 @@ impl KrustyClient {
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .context("building Krusty HTTP client")?;
+            .context("building Mitsuro HTTP client")?;
         Ok(Self {
             base_url: Arc::from(base_url),
             http,

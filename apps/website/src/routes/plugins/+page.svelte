@@ -31,7 +31,7 @@
 </script>
 
 <svelte:head>
-  <title>Krusty Plugin Directory</title>
+  <title>Mitsuro Plugin Directory</title>
 </svelte:head>
 
 <main class="page">
@@ -39,11 +39,11 @@
     <div class="section-heading">
       <div>
         <div class="eyebrow">package directory</div>
-        <h1 class="plugins-title">Installable Krusty plugins.</h1>
+        <h1 class="plugins-title">Extend Mitsuro.</h1>
       </div>
       <p>
-        Official and community plugin packages for Krusty. Catalog files are static JSON/TOML so
-        they can be hosted on krusty.dev, GitHub, or your own registry URL.
+        Official and community plugin packages for Mitsuro. Catalog files are static JSON/TOML and
+        can be hosted on GitHub or your own registry URL.
       </p>
     </div>
 
@@ -117,8 +117,9 @@
     <div class="section-heading">
       <h2>Publish through npm. List through a catalog.</h2>
       <p>
-        Krusty installs npm-shaped packages and reads a static catalog. To list a plugin, publish a
-        package with <code>krusty.plugins</code> in package.json and submit a catalog entry.
+        Mitsuro installs npm-shaped packages and reads a static catalog. To list a plugin, publish a
+        package with the compatibility key <code>krusty.plugins</code> in package.json and submit a
+        catalog entry.
       </p>
     </div>
 
@@ -167,7 +168,7 @@
   }
 
   .submit-section code {
-    color: var(--accent-2);
+    color: var(--pulse);
     font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 </style>

@@ -88,7 +88,7 @@ impl Default for McpOAuthConfig {
 
 impl McpOAuthConfig {
     pub fn client_name(&self) -> &str {
-        self.client_name.as_deref().unwrap_or("Krusty")
+        self.client_name.as_deref().unwrap_or("Mitsuro")
     }
 }
 

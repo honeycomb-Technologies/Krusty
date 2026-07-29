@@ -1,14 +1,12 @@
-```
-▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌
-█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌
-▐▀▀▄·▐▀▀▄ █▌▐█▌▄▀▀▀█▄ ▐█.▪▐█▌▐█▪
-▐█.█▌▐█•█▌▐█▄█▌▐█▄▪▐█ ▐█▌· ▐█▀·.
-·▀  ▀.▀  ▀ ▀▀▀  ▀▀▀▀  ▀▀▀   ▀ •
-```
+<p align="center">
+  <img src="assets/branding/mitsuro/mitsuro-lockup-horizontal.svg" alt="mitsuro" width="360">
+</p>
 
 ## Overview
 
-Krusty is a multi-platform AI coding assistant. The `krusty` binary bundles a terminal TUI, a web server with an embedded frontend, and editor integration via ACP. Autonomous Mako execution lives in the separately supervised `krusty-mako` daemon, so it survives client and HTTP-server restarts without creating a second execution owner. The frontend is built with Expo (React Native) and shared across mobile (iOS/Android), web (embedded in the server binary), and desktop (Tauri wrapper).
+Mitsuro is a multi-platform AI coding product from Honeycomb Technologies. Agent is the interactive coding experience; Hive is the persistent autonomous mode that can keep working across threads and restarts. The existing `krusty` binary and `krusty-mako` service names are compatibility identifiers and remain stable for v1.
+
+The repository contains the Rust runtime and CLI, an Expo client shared across mobile and web, a Tauri desktop host, and ACP editor integration. The terminal UI is still functional but is intentionally frozen at its legacy design while a ground-up Mitsuro TUI is developed.
 
 ## Repository Layout
 
@@ -57,11 +55,11 @@ cargo build --release
 | `krusty serve` | Start the web server with embedded web UI (default port 3000) |
 | `krusty serve --port 8080` | Start on a custom port |
 | `krusty acp` | Run as ACP server for editor integration |
-| `krusty mako run "task"` | Submit a task to the autonomous agent |
-| `krusty mako status` | Show Mako session status |
-| `krusty mako attach <id>` | Attach to a running Mako session |
+| `krusty hive run "task"` | Start a persistent Hive run |
+| `krusty hive status` | Show Hive run status |
+| `krusty hive attach <id>` | Attach to a Hive run |
 
-`krusty serve` bundles everything — API server, agent runtime, and the embedded Expo web build — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
+`krusty serve` bundles the Mitsuro API, Agent runtime, and embedded Expo web build into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it can configure private HTTPS access.
 
 If `krusty serve` reports Tailscale permission denied, run this once:
 
@@ -159,7 +157,7 @@ Open an interactive terminal session with `/terminal` for direct shell access wi
 Use `/pinch` to compress long conversations into a new session with summarized context, preserving essential information while reducing token usage.
 
 ### Skills
-Agent Skills-compatible, progressively disclosed instruction sets. Krusty
+Agent Skills-compatible, progressively disclosed instruction sets. Mitsuro
 discovers native, Agent Skills, Pi, OpenCode, Claude, Codex, project, and plugin
 package roots with deterministic precedence and local allow/ask/deny policy.
 Browse and manage them with `/skills`.
@@ -190,14 +188,14 @@ Switch with `/permissions`.
 All conversations are saved locally in SQLite. Resume any session with `/load` (filtered by current directory).
 
 ### Themes
-31 built-in themes including krusty (default), tokyo_night, dracula, catppuccin_mocha, gruvbox_dark, nord, one_dark, solarized_dark, synthwave_84, monokai, rosepine, and more. Switch with `/theme`.
+The legacy TUI currently retains its existing theme catalog, including the compatibility theme key `krusty`. This surface is intentionally excluded from the v1 visual conversion pending its rebuild.
 
 ### Auto-Updates
-Krusty checks for updates via `/update`. Windows can apply the standalone
+Mitsuro checks for updates via `/update`. Windows can apply the standalone
 binary update in place after verifying the release SHA-256 manifest.
-Mako-bearing Unix releases distribute `krusty`, the supervised `krusty-mako`
-daemon, and service units as one set, so Krusty fails closed instead of updating
-only one binary. Use a Mako-capable package channel or the checksum-verifying
+Hive-capable Unix releases distribute the compatibility `krusty` binary,
+supervised `krusty-mako` service, and service units as one set, so Mitsuro fails
+closed instead of updating only one binary. Use a complete package channel or the checksum-verifying
 installer after that release is published; until then, build the complete set
 from source.
 
@@ -232,7 +230,7 @@ Detailed project documentation lives in [`docs/`](docs/README.md):
 - **[Architecture](docs/architecture/)** - System overview, data flow, and design decisions
 - **[Core Engine](docs/core-engine/)** - Agent orchestrator, AI providers, tools, context management
 - **[Storage](docs/storage/)** - SQLite persistence layer
-- **[Interfaces](docs/interfaces/)** - TUI, web server/API, ACP editor integration, Mako autonomous mode
+- **[Interfaces](docs/interfaces/)** - TUI, web server/API, ACP editor integration, and Hive autonomous mode
 - **[Frontends](docs/frontends/)** - Mobile app (Expo), desktop app (Tauri), shared packages
 - **[Extensions](docs/extensions/)** - Plugin packages, agent extensions, WASM, MCP, plans, and skills
 - **[Operations](docs/operations/)** - Build, CI/CD, packaging, and deployment

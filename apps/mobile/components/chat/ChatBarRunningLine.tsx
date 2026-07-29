@@ -38,24 +38,30 @@ export const RUN_LINE_CORNER_CLIMB = 35;
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 const SvgDefs = Defs as unknown as ComponentType<PropsWithChildren>;
 const normalizedPathLength = { pathLength: 1 };
-const RUN_LINE_TONAL_STOPS = [
-  // The gradient is anchored to the screen, not the moving dash. Keep its
-  // opacity even so the rounded side sections do not disappear at x=0/width;
-  // the blurred round dash caps provide the moving wash's soft tails.
-  ['0', '#a55322', 0.82],
-  ['0.08', '#a95724', 0.82],
-  ['0.18', '#b75f27', 0.82],
-  ['0.28', '#c5682a', 0.82],
-  ['0.37', '#d2702d', 0.82],
-  ['0.44', '#dd772f', 0.82],
-  ['0.5', '#e17a30', 0.82],
-  ['0.56', '#dc762f', 0.82],
-  ['0.63', '#d06f2d', 0.82],
-  ['0.72', '#c36729', 0.82],
-  ['0.82', '#b55e26', 0.82],
-  ['0.92', '#a95724', 0.82],
-  ['1', '#a55322', 0.82],
-] as const;
+const RUN_LINE_TONAL_STOPS = {
+  dark: [
+    ['0', '#75617e', 0.64],
+    ['0.14', '#9a82a5', 0.72],
+    ['0.28', '#9f9da1', 0.68],
+    ['0.42', '#b89a61', 0.74],
+    ['0.5', '#d4bd89', 0.78],
+    ['0.58', '#b89a61', 0.74],
+    ['0.72', '#9f9da1', 0.68],
+    ['0.86', '#9a82a5', 0.72],
+    ['1', '#75617e', 0.64],
+  ],
+  light: [
+    ['0', '#66536f', 0.58],
+    ['0.14', '#75617e', 0.66],
+    ['0.28', '#6b6f77', 0.62],
+    ['0.42', '#806430', 0.68],
+    ['0.5', '#97773f', 0.72],
+    ['0.58', '#806430', 0.68],
+    ['0.72', '#6b6f77', 0.62],
+    ['0.86', '#75617e', 0.66],
+    ['1', '#66536f', 0.58],
+  ],
+} as const;
 
 export interface ChatBarRunningLineProps {
   active: boolean;
@@ -69,6 +75,7 @@ function ChatBarRunningLineComponent({
   active,
   width,
   cornerClimb,
+  theme = 'dark',
   style,
 }: ChatBarRunningLineProps) {
   const progress = useSharedValue(0);
@@ -212,14 +219,14 @@ function ChatBarRunningLineComponent({
       <Svg width={safeWidth} height={pathHeight}>
         <SvgDefs>
           <SvgLinearGradient
-            id="auroraGlassBeam"
+            id="mitsuroGraphiteBrassBeam"
             x1={0}
             y1={0}
             x2={safeWidth}
             y2={0}
             gradientUnits="userSpaceOnUse"
           >
-            {RUN_LINE_TONAL_STOPS.map(([offset, color, opacity]) => (
+            {RUN_LINE_TONAL_STOPS[theme].map(([offset, color, opacity]) => (
               <Stop
                 key={offset}
                 offset={offset}
@@ -229,7 +236,7 @@ function ChatBarRunningLineComponent({
             ))}
           </SvgLinearGradient>
           <Filter
-            id="auroraGlassSoftness"
+            id="mitsuroBeamSoftness"
             x="-20%"
             y="-160%"
             width="140%"
@@ -245,9 +252,9 @@ function ChatBarRunningLineComponent({
           d={edgePath}
           {...dashPathLengthProps}
           fill="none"
-          stroke="url(#auroraGlassBeam)"
-          filter="url(#auroraGlassSoftness)"
-          strokeOpacity={0.86}
+          stroke="url(#mitsuroGraphiteBrassBeam)"
+          filter="url(#mitsuroBeamSoftness)"
+          strokeOpacity={0.78}
           strokeWidth={RUN_LINE_STROKE_WIDTH}
           strokeLinecap="round"
           strokeDasharray={`${beamUnits} ${beamTravel - beamUnits}`}

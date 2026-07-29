@@ -2,7 +2,7 @@
 pkgname=krusty
 pkgver=0.7.3
 pkgrel=1
-pkgdesc="The fun coding assistant"
+pkgdesc="Mitsuro multi-platform AI coding product with Agent and Hive"
 arch=('x86_64' 'aarch64')
 url="https://github.com/honeycomb-Technologies/Krusty"
 license=('MIT')

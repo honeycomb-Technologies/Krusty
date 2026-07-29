@@ -132,7 +132,7 @@ export function useMakoHome(enabled: boolean) {
         setError(
           saveError instanceof Error
             ? saveError.message
-            : "Failed to update crew profile",
+            : "Failed to update Hive Agent profile",
         );
         throw saveError;
       } finally {

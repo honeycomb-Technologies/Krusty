@@ -688,7 +688,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn credential_error(message: String) -> AuthError {
-    AuthError::InternalError(format!("Krusty credential store failure: {message}"))
+    AuthError::InternalError(format!("Mitsuro credential store failure: {message}"))
 }
 
 fn validate_redirect_uri(value: &str) -> Result<()> {

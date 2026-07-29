@@ -220,7 +220,7 @@ impl Default for ChatStore {
             active_thinking_id: None,
             shell_actions: VecDeque::new(),
         };
-        store.push_system("Chat-first mobile shell ready. Mako is intentionally on hold.");
+        store.push_system("Chat-first mobile shell ready. Hive is intentionally on hold.");
         store
     }
 }

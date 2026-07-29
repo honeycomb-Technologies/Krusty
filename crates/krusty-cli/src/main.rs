@@ -1,4 +1,4 @@
-//! Krusty - The most elegant coding CLI to ever exist
+//! Mitsuro - local-first AI coding assistant
 //!
 //! A terminal-based AI coding assistant with:
 //! - Multi-provider AI with API key authentication
@@ -19,10 +19,10 @@ use krusty_core::{acp, agent, ai, extensions, paths, plan, plugins, process, sto
 mod serve;
 mod tui;
 
-/// Krusty - AI Coding Assistant
+/// Mitsuro - AI Coding Assistant
 #[derive(Parser)]
 #[command(name = "krusty")]
-#[command(about = "The most elegant coding CLI to ever exist", long_about = None)]
+#[command(about = "Mitsuro, a local-first AI coding assistant", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -32,8 +32,8 @@ struct Cli {
 enum Commands {
     /// Run as ACP (Agent Client Protocol) server
     ///
-    /// Krusty runs as an ACP-compatible agent that communicates
-    /// via JSON-RPC over stdin/stdout. This mode is used when Krusty is
+    /// Mitsuro runs as an ACP-compatible Agent that communicates
+    /// via JSON-RPC over stdin/stdout. This mode is used when Mitsuro is
     /// spawned by an ACP-compatible editor (Zed, Neovim, etc.).
     ///
     /// Uses credentials from TUI configuration, or override with env vars:
@@ -41,7 +41,7 @@ enum Commands {
     /// - Or provider-specific: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.
     Acp,
 
-    /// Start the Krusty web server with embedded web frontend
+    /// Start the Mitsuro web server with embedded web frontend
     ///
     /// Launches the API server with the web bundle embedded into the binary.
     /// On first run, prompts for provider and API key configuration.
@@ -52,8 +52,12 @@ enum Commands {
         port: u16,
     },
 
-    /// Mako autonomous agent
-    #[command(args_conflicts_with_subcommands = true)]
+    /// Hive autonomous agent system
+    #[command(
+        name = "hive",
+        visible_alias = "mako",
+        args_conflicts_with_subcommands = true
+    )]
     Mako {
         #[command(subcommand)]
         command: Option<MakoCommand>,
@@ -71,7 +75,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum MakoCommand {
-    /// Submit a task to Mako
+    /// Submit a task to Hive
     Run {
         /// The task to perform
         task: String,
@@ -82,34 +86,34 @@ enum MakoCommand {
         #[arg(long)]
         attach: bool,
     },
-    /// Show status for Mako sessions
+    /// Show status for Hive sessions
     Status {
         /// Optional session id for detailed status
         session_id: Option<String>,
     },
-    /// Attach to a running Mako session's live event stream
+    /// Attach to a running Hive session's live event stream
     Attach {
-        /// Mako session id
+        /// Hive session id
         session_id: String,
     },
-    /// Pause a running Mako session
+    /// Pause a running Hive session
     Pause {
-        /// Mako session id
+        /// Hive session id
         session_id: String,
     },
-    /// Resume a paused or idle Mako session
+    /// Resume a paused or idle Hive session
     Resume {
-        /// Mako session id
+        /// Hive session id
         session_id: String,
     },
-    /// Cancel and delete a Mako session
+    /// Cancel and delete a Hive session
     Cancel {
-        /// Mako session id
+        /// Hive session id
         session_id: String,
     },
-    /// Send a follow-up message to an existing Mako session
+    /// Send a follow-up message to an existing Hive session
     Send {
-        /// Mako session id
+        /// Hive session id
         session_id: String,
         /// Follow-up message
         message: String,
@@ -189,15 +193,15 @@ async fn run_mako_command(command: MakoCommand) -> Result<()> {
 
             let response: MakoDispatchResponse = request_json(
                 client.post(format!("{base}/api/mako/dispatch")).json(&body),
-                "Failed to dispatch Mako task",
+                "Failed to dispatch Hive task",
             )
             .await?;
 
-            println!("Mako task dispatched");
+            println!("Hive task dispatched");
             println!("  Session: {}", response.session_id);
             println!("  Status: {}", response.status);
-            println!("  Observe: krusty mako attach {}", response.session_id);
-            println!("  Status: krusty mako status {}", response.session_id);
+            println!("  Observe: krusty hive attach {}", response.session_id);
+            println!("  Status: krusty hive status {}", response.session_id);
 
             if attach {
                 attach_mako_session(&client, &base, &response.session_id).await?;
@@ -207,14 +211,14 @@ async fn run_mako_command(command: MakoCommand) -> Result<()> {
             if let Some(session_id) = session_id {
                 let status: MakoSessionStatusResponse = request_json(
                     client.get(format!("{base}/api/mako/sessions/{session_id}/status")),
-                    "Failed to fetch Mako session status",
+                    "Failed to fetch Hive session status",
                 )
                 .await?;
                 print_mako_session_status(&status);
             } else {
                 let sessions: Vec<MakoSessionSummaryResponse> = request_json(
                     client.get(format!("{base}/api/mako/sessions")),
-                    "Failed to fetch Mako sessions",
+                    "Failed to fetch Hive sessions",
                 )
                 .await?;
                 print_mako_session_summaries(&sessions);
@@ -226,30 +230,30 @@ async fn run_mako_command(command: MakoCommand) -> Result<()> {
         MakoCommand::Pause { session_id } => {
             let response: MakoOkResponse = request_json(
                 client.post(format!("{base}/api/mako/sessions/{session_id}/pause")),
-                "Failed to pause Mako session",
+                "Failed to pause Hive session",
             )
             .await?;
             if response.ok {
-                println!("Paused Mako session {session_id}");
+                println!("Paused Hive session {session_id}");
             }
         }
         MakoCommand::Resume { session_id } => {
             let response: MakoOkResponse = request_json(
                 client.post(format!("{base}/api/mako/sessions/{session_id}/resume")),
-                "Failed to resume Mako session",
+                "Failed to resume Hive session",
             )
             .await?;
             if response.ok {
-                println!("Resumed Mako session {session_id}");
+                println!("Resumed Hive session {session_id}");
             }
         }
         MakoCommand::Cancel { session_id } => {
             request_empty(
                 client.delete(format!("{base}/api/mako/sessions/{session_id}")),
-                "Failed to cancel Mako session",
+                "Failed to cancel Hive session",
             )
             .await?;
-            println!("Cancelled Mako session {session_id}");
+            println!("Cancelled Hive session {session_id}");
         }
         MakoCommand::Send {
             session_id,
@@ -259,11 +263,11 @@ async fn run_mako_command(command: MakoCommand) -> Result<()> {
                 client
                     .post(format!("{base}/api/mako/sessions/{session_id}/message"))
                     .json(&serde_json::json!({ "message": message })),
-                "Failed to send message to Mako session",
+                "Failed to send message to Hive session",
             )
             .await?;
             if response.ok {
-                println!("Queued message for Mako session {session_id}");
+                println!("Queued message for Hive session {session_id}");
             }
         }
     }
@@ -301,7 +305,7 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 
 fn print_mako_session_summaries(sessions: &[MakoSessionSummaryResponse]) {
     if sessions.is_empty() {
-        println!("No Mako sessions found.");
+        println!("No Hive sessions found.");
         return;
     }
 
@@ -383,15 +387,15 @@ async fn attach_mako_session(client: &reqwest::Client, base: &str, session_id: &
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .send()
         .await
-        .context("Failed to attach to Mako session")?;
+        .context("Failed to attach to Hive session")?;
     let response = ensure_success(response).await?;
 
-    println!("Attaching to Mako session {}", session_id);
+    println!("Attaching to Hive session {}", session_id);
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Failed to read Mako event stream")?;
+        let chunk = chunk.context("Failed to read Hive event stream")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(newline_idx) = buffer.find('\n') {
@@ -404,7 +408,7 @@ async fn attach_mako_session(client: &reqwest::Client, base: &str, session_id: &
                 }
 
                 let event: serde_json::Value = serde_json::from_str(data)
-                    .with_context(|| format!("Failed to parse Mako event: {data}"))?;
+                    .with_context(|| format!("Failed to parse Hive event: {data}"))?;
                 if print_mako_event(&event)? {
                     return Ok(());
                 }
@@ -601,7 +605,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Mako subcommand runs HTTP requests and exits, no TUI needed
+    // Hive subcommand uses Mako-compatible HTTP routes and exits, no TUI needed.
     if let Some(Commands::Mako {
         command,
         task,
@@ -618,7 +622,7 @@ async fn main() -> Result<()> {
                 attach,
             }
         } else {
-            anyhow::bail!("Provide a task or a Mako subcommand");
+            anyhow::bail!("Provide a task or a Hive subcommand");
         };
         return run_mako_command(command).await;
     }
@@ -679,7 +683,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Acp) => {
-            tracing::info!("Starting Krusty in ACP server mode");
+            tracing::info!("Starting Mitsuro in ACP server mode");
             let server = acp::AcpServer::new()?;
             server.run().await?;
         }

@@ -171,7 +171,7 @@ async fn add_pinned_port(
 ) -> Result<Json<PreviewSettings>, AppError> {
     if req.port == state.server_port {
         return Err(AppError::BadRequest(
-            "Cannot pin the Krusty server port".to_string(),
+            "Cannot pin the Mitsuro server port".to_string(),
         ));
     }
 

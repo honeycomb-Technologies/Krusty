@@ -14,8 +14,8 @@ interface MitsuroLogoProps {
 }
 
 export function MitsuroLogo({
-  color = "#c5c1c8",
-  markFill = "rgba(197, 193, 200, 0.08)",
+  color = "#e8e5ea",
+  markFill = "rgba(232, 229, 234, 0.055)",
   markSize = 84,
   wordmarkWidth = 216,
   playKey,

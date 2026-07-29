@@ -1,10 +1,10 @@
-# Krusty Conversation Workstream
+# Mitsuro Conversation Workstream
 
 Status: proposed product contract; implementation requires design approval.
 
 ## Objective
 
-Make Krusty's mobile and terminal conversations feel like one capable coding
+Make Mitsuro's mobile and terminal conversations feel like one capable coding
 agent expressed through two native surfaces. The transcript must communicate
 what the agent is doing, what changed, what needs attention, and what the final
 answer is without reducing the stream to raw Markdown or a stack of generic
@@ -47,7 +47,7 @@ Patterns to retain:
 - platform-native text selection and accessibility;
 - rich detail retention bounded to recent activity.
 
-### Krusty today
+### Mitsuro today
 
 Mobile reconstructs visual segments independently from `ChatMessage` content
 and tool arrays. The TUI reconstructs another presentation from string roles,
@@ -129,7 +129,7 @@ they reach this layer.
 
 - A thin leading rail visually joins reasoning and activity within a turn.
 - Neutral work uses a subdued foreground rail.
-- Active work uses the Krusty thinking/accent color with restrained animation.
+- Active work uses the Mitsuro thinking/accent color with restrained animation.
 - Success, warning, approval, and failure colors are status indicators, not
   large background fills.
 - Final prose may continue after the rail rather than remaining boxed inside it.
@@ -300,4 +300,4 @@ The recommended defaults are:
 - compact reasoning by default;
 - three recent turns expanded;
 - active and latest-completed tools retain rich detail;
-- Krusty accent color for active work, semantic colors only for outcomes.
+- Mitsuro accent color for active work, semantic colors only for outcomes.

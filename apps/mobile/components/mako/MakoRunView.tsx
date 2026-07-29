@@ -311,7 +311,7 @@ export function MakoRunView({
     } catch (error) {
       setCrewSlug(runtimeCrewSlug);
       setActionError(
-        error instanceof Error ? error.message : "Failed to update crew.",
+        error instanceof Error ? error.message : "Failed to update Hive Agent.",
       );
     } finally {
       setIsSavingCrew(false);
@@ -425,7 +425,7 @@ export function MakoRunView({
               hint={`${taskStats.completed} done`}
             />
             <SummaryCell
-              label="Crew"
+              label="Agent"
               value={runtimeCrewSlug ?? "Hive"}
               hint={`${cadence.tick_interval_secs}s cadence`}
             />
@@ -500,10 +500,10 @@ export function MakoRunView({
           </View>
 
           <View style={styles.section}>
-            <SectionTitle title="Crew" />
+            <SectionTitle title="Agent" />
             <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
               <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
-                Assign this run to Hive or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
+                Assign this run to Hive or a specific Hive Agent. The selected identity shapes the run&apos;s working presence and context layers.
               </Text>
               <View style={styles.controlBlock}>
                 <MakoCrewPicker
@@ -517,7 +517,7 @@ export function MakoRunView({
               </View>
               {isSavingCrew ? (
                 <Text style={[styles.metaText, { color: t.mutedForeground }]}>
-                  Saving crew...
+                  Saving agent...
                 </Text>
               ) : null}
             </View>

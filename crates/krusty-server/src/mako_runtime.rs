@@ -134,12 +134,12 @@ pub fn control_plane_app_error(error: anyhow::Error) -> AppError {
             "invalid_request" | "invalid_command" | "bad_request" => {
                 AppError::BadRequest(message.clone())
             }
-            _ => AppError::BadGateway(format!("Mako daemon rejected the request: {message}")),
+            _ => AppError::BadGateway(format!("Hive service rejected the request: {message}")),
         },
         Some(MakoDaemonError::Unavailable(message)) => {
-            AppError::BadGateway(format!("Mako daemon unavailable: {message}"))
+            AppError::BadGateway(format!("Hive service unavailable: {message}"))
         }
-        None => AppError::BadGateway(format!("Mako daemon request failed: {error}")),
+        None => AppError::BadGateway(format!("Hive service request failed: {error}")),
     }
 }
 
@@ -684,7 +684,7 @@ impl MakoRuntimeManager {
                 loop {
                     if reconnect_attempts >= MAKO_SUBSCRIPTION_RECONNECT_ATTEMPTS {
                         let _ = event_sender.send(AgenticEvent::Error {
-                            error: "Mako daemon event stream unavailable after repeated reconnect attempts; reconnect to continue"
+                            error: "Hive event stream is unavailable after repeated reconnect attempts; reconnect to continue"
                                 .to_string(),
                         });
                         tracing::error!(
@@ -1012,7 +1012,7 @@ impl MakoRuntimeManager {
             return Err(MakoDaemonError::Remote {
                 code: "conflict".to_string(),
                 message: format!(
-                    "Mako daemon declined steering: {}",
+                    "Hive declined steering: {}",
                     acknowledgement
                         .message
                         .unwrap_or_else(|| "no reason provided".to_string())
@@ -1070,13 +1070,13 @@ impl MakoRuntimeManager {
             .await
             .get(session_id)
             .cloned()
-            .context("No active Mako session")?;
+            .context("No active Hive session")?;
         sender
             .send(LoopInput::ToolApproval {
                 tool_call_id: tool_call_id.to_string(),
                 approved,
             })
-            .context("Mako session is no longer accepting tool approvals")
+            .context("Hive session is no longer accepting tool approvals")
     }
 
     pub async fn user_response_and_subscribe_for_user(
@@ -1109,13 +1109,13 @@ impl MakoRuntimeManager {
             .await
             .get(session_id)
             .cloned()
-            .context("No active Mako session")?;
+            .context("No active Hive session")?;
         sender
             .send(LoopInput::UserResponse {
                 tool_call_id: tool_call_id.to_string(),
                 response: response.to_string(),
             })
-            .context("Mako session is no longer accepting user responses")?;
+            .context("Hive session is no longer accepting user responses")?;
         Ok(receiver)
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
     fn mako_notification_title_prefers_explicit_title() {
         assert_eq!(
             mako_notification_title(Some("Verification complete"), "Auth refactor"),
-            "Mako — Verification complete"
+            "Hive — Verification complete"
         );
     }
 
@@ -1391,11 +1391,11 @@ mod tests {
     fn mako_notification_title_falls_back_to_session_label() {
         assert_eq!(
             mako_notification_title(Some("   "), "Auth refactor"),
-            "Mako — Auth refactor"
+            "Hive — Auth refactor"
         );
         assert_eq!(
             mako_notification_title(None, "Auth refactor"),
-            "Mako — Auth refactor"
+            "Hive — Auth refactor"
         );
     }
 

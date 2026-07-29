@@ -1610,7 +1610,7 @@ mod tests {
         let AgenticEvent::Error { error } = terminal else {
             panic!("expected explicit terminal error, got {terminal:?}");
         };
-        assert!(error.contains("Mako daemon event stream unavailable"));
+        assert!(error.contains("Hive event stream is unavailable"));
         assert!(matches!(
             receiver.recv().await,
             Err(tokio::sync::broadcast::error::RecvError::Closed)

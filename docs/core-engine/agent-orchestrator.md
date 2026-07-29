@@ -1,6 +1,6 @@
 # The Brain: Agent Orchestrator
 
-The agent orchestrator is the single most important piece of code in Krusty. Every conversation — whether it comes from the terminal, the web browser, a mobile app, or an editor integration — flows through the same loop. The orchestrator decides when to call the AI, when to run tools, when to ask the user for input, when to compact context, and when to stop. It is the canonical agentic loop, and there is exactly one of it.
+The agent orchestrator is the single most important piece of code in Mitsuro. Every conversation — whether it comes from the terminal, the web browser, a mobile app, or an editor integration — flows through the same loop. The orchestrator decides when to call the AI, when to run tools, when to ask the user for input, when to compact context, and when to stop. It is the canonical agentic loop, and there is exactly one of it.
 
 This document explains how it works from the inside out.
 
@@ -63,7 +63,7 @@ Before each AI call, the orchestrator builds a context-injected copy of the conv
 - **Project settings** — any `system_prompt_append` from `.krusty/settings.json`
 - **Plan context** — the active plan's task list, progress, and which tasks are ready vs. blocked
 - **Delegated run context** — recent sub-agent investigations, so the AI knows what's already been explored
-- **Autonomous task context** — pending and in-progress Mako tasks
+- **Autonomous task context** — pending and in-progress Hive tasks
 - **Report context** — recent reports available via `ReadReport`
 - **Skills context** — available skills and how to invoke them
 
@@ -242,7 +242,7 @@ The recovery state includes the context ledger snapshot, the stop reason (if any
 - `UserResponse` — user answered an AskUser or PlanConfirm prompt (carries the tool call ID and response text)
 - `Cancel` — user requested cancellation
 
-This protocol is the complete contract between the orchestrator and any consumer. If you can emit `LoopInput` and consume `LoopEvent`, you can build a new Krusty frontend.
+This protocol is the complete contract between the orchestrator and any consumer. If you can emit `LoopInput` and consume `LoopEvent`, you can build a new Mitsuro frontend.
 
 ## Cancellation
 

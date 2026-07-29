@@ -96,7 +96,7 @@ export function MakoCurrentView({
                 Initialize Hive
               </Text>
               <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                Create soul, identity, heartbeat, memory, channels, and crew.
+                Create identity, voice, heartbeat, memory, channels, and Hive Agents.
               </Text>
             </View>
             <Pressable

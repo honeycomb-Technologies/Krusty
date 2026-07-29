@@ -36,7 +36,7 @@ export interface MitsuroMarkProps {
 
 export function MitsuroMark({
   size = 24,
-  color = "#c5c1c8",
+  color = "#e8e5ea",
   fill = "none",
   strokeWidth = 52,
   style,
@@ -74,8 +74,8 @@ export interface MitsuroTraceMarkProps extends MitsuroMarkProps {
 
 export function MitsuroTraceMark({
   size = 88,
-  color = "#c5c1c8",
-  fill = "rgba(197, 193, 200, 0.08)",
+  color = "#e8e5ea",
+  fill = "rgba(232, 229, 234, 0.055)",
   strokeWidth = 42,
   duration = 680,
   playKey = 0,

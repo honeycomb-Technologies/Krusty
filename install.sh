@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Krusty installer
+# Mitsuro installer (compatibility package and binary: krusty)
 # Usage: curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh && sh install.sh
 # Validation: sh install.sh --self-test
 
@@ -257,7 +257,7 @@ acquire_install_lock() {
     mkdir -p "$INSTALL_DIR"
     INSTALL_LOCK="$INSTALL_DIR/.krusty-install.lock"
     if ! mkdir "$INSTALL_LOCK" 2>/dev/null; then
-        fail "Another Krusty install is running (or left $INSTALL_LOCK behind)."
+        fail "Another Mitsuro install is running (or left $INSTALL_LOCK behind)."
         return 1
     fi
     LOCK_HELD=true
@@ -867,7 +867,7 @@ activate_unix_release() {
         done
     fi
     if [ "$EXISTING_SUPERVISED_SET" = true ] && [ ! -f "$RELEASE_DIR/$DAEMON_BINARY" ]; then
-        fail "Refusing to replace a supervised Mako release with a krusty-only archive."
+        fail "Refusing to replace a supervised Hive release with a krusty-only archive."
         return 1
     fi
 
@@ -1470,7 +1470,7 @@ install() {
         exit 1
     fi
 
-    echo "Installing Krusty $VERSION for $PLATFORM..."
+    echo "Installing Mitsuro $VERSION for $PLATFORM..."
     ARCHIVE="krusty-$PLATFORM.$EXT"
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE"
     CHECKSUM_URL="$DOWNLOAD_URL.sha256"
@@ -1505,7 +1505,7 @@ install() {
     fi
 
     echo ""
-    echo "Krusty installed successfully!"
+    echo "Mitsuro installed successfully!"
     if [ "$EXT" != "zip" ]; then
         echo "Active release: $RELEASE_ID"
     fi
@@ -1523,7 +1523,7 @@ install() {
 
     echo "Run 'krusty' to start."
     if [ "$INSTALLED_SYSTEMD_UNITS" = true ]; then
-        echo "To supervise Mako and the self-hosted server:"
+        echo "To supervise Hive and the self-hosted server:"
         echo "  systemctl --user enable --now krusty-mako.socket krusty-serve.service"
     fi
 }

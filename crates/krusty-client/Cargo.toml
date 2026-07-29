@@ -2,7 +2,7 @@
 name = "krusty-client"
 version = "0.9.14"
 edition = "2021"
-description = "Async Rust client for the Krusty server API"
+description = "Async Rust client for the Mitsuro server API"
 
 [dependencies]
 anyhow = "1.0"

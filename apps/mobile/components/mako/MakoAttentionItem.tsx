@@ -33,7 +33,7 @@ function kindLabel(item: MakoAttentionFeedItem): string {
     case "scheduled_run_completed":
       return "Schedule";
     case "delegated_task_completed":
-      return "Crew update";
+      return "Agent update";
     default:
       return "Update";
   }

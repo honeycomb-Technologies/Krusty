@@ -13,7 +13,7 @@ pub(super) fn mako_notification_title(title: Option<&str>, session_label: &str) 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(session_label);
-    format!("Mako — {label}")
+    format!("Hive — {label}")
 }
 
 pub(super) fn notify_mako_user_message(
@@ -75,8 +75,8 @@ pub(super) fn notify_mako_awaiting_input(
         push_service,
         user_id,
         PushPayload {
-            title: "Mako".into(),
-            body: "Mako needs your input".into(),
+            title: "Hive".into(),
+            body: "Hive needs your input".into(),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
             category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
@@ -93,8 +93,8 @@ pub(super) fn notify_mako_awaiting_input(
         apns_service,
         user_id,
         ApnsPayload {
-            title: "Mako".into(),
-            body: "Mako needs your input".into(),
+            title: "Hive".into(),
+            body: "Hive needs your input".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
             data: Some(mako_session_notification_data(
@@ -122,7 +122,7 @@ pub(super) fn notify_mako_tool_approval(
         user_id,
         PushPayload {
             title: "Tool Approval Required".into(),
-            body: format!("Mako wants to run \"{tool_name}\"."),
+            body: format!("Hive wants to run \"{tool_name}\"."),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("approval-{request_id}")),
             category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
@@ -135,7 +135,7 @@ pub(super) fn notify_mako_tool_approval(
         user_id,
         ApnsPayload {
             title: "Tool Approval Required".into(),
-            body: format!("Mako wants to run \"{tool_name}\"."),
+            body: format!("Hive wants to run \"{tool_name}\"."),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
             data: Some(data),
@@ -156,7 +156,7 @@ pub(super) fn notify_mako_error(
         push_service,
         user_id,
         PushPayload {
-            title: "Mako".into(),
+            title: "Hive".into(),
             body: format!("{session_label} encountered an error"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
@@ -208,7 +208,7 @@ pub(super) fn notify_mako_completion(
         push_service,
         user_id,
         PushPayload {
-            title: "Mako".into(),
+            title: "Hive".into(),
             body: format!("{session_label} is complete"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),

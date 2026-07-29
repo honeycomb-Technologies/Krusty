@@ -214,7 +214,7 @@ impl MakoRunStore {
         }
 
         if matches!(kind.as_str(), "scheduled" | "controller_child") {
-            let expected = format!("Mako {kind} objective:\n{}", objective.trim());
+            let expected = format!("Hive {kind} objective:\n{}", objective.trim());
             let materialized = message_content
                 .as_deref()
                 .map(serde_json::from_str::<Vec<Content>>)
@@ -1182,7 +1182,7 @@ fn materialize_objective_message(tx: &Transaction<'_>, run_id: &str, now: &str) 
     if objective.is_empty() {
         return Ok(());
     }
-    let rendered = format!("Mako {kind} objective:\n{objective}");
+    let rendered = format!("Hive {kind} objective:\n{objective}");
     let content = serde_json::to_string(&vec![Content::Text {
         text: rendered.clone(),
     }])?;

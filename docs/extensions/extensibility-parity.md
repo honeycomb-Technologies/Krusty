@@ -1,4 +1,4 @@
-# Extensibility parity: OpenCode, Pi, Goose, Codex, and Krusty
+# Extensibility parity: OpenCode, Pi, Goose, Codex, and Mitsuro
 
 This audit compares the plugin/package, Agent Skills, hook/extension, and MCP
 surfaces that are useful to a coding-agent harness. It is based on the current
@@ -19,10 +19,10 @@ Codex evidence uses the official documentation for [plugins](https://learn.chatg
 
 ## Result
 
-Krusty reaches **10/10 functional coverage on Unix, Windows, and other supported
+Mitsuro reaches **10/10 functional coverage on Unix, Windows, and other supported
 platforms** on the rubric below. That
 means each major extensibility contract has an implemented, governed,
-inspectable path through the shared runtime. It does not mean that Krusty's
+inspectable path through the shared runtime. It does not mean that Mitsuro's
 public package catalog is already as large as the older ecosystems, or that
 every competitor API method has a one-for-one alias.
 
@@ -34,7 +34,7 @@ no-follow, stable-identity, and hard-link guarantees as the Unix snapshot
 implementation. Signed ZIP bundles retain the complete multi-resource
 distribution contract on those platforms without weakening snapshot safety.
 
-| # | Required capability | Krusty evidence | Result |
+| # | Required capability | Mitsuro evidence | Result |
 |---|---|---|---|
 | 1 | Installable, multi-resource distribution unit | One manifest can contribute TUI code, agent extensions, skills, MCP fragments, declarative hooks, and assets; Unix also supports unsigned npm/local snapshots, while signed ZIP releases and catalogs provide the full cross-platform path | Pass |
 | 2 | Complete package lifecycle | Transactional staging, immutable managed snapshots, atomic lockfile replacement, enable/disable, pin/unpin, update, uninstall, and interrupted-install reconciliation | Pass |
@@ -53,7 +53,7 @@ focused test. Merely parsing a manifest field does not count.
 
 ## Capability comparison
 
-| Area | OpenCode | Pi | Goose | Codex | Krusty |
+| Area | OpenCode | Pi | Goose | Codex | Mitsuro |
 |---|---|---|---|---|---|
 | Distribution | Local JS/TS and npm plugins installed with Bun | npm, git, and local packages bundle extensions, skills, prompts, and themes | Extension configuration points at built-in or external MCP servers; recipes and Agent Skills are separate reusable units rather than one signed multi-resource package | Marketplace plugin with `.codex-plugin/plugin.json`; may bundle skills, hooks, apps, MCP, and assets | Cross-platform publisher-signed ZIP bundles and catalogs plus Unix npm/local snapshots; one immutable snapshot can bundle TUI, agent, skill, hook, MCP, and asset resources |
 | Executable API | JS/TS hook object, events, custom tools, SDK client, Bun shell | Broad TypeScript API for tools, events, commands, sessions, providers, shortcuts, and custom TUI | MCP tools/resources/prompts are the public extension boundary; built-in Rust platform extensions and recipes provide first-party executable workflows | Skills and declarative lifecycle hooks are the portable executable/workflow surfaces; MCP/apps add external actions | Persistent JS/TS agent runtime plus executable native/JS TUI runtimes; tools, commands, events, state, context, and before/after interception. Installable WASM TUI entries are descriptor-only today |
@@ -65,29 +65,29 @@ focused test. Merely parsing a manifest field does not count.
 
 ## Deliberate differences
 
-Krusty targets equivalent outcomes without copying every API shape:
+Mitsuro targets equivalent outcomes without copying every API shape:
 
 - Pi exposes its entire interactive UI, model/provider registry, and session
-  tree through one very broad TypeScript API. Krusty splits those concerns:
+  tree through one very broad TypeScript API. Mitsuro splits those concerns:
   agent behavior lives in JS/TS workers, installable render extensions use
   native/JS hosts, the separate Zed-compatible editor/language ABI uses WASM,
   and provider/session policy remains in typed core contracts. The
   current JS agent API is therefore intentionally smaller than Pi's complete
   UI SDK.
 - Codex plugins can point at hosted app connectors administered by a ChatGPT
-  workspace. Krusty's analogous external-action boundary is MCP and its
+  workspace. Mitsuro's analogous external-action boundary is MCP and its
   self-host server API; it does not reproduce the hosted ChatGPT marketplace
   or its installed ecosystem.
 - Goose treats MCP servers as extensions and keeps recipes and skills as
-  adjacent units. Krusty deliberately distinguishes MCP connection lifecycle
-  from installable packages: one Krusty package may contribute MCP config,
+  adjacent units. Mitsuro deliberately distinguishes MCP connection lifecycle
+  from installable packages: one Mitsuro package may contribute MCP config,
   skills, hooks, agent code, TUI code, and assets, but an ordinary MCP server is
   not silently granted in-process hook or package authority.
 - OpenCode, Pi, and Goose already have visible community extension/package/skill
-  ecosystems. Krusty's catalog and source format are implemented, but catalog
+  ecosystems. Mitsuro's catalog and source format are implemented, but catalog
   population and publisher adoption are product/ecosystem work rather than
   missing runtime contracts.
-- Pi intentionally omits built-in MCP. Krusty keeps MCP in core because shared
+- Pi intentionally omits built-in MCP. Mitsuro keeps MCP in core because shared
   CLI, server, mobile, and desktop clients need one typed connection and
   governance boundary.
 - Unsigned local/npm snapshots currently require Unix. Non-Unix installs reject

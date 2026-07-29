@@ -51,7 +51,7 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
         style={[
           codeBlockStyles.container,
           {
-            backgroundColor: isDark ? '#090d12' : '#f3f5f7',
+            backgroundColor: t.codeSurface,
             borderColor: t.border,
           },
         ]}

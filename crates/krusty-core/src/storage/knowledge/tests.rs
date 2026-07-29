@@ -350,7 +350,7 @@ fn build_current_snapshot_content_includes_run_and_task_activity() {
     )
     .expect("snapshot content");
 
-    assert!(content.contains("Recent Mako runs: 1"));
+    assert!(content.contains("Recent Hive runs: 1"));
     assert!(content.contains("## Active Work"));
     assert!(content.contains("Lock runtime cadence"));
 }

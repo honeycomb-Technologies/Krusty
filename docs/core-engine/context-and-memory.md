@@ -1,6 +1,6 @@
 # Context, Memory & Summarization
 
-Every time you send a message to Krusty, the system builds a carefully structured context payload before the AI sees anything. That payload includes project instructions, environment details, persistent memories, active plans, available skills, and the conversation history itself. As conversations grow long, the system compresses older content in place to stay within the model's context window. Manual `/pinch` triggers the same in-place compaction pipeline on demand.
+Every time you send a message to Mitsuro, the system builds a carefully structured context payload before the AI sees anything. That payload includes project instructions, environment details, persistent memories, active plans, available skills, and the conversation history itself. As conversations grow long, the system compresses older content in place to stay within the model's context window. Manual `/pinch` triggers the same in-place compaction pipeline on demand.
 
 This document explains each of those mechanisms: what gets injected, how the system tracks what it has already told the model, how it decides what to keep and what to trim, and how it bridges the gap between sessions.
 
@@ -8,7 +8,7 @@ This document explains each of those mechanisms: what gets injected, how the sys
 
 Large language models have a fixed context window. Even the largest models available today cap out at a few hundred thousand tokens. A coding conversation that spans several hours of exploration, editing, and debugging can easily produce hundreds of messages, each carrying file contents, tool outputs, diff previews, and reasoning traces. Without active management, the raw conversation would blow past the context limit long before the work is done.
 
-Krusty addresses this at two levels. First, it controls what goes into the context at the start of every turn through context injection. Second, it compacts the conversation in place when it grows too large—or when the provider rejects an over-limit request—keeping the same session alive without starting over.
+Mitsuro addresses this at two levels. First, it controls what goes into the context at the start of every turn through context injection. Second, it compacts the conversation in place when it grows too large—or when the provider rejects an over-limit request—keeping the same session alive without starting over.
 
 ## Context Injection
 
@@ -30,11 +30,11 @@ The injection follows a fixed order:
 
 7. **Delegated runs** -- Recent sub-agent investigations (explore, build, planner, verifier runs) for the session. This context tells the model that prior delegated work exists and encourages reusing those results rather than re-exploring the same directories.
 
-8. **Autonomous tasks** -- Any Mako tasks associated with the session, grouped by status (pending, in progress, completed).
+8. **Autonomous tasks** -- Any Hive tasks associated with the session, grouped by status (pending, in progress, completed).
 
 9. **Reports** -- Recent investigation reports for the project, shown as title/date/summary with a pointer to use the `ReadReport` tool for full content.
 
-10. **Coordinator context** -- For Mako sessions specifically, a specialized coordinator system prompt is injected.
+10. **Coordinator context** -- For Hive sessions specifically, a specialized coordinator system prompt is injected.
 
 11. **Skills** -- A listing of all available skills with names, descriptions, and tags, plus instructions on how to invoke them.
 
@@ -103,7 +103,7 @@ Legacy session-forking helpers (`PinchContext`, linked child sessions) remain in
 
 ## Skills Injection
 
-Skills are Agent Skills-compatible instruction packages built around `SKILL.md`. Krusty discovers its native roots plus `.agents`, Pi, OpenCode, Claude, Codex, and registered package roots. Project roots are discovered upward through the worktree, with nearest-project definitions taking precedence over user and package definitions. Strict validation enforces the standard name/description limits and directory-name match; structured diagnostics explain invalid and shadowed definitions.
+Skills are Agent Skills-compatible instruction packages built around `SKILL.md`. Mitsuro discovers its native roots plus `.agents`, Pi, OpenCode, Claude, Codex, and registered package roots. Project roots are discovered upward through the worktree, with nearest-project definitions taking precedence over user and package definitions. Strict validation enforces the standard name/description limits and directory-name match; structured diagnostics explain invalid and shadowed definitions.
 
 The `SkillsManager` in `manager.rs` handles discovery, precedence, policy, diagnostics, package-root registration, and cache fingerprints. The `build_skills_context` function reads only enabled, model-invocable metadata and formats a bounded listing for the system context. Per-skill `allow`/`ask`/`deny` policy is persisted in `.krusty/skills-policy.json`; `ask` requires a supervised parent for model-driven loading, while `deny` is a hard block. Nearest-project policy wins among project files, but can only narrow user policy, never re-enable or loosen it.
 
@@ -113,7 +113,7 @@ Skills are cached in memory, but content fingerprints make normal catalog reads 
 
 ## Shared Build Context
 
-When Krusty runs parallel operations -- specifically the builder swarm, where multiple sub-agents work on different parts of a codebase simultaneously -- the `SharedBuildContext` in `build_context.rs` provides the coordination layer.
+When Mitsuro runs parallel operations -- specifically the builder swarm, where multiple sub-agents work on different parts of a codebase simultaneously -- the `SharedBuildContext` in `build_context.rs` provides the coordination layer.
 
 This is a thread-safe shared state object using `DashMap` (concurrent hash maps) and atomics. It tracks coding conventions (style rules all builders follow), file locks (per-file locking with retry/timeout so agents don't clobber each other's edits), modified files (which agent touched what), line diffs (running add/remove totals), an interface registry (builders publish exported types/functions that others can depend on), and contention metrics (lock wait times per file, flagging hotspots where total wait exceeds one second).
 

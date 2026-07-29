@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
 import { useConnection } from '../hooks/useConnection';
+import { MitsuroWordmark } from '../components/brand';
 import { router } from 'expo-router';
 
 function inferInitialServerUrl(): string {
@@ -68,7 +69,7 @@ export default function OnboardingScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.header}>
-          <Text style={[styles.title, { color: t.foreground }]}>Mitsuro</Text>
+          <MitsuroWordmark width={200} color={t.foreground} />
           <Text style={[styles.subtitle, { color: t.mutedForeground }]}>
             Connect to your server
           </Text>
@@ -148,14 +149,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 48,
   },
-  title: {
-    fontSize: 34,
-    fontWeight: '700',
-    letterSpacing: -0.5,
-  },
   subtitle: {
     fontSize: 17,
-    marginTop: 8,
+    marginTop: 12,
   },
   form: {
     gap: 16,

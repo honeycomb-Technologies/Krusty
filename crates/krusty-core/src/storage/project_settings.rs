@@ -68,7 +68,7 @@ impl DelegationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MakoSettingsError {
-    #[error("Mako {field} must be between {minimum} and {maximum}, got {actual}")]
+    #[error("Hive {field} must be between {minimum} and {maximum}, got {actual}")]
     OutOfRange {
         field: &'static str,
         minimum: u64,

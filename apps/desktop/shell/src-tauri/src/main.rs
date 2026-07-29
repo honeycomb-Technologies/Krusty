@@ -31,15 +31,15 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running krusty desktop shell");
+        .expect("error while running Mitsuro desktop shell");
 }
 
-/// Ensure a Krusty server is running — reuse existing or start a new one.
+/// Ensure a Mitsuro server is running — reuse existing or start a new one.
 async fn ensure_server_running() -> u16 {
     // Check for already-running server
     if let Some(instance) = server_instance::detect_running_server().await {
         tracing::info!(
-            "Reusing existing Krusty server on port {} (PID {})",
+            "Reusing existing Mitsuro server on port {} (PID {})",
             instance.port,
             instance.pid
         );
@@ -55,7 +55,7 @@ async fn ensure_server_running() -> u16 {
             port
         );
     }
-    tracing::info!("Starting embedded Krusty server on port {}", port);
+    tracing::info!("Starting embedded Mitsuro server on port {}", port);
 
     let config = krusty_server::ServerConfig {
         port,

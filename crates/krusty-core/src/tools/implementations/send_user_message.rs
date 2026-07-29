@@ -29,14 +29,14 @@ impl Tool for SendUserMessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a prominent message to the user. In Mako mode, treat this as the primary guaranteed user-facing communication channel."
+        "Send a prominent message to the user. In Hive mode, treat this as the primary guaranteed user-facing communication channel."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
             r#"Use this to communicate information the user must reliably see during autonomous execution.
 
-Treat regular assistant text as secondary coordination output. Some Mako surfaces may collapse, dim, or otherwise de-emphasize ordinary assistant prose. If the user needs to notice something, use SendUserMessage.
+Treat regular assistant text as secondary coordination output. Some Hive surfaces may collapse, dim, or otherwise de-emphasize ordinary assistant prose. If the user needs to notice something, use SendUserMessage.
 
 When to use:
 - Reporting completion of a significant milestone or task

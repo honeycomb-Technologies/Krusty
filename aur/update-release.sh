@@ -172,7 +172,7 @@ if [[ -f "$repo_root/crates/krusty-mako/Cargo.toml" ]]; then
         "${expected_prefix}deploy/systemd/krusty-mako.socket" \
         "${expected_prefix}deploy/systemd/krusty-serve.service"; do
         if ! grep -Fqx "$required_entry" "$archive_regular_listing"; then
-            echo "release archive is missing required regular Mako file: $required_entry" >&2
+            echo "release archive is missing required regular Hive service file: $required_entry" >&2
             exit 1
         fi
     done

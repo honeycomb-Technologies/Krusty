@@ -1,6 +1,8 @@
 # The Terminal UI
 
-Krusty's terminal interface is built on Ratatui and crossterm. It runs inside any modern terminal emulator, renders at 60fps when animations are active, and supports everything from mouse-driven scrolling to gamepad input. This document walks through how the interface is structured, how it processes events, and how the various subsystems fit together.
+> **Legacy surface:** the terminal UI remains functional but is intentionally excluded from the Mitsuro v1 visual conversion. Its current mascot, ASCII, color, and theme behavior are documented here as-is until the planned ground-up TUI rebuild.
+
+Mitsuro's terminal interface is built on Ratatui and crossterm. It runs inside any modern terminal emulator, renders at 60fps when animations are active, and supports everything from mouse-driven scrolling to gamepad input. This document walks through how the interface is structured, how it processes events, and how the various subsystems fit together.
 
 ## Architecture
 
@@ -31,7 +33,7 @@ The loop uses `needs_redraw` tracking to avoid unnecessary renders. When the UI 
 
 The application has two top-level views:
 
-- **StartMenu** -- the landing screen with the Krusty logo, an input bar, and animated menu items. This is where you pick up an existing session or start a new one.
+- **StartMenu** -- the landing screen with the Mitsuro logo, an input bar, and animated menu items. This is where you pick up an existing session or start a new one.
 - **Chat** -- the main working view with the toolbar at the top, a scrollable message area in the center, the input editor at the bottom, and the status bar below that. The plan sidebar and plugin window can appear alongside the message area when active.
 
 Switching between views is managed through `AppUi::view` and an optional `pending_view_change` that gets applied at the end of the event loop tick to avoid mid-frame state inconsistencies.
@@ -137,7 +139,7 @@ The command system maps input prefixed with `/` to application actions. Commands
 | `/mcp` | Browse MCP servers |
 | `/hooks` | Configure tool execution hooks |
 | `/permissions` | Toggle supervised/autonomous mode |
-| `/update` | Check for updates; Unix upgrades use the package manager or verified installer so Krusty and Mako remain aligned |
+| `/update` | Check for updates; Unix upgrades use the package manager or verified installer so Mitsuro and Hive remain aligned |
 
 Unknown commands produce a system message. Each command either manipulates state directly (e.g., `/clear`), opens a popup (e.g., `/model`), or kicks off an async operation (e.g., `/init`).
 
@@ -164,7 +166,7 @@ A `MarkdownCache` avoids re-rendering unchanged content. The cache is keyed by t
 
 ## Theme System
 
-Krusty ships with 31 themes. Each theme is a `Theme` struct with over 70 named color fields organized into groups: core colors, mode colors, special colors (warning, error, code background), UI element colors, message role colors, syntax highlighting colors, diff colors, and display colors (scrollbar, logo, animation, token usage, link).
+Mitsuro ships with 31 themes. Each theme is a `Theme` struct with over 70 named color fields organized into groups: core colors, mode colors, special colors (warning, error, code background), UI element colors, message role colors, syntax highlighting colors, diff colors, and display colors (scrollbar, logo, animation, token usage, link).
 
 ### Theme Builder
 
@@ -244,7 +246,7 @@ Adjacent text deltas and thinking deltas are coalesced in the queue -- two conse
 
 ### Event Types
 
-The orchestrator emits events covering the full lifecycle: text and thinking deltas, tool start/complete/execute/result, approval and input requests, server-side tool results, plan and mode changes, token usage and context compaction, session titles, turn completion, errors, background agent coordination, and Mako teammate events.
+The orchestrator emits events covering the full lifecycle: text and thinking deltas, tool start/complete/execute/result, approval and input requests, server-side tool results, plan and mode changes, token usage and context compaction, session titles, turn completion, errors, background agent coordination, and Hive teammate events.
 
 Each event is translated into visual state: text deltas append to the current assistant message, tool events create or update blocks, approval events show decision prompts, and plan events update the sidebar.
 

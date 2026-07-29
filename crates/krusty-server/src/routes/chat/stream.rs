@@ -119,7 +119,7 @@ pub(super) async fn start_orchestrator_sse(
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
     if ctx.session_type == SessionType::Mako {
         return Err(AppError::BadGateway(
-            "Mako execution is owned by the daemon control plane".to_string(),
+            "Hive execution is owned by its background service".to_string(),
         ));
     }
 

@@ -1,6 +1,6 @@
 # MCP, Plugins, Plans & Skills
 
-Krusty has five cooperating extensibility layers. MCP connects the agent to
+Mitsuro has five cooperating extensibility layers. MCP connects the agent to
 external capability servers. Plugin packages install and govern bundles. Agent
 extensions add tools, slash commands, lifecycle events, and turn context. Plans
 structure complex work. Skills provide deferred domain instructions. They can
@@ -10,21 +10,21 @@ This document explains what each one does, how it works internally, and how to c
 
 ## MCP (Model Context Protocol)
 
-MCP is an open standard that lets AI systems discover and use tools exposed by external servers. Instead of building every capability directly into Krusty, MCP lets you point Krusty at a server that provides tools, resources, and prompts over a standardized protocol. Krusty acts as an MCP client -- it connects to MCP servers, discovers what they offer, and makes those tools available to the agent just like built-in tools.
+MCP is an open standard that lets AI systems discover and use tools exposed by external servers. Instead of building every capability directly into Mitsuro, MCP lets you point Mitsuro at a server that provides tools, resources, and prompts over a standardized protocol. Mitsuro acts as an MCP client -- it connects to MCP servers, discovers what they offer, and makes those tools available to the agent just like built-in tools.
 
 The implementation lives in `crates/krusty-core/src/mcp/`, built on the `rmcp` SDK.
 
 ### Transport
 
-Krusty supports two transport modes for MCP servers.
+Mitsuro supports two transport modes for MCP servers.
 
-**Stdio (local)** servers run as child processes on your machine. Krusty spawns the process, and communication happens over stdin/stdout using newline-delimited JSON-RPC. This is the most common setup -- you point Krusty at a command like `npx @modelcontextprotocol/server-filesystem` and it handles the rest. The working directory, arguments, and environment variables are all configurable per server. Child processes start from a cleared environment: only host `PATH`/`HOME` plus values explicitly resolved from the server declaration are supplied, so package/project servers do not inherit ambient credentials. Each inbound JSON-RPC record is limited to 8 MiB; an invalid or oversized record closes the connection and terminates the server's process tree rather than allowing unbounded buffering or leaving descendants behind.
+**Stdio (local)** servers run as child processes on your machine. Mitsuro spawns the process, and communication happens over stdin/stdout using newline-delimited JSON-RPC. This is the most common setup -- you point Mitsuro at a command like `npx @modelcontextprotocol/server-filesystem` and it handles the rest. The working directory, arguments, and environment variables are all configurable per server. Child processes start from a cleared environment: only host `PATH`/`HOME` plus values explicitly resolved from the server declaration are supplied, so package/project servers do not inherit ambient credentials. Each inbound JSON-RPC record is limited to 8 MiB; an invalid or oversized record closes the connection and terminates the server's process tree rather than allowing unbounded buffering or leaving descendants behind.
 
 **Streamable HTTP (remote)** servers run somewhere else -- a cloud service, a
-team server, or a SaaS tool. Krusty requires HTTPS, with a narrow HTTP exception
+team server, or a SaaS tool. Mitsuro requires HTTPS, with a narrow HTTP exception
 for loopback development endpoints, and supports optional Bearer or OAuth
-authentication. Krusty retains connector-ready remote descriptors for future
-provider integrations, but current MCP calls are routed through Krusty; no
+authentication. Mitsuro retains connector-ready remote descriptors for future
+provider integrations, but current MCP calls are routed through Mitsuro; no
 provider request path consumes those descriptors today.
 
 The HTTP transport is a custom `StreamableHttpClient` implementation handling POST/GET/DELETE operations, SSE event streams, session management, and content-type negotiation. Redirects are disabled so credentials cannot be forwarded to a redirect target. Decompressed JSON responses and individual SSE events have hard byte limits and fail closed when exceeded.
@@ -56,7 +56,7 @@ MCP configuration is layered. Package-provided fragments are defaults, `~/.krust
       "url": "https://mcp.example.com/mcp",
       "oauth": {
         "scopes": ["repo:read", "repo:write"],
-        "clientName": "Krusty"
+        "clientName": "Mitsuro"
       },
       "headers": { "X-Client": "krusty" },
       "envHeaders": { "X-Team-Key": "MY_TEAM_KEY" }
@@ -75,7 +75,7 @@ literal and cannot read host secrets. An explicit bearer token takes precedence
 over OAuth, which makes externally managed service tokens a deterministic
 override.
 
-Remote OAuth follows MCP's OAuth 2.1 flow: Krusty discovers protected-resource and authorization-server metadata, uses S256 PKCE and one-time CSRF state, and dynamically registers a public client. Servers without dynamic registration can set `oauth.clientId`; servers implementing URL-based client metadata can set `oauth.clientMetadataUrl`. Explicit `oauth.scopes` are requested as written, while an empty list lets server metadata choose. Resource and redirect URLs require HTTPS, except for localhost/loopback HTTP callbacks during local development.
+Remote OAuth follows MCP's OAuth 2.1 flow: Mitsuro discovers protected-resource and authorization-server metadata, uses S256 PKCE and one-time CSRF state, and dynamically registers a public client. Servers without dynamic registration can set `oauth.clientId`; servers implementing URL-based client metadata can set `oauth.clientMetadataUrl`. Explicit `oauth.scopes` are requested as written, while an empty list lets server metadata choose. Resource and redirect URLs require HTTPS, except for localhost/loopback HTTP callbacks during local development.
 
 Discovered authorization, registration, and token endpoints are independently validated with the same HTTPS/loopback rule before client registration, authorization URL generation, token exchange, or refresh. OAuth and MCP HTTP clients do not follow redirects.
 
@@ -89,14 +89,14 @@ override this boundary.
 
 Authority is transport-specific. A package stdio declaration is connectable only when the exact installed plugin descriptor has a current `process` grant; a remote declaration requires its current `network` grant. A network-only grant never enables stdio. Project declarations receive no ambient authority and the explicit connect/OAuth action grants only the configured transport. Internal reconnects reuse an already recorded project decision but cannot create one.
 
-Tool rules use shell-style globs. Deny always wins; a non-empty allow list becomes an allowlist. Approval classifications are `inherit`, `prompt`, and `allow`. `prompt` blocks autonomous execution and requires a supervised, approved call. `allow` is metadata for the central policy layer and does not weaken Krusty's conservative treatment of unknown remote tools.
+Tool rules use shell-style globs. Deny always wins; a non-empty allow list becomes an allowlist. Approval classifications are `inherit`, `prompt`, and `allow`. `prompt` blocks autonomous execution and requires a supervised, approved call. `allow` is metadata for the central policy layer and does not weaken Mitsuro's conservative treatment of unknown remote tools.
 
 ### Tool Registration
 
-When Krusty starts, the `McpManager` loads the configuration, connects all
+When Mitsuro starts, the `McpManager` loads the configuration, connects all
 enabled auto-connect-eligible servers in parallel, and queries each connected
 server for its available tools via `list_tools()`. Each MCP tool is then wrapped
-in an `McpTool` struct that implements Krusty's standard `Tool` trait, making it
+in an `McpTool` struct that implements Mitsuro's standard `Tool` trait, making it
 indistinguishable from built-in tools as far as the agent is concerned.
 
 MCP tools are registered in the global `ToolRegistry` with a namespaced name: `mcp__{server}_{tool}`. So a tool called `search` on a server named `filesystem` becomes `mcp__filesystem_search`. The tool's JSON Schema is sanitized during registration to ensure it conforms to the strict schema requirements that AI providers expect -- adding missing `properties` and `additionalProperties` fields, filtering invalid `required` entries, and normalizing nested schemas.
@@ -113,7 +113,7 @@ Servers can be connected and disconnected individually. Server instructions, imp
 
 Beyond server-specific tools, the agent receives `mcp__list_tools` plus a conservative `mcp__call_tool` dispatcher, so a catalog change is usable before every UI has re-registered named wrappers. Read-only `mcp__list_resources`, `mcp__list_resource_templates`, `mcp__read_resource`, `mcp__list_prompts`, and `mcp__get_prompt` wrappers expose the rest of the protocol. Equivalent server endpoints expose tools, resources, resource templates, and prompts to web/mobile clients.
 
-Krusty supports both externally provisioned Bearer tokens and interactive OAuth without placing secrets in project config. OAuth credentials, refresh tokens, and dynamically registered client identity are serialized by rmcp inside Krusty's shared atomic owner-only credential store; status and server responses never contain token material. The live HTTP transport asks rmcp for a token on every request, so near-expiry access tokens are refreshed before use. Tokens are keyed by a SHA-256 fingerprint of the normalized MCP resource URL, preventing a same-named server from receiving credentials issued for a different audience.
+Mitsuro supports both externally provisioned Bearer tokens and interactive OAuth without placing secrets in project config. OAuth credentials, refresh tokens, and dynamically registered client identity are serialized by rmcp inside Mitsuro's shared atomic owner-only credential store; status and server responses never contain token material. The live HTTP transport asks rmcp for a token on every request, so near-expiry access tokens are refreshed before use. Tokens are keyed by a SHA-256 fingerprint of the normalized MCP resource URL, preventing a same-named server from receiving credentials issued for a different audience.
 
 Web/mobile authorization uses the MCP management API:
 
@@ -124,7 +124,7 @@ Web/mobile authorization uses the MCP management API:
 
 MCP configuration and OAuth credentials belong to the process-wide local
 administrator. The MCP, plugin, extension, and skill management route groups
-reject tenant-scoped requests until Krusty has per-tenant manager instances;
+reject tenant-scoped requests until Mitsuro has per-tenant manager instances;
 they never silently reuse a tenant identity against the shared credential
 store.
 
@@ -170,7 +170,7 @@ durable, request-bound grants. Granting `process` to a native or JavaScript
 component authorizes trusted local code with the user's OS authority; the
 `fs_*` and `network` declarations are auditable host permissions, not a kernel
 sandbox around that code. Installable WASM TUI entries are currently managed
-descriptors and do not execute package code. Krusty's isolated
+descriptors and do not execute package code. Mitsuro's isolated
 Zed-compatible WASM editor/language host uses a separate ABI and is not a
 drop-in sandbox for package TUI or agent-extension code.
 Bundles can be distributed through npm, an explicitly selected local package,
@@ -186,7 +186,7 @@ fail closed.
 
 ### Signature Verification
 
-Plugin trust is enforced through ed25519 cryptographic signatures. Before a plugin is installed, Krusty verifies two things:
+Plugin trust is enforced through ed25519 cryptographic signatures. Before a plugin is installed, Mitsuro verifies two things:
 
 1. **Publisher allowlist.** The plugin's publisher must appear in the trust policy (`~/.krusty/plugins/trust/allowlist.toml`). If the publisher isn't trusted, installation is rejected with a message to add them first.
 
@@ -255,13 +255,13 @@ security boundary.
 
 ## Plans
 
-Plans are Krusty's answer to complex, multi-step tasks. When a task is too large to tackle in a single pass -- a feature that touches multiple files across several subsystems, a refactor that needs to happen in stages, or an investigation that branches into several directions -- plans break the work into phases, each phase into numbered tasks, and each task into something the agent can execute and check off.
+Plans are Mitsuro's answer to complex, multi-step tasks. When a task is too large to tackle in a single pass -- a feature that touches multiple files across several subsystems, a refactor that needs to happen in stages, or an investigation that branches into several directions -- plans break the work into phases, each phase into numbered tasks, and each task into something the agent can execute and check off.
 
 The plan system lives in `crates/krusty-core/src/plan/`.
 
 ### Plan Mode vs. Build Mode
 
-Krusty sessions have a work mode: either **plan** or **build**. In plan mode, the agent focuses on decomposing the problem -- reading code, analyzing dependencies, and producing a structured plan. Editing tools are restricted during planning to prevent the agent from jumping into implementation before the plan is ready. Once the plan is approved, the session transitions to build mode, where the agent picks up tasks in order and starts executing.
+Mitsuro sessions have a work mode: either **plan** or **build**. In plan mode, the agent focuses on decomposing the problem -- reading code, analyzing dependencies, and producing a structured plan. Editing tools are restricted during planning to prevent the agent from jumping into implementation before the plan is ready. Once the plan is approved, the session transitions to build mode, where the agent picks up tasks in order and starts executing.
 
 The lifecycle module in `lifecycle.rs` handles this transition intelligently. If a session's persisted mode says "plan" but the plan already has completed or in-progress tasks, the effective mode is automatically repaired to "build". This prevents sessions from getting stuck in plan mode after work has already started.
 
@@ -350,7 +350,7 @@ tags:
 Always use `anyhow::Result` with `.context()` for functions that can fail...
 ```
 
-The frontmatter follows the [Agent Skills](https://agentskills.io) contract. `name` and `description` are required. Names are 1–64 lowercase ASCII characters with single hyphen separators, cannot start/end with a hyphen, and must exactly match the directory name. Descriptions are 1–1024 characters. Standard optional fields (`license`, `compatibility`, `metadata`, `allowed-tools`, and `disable-model-invocation`) are supported; Krusty's existing `version`, `author`, and `tags` catalog fields remain compatible. `allowed-tools` is advisory and never bypasses Krusty's runtime tool governance.
+The frontmatter follows the [Agent Skills](https://agentskills.io) contract. `name` and `description` are required. Names are 1–64 lowercase ASCII characters with single hyphen separators, cannot start/end with a hyphen, and must exactly match the directory name. Descriptions are 1–1024 characters. Standard optional fields (`license`, `compatibility`, `metadata`, `allowed-tools`, and `disable-model-invocation`) are supported; Mitsuro's existing `version`, `author`, and `tags` catalog fields remain compatible. `allowed-tools` is advisory and never bypasses Mitsuro's runtime tool governance.
 
 Skills can include additional files beyond `SKILL.md`. The `load_skill_file` function lets you load any file within a skill's directory, with path traversal protection to prevent reading outside the skill boundary.
 
@@ -358,7 +358,7 @@ Skills can include additional files beyond `SKILL.md`. The `load_skill_file` fun
 
 The `SkillsManager` scans compatible user roots (`~/.krusty/skills`, `~/.agents/skills`, `~/.pi/agent/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`) plus matching project roots (`.krusty`, `.agents`, `.pi`, `.claude`, `.codex`, and `.opencode`). Project discovery walks upward from the working directory through the git worktree boundary (or filesystem root outside a worktree). Pi roots additionally accept direct Markdown skills; package roots are scanned recursively. Package lifecycle code supplies its complete enabled snapshot through `set_package_roots`, so disable, update, and uninstall remove stale contributions immediately.
 
-Precedence is deterministic: nearest project definitions override farther project definitions, project overrides user roots, user roots override packages, and native Krusty roots win ties within the same scope. Every rejected definition, invalid policy, and shadowed duplicate appears in the diagnostics catalog instead of disappearing into debug logs.
+Precedence is deterministic: nearest project definitions override farther project definitions, project overrides user roots, user roots override packages, and native Mitsuro roots win ties within the same scope. Every rejected definition, invalid policy, and shadowed duplicate appears in the diagnostics catalog instead of disappearing into debug logs.
 
 The manager keeps an in-memory catalog but fingerprints definitions and policy files on normal reads. Edits, additions, removals, and policy changes are detected without requiring a restart; `refresh()` remains available as an explicit force-rescan.
 
@@ -386,7 +386,7 @@ When skills are available, bounded metadata (name, description, tags, origin, an
 When a skill is model-activated, the governed skill tool returns the full
 SKILL.md instructions as tool output. An explicit `/skill:name` invocation
 embeds those instructions in the user's invocation. Only bounded skill metadata
-is advertised in the system prompt. This is how you teach Krusty
+is advertised in the system prompt. This is how you teach Mitsuro
 project-specific workflows, coding standards, deployment procedures, or domain
 knowledge without loading every instruction body up front.
 
@@ -402,7 +402,7 @@ This scaffolds a new skill directory with a template `SKILL.md` containing the f
 
 ## How They Fit Together
 
-These five layers serve different audiences and different moments in a Krusty session:
+These five layers serve different audiences and different moments in a Mitsuro session:
 
 - **MCP** extends what tools the agent can call. It's about capability -- connecting to databases, APIs, file systems, or any service that speaks the MCP protocol.
 - **Plugin packages** install, verify, update, permission, and remove complete bundles of capabilities.

@@ -5,7 +5,7 @@
   const features = [
     {
       title: 'Terminal-native agent',
-      body: 'Run the full Krusty TUI locally with tools, project memory, LSP context, and approval controls.'
+      body: 'Run Mitsuro locally with tools, project memory, LSP context, and explicit approval controls.'
     },
     {
       title: 'Plugin package runtime',
@@ -21,11 +21,11 @@
     },
     {
       title: 'Local-first by default',
-      body: 'Your workspace remains on your machine. Krusty brings the assistant to the code, not the reverse.'
+      body: 'Your workspace remains on your machine. Mitsuro brings the Agent to the code, not the reverse.'
     },
     {
       title: 'Open catalog',
-      body: 'The package directory is a static index that can be hosted on git, krusty.dev, or your own URL.'
+      body: 'The package directory is a static index that can be hosted on GitHub or your own infrastructure.'
     }
   ];
 
@@ -33,7 +33,8 @@
 </script>
 
 <svelte:head>
-  <title>Krusty — Local-first AI coding assistant</title>
+  <title>Mitsuro — Local-first AI coding assistant</title>
+  <meta name="description" content="Mitsuro is a local-first AI coding assistant from Honeycomb Technologies." />
 </svelte:head>
 
 <main class="page">
@@ -42,19 +43,19 @@
       <div class="eyebrow">local runtime online</div>
       <h1>Code with agents that stay <span class="gradient-text">on your machine.</span></h1>
       <p class="lede">
-        Krusty is a Rust-native coding assistant with a terminal TUI, web/mobile surfaces,
-        autonomous Mako sessions, and a new hot-reloadable plugin package system.
+        Mitsuro is a local-first coding assistant with terminal, desktop, web, and mobile surfaces.
+        Agent handles focused work while Hive keeps autonomous work alive across threads.
       </p>
       <div class="actions">
         <a class="button primary" href="/plugins">Browse plugins</a>
-        <a class="button" href="#install">Install Krusty</a>
+        <a class="button" href="#install">Install Mitsuro</a>
         <a class="button ghost" href="https://github.com/honeycomb-Technologies/Krusty">View source</a>
       </div>
     </div>
 
-    <div class="terminal-card" aria-label="Krusty terminal preview">
+    <div class="terminal-card" aria-label="Mitsuro terminal preview">
       <div class="terminal-titlebar">
-        <span>krusty.dev / desktop-inspired shell</span>
+        <span>mitsuro / local runtime</span>
         <div class="dots" aria-hidden="true"><span></span><span></span><span></span></div>
       </div>
       <div class="terminal-body">
@@ -92,8 +93,8 @@
     <div class="section-heading">
       <h2>Install locally. Extend with packages.</h2>
       <p>
-        Plugin packages use the same catalog shape Krusty reads in the TUI. The website publishes
-        the directory; Krusty installs from npm, local folders, or custom catalog sources.
+        Plugin packages use Mitsuro's existing compatibility catalog. The website publishes the
+        directory; Mitsuro installs from npm, local folders, or custom catalog sources.
       </p>
     </div>
 

@@ -99,11 +99,11 @@ export function MakoScreen({
     logbook: "Logbook",
     runs: "Runs",
     details: "Details",
-    crew: "Crew",
+    crew: "Agents",
     channels: "Channels",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
-  const subtitle = navigation.topLevel === "mako" ? "Always Swimming." : undefined;
+  const subtitle = navigation.topLevel === "mako" ? "The hive is always alive." : undefined;
 
   return (
     <SafeAreaView

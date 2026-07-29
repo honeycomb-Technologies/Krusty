@@ -104,11 +104,56 @@ Deno.test("legacy mascot components are no longer app entry points", async () =>
 Deno.test("shared product accents use Graphite Brass", async () => {
   const tokens = await source("../../../packages/ui/src/tokens.ts");
   const beam = await source("../components/chat/border-beam/line-spec.json");
+  const webLine = await source("../components/chat/ChatBarRunningLine.tsx");
 
   assert(tokens.includes("#0e0e11"), "graphite must remain the dark foundation");
-  assert(tokens.includes("#b89a61"), "brass must remain the thinking accent");
-  assert(tokens.includes("#7f7485"), "mineral violet must remain the interactive accent");
+  assert(tokens.includes("#b89a61"), "brass must remain the restrained identity accent");
+  assert(tokens.includes("#75617e"), "mineral violet must remain the interactive accent");
+  assert(tokens.includes("#9a82a5"), "Pulse violet must remain the thinking accent");
   assert(!tokens.includes("#ff6b35"), "legacy orange must not return to shared tokens");
+  assert(!tokens.includes("#7f8fa3"), "blue-gray must not return as shared app chrome");
   assert(beam.includes("184, 154, 97"), "running beam must lead with restrained brass");
   assert(!beam.includes("255, 107, 53"), "running beam must not retain Krusty orange");
+  assert(!beam.includes("127, 143, 163"), "running beam must not retain steel-blue chrome");
+  assert(webLine.includes("#75617e"), "web running line must include mineral violet");
+  assert(webLine.includes("#b89a61"), "web running line must include restrained brass");
+  assert(!webLine.includes("#e17a30"), "web running line must not retain rust orange");
+});
+
+Deno.test("app chrome uses shared graphite surfaces", async () => {
+  const surfaces = await Promise.all([
+    source("../components/SettingsModal.tsx"),
+    source("../components/ReportsViewer.tsx"),
+    source("../components/DirectoryPicker.tsx"),
+    source("../components/sheets/AppBottomSheet.tsx"),
+    source("../components/layout/DesktopShell.tsx"),
+    source("../components/chat/ChatBar.tsx"),
+    source("../components/chat/ChatBarModelPopover.tsx"),
+    source("../components/chat/ChatTranscript.tsx"),
+    source("../components/chat/ImagePreviewModal.tsx"),
+    source("../components/chat/MarkdownContent.tsx"),
+    source("../components/chat/PlanTracker.tsx"),
+    source("../components/mako/MakoEditorModal.tsx"),
+  ]);
+  const joined = surfaces.join("\n");
+
+  for (const retired of [
+    "rgba(11,17,25",
+    "rgba(14, 20, 30",
+    "#1a1f2e",
+    "#090d12",
+    "#081018",
+  ]) {
+    assert(!joined.includes(retired), `app chrome must not retain ${retired}`);
+  }
+});
+
+Deno.test("production router excludes the visual prototype", async () => {
+  let exists = true;
+  try {
+    await Deno.stat(new URL("../app/navigation-preview.tsx", import.meta.url));
+  } catch {
+    exists = false;
+  }
+  assert(!exists, "navigation preview must not ship as an unauthenticated app route");
 });

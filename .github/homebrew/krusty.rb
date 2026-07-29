@@ -1,4 +1,4 @@
-# Homebrew formula for Krusty
+# Homebrew formula for Mitsuro (compatibility package: krusty)
 # To use: brew install BurgessTG/tap/krusty
 #
 # Release CI renders this template and attaches krusty.rb to the GitHub Release.
@@ -6,7 +6,7 @@
 # step unless an explicitly configured, repository-scoped token enables it.
 
 class Krusty < Formula
-  desc "Terminal-based AI coding assistant powered by Claude"
+  desc "Mitsuro multi-platform AI coding product with Agent and Hive"
   homepage "https://github.com/honeycomb-Technologies/Krusty"
   version "VERSION_PLACEHOLDER"
   license "MIT"

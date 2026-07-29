@@ -1998,7 +1998,7 @@ fn require_frozen_session_model(
         session.model.clone(),
         session.model_key.clone(),
         session.model_catalog_revision.clone(),
-        "Mako session",
+        "Hive session",
     )?;
     let model = session
         .model
@@ -2007,7 +2007,7 @@ fn require_frozen_session_model(
         .filter(|model| !model.is_empty())
         .ok_or_else(|| {
             RuntimeStoreError::StateConflict(
-                "Mako session has no frozen model; select a model before starting it".into(),
+                "Hive session has no frozen model; select a model before starting it".into(),
             )
         })?;
     if session
@@ -2016,12 +2016,12 @@ fn require_frozen_session_model(
         .is_some_and(|key| key.model_id != model)
     {
         return Err(RuntimeStoreError::StateConflict(
-            "Mako session model does not match its frozen model key".into(),
+            "Hive session model does not match its frozen model key".into(),
         ));
     }
     if session.model_key.is_none() && session.model_catalog_revision.is_some() {
         return Err(RuntimeStoreError::StateConflict(
-            "Mako session catalog revision has no frozen model key".into(),
+            "Hive session catalog revision has no frozen model key".into(),
         ));
     }
     Ok(model)
@@ -2033,7 +2033,7 @@ fn require_frozen_session_permission_mode(
     match session.permission_mode.as_str() {
         "supervised" | "autonomous" => Ok(session.permission_mode.as_str()),
         _ => Err(RuntimeStoreError::StateConflict(
-            "Mako session has an invalid permission mode".into(),
+            "Hive session has an invalid permission mode".into(),
         )),
     }
 }

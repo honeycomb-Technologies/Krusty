@@ -18,8 +18,7 @@ export function SettingsModal({ visible, onClose }: SettingsModalProps) {
           style={[
             styles.panel,
             {
-              backgroundColor:
-                theme.scheme === "dark" ? "rgba(11,17,25,0.98)" : "rgba(255,255,255,0.98)",
+              backgroundColor: theme.colors.surfaceOverlayStrong,
               borderColor: theme.colors.border,
             },
           ]}

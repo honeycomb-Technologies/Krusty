@@ -18,7 +18,7 @@ impl AiClient {
     /// Create the HTTP client with configuration optimized for SSE streaming
     pub(super) fn create_http_client() -> Client {
         Client::builder()
-            .user_agent("Krusty/1.0")
+            .user_agent("Mitsuro/1.0")
             .connect_timeout(constants::http::CONNECT_TIMEOUT)
             .timeout(constants::http::STREAM_TIMEOUT)
             .build()

@@ -109,8 +109,8 @@ fn notify_chat_awaiting_input(
         push_service,
         user_id,
         PushPayload {
-            title: "Krusty".into(),
-            body: "Krusty needs your input".into(),
+            title: "Mitsuro".into(),
+            body: "Agent needs your input".into(),
             session_id: Some(session_id.to_string()),
             tag: None,
             category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
@@ -122,8 +122,8 @@ fn notify_chat_awaiting_input(
         apns_service,
         user_id,
         ApnsPayload {
-            title: "Krusty".into(),
-            body: "Krusty needs your input".into(),
+            title: "Mitsuro".into(),
+            body: "Agent needs your input".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
             data: Some(chat_session_notification_data("awaiting_input", session_id)),
@@ -178,7 +178,7 @@ fn notify_chat_error(
         push_service,
         user_id,
         PushPayload {
-            title: "Krusty".into(),
+            title: "Mitsuro".into(),
             body: "Session encountered an error".into(),
             session_id: Some(session_id.to_string()),
             tag: None,
@@ -191,7 +191,7 @@ fn notify_chat_error(
         apns_service,
         user_id,
         ApnsPayload {
-            title: "Krusty".into(),
+            title: "Mitsuro".into(),
             body: "Session encountered an error".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
@@ -213,7 +213,7 @@ fn notify_chat_completion(
         push_service,
         user_id,
         PushPayload {
-            title: "Krusty".into(),
+            title: "Mitsuro".into(),
             body: format!("{title} is complete"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("session-{session_id}")),

@@ -226,8 +226,7 @@ function ChatTranscriptComponent({
       : "systemChromeMaterialLight";
   const jumpTint =
     theme.scheme === "dark" ? "systemMaterialDark" : "systemMaterialLight";
-  const jumpOverlay =
-    theme.scheme === "dark" ? "rgba(11,17,25,0.6)" : "rgba(255,255,255,0.6)";
+  const jumpOverlay = t.surfaceOverlaySubtle;
 
   isStreamingRef.current = isStreaming;
 

@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name           = 'KrustyDiagnostics'
   s.version        = '1.0.0'
-  s.summary        = 'Content-free MetricKit diagnostics for Krusty internal builds'
+  s.summary        = 'Content-free MetricKit diagnostics for Mitsuro internal builds'
   s.description    = 'Collects bounded, content-free MetricKit summaries for authenticated Honey diagnostics.'
   s.author         = 'Honeycomb Technologies'
   s.homepage       = 'https://github.com/honeycomb-Technologies/Krusty'
