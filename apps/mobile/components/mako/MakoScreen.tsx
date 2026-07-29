@@ -93,7 +93,7 @@ export function MakoScreen({
 
   const status = current.current?.status.home_status ?? "idle";
   const topLevelTitles: Record<MakoTopLevelView, string> = {
-    mako: "Mako",
+    mako: "Hive",
     attention: "Attention",
     schedule: "Schedule",
     logbook: "Logbook",
@@ -102,7 +102,7 @@ export function MakoScreen({
     crew: "Crew",
     channels: "Channels",
   };
-  const title = topLevelTitles[navigation.topLevel] ?? "Mako";
+  const title = topLevelTitles[navigation.topLevel] ?? "Hive";
   const subtitle = navigation.topLevel === "mako" ? "Always Swimming." : undefined;
 
   return (

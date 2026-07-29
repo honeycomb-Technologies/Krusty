@@ -4,7 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import type { SessionType } from "@krusty/api";
 
 import { ChatTranscript } from "../../../components/chat/ChatTranscript";
-import { KrustyLogo } from "../../../components/ui/KrustyLogo";
+import { MitsuroLogo } from "../../../components/brand";
 import { useSessionStore } from "../../../hooks/useStores";
 import { useThemeContext } from "../../../hooks/useTheme";
 import { styles } from "./styles";
@@ -83,7 +83,7 @@ function ActiveConversationSurfaceComponent({
         emptyState={
           emptyState ?? (
             <View style={styles.empty}>
-              <KrustyLogo />
+              <MitsuroLogo />
               {error ? (
                 <Text style={[styles.emptyHint, { color: t.error }]}>{error}</Text>
               ) : null}

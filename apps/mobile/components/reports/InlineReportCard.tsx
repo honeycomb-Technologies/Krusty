@@ -87,7 +87,7 @@ export function InlineReportCard({
               style={[styles.title, { color: t.foreground }]}
               numberOfLines={1}
             >
-              {report?.title ?? "Mako report"}
+              {report?.title ?? "Hive report"}
             </Text>
             {!expanded && report?.summary ? (
               <Text

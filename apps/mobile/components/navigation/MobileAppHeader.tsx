@@ -16,7 +16,7 @@ import Animated, {
 
 import { useThemeContext } from "../../hooks/useTheme";
 import * as Haptics from "../../platform/haptics";
-import { MakoSharkIcon } from "../ui/MakoSharkIcon";
+import { HiveIcon } from "../brand";
 
 const MODES: Array<{
   id: SessionType;
@@ -29,7 +29,7 @@ const MODES: Array<{
 }> = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "code", label: "Code", icon: Code2 },
-  { id: "mako", label: "Mako", icon: MakoSharkIcon },
+  { id: "mako", label: "Hive", icon: HiveIcon },
 ];
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);

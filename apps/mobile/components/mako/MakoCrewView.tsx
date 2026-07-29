@@ -32,7 +32,7 @@ export function MakoCrewView({ state }: MakoCrewViewProps) {
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Crew is Mako&apos;s living roster. Each member carries its own identity, soul, and memory, and can be assigned directly into runs when the work needs a distinct presence.
+        Crew is Hive&apos;s living roster. Each member carries its own identity, soul, and memory, and can be assigned directly into runs when the work needs a distinct presence.
       </Text>
 
       <MakoPresenceDetails state={state} showChannelsRow={false} />

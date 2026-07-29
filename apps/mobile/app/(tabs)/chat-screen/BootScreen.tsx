@@ -2,7 +2,7 @@ import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { useThemeContext } from "../../../hooks/useTheme";
-import { KrustyLogo } from "../../../components/ui/KrustyLogo";
+import { MitsuroLogo } from "../../../components/brand";
 import { styles } from "./styles";
 
 interface ChatBootScreenProps {
@@ -29,7 +29,7 @@ export function ChatBootScreen({
   return (
     <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}> 
       <View style={styles.bootInner}>
-        {showLogo ? <KrustyLogo /> : null}
+        {showLogo ? <MitsuroLogo /> : null}
         {status === "connecting" ? (
           <>
             <ActivityIndicator

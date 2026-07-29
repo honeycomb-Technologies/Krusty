@@ -198,7 +198,7 @@ function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] 
           dayKey: dayKey(wakeAt),
           timeValue: timeValue(wakeAt),
           title: run.title || "Untitled run",
-          detail: detailParts.join(" • ") || "Scheduled by Mako",
+          detail: detailParts.join(" • ") || "Scheduled by Hive",
           seriesKey: scheduleSeriesKey(run, wakeAt),
         },
       ];
@@ -656,7 +656,7 @@ export function MakoScheduleView({
       setCommitments(await client.listMakoSchedules({ limit: 200 }));
     } catch (error) {
       setCommitmentsError(
-        error instanceof Error ? error.message : "Failed to load Mako schedules.",
+        error instanceof Error ? error.message : "Failed to load Hive schedules.",
       );
     } finally {
       setIsLoadingCommitments(false);
@@ -829,7 +829,7 @@ export function MakoScheduleView({
         }
       >
         <Text style={[styles.description, { color: t.mutedForeground }]}>
-          What Mako is committed to, when it will wake, and whether each
+          What Hive is committed to, when it will wake, and whether each
           commitment is active.
         </Text>
 

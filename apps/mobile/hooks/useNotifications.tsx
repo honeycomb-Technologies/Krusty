@@ -139,7 +139,7 @@ async function registerNotificationCategories() {
   await Notifications.setNotificationCategoryAsync(MAKO_SESSION_CATEGORY, [
     {
       identifier: "OPEN_MAKO",
-      buttonTitle: "Open Mako",
+      buttonTitle: "Open Hive",
       options: { opensAppToForeground: true },
     },
   ]);
@@ -161,7 +161,7 @@ function permissionGranted(settings: any): boolean {
 async function ensureAndroidNotificationChannel() {
   if (!Notifications || Platform.OS !== "android") return;
   await Notifications.setNotificationChannelAsync("default", {
-    name: "Krusty",
+    name: "Mitsuro",
     importance: Notifications.AndroidImportance?.HIGH ?? 4,
     vibrationPattern: [0, 200, 100, 200],
   });
@@ -704,7 +704,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: `Mako: ${title}`,
+          title: `Hive: ${title}`,
           body,
           categoryIdentifier: MAKO_SESSION_CATEGORY,
           data: { type: "mako_update", kind: "user_message", sessionId, focus: "mako" },

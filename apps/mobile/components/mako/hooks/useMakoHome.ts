@@ -49,7 +49,7 @@ export function useMakoHome(enabled: boolean) {
         setError(
           refreshError instanceof Error
             ? refreshError.message
-            : "Failed to load Mako home",
+            : "Failed to load Hive home",
         );
       } finally {
         if (generation === refreshGenerationRef.current) {
@@ -81,7 +81,7 @@ export function useMakoHome(enabled: boolean) {
       setError(
         bootstrapError instanceof Error
           ? bootstrapError.message
-          : "Failed to bootstrap Mako home",
+          : "Failed to bootstrap Hive home",
       );
     } finally {
       setIsBootstrapping(false);
@@ -105,7 +105,7 @@ export function useMakoHome(enabled: boolean) {
         setError(
           saveError instanceof Error
             ? saveError.message
-            : "Failed to update Mako home",
+            : "Failed to update Hive home",
         );
         throw saveError;
       } finally {

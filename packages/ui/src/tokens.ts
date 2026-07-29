@@ -1,61 +1,61 @@
-// iOS 26 Liquid Glass inspired design tokens
+// Mitsuro Graphite Brass design tokens.
 
 export const colors = {
   // Core
-  background: '#0b1119',
-  foreground: '#fafafa',
-  primary: '#fafafa',
-  primaryMuted: 'rgba(250, 250, 250, 0.7)',
+  background: '#0e0e11',
+  foreground: '#e8e5ea',
+  primary: '#e8e5ea',
+  primaryMuted: 'rgba(232, 229, 234, 0.70)',
 
   // Messages
-  userMessage: '#ff6b35',
-  userMessageBg: 'rgba(255, 107, 53, 0.15)',
-  aiMessage: 'rgba(255, 255, 255, 0.04)',
-  thinking: '#ff6b35',
-  thinkingBg: 'rgba(255, 107, 53, 0.1)',
+  userMessage: '#7f7485',
+  userMessageBg: 'rgba(127, 116, 133, 0.22)',
+  aiMessage: 'rgba(232, 229, 234, 0.045)',
+  thinking: '#b89a61',
+  thinkingBg: 'rgba(184, 154, 97, 0.12)',
 
   // Status
-  success: '#22c55e',
-  error: '#ef4444',
-  warning: '#f59e0b',
-  info: '#3b82f6',
+  success: '#7f9a86',
+  error: '#b06f73',
+  warning: '#b89a61',
+  info: '#7f8fa3',
 
   // Surfaces
-  card: 'rgba(255, 255, 255, 0.04)',
-  muted: '#27272a',
-  mutedForeground: '#a1a1aa',
-  border: 'rgba(255, 255, 255, 0.08)',
-  destructive: '#7f1d1d',
-  destructiveForeground: '#fca5a5',
+  card: 'rgba(232, 229, 234, 0.045)',
+  muted: '#25282c',
+  mutedForeground: '#9e9ba0',
+  border: 'rgba(232, 229, 234, 0.10)',
+  destructive: '#5f3035',
+  destructiveForeground: '#d9a4a7',
 
   // Glass
   glass: {
-    background: 'rgba(255, 255, 255, 0.06)',
-    backgroundElevated: 'rgba(255, 255, 255, 0.10)',
-    backgroundPressed: 'rgba(255, 255, 255, 0.14)',
-    border: 'rgba(255, 255, 255, 0.12)',
-    borderLight: 'rgba(255, 255, 255, 0.20)',
+    background: 'rgba(232, 229, 234, 0.055)',
+    backgroundElevated: 'rgba(232, 229, 234, 0.095)',
+    backgroundPressed: 'rgba(232, 229, 234, 0.14)',
+    border: 'rgba(232, 229, 234, 0.12)',
+    borderLight: 'rgba(232, 229, 234, 0.20)',
     blur: 20,
     blurIntense: 40,
   },
 
   // Light mode overrides
   light: {
-    background: '#ffffff',
-    foreground: '#0a0a0a',
-    primary: '#0a0a0a',
-    card: 'rgba(0, 0, 0, 0.03)',
-    muted: '#f4f4f5',
-    mutedForeground: '#71717a',
-    border: 'rgba(0, 0, 0, 0.08)',
-    userMessageBg: 'rgba(255, 107, 53, 0.10)',
-    aiMessage: 'rgba(0, 0, 0, 0.03)',
+    background: '#e6e3de',
+    foreground: '#242326',
+    primary: '#242326',
+    card: 'rgba(36, 35, 38, 0.045)',
+    muted: '#d7d3cd',
+    mutedForeground: '#716d72',
+    border: 'rgba(36, 35, 38, 0.11)',
+    userMessageBg: 'rgba(127, 116, 133, 0.16)',
+    aiMessage: 'rgba(36, 35, 38, 0.04)',
     glass: {
-      background: 'rgba(255, 255, 255, 0.60)',
-      backgroundElevated: 'rgba(255, 255, 255, 0.75)',
-      backgroundPressed: 'rgba(255, 255, 255, 0.85)',
-      border: 'rgba(0, 0, 0, 0.08)',
-      borderLight: 'rgba(0, 0, 0, 0.12)',
+      background: 'rgba(246, 243, 238, 0.62)',
+      backgroundElevated: 'rgba(246, 243, 238, 0.78)',
+      backgroundPressed: 'rgba(246, 243, 238, 0.88)',
+      border: 'rgba(36, 35, 38, 0.10)',
+      borderLight: 'rgba(36, 35, 38, 0.15)',
     },
   },
 } as const;

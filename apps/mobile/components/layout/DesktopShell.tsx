@@ -70,7 +70,7 @@ export function DesktopShell({
           <View style={styles.sidebarContent}>
             {/* Header with collapse button */}
             <View style={styles.sidebarHeader}>
-              <Text style={[styles.sidebarTitle, { color: t.foreground }]}>Krusty</Text>
+              <Text style={[styles.sidebarTitle, { color: t.foreground }]}>Mitsuro</Text>
               <Pressable onPress={toggleSidebar} style={styles.iconBtn}>
                 <PanelLeftClose size={18} color={t.mutedForeground} strokeWidth={1.8} />
               </Pressable>

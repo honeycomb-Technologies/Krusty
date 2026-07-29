@@ -174,7 +174,7 @@ function MemoryDetailPane({
           No memory selected
         </Text>
         <Text style={[styles.detailBody, { color: t.mutedForeground }]}>
-          Memories are the durable facts, decisions, and references Mako should keep carrying across runs.
+          Memories are the durable facts, decisions, and references Hive should keep carrying across runs.
         </Text>
       </View>
     );

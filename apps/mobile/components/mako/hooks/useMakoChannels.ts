@@ -24,7 +24,7 @@ export function useMakoChannels(enabled: boolean) {
       setError(
         refreshError instanceof Error
           ? refreshError.message
-          : "Failed to load Mako channels",
+          : "Failed to load Hive channels",
       );
     } finally {
       setIsLoading(false);

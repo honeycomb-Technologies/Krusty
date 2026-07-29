@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import {
   Animated,
   PanResponder,
@@ -14,7 +21,6 @@ import {
   Archive,
   ArrowDown,
   Blocks,
-  Bot,
   CalendarClock,
   Check,
   ChevronRight,
@@ -48,15 +54,22 @@ import {
 } from "lucide-react-native";
 
 import { useThemeContext } from "../hooks/useTheme";
+import { HiveIcon } from "../components/brand";
 
 type Mode = "chat" | "code" | "mako";
 type SheetKind = "threads" | "toolbox" | null;
 type ThemeColors = ReturnType<typeof useThemeContext>["theme"]["colors"];
 
-const MODES: Array<{ id: Mode; label: string; icon: LucideIcon }> = [
+type ModeIcon = ComponentType<{
+  size?: number;
+  color?: string;
+  strokeWidth?: number;
+}>;
+
+const MODES: Array<{ id: Mode; label: string; icon: ModeIcon }> = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "code", label: "Code", icon: Code2 },
-  { id: "mako", label: "Mako", icon: Bot },
+  { id: "mako", label: "Hive", icon: HiveIcon },
 ];
 
 const MODE_INDEX: Record<Mode, number> = { chat: 0, code: 1, mako: 2 };
@@ -112,18 +125,18 @@ const THREADS: Record<
   code: [
     {
       title: "Native bottom sheets",
-      detail: "Krusty · codex/navigation",
+      detail: "Mitsuro · codex/navigation",
       time: "now",
       active: true,
     },
     {
-      title: "Mako scheduler polish",
-      detail: "Krusty · codex/mako-ui",
+      title: "Hive scheduler polish",
+      detail: "Mitsuro · codex/mako-ui",
       time: "3h",
     },
     {
       title: "Tool output renderer",
-      detail: "Krusty · main",
+      detail: "Mitsuro · main",
       time: "2d",
     },
   ],
@@ -149,7 +162,7 @@ const THREADS: Record<
 
 const CODE_PROJECTS = [
   {
-    name: "Krusty",
+    name: "Mitsuro",
     path: "/Users/Jacob/Documents/Krusty",
     time: "now",
     threads: THREADS.code,
@@ -292,7 +305,7 @@ function ContextLine({
 }) {
   const copy = {
     chat: { title: "Mobile navigation system", detail: null },
-    code: { title: "Native bottom sheets", detail: "Krusty" },
+    code: { title: "Native bottom sheets", detail: "Mitsuro" },
     mako: { title: "Release Captain", detail: "idle" },
   }[mode];
 
@@ -376,7 +389,7 @@ const CONVERSATION_COPY: Record<
     },
     {
       role: "assistant",
-      text: "Then the conversation should remain the stable canvas. Chat, Code, and Mako change the kind of work, while threads and tools rise temporarily from the bottom.",
+      text: "Then the conversation should remain the stable canvas. Chat, Code, and Hive change the kind of work, while threads and tools rise temporarily from the bottom.",
       artifact: {
         type: "MARKDOWN REPORT",
         title: "Mobile navigation direction",
@@ -401,7 +414,7 @@ const CONVERSATION_COPY: Record<
     },
     {
       role: "assistant",
-      text: "Understood. I’ll keep this thread focused on releases, scheduled checks, and deployment readiness. My identity, memory, runs, and schedule stay with this Mako.",
+      text: "Understood. I’ll keep this thread focused on releases, scheduled checks, and deployment readiness. My identity, memory, runs, and schedule stay with this Hive.",
       event: "Next scheduled wake · 4:30 PM",
     },
   ],
@@ -436,7 +449,7 @@ function ConversationPanel({
                   { backgroundColor: `${colors.success}18` },
                 ]}
               >
-                <Bot size={16} color={colors.success} />
+                <HiveIcon size={16} color={colors.success} />
               </View>
             ) : null}
             <View
@@ -545,7 +558,7 @@ function Composer({ mode, colors }: { mode: Mode; colors: ThemeColors }) {
   const placeholders = {
     chat: "Ask, create, or explore…",
     code: "Describe what to build…",
-    mako: "Set a course for Mako…",
+    mako: "Set a course for Hive…",
   };
 
   return (
@@ -728,11 +741,11 @@ function ThreadSheet({
   onClose: () => void;
 }) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
-    new Set(["Krusty"]),
+    new Set(["Mitsuro"]),
   );
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const title =
-    mode === "chat" ? "Chats" : mode === "code" ? "Projects" : "Makos";
+    mode === "chat" ? "Chats" : mode === "code" ? "Projects" : "Hives";
   const subtitle =
     mode === "chat"
       ? "Most recent first"
@@ -742,7 +755,7 @@ function ThreadSheet({
 
   const renderThread = (
     thread: (typeof THREADS.chat)[number],
-    icon: LucideIcon,
+    icon: ModeIcon,
     accent: string,
   ) => {
     const Icon = icon;
@@ -897,7 +910,7 @@ function ThreadSheet({
 
         {mode === "mako"
           ? THREADS.mako.map((thread) =>
-              renderThread(thread, Bot, colors.success),
+              renderThread(thread, HiveIcon, colors.success),
             )
           : null}
       </ScrollView>
@@ -1027,7 +1040,7 @@ function ToolboxSheet({
 
   return (
     <BottomSheet
-      title={mode === "chat" ? "Work" : mode === "code" ? "Toolbox" : "Mako"}
+      title={mode === "chat" ? "Work" : mode === "code" ? "Toolbox" : "Hive"}
       subtitle={
         mode === "chat"
           ? "Artifacts, plugins, and reusable work"
@@ -1204,14 +1217,14 @@ function ToolPreview({
           <Text style={styles.terminalMeta}>krusty — zsh — 80×24</Text>
           <Text style={styles.terminalText}>
             <Text style={{ color: colors.success }}>➜ </Text>
-            <Text style={{ color: colors.userMessage }}>Krusty </Text>
+            <Text style={{ color: colors.userMessage }}>Mitsuro </Text>
             git status --short{"\n"}
             <Text style={{ color: colors.warning }}> M </Text>
             apps/mobile/components/chat/ChatBar.tsx{"\n"}
             <Text style={{ color: colors.warning }}>?? </Text>
             apps/mobile/app/navigation-preview.tsx{"\n"}
             <Text style={{ color: colors.success }}>➜ </Text>
-            <Text style={{ color: colors.userMessage }}>Krusty </Text>
+            <Text style={{ color: colors.userMessage }}>Mitsuro </Text>
             <Text style={{ color: colors.foreground }}>▋</Text>
           </Text>
         </View>
@@ -1289,7 +1302,7 @@ function ToolPreview({
         <ToolRow
           icon={Workflow}
           title="Navigation research"
-          detail="Running · 6m · Krusty"
+          detail="Running · 6m · Mitsuro"
           badge="Active"
           colors={colors}
         />
@@ -1311,7 +1324,7 @@ function ToolPreview({
         </Text>
         <ToolRow
           icon={MemoryStick}
-          title="Krusty project knowledge"
+          title="Mitsuro project knowledge"
           detail="34 facts · 12 procedures"
           colors={colors}
         />

@@ -6,7 +6,15 @@ import {
   type ComponentRef,
   type CSSProperties,
 } from 'react';
-import { Animated, Platform, View, StyleSheet } from 'react-native';
+import { Platform, View, StyleSheet } from 'react-native';
+import Animated, {
+  cancelAnimation,
+  runOnJS,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import LottieView from 'lottie-react-native';
 import * as SplashScreen from 'expo-splash-screen';
 
@@ -15,7 +23,7 @@ SplashScreen.preventAutoHideAsync();
 const DELAY_BEFORE_PLAY_MS = 400;
 const FALLBACK_COMPLETE_MS = 5000;
 const EXIT_FADE_MS = 260;
-const SPLASH_BACKGROUND = '#0b1119';
+const SPLASH_BACKGROUND = '#0e0e11';
 
 const webOverlayStyle: CSSProperties = {
   position: 'absolute',
@@ -36,18 +44,27 @@ export function SplashOverlay({ children, onComplete }: Props) {
   const lottieRef = useRef<ComponentRef<typeof LottieView>>(null);
   const completedRef = useRef(false);
   const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const overlayOpacityRef = useRef(new Animated.Value(1));
+  const reduceMotion = useReducedMotion();
+  const overlayOpacity = useSharedValue(1);
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: overlayOpacity.value,
+  }));
 
   const completeSplash = useCallback(() => {
     if (completedRef.current) return;
     completedRef.current = true;
     onComplete?.();
-    Animated.timing(overlayOpacityRef.current, {
-      toValue: 0,
-      duration: EXIT_FADE_MS,
-      useNativeDriver: false,
-    }).start(() => setOverlayVisible(false));
-  }, [onComplete]);
+    if (reduceMotion) {
+      overlayOpacity.value = 0;
+      setOverlayVisible(false);
+      return;
+    }
+    overlayOpacity.value = withTiming(0, { duration: EXIT_FADE_MS }, (finished) => {
+      if (finished) {
+        runOnJS(setOverlayVisible)(false);
+      }
+    });
+  }, [onComplete, overlayOpacity, reduceMotion]);
 
   useEffect(() => {
     const fallbackTimer = setTimeout(completeSplash, FALLBACK_COMPLETE_MS);
@@ -56,9 +73,9 @@ export function SplashOverlay({ children, onComplete }: Props) {
       if (playTimerRef.current) {
         clearTimeout(playTimerRef.current);
       }
-      overlayOpacityRef.current.stopAnimation();
+      cancelAnimation(overlayOpacity);
     };
-  }, [completeSplash]);
+  }, [completeSplash, overlayOpacity]);
 
   const handleLayout = useCallback(() => {
     SplashScreen.hideAsync();
@@ -103,7 +120,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
       {overlayVisible ? (
         <Animated.View
           pointerEvents="none"
-          style={[styles.overlayLayer, { opacity: overlayOpacityRef.current }]}
+          style={[styles.overlayLayer, overlayStyle]}
         >
           {Platform.OS === 'web' ? (
             <LottieView

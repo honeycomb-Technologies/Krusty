@@ -68,7 +68,7 @@ export default function OnboardingScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.header}>
-          <Text style={[styles.title, { color: t.foreground }]}>Krusty</Text>
+          <Text style={[styles.title, { color: t.foreground }]}>Mitsuro</Text>
           <Text style={[styles.subtitle, { color: t.mutedForeground }]}>
             Connect to your server
           </Text>
@@ -128,7 +128,7 @@ export default function OnboardingScreen() {
         </View>
 
         <Text style={[styles.hint, { color: t.mutedForeground }]}>
-          Start your Krusty server with `krusty serve` and find your Tailscale URL in Settings → Remote Access.
+          Start your Mitsuro server with `krusty serve` and find your Tailscale URL in Settings → Remote Access.
         </Text>
       </KeyboardAvoidingView>
     </SafeAreaView>

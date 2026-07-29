@@ -46,7 +46,7 @@ export function MakoCurrentView({
   const blockedPrompt =
     pendingApprovalCount > 0
       ? {
-          title: "Mako needs your approval",
+          title: "Hive needs your approval",
           detail:
             pendingApprovalCount === 1
               ? "Review the pending request and reply in this thread to continue."
@@ -54,11 +54,11 @@ export function MakoCurrentView({
         }
       : waitingRun
         ? {
-            title: "Mako needs your input",
+            title: "Hive needs your input",
             detail:
               waitingRun.diagnostic?.detail ||
               waitingRun.diagnostic?.summary ||
-              "Reply in this thread with the missing direction. Mako will wait here until you do.",
+              "Reply in this thread with the missing direction. Hive will wait here until you do.",
           }
         : null;
 
@@ -82,7 +82,7 @@ export function MakoCurrentView({
       <View style={[styles.metaBlock, { borderBottomColor: t.border }]}>
         <View style={styles.statusLine}>
           <Text style={[styles.statusText, { color: t.mutedForeground }]}>
-            {showBootstrapLoading ? "Connecting to Mako…" : stateBits.join(" • ")}
+            {showBootstrapLoading ? "Connecting to Hive…" : stateBits.join(" • ")}
           </Text>
           {showBootstrapLoading || state.isRefreshing || homeState.isRefreshing ? (
             <ActivityIndicator color={t.userMessage} size="small" />
@@ -93,7 +93,7 @@ export function MakoCurrentView({
           <View style={[styles.focusRow, { borderColor: t.border }]}>
             <View style={styles.focusCopy}>
               <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                Initialize Mako
+                Initialize Hive
               </Text>
               <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
                 Create soul, identity, heartbeat, memory, channels, and crew.

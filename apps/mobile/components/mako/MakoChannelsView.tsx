@@ -85,7 +85,7 @@ export function MakoChannelsView({ state }: MakoChannelsViewProps) {
       <View style={styles.header}>
         <View style={styles.headerCopy}>
           <Text style={[styles.description, { color: t.mutedForeground }]}>
-            Channels defines how Mako speaks outside the immediate run state. The main thread stays primary, while push and other routes surface only when they are actually usable.
+            Channels defines how Hive speaks outside the immediate run state. The main thread stays primary, while push and other routes surface only when they are actually usable.
           </Text>
         </View>
         <Pressable
@@ -149,14 +149,14 @@ export function MakoChannelsView({ state }: MakoChannelsViewProps) {
 
       {!channelsState.isLoading && !channelsState.channels?.items.length ? (
         <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-          No channels are described yet. Initialize or edit routing to define how Mako speaks.
+          No channels are described yet. Initialize or edit routing to define how Hive speaks.
         </Text>
       ) : null}
 
       <MakoEditorModal
         visible={editorOpen}
         title="Edit channels"
-        subtitle="Define how Mako routes updates, approvals, and presence across surfaces."
+        subtitle="Define how Hive routes updates, approvals, and presence across surfaces."
         initialValue={home?.channels?.content ?? ""}
         isSaving={state.isSaving}
         onClose={() => {

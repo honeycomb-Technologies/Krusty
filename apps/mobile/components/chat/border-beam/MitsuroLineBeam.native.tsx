@@ -46,7 +46,7 @@ interface BloomGradientDefinition {
   stops: GradientStop[];
 }
 
-export interface KrustyLineBeamProps {
+export interface MitsuroLineBeamProps {
   width: number;
   height: number;
   borderRadius: number;
@@ -61,11 +61,11 @@ export interface KrustyLineBeamProps {
 }
 
 /**
- * The border-beam line renderer, trimmed to Krusty's branded sunset palette.
+ * The border-beam line renderer, trimmed to Mitsuro's graphite-brass palette.
  * The rounded rectangle begins above the canvas so only the phone's lower edge
  * and corners are visible; the top edge can never flash through the composer.
  */
-export function KrustyLineBeam({
+export function MitsuroLineBeam({
   width,
   height,
   borderRadius,
@@ -77,7 +77,7 @@ export function KrustyLineBeam({
   brightness = 1.18,
   saturation,
   hueRange = 8,
-}: KrustyLineBeamProps) {
+}: MitsuroLineBeamProps) {
   const preset = lineSpec.sizePresets.line;
   const colors = lineSpec.sizeThemePresets.line[theme];
   const finalSaturation = saturation ?? colors.saturation;
@@ -104,9 +104,11 @@ export function KrustyLineBeam({
       }));
 
     return {
-      strokeBlobs: parsePalette(lineSpec.palettes.line.sunset[theme]),
-      innerBlobs: parsePalette(lineSpec.palettes.lineInner.sunset),
-      bloom: lineSpec.line.bloomGradients.sunset[theme] as BloomGradientDefinition[],
+      strokeBlobs: parsePalette(lineSpec.palettes.line.graphiteBrass[theme]),
+      innerBlobs: parsePalette(lineSpec.palettes.lineInner.graphiteBrass),
+      bloom: lineSpec.line.bloomGradients.graphiteBrass[
+        theme
+      ] as BloomGradientDefinition[],
       whiteHighlight: lineSpec.line.whiteHighlight[theme],
     };
   }, [theme]);

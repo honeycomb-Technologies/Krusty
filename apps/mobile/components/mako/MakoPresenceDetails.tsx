@@ -220,7 +220,7 @@ export function MakoPresenceDetails({
         <View style={[styles.detailRow, { borderColor: t.border }]}>
           <View style={styles.detailCopy}>
             <Text style={[styles.detailValue, { color: t.foreground }]}>
-              Mako home is not initialized yet.
+              Hive home is not initialized yet.
             </Text>
             <Text style={[styles.crewMeta, { color: t.mutedForeground }]}>
               Create the global soul, identity, heartbeat, memory, channels, and default crew files.
@@ -240,7 +240,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "identity",
                 title: "Edit identity",
-                subtitle: "Visible name, presence, and top-level operator identity for Mako.",
+                subtitle: "Visible name, presence, and top-level operator identity for Hive.",
                 initialValue: home?.identity?.content ?? "",
               });
             }}
@@ -254,7 +254,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "soul",
                 title: "Edit soul",
-                subtitle: "The voice, stance, and behavioral center of Mako.",
+                subtitle: "The voice, stance, and behavioral center of Hive.",
                 initialValue: home?.soul?.content ?? "",
               });
             }}
@@ -268,7 +268,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "heartbeat",
                 title: "Edit heartbeat",
-                subtitle: "Recurring checks and quiet operator habits that keep Mako alive.",
+                subtitle: "Recurring checks and quiet operator habits that keep Hive alive.",
                 initialValue: home?.heartbeat?.content ?? "",
               });
             }}
@@ -283,7 +283,7 @@ export function MakoPresenceDetails({
                   scope: "home",
                   kind: "channels",
                   title: "Edit channels",
-                  subtitle: "How Mako routes updates, approvals, and presence across surfaces.",
+                  subtitle: "How Hive routes updates, approvals, and presence across surfaces.",
                   initialValue: home?.channels?.content ?? "",
                 });
               }}

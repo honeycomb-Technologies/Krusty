@@ -53,7 +53,7 @@ export function createTheme(scheme: ResolvedScheme): Theme {
       background: isDark ? colors.background : colors.light.background,
       foreground: isDark ? colors.foreground : colors.light.foreground,
       primary: isDark ? colors.primary : colors.light.primary,
-      primaryMuted: isDark ? colors.primaryMuted : 'rgba(10, 10, 10, 0.7)',
+      primaryMuted: isDark ? colors.primaryMuted : 'rgba(36, 35, 38, 0.70)',
       userMessage: colors.userMessage,
       userMessageBg: isDark ? colors.userMessageBg : colors.light.userMessageBg,
       aiMessage: isDark ? colors.aiMessage : colors.light.aiMessage,

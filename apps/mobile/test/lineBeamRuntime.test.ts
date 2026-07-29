@@ -17,11 +17,11 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-Deno.test('Krusty line palette keeps the product accent as its lead color', () => {
-  const lead = parseCssColor(lineSpec.palettes.line.sunset.dark[0].color);
-  assert(Math.round(lead.r * 255) === 255, 'lead red channel should remain 255');
-  assert(Math.round(lead.g * 255) === 107, 'lead green channel should remain 107');
-  assert(Math.round(lead.b * 255) === 53, 'lead blue channel should remain 53');
+Deno.test('Mitsuro line palette keeps brass as its lead color', () => {
+  const lead = parseCssColor(lineSpec.palettes.line.graphiteBrass.dark[0].color);
+  assert(Math.round(lead.r * 255) === 184, 'lead red channel should be brass 184');
+  assert(Math.round(lead.g * 255) === 154, 'lead green channel should be brass 154');
+  assert(Math.round(lead.b * 255) === 97, 'lead blue channel should be brass 97');
 });
 
 Deno.test('line beam is fully visible and centered at the midpoint', () => {

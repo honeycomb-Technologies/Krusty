@@ -44,7 +44,7 @@ import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
 import { resolveComposerSendPayload } from './composerSend';
 import { Waveform } from './Waveform';
-import { CrabIcon } from '../ui/CrabIcon';
+import { MitsuroMark } from '../brand';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
 import Svg, { Path, Polygon } from 'react-native-svg';
@@ -1367,7 +1367,7 @@ function ChatBarComponent(props: ChatBarProps) {
                   }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
                   onBlur={() => setInputFocused(false)}
-                  placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
+                  placeholder={isMako ? "Message Hive..." : "Message Agent..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
                   scrollEnabled={composerBarHeight >= COMPOSER_MAX_HEIGHT}
@@ -1405,7 +1405,7 @@ function ChatBarComponent(props: ChatBarProps) {
               <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
               <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
               <View style={styles.kInner}>
-                <CrabIcon size={26} color={kColor} />
+                <MitsuroMark size={26} color={kColor} strokeWidth={62} />
               </View>
             </Pressable>
           </View>
@@ -1523,7 +1523,7 @@ function ChatBarComponent(props: ChatBarProps) {
         onSend={handleSend}
         canSend={canSend}
         disabled={disabled}
-        placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
+        placeholder={isMako ? "Message Hive..." : "Message Agent..."}
         mutedForeground={t.mutedForeground}
         foreground={t.foreground}
         userMessage={t.userMessage}

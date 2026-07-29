@@ -30,7 +30,7 @@ import {
   useWorkspaceStore,
 } from "../../hooks/useStores";
 import { useShallow } from "zustand/react/shallow";
-import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
+import { HiveIcon } from "../../components/brand";
 import {
   ChatBar,
   type Attachment as ChatBarAttachment,
@@ -461,14 +461,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         }
         if (normalizedAttachments.length > 0) {
           sessionStore.setState({
-            error: "Start the Mako thread with text, then attach files in the conversation.",
+            error: "Start the Hive thread with text, then attach files in the conversation.",
           });
           return;
         }
         const resolvedModel = await ensureModelReady();
         if (!resolvedModel) {
           sessionStore.setState({
-            error: "Choose an available model before starting Mako.",
+            error: "Choose an available model before starting Hive.",
           });
           return;
         }
@@ -488,7 +488,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             error:
               dispatchError instanceof Error
                 ? dispatchError.message
-                : "Failed to start the Mako thread.",
+                : "Failed to start the Hive thread.",
           });
         }
         return;
@@ -692,9 +692,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onPress={() => handleSelectMakoView("mako")}
           style={styles.toolboxCornerBtn}
           accessibilityRole="button"
-          accessibilityLabel="Open Mako"
+          accessibilityLabel="Open Hive"
         >
-          <MakoSharkIcon
+          <HiveIcon
             size={20}
             color={t.mutedForeground}
             strokeWidth={1.8}

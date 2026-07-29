@@ -157,7 +157,7 @@ export function MakoAttentionItem({
 
             <Pressable onPress={() => onOpenThread(item)} style={styles.action}>
               <Text style={[styles.secondaryActionLabel, { color: t.mutedForeground }]}>
-                Jump to Mako
+                Jump to Hive
               </Text>
             </Pressable>
 

@@ -40,7 +40,7 @@ export function useMakoCurrent(enabled: boolean) {
         setError(
           refreshError instanceof Error
             ? refreshError.message
-            : "Failed to load Mako",
+            : "Failed to load Hive",
         );
       } finally {
         if (generation === refreshGenerationRef.current) {

@@ -99,7 +99,7 @@ function formatTime(dateStr: string): string {
 function modeTitle(mode: SessionType): string {
   if (mode === "chat") return "Chat threads";
   if (mode === "code") return "Code threads";
-  return "Mako threads";
+  return "Hive threads";
 }
 
 export function SessionDrawer({
@@ -589,7 +589,7 @@ export function SessionDrawer({
                 const active = session.session_id === activeSessionId;
                 const runtime = session.runtime;
                 const runtimeLabel = runtime?.status ?? session.agent_state;
-                const crew = runtime?.crew_slug || "Mako default";
+                const crew = runtime?.crew_slug || "Hive default";
                 return (
                   <Pressable
                     accessibilityRole="button"
@@ -611,7 +611,7 @@ export function SessionDrawer({
                           { color: active ? t.userMessage : t.foreground },
                         ]}
                       >
-                        {session.title || "Untitled Mako"}
+                        {session.title || "Untitled Hive"}
                       </Text>
                       <View
                         style={[
@@ -649,7 +649,7 @@ export function SessionDrawer({
           ) : (
             <View style={styles.listContent}>
               <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-                No Mako threads yet
+                No Hive threads yet
               </Text>
             </View>
           )

@@ -47,9 +47,9 @@ export function MakoCrewPicker({
         style={[styles.row, { borderColor: t.border }]}
       >
         <View style={styles.copy}>
-          <Text style={[styles.title, { color: t.foreground }]}>Mako default</Text>
+          <Text style={[styles.title, { color: t.foreground }]}>Hive default</Text>
           <Text style={[styles.detail, { color: t.mutedForeground }]}>
-            Use Mako&apos;s primary identity and home layers for this run.
+            Use Hive&apos;s primary identity and home layers for this run.
           </Text>
         </View>
         <Text

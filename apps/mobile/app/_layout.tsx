@@ -14,7 +14,7 @@ import { NotificationProvider } from '../hooks/useNotifications';
 import { configureKrustyPerformance } from '@krusty/state';
 import { MobileDiagnosticsProvider } from '../diagnostics/MobileDiagnosticsProvider';
 
-const BOOT_BACKGROUND = '#0b1119';
+const BOOT_BACKGROUND = '#0e0e11';
 
 configureKrustyPerformance(
   __DEV__ || process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',

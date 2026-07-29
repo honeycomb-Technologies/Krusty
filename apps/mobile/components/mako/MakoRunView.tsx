@@ -426,7 +426,7 @@ export function MakoRunView({
             />
             <SummaryCell
               label="Crew"
-              value={runtimeCrewSlug ?? "Mako"}
+              value={runtimeCrewSlug ?? "Hive"}
               hint={`${cadence.tick_interval_secs}s cadence`}
             />
           </View>
@@ -503,7 +503,7 @@ export function MakoRunView({
             <SectionTitle title="Crew" />
             <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
               <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
-                Assign this run to Mako or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
+                Assign this run to Hive or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
               </Text>
               <View style={styles.controlBlock}>
                 <MakoCrewPicker
@@ -607,7 +607,7 @@ export function MakoRunView({
                   <View key={message.id} style={[styles.listRow, { borderColor: t.border }]}>
                     <View style={styles.listCopy}>
                       <Text style={[styles.listMeta, { color: t.mutedForeground }]}>
-                        {message.role === "assistant" ? "Mako" : "You"}
+                        {message.role === "assistant" ? "Hive" : "You"}
                       </Text>
                       <Text
                         style={[styles.listDetail, { color: t.foreground }]}

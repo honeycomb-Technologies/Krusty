@@ -17,7 +17,7 @@ import {
   type SharedValue,
 } from 'react-native-reanimated';
 
-import { KrustyLineBeam } from './border-beam/KrustyLineBeam.native';
+import { MitsuroLineBeam } from './border-beam/MitsuroLineBeam.native';
 
 const RUN_LINE_MIN_HEIGHT = 18;
 const RUN_LINE_CORNER_OVERDRAW = 18;
@@ -57,7 +57,7 @@ function ActiveLineBeam({
   const frozenClock = useSharedValue((RUN_LINE_DURATION_SECONDS * 1000) / 2);
 
   return (
-    <KrustyLineBeam
+    <MitsuroLineBeam
       width={width}
       height={height}
       borderRadius={borderRadius}

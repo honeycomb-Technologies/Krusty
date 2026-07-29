@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Krusty",
+    "name": "Mitsuro",
     "slug": "krusty",
     "version": "0.9.20",
     "orientation": "portrait",
@@ -8,12 +8,12 @@
     "userInterfaceStyle": "automatic",
     "scheme": "krusty",
     "splash": {
-      "backgroundColor": "#0b1119"
+      "backgroundColor": "#0e0e11"
     },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "io.krusty.mobile",
-      "backgroundColor": "#0b1119",
+      "backgroundColor": "#0e0e11",
       "icon": {
         "light": "./assets/icons/ios-light.png",
         "dark": "./assets/icons/ios-dark.png",
@@ -37,7 +37,7 @@
       "package": "io.krusty.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0b1119"
+        "backgroundColor": "#0e0e11"
       }
     },
     "web": {
@@ -51,7 +51,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#0b1119"
+          "backgroundColor": "#0e0e11"
         }
       ],
       "expo-font",
@@ -59,21 +59,21 @@
         "expo-notifications",
         {
           "icon": "./assets/icons/ios-light.png",
-          "color": "#ff6b35"
+          "color": "#b89a61"
         }
       ],
       [
         "expo-image-picker",
         {
-          "cameraPermission": "Allow Krusty to take photos for attachments",
-          "photosPermission": "Allow Krusty to access photos for attachments"
+          "cameraPermission": "Allow Mitsuro to take photos for attachments",
+          "photosPermission": "Allow Mitsuro to access photos for attachments"
         }
       ],
       [
         "expo-speech-recognition",
         {
-          "microphonePermission": "Allow Krusty to use the microphone for voice input",
-          "speechRecognitionPermission": "Allow Krusty to use speech recognition for voice input"
+          "microphonePermission": "Allow Mitsuro to use the microphone for voice input",
+          "speechRecognitionPermission": "Allow Mitsuro to use speech recognition for voice input"
         }
       ],
       [
@@ -85,8 +85,8 @@
           "widgets": [
             {
               "name": "MakoWidget",
-              "displayName": "Mako Status",
-              "description": "Daily updates and status from your Mako agent",
+              "displayName": "Hive Status",
+              "description": "Daily updates and status from your Hive agent",
               "supportedFamilies": [
                 "systemSmall",
                 "systemMedium",
@@ -99,7 +99,7 @@
             },
             {
               "name": "ChatWidget",
-              "displayName": "Krusty Chat",
+              "displayName": "Mitsuro Chat",
               "description": "Active chat status and quick launch",
               "supportedFamilies": [
                 "systemSmall",
