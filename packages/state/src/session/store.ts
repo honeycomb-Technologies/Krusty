@@ -13,6 +13,7 @@ import type { KrustyStorage } from '../storage';
 import type { createWorkspaceStore } from '../workspace';
 import {
   beginKrustyPerformanceSpan,
+  recordKrustyPerformanceMetric,
   trackKrustyPerformanceResource,
 } from '../performance';
 
@@ -30,7 +31,7 @@ import {
 import {
   buildContentBlocks,
   getUnsupportedImageAttachment,
-  processStoredMessages,
+  processStoredMessagesCooperatively,
   unsupportedImageMimeTypeMessage,
 } from './messages';
 import { modelKeysEqual } from './modelSelection';
@@ -105,6 +106,15 @@ function isNotFoundApiError(err: unknown): boolean {
   }
   const status = (err as { status?: unknown }).status;
   return status === 404;
+}
+
+// Recovery tests replace the global timer API to drive only their polling
+// clock. Capture the real host scheduler when the store module loads so a
+// cooperative hydration turn cannot be stranded in an unrelated fake queue.
+const scheduleSessionHydrationHostTurn = globalThis.setTimeout.bind(globalThis);
+
+function yieldSessionHydrationHost(): Promise<void> {
+  return new Promise((resolve) => scheduleSessionHydrationHostTurn(resolve, 0));
 }
 
 function buildDisplayAttachments(
@@ -1093,10 +1103,50 @@ export function createSessionStore(
             }
 
             const previousMessages = get().messages;
-            const processedMessages = processStoredMessages(
-              data.messages,
-              previousMessages,
+            const finishMessageTransformSpan = beginKrustyPerformanceSpan(
+              'session.snapshot_transform',
             );
+            let messageTransform;
+            try {
+              messageTransform = await processStoredMessagesCooperatively(
+                data.messages,
+                previousMessages,
+                {
+                  yieldToHost: yieldSessionHydrationHost,
+                  shouldContinue: () =>
+                    selectionGeneration === sessionSelectionGeneration
+                    && get().sessionId === sessionId,
+                },
+              );
+            } finally {
+              finishMessageTransformSpan();
+            }
+            recordKrustyPerformanceMetric(
+              'session.snapshot_max_slice',
+              { durationMs: messageTransform.maxSliceDurationMs },
+            );
+            recordKrustyPerformanceMetric(
+              'session.snapshot_yields',
+              { count: messageTransform.yieldCount },
+            );
+            if (
+              messageTransform.cancelled
+              || selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+
+            // Give the optimistic shell and any queued input a host turn before
+            // snapshot transforms and the single atomic transcript commit.
+            await yieldSessionHydrationHost();
+            if (
+              selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+            const processedMessages = messageTransform.messages;
             const serverState = serverStateResult.ok ? serverStateResult.state : null;
             rememberServerState(sessionId, serverState);
 
@@ -1105,7 +1155,6 @@ export function createSessionStore(
               processedMessages,
               serverState,
             );
-            sessionCache.set(snapshot);
 
             const previousModel = get().model;
             const previousModelKey = get().modelKey;
@@ -1225,6 +1274,23 @@ export function createSessionStore(
               )
             ) {
               void persistCurrentSelectedModel(snapshot.model, snapshot.modelKey);
+            }
+
+            // Cache compaction is useful for the next visit, not for this first
+            // paint. Keep it out of the visible transcript publication task.
+            await yieldSessionHydrationHost();
+            if (
+              selectionGeneration === sessionSelectionGeneration
+              && get().sessionId === sessionId
+            ) {
+              const finishCacheSpan = beginKrustyPerformanceSpan(
+                'session.cache_compact',
+              );
+              try {
+                sessionCache.set(snapshot);
+              } finally {
+                finishCacheSpan();
+              }
             }
           } catch (err) {
             if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {

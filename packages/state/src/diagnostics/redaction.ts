@@ -11,6 +11,8 @@ const KNOWN_LABELS = new Set([
   'pending.recovered', 'js.drift', 'js.longtask', 'interaction', 'mode.change',
   'app.launch', 'new_chat.shell', 'new_chat.session_bind', 'session.open',
   'stream.connect', 'stream.first_event', 'stream.flush', 'stream.finish',
+  'session.snapshot_transform', 'session.cache_compact',
+  'session.snapshot_max_slice', 'session.snapshot_yields',
   'transcript.derive', 'transcript.first_paint', 'mode.switch', 'toolbox.open',
   'live_activity.update', 'stream_connections', 'state_polling', 'presence_heartbeats',
   'session_requests', 'toolbox_requests', 'live_activity_updates',

@@ -2,6 +2,7 @@ import {
 	beginKrustyPerformanceSpan,
 	configureKrustyPerformance,
 	getKrustyPerformanceSnapshot,
+	recordKrustyPerformanceMetric,
 	resetKrustyPerformance,
 	trackKrustyPerformanceResource,
 } from '../src/performance.ts';
@@ -26,14 +27,26 @@ Deno.test('performance spans and resources stay bounded and releasable', () => {
 	);
 
 	const duration = finish();
+	recordKrustyPerformanceMetric('session.snapshot_max_slice', {
+		durationMs: 3.25,
+	});
+	recordKrustyPerformanceMetric('session.snapshot_yields', { count: 4 });
 	assert(duration !== null && duration >= 0, 'enabled span should record duration');
 	assert(finish() === null, 'span completion should be idempotent');
 	release();
 	release();
 
 	const snapshot = getKrustyPerformanceSnapshot();
-	assert(snapshot.entries.length === 1, 'one completed span should be retained');
+	assert(snapshot.entries.length === 3, 'span and numeric metrics should be retained');
 	assert(snapshot.entries[0]?.name === 'stream.flush', 'span name should be retained');
+	assert(
+		snapshot.entries[1]?.durationMs === 3.25,
+		'maximum synchronous slice timing should remain numeric',
+	);
+	assert(
+		snapshot.entries[2]?.count === 4,
+		'cooperative yield count should remain numeric',
+	);
 	assert(
 		snapshot.resources.stream_connections === 0,
 		'resource release should be idempotent',

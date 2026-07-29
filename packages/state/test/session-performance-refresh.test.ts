@@ -1,5 +1,8 @@
 import { createSessionStore } from "../src/session/store.ts";
-import { processStoredMessages } from "../src/session/messages.ts";
+import {
+  processStoredMessages,
+  processStoredMessagesCooperatively,
+} from "../src/session/messages.ts";
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
@@ -96,6 +99,102 @@ Deno.test("processStoredMessages reuses stable IDs from previous messages", () =
   );
   assertEquals(next[0]?.id, previous[0]?.id, "user id should remain stable");
   assertEquals(next[1]?.id, previous[1]?.id, "assistant id should remain stable");
+});
+
+Deno.test("cooperative stored-message parsing is byte-equivalent and time-sliced", async () => {
+  const rawMessages = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "hello" },
+        { type: "text", text: " world" },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "aGVsbG8=",
+          },
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "checking" },
+        { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "pwd" } },
+        { type: "text", text: "done" },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-1",
+          output: "/work",
+          is_error: false,
+        },
+      ],
+    },
+  ];
+  const previous = processStoredMessages(rawMessages);
+  const expected = processStoredMessages(rawMessages, previous);
+  let clock = 0;
+  let hostYields = 0;
+
+  const actual = await processStoredMessagesCooperatively(
+    rawMessages,
+    previous,
+    {
+      timeSliceMs: 4,
+      now: () => {
+        clock += 2;
+        return clock;
+      },
+      yieldToHost: async () => {
+        hostYields += 1;
+      },
+    },
+  );
+
+  assert(!actual.cancelled, "the complete transform should not be cancelled");
+  assert(actual.yieldCount > 0, "content-block work should yield between slices");
+  assertEquals(actual.yieldCount, hostYields, "yield telemetry should match host turns");
+  assert(
+    actual.maxSliceDurationMs <= 4,
+    `synthetic slices should honor the budget, got ${actual.maxSliceDurationMs}`,
+  );
+  assertEquals(
+    JSON.stringify(actual.messages),
+    JSON.stringify(expected),
+    "cooperative output must exactly match the synchronous compatibility path",
+  );
+});
+
+Deno.test("cooperative stored-message parsing discards partial work after invalidation", async () => {
+  const rawMessages = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: `message-${index}` }],
+  }));
+  let clock = 0;
+  let active = true;
+
+  const result = await processStoredMessagesCooperatively(rawMessages, [], {
+    timeSliceMs: 4,
+    now: () => {
+      clock += 5;
+      return clock;
+    },
+    yieldToHost: async () => {
+      active = false;
+    },
+    shouldContinue: () => active,
+  });
+
+  assert(result.cancelled, "a superseded selection must cancel at the first host yield");
+  assertEquals(result.yieldCount, 1, "cancellation should stop after one bounded slice");
+  assertEquals(result.messages.length, 0, "partial transcripts must never be publishable");
 });
 
 Deno.test("warm reload preserves message IDs across full session hydrate", async () => {

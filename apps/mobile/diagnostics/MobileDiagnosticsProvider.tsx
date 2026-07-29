@@ -505,7 +505,11 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
         if (entry.name === 'mode.switch') {
           recorder.record('mode', { name: safeModeTransition(entry.detail), durationMs: entry.durationMs });
         } else {
-          recorder.record('performance', { name: entry.name, durationMs: entry.durationMs });
+          recorder.record('performance', {
+            name: entry.name,
+            durationMs: entry.durationMs,
+            count: entry.count,
+          });
         }
       }
       for (const [name, count] of Object.entries(snapshot.resources)) {

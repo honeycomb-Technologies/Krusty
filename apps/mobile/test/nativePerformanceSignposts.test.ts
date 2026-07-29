@@ -26,6 +26,20 @@ Deno.test("native performance spans use fixed privacy-safe signposts", async () 
       && nativeSource.includes("guard allowedNames.contains(name) else { return }"),
     "native signposts must reject arbitrary labels",
   );
+  const phaseUnion = performanceSource.match(
+    /export type KrustyPerformancePhase =([\s\S]*?);/,
+  )?.[1] ?? "";
+  const jsPhases = [...phaseUnion.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  const nativeAllowlist = nativeSource.match(
+    /private let allowedNames: Set<String> = \[([\s\S]*?)\]/,
+  )?.[1] ?? "";
+  const nativePhases = new Set(
+    [...nativeAllowlist.matchAll(/"([^"]+)"/g)].map((match) => match[1]),
+  );
+  assert(
+    jsPhases.length > 0 && jsPhases.every((phase) => nativePhases.has(phase)),
+    "every JS span phase must have a matching fixed native signpost label",
+  );
   assert(
     nativeSource.includes('"KrustyPerformance"')
       && !nativeSource.includes("detail, privacy:"),

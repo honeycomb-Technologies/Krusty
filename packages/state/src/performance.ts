@@ -7,11 +7,17 @@ export type KrustyPerformancePhase =
 	| 'stream.first_event'
 	| 'stream.flush'
 	| 'stream.finish'
+	| 'session.snapshot_transform'
+	| 'session.cache_compact'
 	| 'transcript.derive'
 	| 'transcript.first_paint'
 	| 'mode.switch'
 	| 'toolbox.open'
 	| 'live_activity.update';
+
+export type KrustyPerformanceMetric =
+	| 'session.snapshot_max_slice'
+	| 'session.snapshot_yields';
 
 export type KrustyPerformanceResource =
 	| 'stream_connections'
@@ -22,8 +28,9 @@ export type KrustyPerformanceResource =
 	| 'live_activity_updates';
 
 export interface KrustyPerformanceEntry {
-	name: KrustyPerformancePhase;
+	name: KrustyPerformancePhase | KrustyPerformanceMetric;
 	durationMs: number;
+	count?: number;
 	startedAtMs: number;
 	detail?: string;
 }
@@ -127,6 +134,28 @@ export function beginKrustyPerformanceSpan(
 		}
 		return durationMs;
 	};
+}
+
+export function recordKrustyPerformanceMetric(
+	name: KrustyPerformanceMetric,
+	values: { durationMs?: number; count?: number },
+): void {
+	if (!enabled) return;
+	const durationMs = Number.isFinite(values.durationMs)
+		? Math.max(0, values.durationMs ?? 0)
+		: 0;
+	const count = Number.isFinite(values.count)
+		? Math.max(0, Math.floor(values.count ?? 0))
+		: undefined;
+	entries.push({
+		name,
+		durationMs,
+		count,
+		startedAtMs: clockNow(),
+	});
+	if (entries.length > MAX_ENTRIES) {
+		entries.splice(0, entries.length - MAX_ENTRIES);
+	}
 }
 
 export function setKrustyPerformanceResource(

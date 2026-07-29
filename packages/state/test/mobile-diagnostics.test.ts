@@ -34,6 +34,13 @@ Deno.test('diagnostics schema cannot retain sensitive arbitrary values', () => {
     arbitrary.name?.startsWith('label_'),
     'unknown strings must be reduced to a stable non-reversible label',
   );
+  const performancePhase = sanitizeDiagnosticFields({
+    name: 'session.snapshot_transform',
+  });
+  assert(
+    performancePhase.name === 'session.snapshot_transform',
+    'known content-free performance phases must retain their useful labels',
+  );
 });
 
 Deno.test('baseline recorder enforces event and byte bounds', () => {

@@ -16,6 +16,7 @@ private final class KrustyPerformanceSignposts {
   private let allowedNames: Set<String> = [
     "app.launch", "new_chat.shell", "new_chat.session_bind", "session.open",
     "stream.connect", "stream.first_event", "stream.flush", "stream.finish",
+    "session.snapshot_transform", "session.cache_compact",
     "transcript.derive", "transcript.first_paint", "mode.switch", "toolbox.open",
     "live_activity.update",
   ]

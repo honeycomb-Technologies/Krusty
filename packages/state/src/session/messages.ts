@@ -81,7 +81,8 @@ function appendRenderPart(
   message: ChatMessage,
   part: ChatRenderPart,
 ): void {
-  message.renderParts = [...(message.renderParts || []), part];
+  const parts = message.renderParts ?? (message.renderParts = []);
+  parts.push(part);
 }
 
 /**
@@ -100,7 +101,7 @@ function joinAdjacentText(existing: string, next: string): string {
 function appendTextRenderPart(message: ChatMessage, content: string): void {
   if (!content) return;
 
-  const parts = [...(message.renderParts || [])];
+  const parts = message.renderParts ?? (message.renderParts = []);
   const lastPart = parts[parts.length - 1];
   if (lastPart?.type === 'text') {
     parts[parts.length - 1] = {
@@ -114,13 +115,12 @@ function appendTextRenderPart(message: ChatMessage, content: string): void {
       content,
     });
   }
-  message.renderParts = parts;
 }
 
 function appendThinkingRenderPart(message: ChatMessage, content: string): void {
   if (!content) return;
 
-  const parts = [...(message.renderParts || [])];
+  const parts = message.renderParts ?? (message.renderParts = []);
   const lastPart = parts[parts.length - 1];
   if (lastPart?.type === 'thinking') {
     parts[parts.length - 1] = {
@@ -134,7 +134,6 @@ function appendThinkingRenderPart(message: ChatMessage, content: string): void {
       content,
     });
   }
-  message.renderParts = parts;
 }
 
 function appendAttachmentsRenderPart(message: ChatMessage): void {
@@ -148,10 +147,17 @@ function appendAttachmentsRenderPart(message: ChatMessage): void {
   });
 }
 
-function parseStoredMessage(
-  message: { role: string; content: unknown },
-  toolResults?: Map<string, { output: string; isError: boolean }>,
-): ChatMessage {
+interface StoredMessageInput {
+  role: string;
+  content: unknown;
+}
+
+interface StoredToolResult {
+  output: string;
+  isError: boolean;
+}
+
+function createParsedStoredMessage(message: StoredMessageInput): ChatMessage {
   const role: 'user' | 'assistant' =
     message.role === 'user' || message.role === 'assistant'
       ? message.role
@@ -164,72 +170,82 @@ function parseStoredMessage(
     toolCalls: [],
     renderParts: [],
   };
-  const contentArray = Array.isArray(message.content) ? message.content : [];
-  let imageIndex = 0;
+  return parsed;
+}
 
-  for (const block of contentArray) {
-    if (!block || typeof block !== 'object') continue;
-
-    if (block.type === 'text' || ('text' in block && !block.type)) {
-      const text = block.text || '';
-      if (parsed.content.length < MAX_MESSAGE_CONTENT_LENGTH) {
-        parsed.content += (parsed.content ? '\n' : '') + text;
-      }
-      appendTextRenderPart(parsed, text);
-    } else if (block.type === 'thinking' || 'thinking' in block) {
-      const thinkingContent = block.thinking || '';
-      parsed.thinking = parsed.thinking
-        ? `${parsed.thinking}\n\n${thinkingContent}`
-        : thinkingContent;
-      appendThinkingRenderPart(parsed, thinkingContent);
-    } else if (block.type === 'image') {
-      const attachment = parseImageAttachment(block, imageIndex);
-      if (attachment) {
-        parsed.attachments = [...(parsed.attachments || []), attachment];
-        appendAttachmentsRenderPart(parsed);
-        imageIndex += 1;
-      }
-    } else if (
-      block.type === 'tool_use'
-      || ('id' in block && 'name' in block && 'input' in block)
-    ) {
-      parsed.toolCalls = parsed.toolCalls || [];
-      const toolResult = toolResults?.get(block.id);
-      const delegated = parseDelegatedArtifactState(
+function applyStoredContentBlock(
+  parsed: ChatMessage,
+  block: Record<string, any>,
+  imageIndex: number,
+  toolResults?: Map<string, StoredToolResult>,
+): number {
+  if (block.type === 'text' || ('text' in block && !block.type)) {
+    const text = block.text || '';
+    if (parsed.content.length < MAX_MESSAGE_CONTENT_LENGTH) {
+      parsed.content += (parsed.content ? '\n' : '') + text;
+    }
+    appendTextRenderPart(parsed, text);
+  } else if (block.type === 'thinking' || 'thinking' in block) {
+    const thinkingContent = block.thinking || '';
+    parsed.thinking = parsed.thinking
+      ? `${parsed.thinking}\n\n${thinkingContent}`
+      : thinkingContent;
+    appendThinkingRenderPart(parsed, thinkingContent);
+  } else if (block.type === 'image') {
+    const attachment = parseImageAttachment(block, imageIndex);
+    if (attachment) {
+      const attachments = parsed.attachments ?? (parsed.attachments = []);
+      attachments.push(attachment);
+      appendAttachmentsRenderPart(parsed);
+      imageIndex += 1;
+    }
+  } else if (
+    block.type === 'tool_use'
+    || ('id' in block && 'name' in block && 'input' in block)
+  ) {
+    parsed.toolCalls = parsed.toolCalls || [];
+    const toolResult = toolResults?.get(block.id);
+    const delegated = parseDelegatedArtifactState(
+      block.name,
+      toolResult?.output,
+      block.input,
+    );
+    const status: ToolCall['status'] = toolResult
+      ? delegated?.outcome === 'partial'
+        ? 'partial'
+        : delegated?.outcome === 'failed'
+          ? 'error'
+          : toolResult.isError
+            ? 'error'
+            : 'success'
+      : 'pending';
+    parsed.toolCalls.push({
+      id: block.id,
+      name: block.name,
+      arguments: block.input,
+      output: formatToolOutputForDisplay(
         block.name,
         toolResult?.output,
         block.input,
-      );
-      const status: ToolCall['status'] = toolResult
-        ? delegated?.outcome === 'partial'
-          ? 'partial'
-          : delegated?.outcome === 'failed'
-            ? 'error'
-            : toolResult.isError
-              ? 'error'
-              : 'success'
-        : 'pending';
-      parsed.toolCalls.push({
-        id: block.id,
-        name: block.name,
-        arguments: block.input,
-        output: formatToolOutputForDisplay(
-          block.name,
-          toolResult?.output,
-          block.input,
-        ),
-        delegatedRunId: delegated?.delegatedRunId,
-        delegated,
-        status,
-      });
-      appendRenderPart(parsed, {
-        type: 'tool',
-        id: `tool-${block.id}`,
-        toolCallId: block.id,
-      });
-    }
+      ),
+      delegatedRunId: delegated?.delegatedRunId,
+      delegated,
+      status,
+    });
+    appendRenderPart(parsed, {
+      type: 'tool',
+      id: `tool-${block.id}`,
+      toolCallId: block.id,
+    });
   }
 
+  return imageIndex;
+}
+
+function finalizeParsedStoredMessage(
+  parsed: ChatMessage,
+  message: StoredMessageInput,
+): void {
   if (
     !parsed.content
     && !parsed.thinking
@@ -238,16 +254,51 @@ function parseStoredMessage(
     parsed.content = extractTextContent(message.content);
     appendTextRenderPart(parsed, parsed.content);
   }
+}
 
+function parseStoredMessage(
+  message: StoredMessageInput,
+  toolResults?: Map<string, StoredToolResult>,
+): ChatMessage {
+  const parsed = createParsedStoredMessage(message);
+  const contentArray = Array.isArray(message.content) ? message.content : [];
+  let imageIndex = 0;
+
+  for (const block of contentArray) {
+    if (!block || typeof block !== 'object') continue;
+    imageIndex = applyStoredContentBlock(
+      parsed,
+      block,
+      imageIndex,
+      toolResults,
+    );
+  }
+
+  finalizeParsedStoredMessage(parsed, message);
   return parsed;
 }
 
-export function processStoredMessages(
-  rawMessages: { role: string; content: unknown }[],
-  previousMessages: ChatMessage[] = [],
-): ChatMessage[] {
-  const result: ChatMessage[] = [];
-  const toolResults = new Map<string, { output: string; isError: boolean }>();
+function collectStoredToolResult(
+  block: Record<string, any>,
+  toolResults: Map<string, StoredToolResult>,
+): void {
+  if (block.type !== 'tool_result' && !('tool_use_id' in block)) return;
+  if (!block.tool_use_id) return;
+  const output =
+    typeof block.output === 'string'
+      ? block.output
+      : typeof block.content === 'string'
+        ? block.content
+        : JSON.stringify(block.output || block.content || '');
+  toolResults.set(block.tool_use_id, {
+    output,
+    isError: block.is_error === true,
+  });
+}
+
+function buildPreviousMessageIndex(
+  previousMessages: ChatMessage[],
+): Map<string, ChatMessage> {
   const previousByFingerprint = new Map<string, ChatMessage>();
   for (const previous of previousMessages) {
     if (previous.kind === 'streaming' || previous.kind === 'live_partial') {
@@ -255,47 +306,189 @@ export function processStoredMessages(
     }
     previousByFingerprint.set(messageStabilityFingerprint(previous), previous);
   }
+  return previousByFingerprint;
+}
+
+function appendParsedStoredMessage(
+  result: ChatMessage[],
+  parsed: ChatMessage,
+  previousByFingerprint: Map<string, ChatMessage>,
+): void {
+  const hasContent = parsed.content.trim().length > 0;
+  const hasThinking = (parsed.thinking?.trim().length ?? 0) > 0;
+  const hasToolCalls = (parsed.toolCalls?.length ?? 0) > 0;
+  const hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+  if (!hasContent && !hasThinking && !hasToolCalls && !hasAttachments) return;
+
+  if (previousByFingerprint.size > 0) {
+    const fingerprint = messageStabilityFingerprint(parsed);
+    const previous = previousByFingerprint.get(fingerprint);
+    parsed.id = previous?.id || buildStoredMessageId(result.length, parsed);
+    // Prefer one-to-one reuse so later duplicates still get unique IDs.
+    if (previous) {
+      previousByFingerprint.delete(fingerprint);
+    }
+  } else {
+    // Cold hydration has no stable IDs to recover, so avoid building and
+    // hashing large concatenated fingerprints that cannot produce a match.
+    parsed.id = buildStoredMessageId(result.length, parsed);
+  }
+  result.push(parsed);
+}
+
+export function processStoredMessages(
+  rawMessages: StoredMessageInput[],
+  previousMessages: ChatMessage[] = [],
+): ChatMessage[] {
+  const result: ChatMessage[] = [];
+  const toolResults = new Map<string, StoredToolResult>();
+  const previousByFingerprint = buildPreviousMessageIndex(previousMessages);
 
   for (const message of rawMessages) {
     const contentArray = Array.isArray(message.content) ? message.content : [];
     for (const block of contentArray) {
       if (!block || typeof block !== 'object') continue;
-      if (block.type === 'tool_result' || 'tool_use_id' in block) {
-        if (block.tool_use_id) {
-          const output =
-            typeof block.output === 'string'
-              ? block.output
-              : typeof block.content === 'string'
-                ? block.content
-                : JSON.stringify(block.output || block.content || '');
-          toolResults.set(block.tool_use_id, {
-            output,
-            isError: block.is_error === true,
-          });
-        }
-      }
+      collectStoredToolResult(block, toolResults);
     }
   }
 
   for (const message of rawMessages) {
     const parsed = parseStoredMessage(message, toolResults);
-    const hasContent = parsed.content.trim().length > 0;
-    const hasThinking = (parsed.thinking?.trim().length ?? 0) > 0;
-    const hasToolCalls = (parsed.toolCalls?.length ?? 0) > 0;
-    const hasAttachments = (parsed.attachments?.length ?? 0) > 0;
-    if (hasContent || hasThinking || hasToolCalls || hasAttachments) {
-      const fingerprint = messageStabilityFingerprint(parsed);
-      const previous = previousByFingerprint.get(fingerprint);
-      parsed.id = previous?.id || buildStoredMessageId(result.length, parsed);
-      // Prefer one-to-one reuse so later duplicates still get unique IDs.
-      if (previous) {
-        previousByFingerprint.delete(fingerprint);
-      }
-      result.push(parsed);
-    }
+    appendParsedStoredMessage(result, parsed, previousByFingerprint);
   }
 
   return result;
+}
+
+export interface CooperativeStoredMessageOptions {
+  /** Maximum synchronous work per slice before yielding to native input. */
+  timeSliceMs?: number;
+  now?: () => number;
+  yieldToHost?: () => Promise<void>;
+  /** False invalidates partial work; callers must never publish it. */
+  shouldContinue?: () => boolean;
+}
+
+export interface CooperativeStoredMessageResult {
+  messages: ChatMessage[];
+  cancelled: boolean;
+  yieldCount: number;
+  maxSliceDurationMs: number;
+}
+
+const DEFAULT_STORED_MESSAGE_SLICE_MS = 4;
+
+function defaultStoredMessageClock(): number {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function defaultStoredMessageHostYield(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Parse a stored transcript cooperatively while preserving one atomic result.
+ *
+ * The two passes and every content block keep the synchronous parser's exact
+ * ordering and tool-result semantics. Partial arrays are discarded when a
+ * newer session selection invalidates the caller.
+ */
+export async function processStoredMessagesCooperatively(
+  rawMessages: StoredMessageInput[],
+  previousMessages: ChatMessage[] = [],
+  options: CooperativeStoredMessageOptions = {},
+): Promise<CooperativeStoredMessageResult> {
+  const timeSliceMs = Math.max(
+    1,
+    options.timeSliceMs ?? DEFAULT_STORED_MESSAGE_SLICE_MS,
+  );
+  const now = options.now ?? defaultStoredMessageClock;
+  const yieldToHost = options.yieldToHost ?? defaultStoredMessageHostYield;
+  const shouldContinue = options.shouldContinue ?? (() => true);
+  const result: ChatMessage[] = [];
+  const toolResults = new Map<string, StoredToolResult>();
+  const previousByFingerprint = new Map<string, ChatMessage>();
+  let sliceStartedAt = now();
+  let yieldCount = 0;
+  let maxSliceDurationMs = 0;
+
+  const checkpoint = (): true | Promise<boolean> => {
+    const sliceDurationMs = Math.max(0, now() - sliceStartedAt);
+    maxSliceDurationMs = Math.max(maxSliceDurationMs, sliceDurationMs);
+    if (sliceDurationMs < timeSliceMs) return true;
+    return yieldToHost().then(() => {
+      yieldCount += 1;
+      if (!shouldContinue()) return false;
+      sliceStartedAt = now();
+      return true;
+    });
+  };
+  const cancelledResult = (): CooperativeStoredMessageResult => ({
+    messages: [],
+    cancelled: true,
+    yieldCount,
+    maxSliceDurationMs,
+  });
+
+  if (!shouldContinue()) return cancelledResult();
+
+  for (const previous of previousMessages) {
+    if (previous.kind !== 'streaming' && previous.kind !== 'live_partial') {
+      previousByFingerprint.set(
+        messageStabilityFingerprint(previous),
+        previous,
+      );
+    }
+    const next = checkpoint();
+    if (next !== true && !await next) return cancelledResult();
+  }
+
+  for (const message of rawMessages) {
+    const contentArray = Array.isArray(message.content) ? message.content : [];
+    for (const block of contentArray) {
+      if (block && typeof block === 'object') {
+        collectStoredToolResult(block, toolResults);
+      }
+      const next = checkpoint();
+      if (next !== true && !await next) return cancelledResult();
+    }
+    const next = checkpoint();
+    if (next !== true && !await next) return cancelledResult();
+  }
+
+  for (const message of rawMessages) {
+    const parsed = createParsedStoredMessage(message);
+    const contentArray = Array.isArray(message.content) ? message.content : [];
+    let imageIndex = 0;
+    for (const block of contentArray) {
+      if (block && typeof block === 'object') {
+        imageIndex = applyStoredContentBlock(
+          parsed,
+          block,
+          imageIndex,
+          toolResults,
+        );
+      }
+      const next = checkpoint();
+      if (next !== true && !await next) return cancelledResult();
+    }
+    finalizeParsedStoredMessage(parsed, message);
+    appendParsedStoredMessage(result, parsed, previousByFingerprint);
+    const next = checkpoint();
+    if (next !== true && !await next) return cancelledResult();
+  }
+
+  maxSliceDurationMs = Math.max(
+    maxSliceDurationMs,
+    Math.max(0, now() - sliceStartedAt),
+  );
+  if (!shouldContinue()) return cancelledResult();
+  return {
+    messages: result,
+    cancelled: false,
+    yieldCount,
+    maxSliceDurationMs,
+  };
 }
 
 function messageStabilityFingerprint(message: ChatMessage): string {
