@@ -65,6 +65,9 @@
       },
     },
   },
+  "trustedDependencies": [
+    "@shopify/react-native-skia",
+  ],
   "overrides": {
     "@expo/ui": "~55.0.17",
     "expo-constants": "~55.0.17",

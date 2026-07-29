@@ -11,6 +11,7 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
+  readTextFile(path: URL): Promise<string>;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -39,4 +40,23 @@ Deno.test('shader blob records keep the fixed uniform stride', () => {
   const blob = simpleBlob(10, 12, 20, 22, 1, 0.5, 0.25, 0.8);
   assert(blob.length === BLOB_FLOATS, 'blob record must match shader uniform stride');
   assert(blob[0] === 10 && blob[3] === 22, 'blob geometry should be preserved');
+});
+
+Deno.test('EAS Bun installs trust the Skia binary lifecycle', async () => {
+  const packageJson = JSON.parse(
+    await Deno.readTextFile(new URL('../package.json', import.meta.url)),
+  ) as { trustedDependencies?: string[] };
+  const bunLock = await Deno.readTextFile(
+    new URL('../bun.lock', import.meta.url),
+  );
+
+  assert(
+    packageJson.trustedDependencies?.includes('@shopify/react-native-skia'),
+    'package.json must allow Skia to download its native binaries',
+  );
+  assert(
+    bunLock.includes('"trustedDependencies"')
+      && bunLock.includes('"@shopify/react-native-skia"'),
+    'the frozen Bun lockfile must preserve Skia lifecycle trust for EAS',
+  );
 });
