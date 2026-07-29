@@ -125,6 +125,7 @@ export function SettingsPanel({
 	const [skills, setSkills] = useState<SkillInfo[]>([]);
 	const [skillsLoading, setSkillsLoading] = useState(false);
 	const [skillsMessage, setSkillsMessage] = useState<string | null>(null);
+	const [skillPageStart, setSkillPageStart] = useState(0);
 
 	const [previewSettings, setPreviewSettings] =
 		useState<PreviewSettings | null>(null);
@@ -641,6 +642,8 @@ export function SettingsPanel({
 						loading={skillsLoading}
 						skills={skills}
 						message={skillsMessage}
+						pageStart={skillPageStart}
+						onPageStartChange={setSkillPageStart}
 					/>
 				);
 			case "preview":

@@ -175,8 +175,11 @@ Deno.test("settings and transcript secondary surfaces stay bounded", async () =>
     settings.includes("<FlatList")
       && settings.includes("initialNumToRender={2}")
       && settings.includes("windowSize={3}")
+      && settings.includes("const [skillPageStart, setSkillPageStart] = useState(0)")
+      && settings.includes("pageStart={skillPageStart}")
+      && settings.includes("onPageStartChange={setSkillPageStart}")
       && !settings.includes("<ScrollView"),
-    "settings sections must virtualize without eagerly mounting the whole control tree",
+    "settings sections must virtualize without eagerly mounting the whole control tree or losing skill pagination when rows recycle",
   );
   assert(
     transcript.match(/contentHeightRef\.current = 0;/g)?.length === 2

@@ -667,17 +667,20 @@ export function SkillsSection({
   loading,
   skills,
   message,
+  pageStart,
+  onPageStartChange,
 }: {
   isConnected: boolean;
   loading: boolean;
   skills: SkillInfo[];
   message: string | null;
+  pageStart: number;
+  onPageStartChange: (nextStart: number) => void;
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const [skillPageStart, setSkillPageStart] = useState(0);
   const clampedSkillPageStart = clampSkillPageStart(
-    skillPageStart,
+    pageStart,
     skills.length,
   );
   const visibleSkills = useMemo(
@@ -691,10 +694,6 @@ export function SkillsSection({
   const skillPageEnd = clampedSkillPageStart + visibleSkills.length;
   const hasPreviousSkillPage = clampedSkillPageStart > 0;
   const hasNextSkillPage = skillPageEnd < skills.length;
-
-  useEffect(() => {
-    setSkillPageStart(0);
-  }, [skills]);
 
   return (
     <>
@@ -730,8 +729,8 @@ export function SkillsSection({
                     accessibilityRole="button"
                     accessibilityLabel="Show previous skills"
                     onPress={() =>
-                      setSkillPageStart((current) =>
-                        previousSkillPageStart(current),
+                      onPageStartChange(
+                        previousSkillPageStart(clampedSkillPageStart),
                       )
                     }
                     style={[styles.smallActionBtn, { borderColor: t.border }]}
@@ -750,8 +749,11 @@ export function SkillsSection({
                     accessibilityRole="button"
                     accessibilityLabel="Show next skills"
                     onPress={() =>
-                      setSkillPageStart((current) =>
-                        nextSkillPageStart(current, skills.length),
+                      onPageStartChange(
+                        nextSkillPageStart(
+                          clampedSkillPageStart,
+                          skills.length,
+                        ),
                       )
                     }
                     style={[styles.smallActionBtn, { borderColor: t.border }]}
