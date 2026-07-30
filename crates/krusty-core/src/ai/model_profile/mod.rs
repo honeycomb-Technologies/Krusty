@@ -94,7 +94,9 @@ mod tests {
         assert!(!codex.base_prompt.contains("## Model behavior"));
         assert!(!codex.base_prompt.contains("## Provider Guidance"));
         assert!(!codex.base_prompt.contains("## Capability Guidance"));
-        assert!(codex.base_prompt.contains("Finish the user's software task"));
+        assert!(codex
+            .base_prompt
+            .contains("Finish the user's software task"));
         assert!(codex.base_prompt.len() <= 5_000);
     }
 
@@ -110,6 +112,8 @@ mod tests {
         );
 
         assert_eq!(sections.base_prompt, "Summarize only.");
-        assert!(!sections.base_prompt.contains("Finish the user's software task"));
+        assert!(!sections
+            .base_prompt
+            .contains("Finish the user's software task"));
     }
 }
