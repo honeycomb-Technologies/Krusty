@@ -6,6 +6,7 @@ declare class KrustyDiagnosticsModule extends NativeModule<{}> {
   getBuildNumber(): string | null;
   beginPerformanceSpan(spanId: number, name: string): void;
   endPerformanceSpan(spanId: number, name: string): void;
+  recordJsHotPathProbe(payload: string): void;
   listMetricKitPayloads(): Promise<NativeMetricKitPayload[]>;
   acknowledgeMetricKitPayloads(ids: string[]): Promise<void>;
 }

@@ -67,6 +67,7 @@ const PENDING_ACTIONS_KEY = "krusty_pending_notification_actions_v1";
 const HANDLED_ACTIONS_KEY = "krusty_handled_notification_actions_v1";
 const MAX_HANDLED_ACTIONS = 100;
 const ACTION_RETRY_BASE_MS = 1_000;
+const EXPO_PROJECT_ID = "6e327449-af3c-4138-b1c4-7ceca2baf243";
 
 const TOOL_APPROVAL_CATEGORY = "TOOL_APPROVAL";
 const CHAT_SESSION_CATEGORY = "CHAT_SESSION";
@@ -148,7 +149,23 @@ async function registerNotificationCategories() {
 type RegisteredNotificationTokens = {
   displayToken: string | null;
   nativeDeviceToken: string | null;
+  deviceTokenIdentity: string | null;
 };
+
+type DevicePushTokenLike = {
+  data?: unknown;
+  type?: unknown;
+};
+
+function devicePushTokenIdentity(
+  token: DevicePushTokenLike | null | undefined,
+): string | null {
+  if (!token || typeof token.data !== "string" || token.data.length === 0) {
+    return null;
+  }
+  const type = typeof token.type === "string" ? token.type : "unknown";
+  return `${type}:${token.data}`;
+}
 
 function permissionGranted(settings: any): boolean {
   return Boolean(
@@ -169,9 +186,14 @@ async function ensureAndroidNotificationChannel() {
 
 async function registerForPushNotifications(
   requestPermission = true,
+  devicePushToken?: DevicePushTokenLike,
 ): Promise<RegisteredNotificationTokens> {
   if (!Notifications || !Device || !Device.isDevice) {
-    return { displayToken: null, nativeDeviceToken: null };
+    return {
+      displayToken: null,
+      nativeDeviceToken: null,
+      deviceTokenIdentity: null,
+    };
   }
 
   await ensureAndroidNotificationChannel();
@@ -181,22 +203,29 @@ async function registerForPushNotifications(
   }
 
   if (!permissionGranted(settings)) {
-    return { displayToken: null, nativeDeviceToken: null };
+    return {
+      displayToken: null,
+      nativeDeviceToken: null,
+      deviceTokenIdentity: null,
+    };
   }
 
-  const tokenData = await Notifications.getExpoPushTokenAsync({
-    projectId: "6e327449-af3c-4138-b1c4-7ceca2baf243",
-  }).catch(() => null);
   const nativeTokenData =
-    Platform.OS === "ios"
-      ? await Notifications.getDevicePushTokenAsync().catch(() => null)
-      : null;
+    devicePushToken ??
+    (await Notifications.getDevicePushTokenAsync().catch(() => null));
+  const tokenData = await Notifications.getExpoPushTokenAsync({
+    projectId: EXPO_PROJECT_ID,
+    ...(nativeTokenData ? { devicePushToken: nativeTokenData } : {}),
+  }).catch(() => null);
 
   return {
     displayToken:
       typeof tokenData?.data === "string" ? tokenData.data : null,
     nativeDeviceToken:
-      typeof nativeTokenData?.data === "string" ? nativeTokenData.data : null,
+      Platform.OS === "ios" && typeof nativeTokenData?.data === "string"
+        ? nativeTokenData.data
+        : null,
+    deviceTokenIdentity: devicePushTokenIdentity(nativeTokenData),
   };
 }
 
@@ -308,7 +337,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const clientRef = useRef(client);
   const registrationGenerationRef = useRef(0);
   const registrationQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const tokenRefreshGenerationRef = useRef(0);
+  const deviceTokenIdentityRef = useRef<string | null>(null);
   clientRef.current = client;
   foregroundNotificationLevel = notificationLevel;
 
@@ -489,12 +518,17 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!Notifications || !isConfigured) return;
     let cancelled = false;
+    let refreshInFlight: Promise<void> | null = null;
+    let queuedDevicePushToken: DevicePushTokenLike | undefined;
 
-    const refreshTokens = async () => {
-      const generation = ++tokenRefreshGenerationRef.current;
+    const runTokenRefresh = async (devicePushToken?: DevicePushTokenLike) => {
       try {
-        const tokens = await registerForPushNotifications(true);
-        if (cancelled || generation !== tokenRefreshGenerationRef.current) return;
+        const tokens = await registerForPushNotifications(
+          true,
+          devicePushToken,
+        );
+        if (cancelled) return;
+        deviceTokenIdentityRef.current = tokens.deviceTokenIdentity;
         if (!tokens.displayToken && !tokens.nativeDeviceToken) {
           setRegistrationState("permission_required");
           return;
@@ -514,15 +548,61 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         }
       }
     };
+
+    const refreshTokens = (
+      devicePushToken?: DevicePushTokenLike,
+    ): Promise<void> => {
+      const identity = devicePushTokenIdentity(devicePushToken);
+      if (identity && identity === deviceTokenIdentityRef.current) {
+        return Promise.resolve();
+      }
+      if (refreshInFlight) {
+        queuedDevicePushToken = devicePushToken;
+        return refreshInFlight;
+      }
+
+      const currentRefresh = (async () => {
+        let nextDevicePushToken = devicePushToken;
+        do {
+          queuedDevicePushToken = undefined;
+          await runTokenRefresh(nextDevicePushToken);
+          nextDevicePushToken = queuedDevicePushToken;
+        } while (
+          !cancelled &&
+          nextDevicePushToken &&
+          devicePushTokenIdentity(nextDevicePushToken) !==
+            deviceTokenIdentityRef.current
+        );
+      })();
+      refreshInFlight = currentRefresh;
+      void currentRefresh.finally(() => {
+        if (refreshInFlight !== currentRefresh) return;
+        refreshInFlight = null;
+        const remainingDevicePushToken = queuedDevicePushToken;
+        queuedDevicePushToken = undefined;
+        if (
+          !cancelled &&
+          remainingDevicePushToken &&
+          devicePushTokenIdentity(remainingDevicePushToken) !==
+            deviceTokenIdentityRef.current
+        ) {
+          void refreshTokens(remainingDevicePushToken);
+        }
+      });
+      return currentRefresh;
+    };
+
     void refreshTokens();
 
-    const tokenListener = Notifications.addPushTokenListener?.(() => {
-      void refreshTokens();
-    });
+    const tokenListener = Notifications.addPushTokenListener?.(
+      (devicePushToken: DevicePushTokenLike) => {
+        void refreshTokens(devicePushToken);
+      },
+    );
     const appStateListener = AppState.addEventListener("change", (state) => {
       if (state === "active") {
         void refreshTokens();
-        void processPendingActions();
+        processPendingActionsRef.current();
       }
     });
 
@@ -531,7 +611,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       tokenListener?.remove?.();
       appStateListener.remove();
     };
-  }, [isConfigured, processPendingActions]);
+  }, [isConfigured]);
 
   useEffect(() => {
     const generation = ++registrationGenerationRef.current;

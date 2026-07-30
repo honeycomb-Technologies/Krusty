@@ -614,6 +614,11 @@ public class KrustyDiagnosticsModule: Module {
       KrustyPerformanceSignposts.shared.end(spanId: spanId, name: name)
     }
 
+    Function("recordJsHotPathProbe") { (payload: String) -> Void in
+      guard payload.utf8.count <= 2_048 else { return }
+      NSLog("[KrustyJSHotPath] %@", payload)
+    }
+
     AsyncFunction("listMetricKitPayloads") { () -> [NativeMetricPayloadRecord] in
       KrustyMetricKitCollector.shared.list()
     }

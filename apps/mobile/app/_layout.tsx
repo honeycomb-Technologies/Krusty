@@ -13,9 +13,11 @@ import { SplashOverlay } from '../components/splash/SplashOverlay';
 import { NotificationProvider } from '../hooks/useNotifications';
 import { configureKrustyPerformance } from '@krusty/state';
 import { MobileDiagnosticsProvider } from '../diagnostics/MobileDiagnosticsProvider';
+import { installJsHotPathProbe } from '../diagnostics/jsHotPathProbe';
 
 const BOOT_BACKGROUND = '#0e0e11';
 
+installJsHotPathProbe();
 configureKrustyPerformance(
   __DEV__ || process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
 );
