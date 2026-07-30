@@ -1,6 +1,6 @@
 {
   "name": "@krusty/desktop-shell",
-  "version": "0.9.14",
+  "version": "0.9.20",
   "private": true,
   "packageManager": "bun@1.3.0",
   "type": "module",

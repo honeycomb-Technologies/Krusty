@@ -1,6 +1,6 @@
 [package]
 name = "krusty-core"
-version = "0.9.14"
+version = "0.9.20"
 edition = "2021"
 description = "Core library for Mitsuro - AI, storage, tools, and extensions"
 
