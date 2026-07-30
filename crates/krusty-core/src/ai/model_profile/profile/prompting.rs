@@ -42,7 +42,7 @@ impl ModelProfile {
                 "Turn internal reasoning into the next concrete tool call or final answer; do not dump the plan in user-visible text every round."
             }
             PromptFamily::Grok => {
-                "After each tool result, silently decide the next action—do not re-narrate the plan. If the latest user message asks for a direct reply or says not to call another tool, reply immediately without a tool. Never issue a no-op or placeholder tool call merely to bridge from a tool result to text. Between tool rounds, at most one 8–12 word next-step preamble; otherwise stay quiet and call tools until done."
+                "After each tool result, silently decide the next action—do not re-narrate the plan. If the latest user message asks for a direct reply or says not to call another tool, reply immediately without a tool. Never issue a no-op or placeholder tool call merely to bridge from a tool result to text. Skip redundant mid-turn status; speak only when something new matters, then keep going with tools."
             }
             PromptFamily::GoogleGemini => {
                 "Ground decisions in tool evidence, keep calls narrow, and preserve the active task across long contexts."
