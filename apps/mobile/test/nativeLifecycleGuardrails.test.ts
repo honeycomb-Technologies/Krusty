@@ -107,10 +107,10 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
 
   assert(
     screen.includes("createLatestIntentScheduler")
-      && screen.includes("quietDelayMs: 24")
-      && screen.includes("maxDelayMs: 80")
+      && screen.includes("quietDelayMs: 72")
+      && !screen.includes("maxDelayMs: 80")
       && screen.includes("startTransition(() => setActiveMode(mode))"),
-    "heavy mode activation must coalesce to the latest intent with a hard deadline",
+    "heavy mode activation must remain quiet-only and admit only the latest intent",
   );
   assert(
     screen.includes("modeForHorizontalSwipe(\n        requestedMode,"),
@@ -129,6 +129,11 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
       && controller.includes("state.cancelPendingSessionLoad()")
       && controller.includes("const hydrationTimer = setTimeout"),
     "cold hydration must wait for the visible winner and invalidate hidden work",
+  );
+  assert(
+    controller.includes("PRESENCE_SETTLE_DELAY_MS = 250")
+      && controller.includes("schedulePresenceReconcile()"),
+    "presence transport must wait for the settled visible mode",
   );
   assert(
     !screen.includes("modeIntentRef") && !screen.includes("commitModeIntent"),

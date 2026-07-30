@@ -1,6 +1,12 @@
 export interface LatestIntentSchedulerOptions<T, TimerHandle = ReturnType<typeof setTimeout>> {
   quietDelayMs: number;
-  maxDelayMs: number;
+  /**
+   * Optional hard deadline for work that must make progress during continuous
+   * input. Omit it for heavy UI work: the visible intent can update
+   * immediately while the expensive destination is admitted only after input
+   * becomes quiet.
+   */
+  maxDelayMs?: number;
   onFlush(intent: T): void;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => TimerHandle;
@@ -18,9 +24,10 @@ export interface LatestIntentScheduler<T> {
 }
 
 /**
- * Coalesces bursty UI intents without allowing continuous input to postpone work
- * forever. The quiet deadline follows the latest submission, while the hard
- * deadline remains anchored to the first submission in the current burst.
+ * Coalesces bursty UI intents. The quiet deadline follows the latest
+ * submission. Callers may opt into a hard deadline for lightweight work, but
+ * heavy navigation should remain quiet-only so sustained input cannot enqueue
+ * repeated surface mounts.
  */
 export function createLatestIntentScheduler<
   T,
@@ -32,7 +39,10 @@ export function createLatestIntentScheduler<
   if (!Number.isFinite(quietDelayMs) || quietDelayMs < 0) {
     throw new RangeError("quietDelayMs must be a finite non-negative number");
   }
-  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+  if (
+    maxDelayMs !== undefined
+    && (!Number.isFinite(maxDelayMs) || maxDelayMs < 0)
+  ) {
     throw new RangeError("maxDelayMs must be a finite non-negative number");
   }
 
@@ -44,7 +54,7 @@ export function createLatestIntentScheduler<
 
   let pending = false;
   let latestIntent: T;
-  let hardDeadlineMs = 0;
+  let hardDeadlineMs: number | null = null;
   let quietDeadlineMs = 0;
   let timer: TimerHandle | null = null;
   let timerGeneration = 0;
@@ -69,7 +79,9 @@ export function createLatestIntentScheduler<
 
   const schedulePending = () => {
     clearScheduledTimer();
-    const dueAtMs = Math.min(quietDeadlineMs, hardDeadlineMs);
+    const dueAtMs = hardDeadlineMs === null
+      ? quietDeadlineMs
+      : Math.min(quietDeadlineMs, hardDeadlineMs);
     const generation = timerGeneration;
     timer = setTimer(() => {
       if (generation !== timerGeneration || !pending) return;
@@ -91,7 +103,9 @@ export function createLatestIntentScheduler<
       quietDeadlineMs = submittedAtMs + quietDelayMs;
       if (!pending) {
         pending = true;
-        hardDeadlineMs = submittedAtMs + maxDelayMs;
+        hardDeadlineMs = maxDelayMs === undefined
+          ? null
+          : submittedAtMs + maxDelayMs;
       }
       schedulePending();
     },

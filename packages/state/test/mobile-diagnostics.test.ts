@@ -54,17 +54,26 @@ Deno.test('diagnostics schema cannot retain sensitive arbitrary values', () => {
     'content-free transcript shape metrics must remain useful and numeric',
   );
   const requestMetric = sanitizeDiagnosticFields({
-    name: 'api.sessions',
+    name: 'api.sessions.presence',
     outcome: 'error',
     code: 'network.error',
     durationMs: 1_234.56,
   });
   assert(
-    requestMetric.name === 'api.sessions'
+    requestMetric.name === 'api.sessions.presence'
       && requestMetric.outcome === 'error'
       && requestMetric.code === 'network.error'
       && requestMetric.durationMs === 1_234.6,
     'sanitized request families and coarse failure classes must remain queryable',
+  );
+  const diagnosticOverhead = sanitizeDiagnosticFields({
+    name: 'diagnostics.persist',
+    durationMs: 7.89,
+  });
+  assert(
+    diagnosticOverhead.name === 'diagnostics.persist'
+      && diagnosticOverhead.durationMs === 7.9,
+    'privacy-safe diagnostics overhead spans must remain queryable',
   );
 });
 

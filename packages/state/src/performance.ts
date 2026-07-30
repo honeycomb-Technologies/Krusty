@@ -16,6 +16,8 @@ export type KrustyPerformancePhase =
 	| 'transcript.first_paint'
 	| 'mode.switch'
 	| 'toolbox.open'
+	| 'diagnostics.persist'
+	| 'diagnostics.upload'
 	| 'live_activity.update';
 
 export type KrustyPerformanceMetric =

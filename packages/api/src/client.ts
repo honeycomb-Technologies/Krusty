@@ -111,7 +111,20 @@ function httpStatusClass(status: number): string {
 
 function requestDiagnosticName(path: string): string {
 	const route = path.split("?", 1)[0] ?? path;
-	if (route.startsWith("/sessions")) return "api.sessions";
+	if (route === "/sessions") return "api.sessions.catalog";
+	if (route === "/sessions/directories") return "api.sessions.directories";
+	if (route.startsWith("/sessions/")) {
+		const segments = route.split("/").filter(Boolean);
+		const subroute = segments[2];
+		if (!subroute) return "api.sessions.detail";
+		if (subroute === "state") return "api.sessions.state";
+		if (subroute === "workflow") return "api.sessions.workflow";
+		if (subroute === "presence") return "api.sessions.presence";
+		if (subroute === "cancel" || subroute === "pinch") {
+			return "api.sessions.action";
+		}
+		return "api.sessions";
+	}
 	if (route.startsWith("/models")) return "api.models";
 	if (route.startsWith("/credentials")) return "api.credentials";
 	if (route.startsWith("/auth")) return "api.auth";

@@ -79,11 +79,44 @@ describe("KrustyClient content-free request diagnostics", () => {
 
 		expect(events.map(({ name, outcome, code }) => ({ name, outcome, code })))
 			.toEqual([
-				{ name: "api.sessions", outcome: "start", code: undefined },
-				{ name: "api.sessions", outcome: "complete", code: "http.2xx" },
+				{ name: "api.sessions.detail", outcome: "start", code: undefined },
+				{ name: "api.sessions.detail", outcome: "complete", code: "http.2xx" },
 			]);
 		expect(events[1]?.durationMs).toBeGreaterThanOrEqual(0);
 		expect(JSON.stringify(events)).not.toContain("session-private-id");
+	});
+
+	it("separates privacy-safe session request families without identifiers", async () => {
+		const names: string[] = [];
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async (input) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/sessions") return Response.json([]);
+				if (path === "/sessions/directories") return Response.json([]);
+				return Response.json({});
+			},
+			requestObserver: (event) => {
+				if (event.outcome === "start") names.push(event.name);
+			},
+		});
+
+		await client.getSessions();
+		await client.getSessionState("private-session-id");
+		await client.getWorkflow("private-session-id");
+		await client.getSessionPresence("private-session-id");
+		await client.pinchSession("private-session-id");
+		await client.getDirectories();
+
+		expect(names).toEqual([
+			"api.sessions.catalog",
+			"api.sessions.state",
+			"api.sessions.workflow",
+			"api.sessions.presence",
+			"api.sessions.action",
+			"api.sessions.directories",
+		]);
+		expect(JSON.stringify(names)).not.toContain("private-session-id");
 	});
 
 	it("separates HTTP and transport failures without response content", async () => {

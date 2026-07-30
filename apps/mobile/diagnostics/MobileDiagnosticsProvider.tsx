@@ -17,6 +17,7 @@ import {
   MobileDiagnosticRecorder,
   buildDiagnosticUploadBatch,
   createStressDiagnosticRecorder,
+  beginKrustyPerformanceSpan,
   getKrustyPerformanceSnapshot,
   type DiagnosticBatch,
   type DiagnosticMode,
@@ -182,10 +183,12 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
       const mode = targetRecorder.getMode();
       const completionPending = pendingCompletionRef.current
         || targetRecorder.isStressCompletionPending();
-      const retainFullRun = completionPending || mode === 'stress';
-      const batch = retainFullRun
+      const batch = completionPending
         ? targetRecorder.createCompletionPersistenceBatch()
-        : targetRecorder.createPersistenceBatch();
+        : mode === 'stress'
+          ? targetRecorder.createPersistenceBatch() ?? createCompletionMarkerBatch(targetRecorder)
+          : targetRecorder.createPersistenceBatch();
+      const endPersistSpan = beginKrustyPerformanceSpan('diagnostics.persist');
       try {
         if (!batch) {
           await AsyncStorage.removeItem(PENDING_KEY);
@@ -205,6 +208,8 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
         return true;
       } catch {
         return false;
+      } finally {
+        endPersistSpan();
       }
     });
     persistPromiseRef.current = operation;
@@ -229,6 +234,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     }
     uploadingRef.current = true;
     setUploadState('uploading');
+    const endUploadSpan = beginKrustyPerformanceSpan('diagnostics.upload');
     try {
       const completionRequested = () => (
         pendingCompletionRef.current || recorder.isStressCompletionPending()
@@ -275,9 +281,11 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
             return false;
           }
         }
-        await persist();
         batch = recorder.createBatch();
       }
+      // Accepted batches are idempotent server-side. Persist once after the
+      // drain instead of serializing the recorder after every 128-event chunk.
+      await persist();
 
       if (completionRequested()) {
         // A completion marker is intentionally separate from checkpoint data:
@@ -322,6 +330,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
       setUploadState('failed');
       return false;
     } finally {
+      endUploadSpan();
       uploadingRef.current = false;
     }
   }, [client, isConnected, persist, recorder]);
@@ -550,7 +559,12 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     if (!recorder) return;
     const persistTimer = setInterval(() => void persist(), PERSIST_INTERVAL_MS);
     const uploadTimer = setInterval(() => {
-      if (AppState.currentState === 'active') void flush();
+      // A stress run is already bounded and restart-safe. Uploading its entire
+      // queue on a timer can contend with the exact interactions being measured.
+      if (
+        AppState.currentState === 'active'
+        && recorder.getMode() !== 'stress'
+      ) void flush();
     }, UPLOAD_INTERVAL_MS);
     return () => {
       clearInterval(persistTimer);

@@ -20,6 +20,7 @@ type SessionsStoreApi = LoadedStores["sessions"];
 type ModeStores = LoadedStores["modes"];
 
 const VISIBLE_MODE_HYDRATION_DELAY_MS = 80;
+const PRESENCE_SETTLE_DELAY_MS = 250;
 
 function jsonEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
@@ -196,8 +197,11 @@ export function useSessionController({
     void ensureModelReady(modeStores[activeMode].session);
   }, [activeMode, client, ensureModelReady, isConnected, modeStores]);
 
-  // Exactly one visible mode advertises presence. Hidden streams keep their
-  // transport/recovery poll alive; hidden idle modes release both timers.
+  // Exactly one settled visible mode advertises presence. Hidden streams keep
+  // their recovery poll alive; hidden idle modes release it immediately.
+  // Presence transport itself is delayed until navigation becomes quiet so
+  // rapid mode switches do not emit a PUT/DELETE pair for every intermediate
+  // surface.
   useEffect(() => {
     for (const mode of ["chat", "code", "mako"] as const) {
       const state = modeStores[mode].session.getState();
@@ -212,11 +216,6 @@ export function useSessionController({
         mode,
         state.isStreaming,
       );
-      if (policy.keepPresence && state.sessionId) {
-        state.startPresenceHeartbeat(state.sessionId);
-      } else {
-        state.stopPresenceHeartbeat(state.sessionId);
-      }
       if (!policy.keepPolling) {
         state.stopStatePolling();
       }
@@ -226,17 +225,48 @@ export function useSessionController({
     // creation, notification navigation). Only the visible store is observed,
     // so a late hidden hydration cannot re-enable its presence transport.
     const activeStore = modeStores[activeMode].session;
+    let disposed = false;
+    let presenceTimer: ReturnType<typeof setTimeout> | null = null;
+    const reconcilePresence = () => {
+      presenceTimer = null;
+      if (disposed) return;
+      for (const mode of ["chat", "code", "mako"] as const) {
+        const state = modeStores[mode].session.getState();
+        const policy = resolveModeLifecyclePolicy(
+          activeMode,
+          mode,
+          state.isStreaming,
+        );
+        if (policy.keepPresence && state.sessionId) {
+          state.startPresenceHeartbeat(state.sessionId);
+        } else {
+          // This reconciler is the current navigation authority, so clear any
+          // older transport even if the hidden store changed session IDs while
+          // the user was switching modes.
+          state.stopPresenceHeartbeat();
+        }
+      }
+    };
+    const schedulePresenceReconcile = () => {
+      if (presenceTimer !== null) clearTimeout(presenceTimer);
+      presenceTimer = setTimeout(
+        reconcilePresence,
+        PRESENCE_SETTLE_DELAY_MS,
+      );
+    };
+
     let activeSessionId = activeStore.getState().sessionId;
     const unsubscribe = activeStore.subscribe((state) => {
       if (state.sessionId === activeSessionId) return;
       activeSessionId = state.sessionId;
-      if (activeSessionId) {
-        state.startPresenceHeartbeat(activeSessionId);
-      } else {
-        state.stopPresenceHeartbeat();
-      }
+      schedulePresenceReconcile();
     });
-    return unsubscribe;
+    schedulePresenceReconcile();
+    return () => {
+      disposed = true;
+      if (presenceTimer !== null) clearTimeout(presenceTimer);
+      unsubscribe();
+    };
   }, [activeMode, modeStores]);
 
   // Periodic model catalog refresh while the app is foregrounded.

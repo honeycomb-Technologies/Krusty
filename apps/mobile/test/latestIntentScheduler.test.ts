@@ -63,6 +63,19 @@ function createHarness(quietDelayMs = 100, maxDelayMs = 250) {
   return { clock, flushed, scheduler };
 }
 
+function createQuietOnlyHarness(quietDelayMs = 100) {
+  const clock = new FakeClock();
+  const flushed: Array<{ value: string; atMs: number }> = [];
+  const scheduler = createLatestIntentScheduler<string, number>({
+    quietDelayMs,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    onFlush: (value) => flushed.push({ value, atMs: clock.nowMs }),
+  });
+  return { clock, flushed, scheduler };
+}
+
 Deno.test("latest intent scheduler admits only the latest intent after quiet", () => {
   const { clock, flushed, scheduler } = createHarness();
 
@@ -94,6 +107,27 @@ Deno.test("latest intent scheduler enforces its first-intent hard deadline", () 
   assertEquals(flushed.length, 1, "hard limit must force admission");
   assertEquals(flushed[0].value, "240", "hard-limit flush must use latest intent");
   assertEquals(flushed[0].atMs, 250, "hard limit must stay anchored to burst start");
+});
+
+Deno.test("quiet-only scheduler never admits heavy work during sustained input", () => {
+  const { clock, flushed, scheduler } = createQuietOnlyHarness();
+
+  scheduler.submit("chat");
+  for (const value of ["code", "mako", "chat", "mako"]) {
+    clock.advanceBy(80);
+    scheduler.submit(value);
+  }
+  clock.advanceBy(99);
+  assertEquals(
+    flushed.length,
+    0,
+    "continuous input must not enqueue intermediate heavy destinations",
+  );
+  clock.advanceBy(1);
+
+  assertEquals(flushed.length, 1, "latest destination flushes after input quiets");
+  assertEquals(flushed[0].value, "mako", "only the final intent may be admitted");
+  assertEquals(flushed[0].atMs, 420, "quiet deadline follows the final submission");
 });
 
 Deno.test("manual flush admits immediately and invalidates the scheduled callback", () => {

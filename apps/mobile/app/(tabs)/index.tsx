@@ -134,17 +134,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const activeModeRef = useRef(activeMode);
   activeModeRef.current = activeMode;
   const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
-  // Header selection responds immediately; heavy surface/store work can skip
-  // superseded intermediate requests and settle on the latest mode. Unlike a
-  // deferred value, the hard deadline prevents continuous taps from starving
-  // the destination surface forever.
+  // Header selection responds immediately; heavy surface/store work waits for
+  // a short quiet window and commits only the latest requested mode. A hard
+  // deadline here admitted another expensive surface every 80ms during
+  // sustained stress input, allowing React transitions to accumulate.
   const modeIntentSchedulerRef = useRef<ReturnType<
     typeof createLatestIntentScheduler<SessionType>
   > | null>(null);
   if (!modeIntentSchedulerRef.current) {
     modeIntentSchedulerRef.current = createLatestIntentScheduler({
-      quietDelayMs: 24,
-      maxDelayMs: 80,
+      quietDelayMs: 72,
       onFlush: (mode) => {
         if (mode === activeModeRef.current) {
           finishModeSwitchSpanRef.current?.();

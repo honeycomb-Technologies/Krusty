@@ -19,7 +19,7 @@ private final class KrustyPerformanceSignposts {
     "session.fetch_decode", "session.snapshot_transform", "session.snapshot_publish",
     "session.cache_compact",
     "transcript.derive", "transcript.visual_plan", "transcript.first_paint",
-    "mode.switch", "toolbox.open",
+    "mode.switch", "toolbox.open", "diagnostics.persist", "diagnostics.upload",
     "live_activity.update",
   ]
 

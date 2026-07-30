@@ -28,6 +28,23 @@ Deno.test('diagnostic completion drains checkpoints before one empty marker', as
     provider.includes('void flush(true);'),
     'restored or reconnected pending completions must retry immediately',
   );
+  assert(
+    provider.includes("mode === 'stress'\n          ? targetRecorder.createPersistenceBatch()"),
+    'active stress recovery must persist only the latest bounded checkpoint',
+  );
+  assert(
+    !provider.includes("completionPending || mode === 'stress'"),
+    'active stress capture must not serialize its full run every 15 seconds',
+  );
+  assert(
+    provider.includes("recorder.getMode() !== 'stress'"),
+    'periodic uploads must not contend with an active stress run',
+  );
+  assert(
+    provider.includes("beginKrustyPerformanceSpan('diagnostics.persist')")
+      && provider.includes("beginKrustyPerformanceSpan('diagnostics.upload')"),
+    'diagnostics overhead must be attributed in the next report',
+  );
 });
 
 Deno.test('diagnostics controls keep stop actionable and label active checkpoints', async () => {

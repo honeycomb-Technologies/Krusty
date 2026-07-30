@@ -96,8 +96,10 @@ export function useSessionActions({
   >(null);
   if (!sessionSelectionSchedulerRef.current) {
     sessionSelectionSchedulerRef.current = createLatestIntentScheduler({
-      quietDelayMs: 24,
-      maxDelayMs: 80,
+      // Loading a transcript is heavy work. Keep replacing the pending
+      // selection while the user is still tapping and hydrate only the final
+      // quiet destination.
+      quietDelayMs: 72,
       onFlush: (intent) => admitSessionSelectionRef.current(intent),
     });
   }
