@@ -43,7 +43,7 @@ Foreground Bash keeps a recoverable full-output spool only when the model-facing
 
 The repeated instruction prefix has three layers:
 
-1. The base coding contract is compact and slow-changing. A small model-family overlay adds only behavior that differs materially by provider family.
+1. The base coding contract is compact, slow-changing, and shared across model families. Provider-specific prompt overlays are intentionally omitted so the stable prefix stays identical.
 2. Project instructions are separated from live session state so they can remain in the reusable prefix.
 3. Active plan, Hive coordinator, task, memory, report, and other volatile state is appended as current runtime context. On OpenAI Responses and Codex paths it retains `developer` authority rather than being demoted to user content.
 
