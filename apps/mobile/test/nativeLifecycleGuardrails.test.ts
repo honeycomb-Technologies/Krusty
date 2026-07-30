@@ -121,6 +121,13 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
     "the visible tab selection must respond before deferred surface activation",
   );
   assert(
+    screen.includes("const requestedModeDisplayTitle =")
+      && screen.includes("stores.modes[requestedMode].session.getState().title")
+      && screen.includes("title={requestedModeDisplayTitle}")
+      && screen.includes("requestedMode === activeMode\n            && sessionId"),
+    "the immediate mode selection must never retain or rename the previous mode's title",
+  );
+  assert(
     screen.includes("const activeTab = tabForSessionType(activeMode)"),
     "composer and session actions must remain bound to the committed deferred mode",
   );
@@ -253,6 +260,14 @@ Deno.test("stress controls remain native automation targets", async () => {
   assert(
     header.includes('accessibilityLabel={`Switch to ${item.label}`}'),
     "all mobile modes must remain independently addressable during native stress automation",
+  );
+  assert(
+    !header.includes("modeLayoutTransition")
+      && !header.includes("FadeIn")
+      && !header.includes("FadeOut")
+      && !header.includes("entering=")
+      && !header.includes("exiting="),
+    "mode text must swap in one native layout transaction instead of cross-fading competing labels",
   );
   for (
     const label of [

@@ -610,6 +610,17 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // Empty and placeholder sessions stay visually quiet. A real persisted title
   // appears only after the conversation has one.
   const displayTitle = displayThreadTitle(sessionTitle);
+  // The selected pill reflects requestedMode immediately while expensive
+  // surface activation waits for the quiet window. Read the requested store's
+  // already-known title during that short gap so Code never appears above the
+  // previous mode's title. The committed selector resumes ownership once both
+  // modes agree.
+  const requestedModeDisplayTitle =
+    requestedMode === activeMode
+      ? displayTitle
+      : displayThreadTitle(
+          stores.modes[requestedMode].session.getState().title,
+        );
 
   const handleModeChange = useCallback(
     (mode: SessionType) => {
@@ -762,12 +773,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     <Animated.View style={entrance.topBarStyle}>
       <MobileAppHeader
         mode={requestedMode}
-        title={displayTitle}
+        title={requestedModeDisplayTitle}
         onModeChange={handleModeChange}
         onOpenThreads={() => setActiveSheet("threads")}
         onOpenToolbox={handleToolboxOpen}
         onTitlePress={
-          sessionId && displayTitle && activeMode !== "mako"
+          requestedMode === activeMode
+            && sessionId
+            && requestedModeDisplayTitle
+            && activeMode !== "mako"
             ? handleRenameSession
             : undefined
         }
