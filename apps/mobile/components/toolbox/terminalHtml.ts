@@ -10,6 +10,10 @@ export function getTerminalHtml(wsUrl: string, theme: TerminalTheme): string {
   const foregroundJson = JSON.stringify(theme.foreground);
   const cursorJson = JSON.stringify(theme.cursor);
 
+  // xterm is already an app dependency, but the native WebView currently has
+  // no build step that emits its browser distribution as a local Expo asset.
+  // Keep these pinned URLs until that asset pipeline exists; the surrounding
+  // lifecycle gate prevents frantic UI transitions from repeatedly mounting it.
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -46,7 +50,52 @@ export function getTerminalHtml(wsUrl: string, theme: TerminalTheme): string {
       fitAddon.fit();
 
       var ws = new WebSocket(${wsUrlJson});
+      ws.binaryType = 'arraybuffer';
       var heartbeat = null;
+      var pendingOutput = [];
+      var pendingOutputBytes = 0;
+      var outputWriteActive = false;
+      var outputOverflowed = false;
+      var OUTPUT_HIGH_WATERMARK = 512 * 1024;
+      var OUTPUT_LOW_WATERMARK = 128 * 1024;
+
+      function outputSize(data) {
+        return typeof data === 'string' ? data.length * 2 : (data.byteLength || 0);
+      }
+
+      function drainOutput() {
+        if (outputWriteActive || pendingOutput.length === 0) return;
+        outputWriteActive = true;
+        var chunk = pendingOutput.shift();
+        pendingOutputBytes = Math.max(0, pendingOutputBytes - outputSize(chunk));
+        term.write(chunk, function() {
+          outputWriteActive = false;
+          if (outputOverflowed && pendingOutputBytes <= OUTPUT_LOW_WATERMARK) {
+            outputOverflowed = false;
+          }
+          drainOutput();
+        });
+      }
+
+      function enqueueOutput(data) {
+        var nextBytes = pendingOutputBytes + outputSize(data);
+        if (nextBytes > OUTPUT_HIGH_WATERMARK) {
+          if (!outputOverflowed) {
+            outputOverflowed = true;
+            var warning = '\\r\\n[Terminal output exceeded the safe buffer; reconnecting is required.]\\r\\n';
+            pendingOutput.push(warning);
+            pendingOutputBytes += outputSize(warning);
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.close(1008, 'terminal output buffer exceeded');
+            }
+          }
+          drainOutput();
+          return;
+        }
+        pendingOutput.push(data);
+        pendingOutputBytes = nextBytes;
+        drainOutput();
+      }
 
       function sendJson(payload) {
         if (ws.readyState === WebSocket.OPEN) {
@@ -69,25 +118,25 @@ export function getTerminalHtml(wsUrl: string, theme: TerminalTheme): string {
 
       ws.onmessage = function(event) {
         if (typeof event.data !== 'string') {
-          term.write(new Uint8Array(event.data));
+          enqueueOutput(new Uint8Array(event.data));
           return;
         }
 
         try {
           var message = JSON.parse(event.data);
           if (message.type === 'output' && typeof message.data === 'string') {
-            term.write(message.data);
+            enqueueOutput(message.data);
             return;
           }
           if (message.type === 'error' && typeof message.error === 'string') {
-            term.write('\\r\\n' + message.error + '\\r\\n');
+            enqueueOutput('\\r\\n' + message.error + '\\r\\n');
             return;
           }
           if (message.type === 'pong') {
             return;
           }
         } catch (error) {
-          term.write(event.data);
+          enqueueOutput(event.data);
           return;
         }
       };
@@ -97,7 +146,7 @@ export function getTerminalHtml(wsUrl: string, theme: TerminalTheme): string {
           clearInterval(heartbeat);
           heartbeat = null;
         }
-        term.write('\\r\\n[Connection closed]\\r\\n');
+        enqueueOutput('\\r\\n[Connection closed]\\r\\n');
       };
 
       term.onData(function(data) {

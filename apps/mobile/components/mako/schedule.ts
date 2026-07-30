@@ -121,20 +121,20 @@ export function describeSchedulePreset(
   switch (preset) {
     case "now":
       return subject === "course"
-        ? "New work opens as a run inside Mako."
+        ? "New work opens as a run inside Hive."
         : "This run is active now.";
     case "30m":
       return subject === "course"
-        ? "Mako will queue this run and wake it in 30 minutes."
-        : "Mako will wake this run in 30 minutes.";
+        ? "Hive will queue this run and wake it in 30 minutes."
+        : "Hive will wake this run in 30 minutes.";
     case "2h":
       return subject === "course"
-        ? "Mako will queue this run and wake it in two hours."
-        : "Mako will wake this run in two hours.";
+        ? "Hive will queue this run and wake it in two hours."
+        : "Hive will wake this run in two hours.";
     case "tomorrow":
       return subject === "course"
-        ? "Mako will queue this run for tomorrow morning."
-        : "Mako will wake this run tomorrow morning.";
+        ? "Hive will queue this run for tomorrow morning."
+        : "Hive will wake this run tomorrow morning.";
     case "custom":
       return subject === "course"
         ? "Choose a specific local wake time for this new run."

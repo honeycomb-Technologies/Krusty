@@ -780,7 +780,7 @@ async fn start_server_with_listener_mode(
     tracing::info!(
         bind_address = %local_addr,
         local_url = %format!("http://localhost:{}", local_addr.port()),
-        "Krusty server listening"
+        "Mitsuro server listening"
     );
 
     axum::serve(
@@ -820,7 +820,7 @@ async fn serve_web_app(uri: Uri) -> impl IntoResponse {
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/plain")
             .body(Body::from(
-                "Krusty API server running. Web frontend not embedded in this build.",
+                "Mitsuro API server running. Web frontend not embedded in this build.",
             ))
             .expect("static response builder"),
     }

@@ -227,7 +227,7 @@ pub(crate) async fn run_mako_session_inner(
         web_search: Some(WebSearchConfig::default()),
         web_fetch: Some(WebFetchConfig::default()),
         // Mako's coordinator/persona layers are context sections so the base
-        // Krusty safety/runtime contract and model-family overlay remain intact.
+        // Krusty safety/runtime contract remains intact.
         system_prompt: None,
         ..Default::default()
     };

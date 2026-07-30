@@ -3,20 +3,23 @@
 	font-family:
 		Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
 		"Segoe UI", sans-serif;
-	--bg: #0b0b0d;
-	--bg-soft: #101014;
-	--panel: rgba(20, 20, 25, 0.78);
-	--panel-strong: rgba(28, 27, 31, 0.94);
-	--line: rgba(255, 255, 255, 0.11);
-	--line-strong: rgba(255, 255, 255, 0.18);
-	--text: #f5f1e8;
-	--muted: #aaa49a;
-	--dim: #746e66;
-	--accent: #ff6b35;
-	--accent-2: #ffcc00;
-	--accent-low: #8b4513;
-	--success: #7bd88f;
-	--danger: #ff5d73;
+	--bg: #0e0e11;
+	--bg-soft: #141519;
+	--panel: rgba(25, 24, 29, 0.78);
+	--panel-strong: rgba(34, 32, 39, 0.94);
+	--line: rgba(232, 229, 234, 0.1);
+	--line-strong: rgba(232, 229, 234, 0.18);
+	--text: #e8e5ea;
+	--muted: #9e98a3;
+	--dim: #716d72;
+	--accent: #75617e;
+	--accent-strong: #66536f;
+	--accent-surface: rgba(117, 97, 126, 0.22);
+	--pulse: #9a82a5;
+	--brass: #b89a61;
+	--brass-highlight: #d4bd89;
+	--success: #7f9a86;
+	--danger: #b06f73;
 	--shadow: 0 28px 80px rgba(0, 0, 0, 0.5);
 	background: var(--bg);
 	color: var(--text);
@@ -40,15 +43,15 @@ body {
 		linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
 		radial-gradient(
 			circle at 20% 12%,
-			rgba(255, 107, 53, 0.2),
+			rgba(117, 97, 126, 0.16),
 			transparent 32rem
 		),
 		radial-gradient(
 			circle at 82% 8%,
-			rgba(255, 204, 0, 0.12),
+			rgba(184, 154, 97, 0.09),
 			transparent 28rem
 		),
-		linear-gradient(180deg, #0b0b0d 0%, #111014 46%, #08080a 100%);
+		linear-gradient(180deg, #0e0e11 0%, #141519 46%, #09090b 100%);
 	background-size:
 		42px 42px,
 		42px 42px,
@@ -68,7 +71,7 @@ input {
 }
 
 ::selection {
-	background: rgba(255, 107, 53, 0.35);
+	background: rgba(117, 97, 126, 0.45);
 }
 
 .site-shell {
@@ -80,7 +83,7 @@ input {
 	top: 0;
 	z-index: 20;
 	border-bottom: 1px solid var(--line);
-	background: rgba(11, 11, 13, 0.76);
+	background: rgba(14, 14, 17, 0.82);
 	backdrop-filter: blur(18px);
 }
 
@@ -96,27 +99,12 @@ input {
 .brand {
 	display: inline-flex;
 	align-items: center;
-	gap: 12px;
-	font-weight: 800;
-	letter-spacing: 0.14em;
-	text-transform: uppercase;
+	gap: 10px;
 }
 
-.brand-mark {
-	display: grid;
-	width: 30px;
-	height: 30px;
-	grid-template-columns: repeat(3, 1fr);
-	gap: 2px;
-}
-
-.brand-mark span {
-	background: linear-gradient(
-		135deg,
-		var(--accent-low),
-		var(--accent),
-		var(--accent-2)
-	);
+.brand-cell {
+	width: 28px;
+	height: 28px;
 }
 
 .nav-links {
@@ -156,6 +144,7 @@ input {
 	border: 1px solid var(--line);
 	background: rgba(255, 255, 255, 0.045);
 	padding: 8px 11px;
+	border-radius: 999px;
 	color: var(--muted);
 	font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 12px;
@@ -168,7 +157,8 @@ input {
 	width: 7px;
 	height: 7px;
 	background: var(--success);
-	box-shadow: 0 0 18px var(--success);
+	border-radius: 50%;
+	box-shadow: 0 0 16px rgba(127, 154, 134, 0.65);
 }
 
 h1,
@@ -189,9 +179,9 @@ h1 {
 .gradient-text {
 	background: linear-gradient(
 		90deg,
-		#f5f1e8,
-		var(--accent-2) 48%,
-		var(--accent)
+		var(--text),
+		var(--brass-highlight) 46%,
+		var(--pulse)
 	);
 	-webkit-background-clip: text;
 	background-clip: text;
@@ -219,6 +209,7 @@ h1 {
 	justify-content: center;
 	min-height: 46px;
 	border: 1px solid var(--line-strong);
+	border-radius: 12px;
 	padding: 0 18px;
 	background: rgba(255, 255, 255, 0.055);
 	color: var(--text);
@@ -231,14 +222,18 @@ h1 {
 
 .button:hover {
 	transform: translateY(-1px);
-	border-color: rgba(255, 204, 0, 0.38);
+	border-color: rgba(154, 130, 165, 0.46);
 	background: rgba(255, 255, 255, 0.08);
 }
 
 .button.primary {
-	border-color: rgba(255, 107, 53, 0.42);
-	background: linear-gradient(135deg, var(--accent), var(--accent-2));
-	color: #14100a;
+	border-color: rgba(154, 130, 165, 0.42);
+	background: var(--accent);
+	color: #f7f4f8;
+}
+
+.button.primary:hover {
+	background: var(--accent-strong);
 }
 
 .button.ghost {
@@ -249,6 +244,7 @@ h1 {
 .panel-card,
 .plugin-card {
 	border: 1px solid var(--line);
+	border-radius: 18px;
 	background: var(--panel);
 	box-shadow: var(--shadow);
 	backdrop-filter: blur(18px);
@@ -277,6 +273,7 @@ h1 {
 .dots span {
 	width: 9px;
 	height: 9px;
+	border-radius: 50%;
 	background: var(--line-strong);
 }
 
@@ -289,7 +286,7 @@ h1 {
 }
 
 .prompt {
-	color: var(--accent-2);
+	color: var(--brass);
 }
 
 .command {
@@ -350,6 +347,7 @@ h1 {
 	justify-content: space-between;
 	gap: 16px;
 	border: 1px solid var(--line);
+	border-radius: 16px;
 	background: var(--panel-strong);
 	padding: 16px;
 	font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -371,6 +369,7 @@ h1 {
 .search-input {
 	width: 100%;
 	border: 1px solid var(--line);
+	border-radius: 12px;
 	background: rgba(255, 255, 255, 0.045);
 	padding: 14px 16px;
 	color: var(--text);
@@ -378,7 +377,7 @@ h1 {
 }
 
 .search-input:focus {
-	border-color: rgba(255, 204, 0, 0.45);
+	border-color: rgba(154, 130, 165, 0.55);
 }
 
 .plugin-grid {
@@ -404,6 +403,7 @@ h1 {
 
 .pill {
 	border: 1px solid var(--line);
+	border-radius: 999px;
 	background: rgba(255, 255, 255, 0.045);
 	padding: 5px 8px;
 	color: var(--muted);
@@ -413,13 +413,14 @@ h1 {
 }
 
 .pill.hot {
-	border-color: rgba(255, 107, 53, 0.38);
-	color: var(--accent-2);
+	border-color: rgba(184, 154, 97, 0.38);
+	color: var(--brass-highlight);
 }
 
 .package-line {
 	overflow-x: auto;
 	border: 1px solid var(--line);
+	border-radius: 10px;
 	background: rgba(0, 0, 0, 0.22);
 	padding: 10px;
 	color: var(--text);

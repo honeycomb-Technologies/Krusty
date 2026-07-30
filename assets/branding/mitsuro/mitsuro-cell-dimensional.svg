@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Mitsuro concave metal cell</title>
+  <desc id="desc">A centered Mitsuro cell recessed into cast black metal.</desc>
+  <defs>
+    <radialGradient id="shell" cx="31%" cy="22%" r="91%">
+      <stop offset="0" stop-color="#25242A"/>
+      <stop offset="0.43" stop-color="#141519"/>
+      <stop offset="1" stop-color="#08090B"/>
+    </radialGradient>
+    <radialGradient id="well" cx="50%" cy="44%" r="65%">
+      <stop offset="0" stop-color="#17181C"/>
+      <stop offset="0.66" stop-color="#0D0E11"/>
+      <stop offset="1" stop-color="#07080A"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="18%" y1="10%" x2="83%" y2="92%">
+      <stop offset="0" stop-color="#45444A"/>
+      <stop offset="0.28" stop-color="#24252A"/>
+      <stop offset="0.7" stop-color="#08090B"/>
+      <stop offset="1" stop-color="#303136"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="20%" y1="8%" x2="78%" y2="94%">
+      <stop offset="0" stop-color="#77747B" stop-opacity=".42"/>
+      <stop offset=".46" stop-color="#313238" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#010204" stop-opacity=".86"/>
+    </linearGradient>
+    <filter id="recess" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="25" result="blur"/>
+      <feOffset dy="32" result="down"/>
+      <feColorMatrix in="down" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .78 0" result="shadow"/>
+      <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#shell)"/>
+  <g transform="translate(512 512) scale(.98) translate(-512 -512)" filter="url(#recess)">
+    <path fill="#050608" opacity=".9" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <path fill="url(#rim)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  <g transform="translate(512 512) scale(.86) translate(-512 -512)">
+    <path fill="url(#well)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <g transform="translate(512 512) scale(.87) translate(-512 -512)">
+    <path fill="none" stroke="url(#edge)" stroke-width="11" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+</svg>

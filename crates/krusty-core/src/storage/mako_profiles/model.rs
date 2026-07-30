@@ -18,7 +18,7 @@ pub enum MakoProfileOwner {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum MakoProfileOwnerError {
-    #[error("Mako profile user id must not be empty")]
+    #[error("Hive profile user id must not be empty")]
     EmptyUserId,
 }
 

@@ -143,7 +143,7 @@ impl Tool for McpTool {
 
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
         let scoped_access_warning =
-            "MCP tool executes on an external server outside Krusty's local filesystem access policy.";
+            "MCP tool executes on an external server outside Mitsuro's local filesystem access policy.";
 
         // Warn when MCP tools are used with a scoped local access root: the remote
         // MCP server applies its own host-side access rules.

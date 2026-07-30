@@ -9,7 +9,7 @@ export interface MakoDrawerItem {
 export const MAKO_DRAWER_ITEMS: MakoDrawerItem[] = [
   {
     id: "mako",
-    label: "Mako",
+    label: "Hive",
     detail: "Main thread",
   },
   {

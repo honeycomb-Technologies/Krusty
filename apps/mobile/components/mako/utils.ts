@@ -103,7 +103,7 @@ export function getRunNextWakeAt(
 export function formatRunMeta(summary: MakoCurrentRunSummary): string {
   const parts = [formatProjectLabel(summary.project_dir)];
   if (summary.runtime?.crew_slug) {
-    parts.push(`crew ${summary.runtime.crew_slug}`);
+    parts.push(`agent ${summary.runtime.crew_slug}`);
   }
   const priority = getRunPriority(summary);
   if (priority !== "normal") {

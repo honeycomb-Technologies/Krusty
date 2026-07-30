@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Mitsuro app icon master</title>
+  <desc id="desc">A centered rounded point-up cell recessed into full-bleed cast black metal.</desc>
+  <defs>
+    <radialGradient id="shell" cx="30%" cy="18%" r="105%">
+      <stop offset="0" stop-color="#2A292F"/><stop offset=".34" stop-color="#191A1E"/><stop offset=".72" stop-color="#0E0F12"/><stop offset="1" stop-color="#07080A"/>
+    </radialGradient>
+    <radialGradient id="violet" cx="22%" cy="20%" r="74%">
+      <stop stop-color="#75617E" stop-opacity=".19"/><stop offset="1" stop-color="#75617E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1=".2" y1=".1" x2=".8" y2=".9">
+      <stop stop-color="#4B4A50"/><stop offset=".3" stop-color="#24252A"/><stop offset=".66" stop-color="#08090B"/><stop offset="1" stop-color="#323338"/>
+    </linearGradient>
+    <radialGradient id="well" cx="47%" cy="40%" r="66%">
+      <stop stop-color="#1A1B20"/><stop offset=".64" stop-color="#0D0E11"/><stop offset="1" stop-color="#060709"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="27" result="b"/><feOffset dy="35" result="o"/><feColorMatrix in="o" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .9 0"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#shell)"/>
+  <rect width="1024" height="1024" fill="url(#violet)"/>
+  <g transform="translate(512 512) scale(.99) translate(-512 -512)" filter="url(#shadow)">
+    <path fill="#040507" opacity=".92" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <path fill="url(#rim)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  <g transform="translate(512 512) scale(.86) translate(-512 -512)">
+    <path fill="url(#well)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <g transform="translate(512 512) scale(.87) translate(-512 -512)">
+    <path fill="none" stroke="#77747B" stroke-opacity=".3" stroke-width="10" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+</svg>

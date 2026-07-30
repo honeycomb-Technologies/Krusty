@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useConnection } from "../../../hooks/useConnection";
 import type {
   MakoCurrentResponse,
@@ -14,29 +14,46 @@ export function useMakoCurrent(enabled: boolean) {
   const [isDispatching, setIsDispatching] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const refreshGenerationRef = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     if (!client || !isConnected) {
       setCurrent(null);
       setIsLoading(false);
-      return;
+      return Promise.resolve();
     }
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
 
-    setError(null);
-    setIsRefreshing(true);
-    try {
-      const response = await client.getMakoCurrent();
-      setCurrent(response);
-    } catch (refreshError) {
-      setError(
-        refreshError instanceof Error
-          ? refreshError.message
-          : "Failed to load Mako",
-      );
-    } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
-    }
+    const generation = ++refreshGenerationRef.current;
+    const request = (async () => {
+      setError(null);
+      setIsRefreshing(true);
+      try {
+        const response = await client.getMakoCurrent();
+        if (generation !== refreshGenerationRef.current) return;
+        setCurrent((current) => JSON.stringify(current) === JSON.stringify(response)
+          ? current
+          : response);
+      } catch (refreshError) {
+        if (generation !== refreshGenerationRef.current) return;
+        setError(
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Failed to load Hive",
+        );
+      } finally {
+        if (generation === refreshGenerationRef.current) {
+          setIsLoading(false);
+          setIsRefreshing(false);
+        }
+      }
+    })();
+    refreshPromiseRef.current = request;
+    void request.finally(() => {
+      if (refreshPromiseRef.current === request) refreshPromiseRef.current = null;
+    });
+    return request;
   }, [client, isConnected]);
 
   const setCourse = useCallback(
@@ -72,7 +89,7 @@ export function useMakoCurrent(enabled: boolean) {
         setError(
           dispatchError instanceof Error
             ? dispatchError.message
-            : "Failed to set course",
+            : "Failed to start Hive run",
         );
         return null;
       } finally {
@@ -110,6 +127,10 @@ export function useMakoCurrent(enabled: boolean) {
       return;
     }
     void refresh();
+    return () => {
+      refreshGenerationRef.current += 1;
+      refreshPromiseRef.current = null;
+    };
   }, [enabled, refresh]);
 
   return {

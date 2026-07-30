@@ -1,5 +1,5 @@
 [Unit]
-Description=Krusty self-hosted server
+Description=Mitsuro self-hosted server
 Requires=krusty-mako.socket
 After=network-online.target krusty-mako.socket
 Wants=network-online.target

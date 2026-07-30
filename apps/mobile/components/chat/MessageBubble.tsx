@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Brain,
@@ -23,12 +23,12 @@ import {
   isQuestionTool,
   type AssistantVisualSegment,
 } from "./assistantRenderPlan";
-import { assistantMessageRevision } from "./assistantSegments";
 import {
   presentTool,
   shouldExpandToolByPolicy,
 } from "./toolPresentation";
 import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@krusty/api";
+import { beginKrustyPerformanceSpan } from "@krusty/state";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
 
@@ -66,10 +66,19 @@ export const MessageBubble = memo(function MessageBubble({
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
-  const assistantSegments = assistantVisualSegments(
-    message,
-    isLast,
-    isThinking,
+  const assistantSegments = useMemo(
+    () => {
+      if (isUser) return [];
+      const finishVisualPlanSpan = beginKrustyPerformanceSpan(
+        "transcript.visual_plan",
+      );
+      try {
+        return assistantVisualSegments(message, isLast, isThinking);
+      } finally {
+        finishVisualPlanSpan();
+      }
+    },
+    [isLast, isThinking, isUser, message],
   );
   const handleCopy = () => {
     const value = message.content.trim();
@@ -253,8 +262,14 @@ export const MessageBubble = memo(function MessageBubble({
   prev.onSubmitToolResult === next.onSubmitToolResult &&
   prev.onPlanConfirm === next.onPlanConfirm &&
   (
-    prev.message.role === 'assistant'
-      ? assistantMessageRevision(prev.message) === assistantMessageRevision(next.message)
+    prev.message.role === 'assistant' && next.message.role === 'assistant'
+      ? prev.message.id === next.message.id &&
+        prev.message.content === next.message.content &&
+        prev.message.thinking === next.message.thinking &&
+        prev.message.kind === next.message.kind &&
+        prev.message.toolCalls === next.message.toolCalls &&
+        prev.message.renderParts === next.message.renderParts &&
+        prev.message.attachments === next.message.attachments
       : prev.message.id === next.message.id &&
         prev.message.content === next.message.content &&
         prev.message.isQueued === next.message.isQueued &&
@@ -403,12 +418,14 @@ function MessageAttachments({
           </View>
         );
       })}
-      <ImagePreviewModal
-        visible={Boolean(previewAttachment)}
-        uri={previewUri}
-        title={previewAttachment?.name}
-        onClose={() => setPreviewAttachment(null)}
-      />
+      {previewAttachment ? (
+        <ImagePreviewModal
+          visible
+          uri={previewUri}
+          title={previewAttachment.name}
+          onClose={() => setPreviewAttachment(null)}
+        />
+      ) : null}
     </View>
   );
 }

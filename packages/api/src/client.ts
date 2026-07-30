@@ -62,6 +62,8 @@ import type {
 		SimpleOkResponse,
 		SteerRequest,
 		SteerResponse,
+		MobileDiagnosticUploadBatch,
+		MobileDiagnosticUploadResponse,
 	} from "./types";
 
 type UsageStreamEvent = Extract<StreamEvent, { type: "usage" }>;
@@ -91,6 +93,59 @@ export function normalizeUsageMetrics(event: UsageStreamEvent): UsageMetrics {
 
 const STREAM_ACTIVITY_TIMEOUT = 240_000;
 
+function monotonicNow(): number {
+	return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
+function httpStatusClass(status: number): string {
+	if (status >= 200 && status < 300) return "http.2xx";
+	if (status >= 300 && status < 400) return "http.3xx";
+	if (status >= 400 && status < 500) return "http.4xx";
+	if (status >= 500) return "http.5xx";
+	return "http.unknown";
+}
+
+function requestDiagnosticName(path: string): string {
+	const route = path.split("?", 1)[0] ?? path;
+	if (route === "/sessions") return "api.sessions.catalog";
+	if (route === "/sessions/directories") return "api.sessions.directories";
+	if (route.startsWith("/sessions/")) {
+		const segments = route.split("/").filter(Boolean);
+		const subroute = segments[2];
+		if (!subroute) return "api.sessions.detail";
+		if (subroute === "state") return "api.sessions.state";
+		if (subroute === "workflow") return "api.sessions.workflow";
+		if (subroute === "presence") return "api.sessions.presence";
+		if (subroute === "cancel" || subroute === "pinch") {
+			return "api.sessions.action";
+		}
+		return "api.sessions";
+	}
+	if (route.startsWith("/models")) return "api.models";
+	if (route.startsWith("/credentials")) return "api.credentials";
+	if (route.startsWith("/auth")) return "api.auth";
+	if (route.startsWith("/mcp")) return "api.mcp";
+	if (route.startsWith("/skills")) return "api.skills";
+	if (route.startsWith("/ports") || route.startsWith("/settings/preview")) {
+		return "api.ports";
+	}
+	if (route.startsWith("/mako")) return "api.mako";
+	if (route.startsWith("/git")) return "api.git";
+	if (route.startsWith("/files")) return "api.files";
+	if (route.startsWith("/apns") || route.startsWith("/push")) {
+		return "api.notifications";
+	}
+	if (route.startsWith("/mobile-diagnostics")) {
+		return "api.mobile_diagnostics";
+	}
+	if (route.startsWith("/chat")) return "api.stream";
+	return "api.other";
+}
+
 function apiErrorMessage(body: string, fallback: string): string {
 	if (!body) return fallback;
 	try {
@@ -112,6 +167,21 @@ export interface KrustyClientConfig {
 	token?: string;
 	/** Custom fetch implementation for environments without streaming support (e.g. React Native). */
 	fetchImpl?: typeof fetch;
+	/** Content-free request lifecycle observer for app-owned diagnostics. */
+	requestObserver?: (event: KrustyRequestDiagnostic) => void;
+}
+
+export type KrustyRequestDiagnosticOutcome =
+	| "start"
+	| "complete"
+	| "cancel"
+	| "error";
+
+export interface KrustyRequestDiagnostic {
+	name: string;
+	outcome: KrustyRequestDiagnosticOutcome;
+	durationMs?: number;
+	code?: string;
 }
 
 export class KrustyApiError extends Error {
@@ -129,11 +199,13 @@ export class KrustyClient {
 	private baseUrl: string;
 	private token: string | undefined;
 	private fetchFn: typeof fetch;
+	private requestObserver: KrustyClientConfig["requestObserver"];
 
 	constructor(config: KrustyClientConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
 		this.token = config.token;
 		this.fetchFn = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
+		this.requestObserver = config.requestObserver;
 	}
 
 	private headers(): Record<string, string> {
@@ -149,31 +221,103 @@ export class KrustyClient {
 		options: RequestInit = {},
 	): Promise<T> {
 		const url = `${this.baseUrl}/api${path}`;
-		const response = await this.fetchFn(url, {
-			...options,
-			headers: {
-				...this.headers(),
-				...(options.headers as Record<string, string>),
-			},
-		});
+		const diagnosticName = requestDiagnosticName(path);
+		const startedAt = monotonicNow();
+		this.observeRequest(diagnosticName, "start");
+		let response: Response;
+		try {
+			response = await this.fetchFn(url, {
+				...options,
+				headers: {
+					...this.headers(),
+					...(options.headers as Record<string, string>),
+				},
+			});
+		} catch (error) {
+			this.observeRequest(
+				diagnosticName,
+				isAbortError(error) ? "cancel" : "error",
+				startedAt,
+				isAbortError(error) ? "request.abort" : "network.error",
+			);
+			throw error;
+		}
 
 		if (!response.ok) {
 			const text = await response.text().catch(() => "Request failed");
 			const message = apiErrorMessage(text, "Request failed");
+			this.observeRequest(
+				diagnosticName,
+				"error",
+				startedAt,
+				httpStatusClass(response.status),
+			);
 			throw new KrustyApiError(response.status, message, text);
 		}
 
-		return response.json() as Promise<T>;
+		try {
+			const result = await response.json() as T;
+			this.observeRequest(
+				diagnosticName,
+				"complete",
+				startedAt,
+				httpStatusClass(response.status),
+			);
+			return result;
+		} catch (error) {
+			this.observeRequest(
+				diagnosticName,
+				"error",
+				startedAt,
+				"decode.error",
+			);
+			throw error;
+		}
+	}
+
+	private observeRequest(
+		name: string,
+		outcome: KrustyRequestDiagnosticOutcome,
+		startedAt?: number,
+		code?: string,
+	): void {
+		try {
+			this.requestObserver?.({
+				name,
+				outcome,
+				durationMs: startedAt === undefined
+					? undefined
+					: Math.max(0, monotonicNow() - startedAt),
+				code,
+			});
+		} catch {
+			// Diagnostics must never change request behavior.
+		}
 	}
 
 	// Health & Auth
 	async checkHealth(): Promise<boolean> {
+		const diagnosticName = "api.health";
+		const startedAt = monotonicNow();
+		this.observeRequest(diagnosticName, "start");
 		try {
-			const resp = await fetch(`${this.baseUrl}/health`, {
+			const resp = await this.fetchFn(`${this.baseUrl}/health`, {
 				headers: this.headers(),
 			});
+			this.observeRequest(
+				diagnosticName,
+				resp.ok ? "complete" : "error",
+				startedAt,
+				httpStatusClass(resp.status),
+			);
 			return resp.ok;
-		} catch {
+		} catch (error) {
+			this.observeRequest(
+				diagnosticName,
+				isAbortError(error) ? "cancel" : "error",
+				startedAt,
+				isAbortError(error) ? "request.abort" : "network.error",
+			);
 			return false;
 		}
 	}
@@ -225,6 +369,15 @@ export class KrustyClient {
 			body: JSON.stringify({
 				expo_push_token: expoPushToken,
 			}),
+		});
+	}
+
+	async uploadMobileDiagnostics(
+		batch: MobileDiagnosticUploadBatch,
+	): Promise<MobileDiagnosticUploadResponse> {
+		return this.request("/mobile-diagnostics/batches", {
+			method: "POST",
+			body: JSON.stringify(batch),
 		});
 	}
 
@@ -1041,6 +1194,9 @@ export class KrustyClient {
 		signal?: AbortSignal,
 	): Promise<void> {
 		const url = `${this.baseUrl}/api${path}`;
+		const diagnosticName = "api.stream";
+		const startedAt = monotonicNow();
+		this.observeRequest(diagnosticName, "start");
 		let response: Response;
 		try {
 			response = await this.fetchFn(url, {
@@ -1053,18 +1209,36 @@ export class KrustyClient {
 				signal,
 			});
 		} catch (error) {
+			this.observeRequest(
+				diagnosticName,
+				signal?.aborted ? "cancel" : "error",
+				startedAt,
+				signal?.aborted ? "request.abort" : "network.error",
+			);
 			if (signal?.aborted) return;
 			callbacks.onError(error instanceof Error ? error.message : "Stream error");
 			return;
 		}
 
 		if (!response.ok) {
+			this.observeRequest(
+				diagnosticName,
+				"error",
+				startedAt,
+				httpStatusClass(response.status),
+			);
 			const text = await response.text().catch(() => "Stream failed");
 			callbacks.onError(
 				`API ${response.status}: ${apiErrorMessage(text, "Stream failed")}`,
 			);
 			return;
 		}
+		this.observeRequest(
+			diagnosticName,
+			"complete",
+			startedAt,
+			httpStatusClass(response.status),
+		);
 
 		let terminalEventSeen = false;
 		let errorReported = false;

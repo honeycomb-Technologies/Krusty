@@ -1158,6 +1158,48 @@ export interface MakoRecoverDaemonResponse {
 	recovered_count: number;
 }
 
+// Content-free mobile diagnostics. Keep this contract operational and bounded:
+// never add prompts, responses, credentials, terminal/file contents, or raw URLs.
+export interface MobileDiagnosticUploadBatch {
+	run: {
+		id: string;
+		installation_id: string;
+		app_version: string;
+		build_number: string;
+		platform: "ios" | "android" | "web";
+		os_version: string;
+		device_class: string;
+		capture_level: "baseline" | "stress";
+		started_at_ms: number;
+		ended_at_ms: number | null;
+		dropped_event_count: number;
+	};
+	events: Array<{
+		sequence: number;
+		occurred_at_ms: number;
+		monotonic_ms: number;
+		category: string;
+		name: string;
+		duration_ms: number | null;
+		severity: "info" | "warning" | "error";
+		attributes: Record<string, string | number | boolean>;
+	}>;
+	native_payloads: Array<{
+		payload_id: string;
+		kind: "metric" | "diagnostic";
+		received_at_ms: number;
+		payload_json: string;
+	}>;
+	completed: boolean;
+}
+
+export interface MobileDiagnosticUploadResponse {
+	run_id: string;
+	accepted_events: number;
+	accepted_native_payloads: number;
+	dropped_attributes: number;
+}
+
 export interface MakoRunWakeEvent {
 	id: string;
 	timestamp: string;

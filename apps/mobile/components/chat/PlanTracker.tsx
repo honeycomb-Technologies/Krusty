@@ -135,7 +135,7 @@ export function PlanTracker({
             styles.collapsedChip,
             {
               borderColor: t.border,
-              backgroundColor: isDark ? "rgba(11,17,25,0.92)" : "rgba(255,255,255,0.92)",
+              backgroundColor: t.surfaceOverlayElevated,
             },
           ]}
         >
@@ -165,7 +165,7 @@ export function PlanTracker({
       <View
         style={[
           StyleSheet.absoluteFill,
-          { backgroundColor: isDark ? "rgba(11,17,25,0.88)" : "rgba(255,255,255,0.88)" },
+          { backgroundColor: t.surfaceOverlay },
         ]}
       />
 

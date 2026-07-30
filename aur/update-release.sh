@@ -22,8 +22,8 @@ repo_root=$(cd -- "$script_dir/.." && pwd)
 pkgbuild="$script_dir/PKGBUILD"
 srcinfo="$script_dir/.SRCINFO"
 archive_name="krusty-$version.tar.gz"
-archive_url="https://github.com/honeycomb-Technologies/Krusty/archive/refs/tags/v$version.tar.gz"
-expected_prefix="Krusty-$version/"
+archive_url="https://github.com/honeycomb-Technologies/Mitsuro/archive/refs/tags/v$version.tar.gz"
+expected_prefix="Mitsuro-$version/"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/krusty-aur-release.XXXXXX")
 trap 'rm -rf -- "$temp_dir"' EXIT
 archive_listing="$temp_dir/archive-entries.txt"
@@ -172,7 +172,7 @@ if [[ -f "$repo_root/crates/krusty-mako/Cargo.toml" ]]; then
         "${expected_prefix}deploy/systemd/krusty-mako.socket" \
         "${expected_prefix}deploy/systemd/krusty-serve.service"; do
         if ! grep -Fqx "$required_entry" "$archive_regular_listing"; then
-            echo "release archive is missing required regular Mako file: $required_entry" >&2
+            echo "release archive is missing required regular Hive service file: $required_entry" >&2
             exit 1
         fi
     done

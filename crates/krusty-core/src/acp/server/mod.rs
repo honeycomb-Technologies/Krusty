@@ -65,7 +65,7 @@ impl AcpServer {
     /// This method takes over stdin/stdout for ACP communication.
     /// All logging should go to stderr.
     pub async fn run(self) -> Result<()> {
-        info!("Starting Krusty ACP server");
+        info!("Starting Mitsuro ACP server");
 
         // Register ACP-compatible tools (excludes TUI-only tools like AskUserQuestion)
         register_acp_tools(self.agent.tools()).await;

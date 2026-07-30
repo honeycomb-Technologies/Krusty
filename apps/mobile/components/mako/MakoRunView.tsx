@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +9,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { RunDetailSkeleton } from "../ui/Skeleton";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
 import { MakoCrewPicker } from "./MakoCrewPicker";
@@ -36,6 +36,7 @@ import {
 } from "./utils";
 import type { MakoChatContext, MakoCurrentRunSummary } from "./types";
 import type { ChatMessage, MakoCrewRuntimeMember } from "@krusty/api";
+import { useMakoSessionView } from "./hooks/useMakoSessionView";
 
 interface MakoRunViewProps {
   runId: string;
@@ -157,6 +158,7 @@ export function MakoRunView({
   onBack,
   onDeleteRun,
 }: MakoRunViewProps) {
+  const sessionView = useMakoSessionView();
   const { client } = useConnection();
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -202,7 +204,7 @@ export function MakoRunView({
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
   const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
   const showResume = runtimeStatus !== "running";
-  const recentMessages = chat.messages.slice(-3);
+  const recentMessages = sessionView.messages.slice(-3);
   const artifactTasks = (status?.tasks ?? []).filter((task) => task.result);
 
   useEffect(() => {
@@ -309,7 +311,7 @@ export function MakoRunView({
     } catch (error) {
       setCrewSlug(runtimeCrewSlug);
       setActionError(
-        error instanceof Error ? error.message : "Failed to update crew.",
+        error instanceof Error ? error.message : "Failed to update Hive Agent.",
       );
     } finally {
       setIsSavingCrew(false);
@@ -330,10 +332,10 @@ export function MakoRunView({
 
         <View style={styles.chatWrap}>
           <ChatTranscript
-            messages={chat.messages}
-            sessionId={chat.sessionId}
-            isStreaming={chat.isStreaming}
-            isThinking={chat.isThinking}
+            messages={sessionView.messages}
+            sessionId={sessionView.sessionId}
+            isStreaming={sessionView.isStreaming}
+            isThinking={sessionView.isThinking}
             activeToolCallId={chat.activeToolCallId}
             onApproveTool={chat.onApproveTool}
             onDenyTool={chat.onDenyTool}
@@ -391,9 +393,7 @@ export function MakoRunView({
       />
 
       {isLoading && !status ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color={t.userMessage} />
-        </View>
+        <RunDetailSkeleton />
       ) : (
         <ScrollView
           style={styles.scroll}
@@ -425,8 +425,8 @@ export function MakoRunView({
               hint={`${taskStats.completed} done`}
             />
             <SummaryCell
-              label="Crew"
-              value={runtimeCrewSlug ?? "Mako"}
+              label="Agent"
+              value={runtimeCrewSlug ?? "Hive"}
               hint={`${cadence.tick_interval_secs}s cadence`}
             />
           </View>
@@ -500,10 +500,10 @@ export function MakoRunView({
           </View>
 
           <View style={styles.section}>
-            <SectionTitle title="Crew" />
+            <SectionTitle title="Agent" />
             <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
               <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
-                Assign this run to Mako or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
+                Assign this run to Hive or a specific Hive Agent. The selected identity shapes the run&apos;s working presence and context layers.
               </Text>
               <View style={styles.controlBlock}>
                 <MakoCrewPicker
@@ -517,7 +517,7 @@ export function MakoRunView({
               </View>
               {isSavingCrew ? (
                 <Text style={[styles.metaText, { color: t.mutedForeground }]}>
-                  Saving crew...
+                  Saving agent...
                 </Text>
               ) : null}
             </View>
@@ -607,7 +607,7 @@ export function MakoRunView({
                   <View key={message.id} style={[styles.listRow, { borderColor: t.border }]}>
                     <View style={styles.listCopy}>
                       <Text style={[styles.listMeta, { color: t.mutedForeground }]}>
-                        {message.role === "assistant" ? "Mako" : "You"}
+                        {message.role === "assistant" ? "Hive" : "You"}
                       </Text>
                       <Text
                         style={[styles.listDetail, { color: t.foreground }]}

@@ -2,7 +2,7 @@
 name = "grok-auth"
 version = "0.1.0"
 edition = "2021"
-description = "Modular, reusable xAI / Grok authentication client for Rust harnesses (Krusty, etc.). Interoperable with the official `grok` CLI via ~/.grok/auth.json."
+description = "Modular, reusable xAI / Grok authentication client for Rust harnesses including Mitsuro. Interoperable with the official `grok` CLI via ~/.grok/auth.json."
 license = "MIT OR Apache-2.0"
 keywords = ["xai", "grok", "auth", "oidc", "oauth2"]
 categories = ["authentication"]

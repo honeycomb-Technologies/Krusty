@@ -4,6 +4,7 @@ import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
 import { useThemeContext } from "../../hooks/useTheme";
 import type { MakoChatContext } from "./types";
+import { useMakoSessionView } from "./hooks/useMakoSessionView";
 
 interface MakoThreadSurfaceProps {
   chat: MakoChatContext;
@@ -24,17 +25,18 @@ export function MakoThreadSurface({
   const t = theme.colors;
   const [composerReserveHeight, setComposerReserveHeight] = useState(150);
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
+  const sessionView = useMakoSessionView();
 
   return (
     <View style={styles.container}>
       <ChatTranscript
-        messages={chat.messages}
-        sessionId={chat.sessionId}
+        messages={sessionView.messages}
+        sessionId={sessionView.sessionId}
         sessionType="mako"
-        scrollStateKey={`mako:${chat.sessionId ?? "new"}`}
-        isStreaming={chat.isStreaming}
-        isThinking={chat.isThinking}
-        isLoading={chat.isLoading}
+        scrollStateKey={`mako:${sessionView.sessionId ?? "new"}`}
+        isStreaming={sessionView.isStreaming}
+        isThinking={sessionView.isThinking}
+        isLoading={sessionView.isLoading}
         activeToolCallId={chat.activeToolCallId}
         onApproveTool={chat.onApproveTool}
         onDenyTool={chat.onDenyTool}
@@ -49,7 +51,7 @@ export function MakoThreadSurface({
         onScrollTargetHandled={onScrollTargetHandled}
       />
 
-      {chat.error ? (
+      {sessionView.error ? (
         <View
           style={[
             styles.errorBanner,
@@ -60,7 +62,7 @@ export function MakoThreadSurface({
           ]}
         >
           <Text style={[styles.errorText, { color: t.error }]}>
-            {chat.error}
+            {sessionView.error}
           </Text>
         </View>
       ) : null}

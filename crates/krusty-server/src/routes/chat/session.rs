@@ -156,7 +156,7 @@ pub(super) async fn prepare_chat_route_session(
             let session = load_owned_session(&sm, id, user)?;
             if session.session_type == SessionType::Mako && req.target_branch.is_some() {
                 return Err(AppError::Conflict(
-                    "Mako target branches are daemon-owned and cannot be changed through /chat"
+                    "Hive target branches are background-service-owned and cannot be changed through /chat"
                         .into(),
                 ));
             }

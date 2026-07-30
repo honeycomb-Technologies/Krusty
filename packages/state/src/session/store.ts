@@ -11,6 +11,11 @@ import type { createPlanStore } from '../plan';
 import type { createSessionsStore } from '../sessions';
 import type { KrustyStorage } from '../storage';
 import type { createWorkspaceStore } from '../workspace';
+import {
+  beginKrustyPerformanceSpan,
+  recordKrustyPerformanceMetric,
+  trackKrustyPerformanceResource,
+} from '../performance';
 
 import {
   MAX_QUEUED_MESSAGES,
@@ -26,7 +31,7 @@ import {
 import {
   buildContentBlocks,
   getUnsupportedImageAttachment,
-  processStoredMessages,
+  processStoredMessagesCooperatively,
   unsupportedImageMimeTypeMessage,
 } from './messages';
 import { modelKeysEqual } from './modelSelection';
@@ -103,6 +108,15 @@ function isNotFoundApiError(err: unknown): boolean {
   return status === 404;
 }
 
+// Recovery tests replace the global timer API to drive only their polling
+// clock. Capture the real host scheduler when the store module loads so a
+// cooperative hydration turn cannot be stranded in an unrelated fake queue.
+const scheduleSessionHydrationHostTurn = globalThis.setTimeout.bind(globalThis);
+
+function yieldSessionHydrationHost(): Promise<void> {
+  return new Promise((resolve) => scheduleSessionHydrationHostTurn(resolve, 0));
+}
+
 function buildDisplayAttachments(
   attachments: Attachment[],
 ): ChatMessageAttachment[] {
@@ -129,16 +143,96 @@ export function createSessionStore(
   let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
   let statePollingGeneration = 0;
   let streamAttachmentGeneration = 0;
-  let sessionLoadGeneration = 0;
+  let sessionSelectionGeneration = 0;
   const sessionCache = new SessionSnapshotCache();
   const inFlightSessionLoads = new Map<string, Promise<void>>();
+  const inFlightSessionHydrations = new Map<string, Promise<{
+    data: Awaited<ReturnType<KrustyClient['getSession']>>;
+    serverStateResult: {
+      ok: boolean;
+      state: ApiSessionStateResponse | null;
+    };
+  }>>();
   const lastKnownServerState = new Map<string, ApiSessionStateResponse>();
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let presenceHeartbeatSessionId: string | null = null;
+  let presenceDesired = false;
+  let releaseStatePollingResource: (() => void) | null = null;
+  let releasePresenceHeartbeatResource: (() => void) | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
+  let readStoreState: (() => SessionStoreState) | null = null;
 
   let localStreamLive = false;
+
+  function stopPresenceTransport(sessionId?: string | null) {
+    const ownedSessionId = presenceHeartbeatSessionId;
+    if (sessionId && ownedSessionId && sessionId !== ownedSessionId) return;
+    if (presenceHeartbeatInterval) {
+      clearInterval(presenceHeartbeatInterval);
+      presenceHeartbeatInterval = null;
+    }
+    releasePresenceHeartbeatResource?.();
+    releasePresenceHeartbeatResource = null;
+    presenceHeartbeatSessionId = null;
+
+    if (!ownedSessionId) return;
+    const clientId = getPresenceClientId();
+    if (!clientId) return;
+    void client.removeSessionPresence(ownedSessionId, clientId).catch(() => {});
+  }
+
+  function startPresenceTransport(sessionId: string) {
+    if (!presenceDesired) return;
+    if (
+      presenceHeartbeatSessionId === sessionId
+      && presenceHeartbeatInterval
+    ) {
+      return;
+    }
+    stopPresenceTransport();
+    presenceHeartbeatSessionId = sessionId;
+    const getState = readStoreState;
+    if (!getState) return;
+    void syncPresence(sessionId, getState);
+    presenceHeartbeatInterval = setInterval(() => {
+      void syncPresence(sessionId, getState);
+    }, PRESENCE_HEARTBEAT_INTERVAL);
+    releasePresenceHeartbeatResource = trackKrustyPerformanceResource(
+      'presence_heartbeats',
+    );
+  }
+
+  function getSessionHydration(
+    sessionId: string,
+    prefetchedServerState?: ApiSessionStateResponse | null,
+  ) {
+    const existing = inFlightSessionHydrations.get(sessionId);
+    if (existing) return existing;
+
+    const statePromise = prefetchedServerState !== undefined
+      ? Promise.resolve({
+          ok: true,
+          state: prefetchedServerState,
+        })
+      : client.getSessionState
+        ? client.getSessionState(sessionId).then(
+            (state) => ({ ok: true, state }),
+            () => ({ ok: false, state: null }),
+          )
+        : Promise.resolve({ ok: false, state: null });
+    const hydration = Promise.all([
+      client.getSession(sessionId),
+      statePromise,
+    ]).then(([data, serverStateResult]) => ({ data, serverStateResult }));
+    inFlightSessionHydrations.set(sessionId, hydration);
+    void hydration.finally(() => {
+      if (inFlightSessionHydrations.get(sessionId) === hydration) {
+        inFlightSessionHydrations.delete(sessionId);
+      }
+    }).catch(() => {});
+    return hydration;
+  }
 
   function isLocalStreamAttached(): boolean {
     // True only while this client is actively consuming an SSE stream.
@@ -255,6 +349,7 @@ export function createSessionStore(
     SessionStoreState,
     | "sendMessage"
     | "loadSession"
+    | "cancelPendingSessionLoad"
     | "ensureMakoMainSession"
     | "clearSession"
     | "initSession"
@@ -310,6 +405,7 @@ export function createSessionStore(
   // -------------------------------------------------------------------------
 
   return create<SessionStoreState>((set, get) => {
+    readStoreState = get;
     function applyStreamFailure(err: unknown) {
       set((s) => ({
         isLoading: false,
@@ -595,6 +691,13 @@ export function createSessionStore(
       const streamGeneration = ++streamAttachmentGeneration;
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration;
+      const finishConnectSpan = beginKrustyPerformanceSpan(
+        'stream.connect',
+        state.sessionId ?? undefined,
+      );
+      const releaseStreamConnection = trackKrustyPerformanceResource(
+        'stream_connections',
+      );
 
       const pollingSessionId = state.sessionId;
       if (pollingSessionId) {
@@ -609,6 +712,8 @@ export function createSessionStore(
               planStore,
               sessionsStore,
               persistSessionMode: persistMode,
+              isActive: isStreamAttached,
+              onFirstEvent: finishConnectSpan,
             }),
             pollingSessionId,
             streamRecovery,
@@ -718,6 +823,8 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        finishConnectSpan();
+        releaseStreamConnection();
         if (!isStreamAttached()) {
           localStreamLive = false;
           return;
@@ -741,7 +848,7 @@ export function createSessionStore(
         const mainId = main.session_id?.trim();
         if (!mainId) {
           set({
-            error: "Mako companion session is unavailable.",
+            error: "Hive companion session is unavailable.",
             isLoading: false,
           });
           return null;
@@ -767,7 +874,7 @@ export function createSessionStore(
       } catch (err) {
         set({
           isLoading: false,
-          error: toErrorMessage(err, "Failed to open Mako companion"),
+          error: toErrorMessage(err, "Failed to open Hive companion"),
         });
         return null;
       }
@@ -776,14 +883,24 @@ export function createSessionStore(
     // -- loadSession --------------------------------------------------------
 
         async loadSession(sessionId: string, isRefresh = false) {
+          const isNewSelectionIntent = get().sessionId !== sessionId;
+          const selectionGeneration = isNewSelectionIntent
+            ? ++sessionSelectionGeneration
+            : sessionSelectionGeneration;
           const existing = inFlightSessionLoads.get(sessionId);
-          if (existing) {
+          if (existing && !isNewSelectionIntent) {
             return existing;
           }
+          const finishOpenSpan = beginKrustyPerformanceSpan(
+            'session.open',
+            sessionId,
+          );
+          const releaseRequest = trackKrustyPerformanceResource(
+            'session_requests',
+          );
 
           const run = (async () => {
           const previousSessionId = get().sessionId;
-          const loadGeneration = ++sessionLoadGeneration;
           const isSessionSwitch = previousSessionId !== sessionId;
           const listedSessions = sessionsStore.getState().sessions ?? [];
 
@@ -795,7 +912,7 @@ export function createSessionStore(
             abortController = null;
             localStreamLive = false;
             get().stopStatePolling();
-            get().stopPresenceHeartbeat(previousSessionId);
+            stopPresenceTransport(previousSessionId);
             planStore.getState().setWorkflow(null);
 
             // Keep the leaving session warm so back-navigation can paint instantly.
@@ -921,7 +1038,7 @@ export function createSessionStore(
                 workspaceMode,
                 optimistic.targetBranch,
               );
-            get().startPresenceHeartbeat(optimistic.sessionId);
+            startPresenceTransport(optimistic.sessionId);
             if (cachedIsStreaming) {
               get().startStatePolling(optimistic.sessionId);
             }
@@ -945,7 +1062,7 @@ export function createSessionStore(
               try {
                 const softState = await client.getSessionState(sessionId);
                 if (
-                  loadGeneration !== sessionLoadGeneration
+                  selectionGeneration !== sessionSelectionGeneration
                   || get().sessionId !== sessionId
                 ) {
                   return;
@@ -977,123 +1094,162 @@ export function createSessionStore(
               }
             }
 
-            const sessionPromise = client.getSession(sessionId);
-            const statePromise = hasPrefetchedServerState
-              ? Promise.resolve({
-                  ok: true as const,
-                  state: prefetchedServerState,
-                })
-              : client.getSessionState
-                ? client.getSessionState(sessionId).then(
-                    (state) => ({ ok: true as const, state }),
-                    () => ({
-                      ok: false as const,
-                      state: null as ApiSessionStateResponse | null,
-                    }),
-                  )
-                : Promise.resolve({
-                    ok: false as const,
-                    state: null as ApiSessionStateResponse | null,
-                  });
-            const [data, serverStateResult] = await Promise.all([
-              sessionPromise,
-              statePromise,
-            ]);
-            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+            const { data, serverStateResult } = await (async () => {
+              const finishFetchDecodeSpan = beginKrustyPerformanceSpan(
+                'session.fetch_decode',
+              );
+              try {
+                return await getSessionHydration(
+                  sessionId,
+                  hasPrefetchedServerState ? prefetchedServerState : undefined,
+                );
+              } finally {
+                finishFetchDecodeSpan();
+              }
+            })();
+            if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
 
             const previousMessages = get().messages;
-            const processedMessages = processStoredMessages(
-              data.messages,
-              previousMessages,
+            const finishMessageTransformSpan = beginKrustyPerformanceSpan(
+              'session.snapshot_transform',
             );
+            let messageTransform;
+            try {
+              messageTransform = await processStoredMessagesCooperatively(
+                data.messages,
+                previousMessages,
+                {
+                  yieldToHost: yieldSessionHydrationHost,
+                  shouldContinue: () =>
+                    selectionGeneration === sessionSelectionGeneration
+                    && get().sessionId === sessionId,
+                },
+              );
+            } finally {
+              finishMessageTransformSpan();
+            }
+            recordKrustyPerformanceMetric(
+              'session.snapshot_max_slice',
+              { durationMs: messageTransform.maxSliceDurationMs },
+            );
+            recordKrustyPerformanceMetric(
+              'session.snapshot_yields',
+              { count: messageTransform.yieldCount },
+            );
+            if (
+              messageTransform.cancelled
+              || selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+
+            // Give the optimistic shell and any queued input a host turn before
+            // snapshot transforms and the single atomic transcript commit.
+            await yieldSessionHydrationHost();
+            if (
+              selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+            const processedMessages = messageTransform.messages;
             const serverState = serverStateResult.ok ? serverStateResult.state : null;
             rememberServerState(sessionId, serverState);
 
-            const snapshot = buildSessionSnapshotFromResponse(
-              data,
-              processedMessages,
-              serverState,
-            );
-            sessionCache.set(snapshot);
-
             const previousModel = get().model;
             const previousModelKey = get().modelKey;
-            const hydratedMessages = applyDelegatedSessionState(
-              applyLivePartialAssistant(
-                applyRecoveryParity(
-                  snapshot.messages,
-                  serverState?.recovery,
-                  serverState?.agent_state ?? "idle",
-                ),
-                serverState?.live_partial_assistant,
-                serverState?.agent_state ?? "idle",
-                pendingInteractionsFromSnapshot(serverState),
-              ),
-              serverState?.delegated_tools,
-              serverState?.recent_delegated_runs,
+            const finishSnapshotPublishSpan = beginKrustyPerformanceSpan(
+              'session.snapshot_publish',
             );
+            const snapshot = (() => {
+              try {
+                const nextSnapshot = buildSessionSnapshotFromResponse(
+                  data,
+                  processedMessages,
+                  serverState,
+                );
+                const hydratedMessages = applyDelegatedSessionState(
+                  applyLivePartialAssistant(
+                    applyRecoveryParity(
+                      nextSnapshot.messages,
+                      serverState?.recovery,
+                      serverState?.agent_state ?? "idle",
+                    ),
+                    serverState?.live_partial_assistant,
+                    serverState?.agent_state ?? "idle",
+                    pendingInteractionsFromSnapshot(serverState),
+                  ),
+                  serverState?.delegated_tools,
+                  serverState?.recent_delegated_runs,
+                );
 
-            set((s) => {
-              const sameExactSelection = Boolean(snapshot.modelKey)
-                && modelKeysEqual(snapshot.modelKey, s.modelKey);
-              const nextModelProvider = snapshot.model
-                ? snapshot.modelKey?.provider
-                  ?? (snapshot.model === s.model ? s.modelProvider : null)
-                : s.modelProvider;
-              const nextModelInfo = snapshot.model
-                ? sameExactSelection || (!snapshot.modelKey && snapshot.model === s.model)
-                  ? s.modelInfo
-                  : null
-                : s.modelInfo;
-              const capabilityInput = nextModelInfo ?? snapshot.model ?? s.model;
-              const nextThinkingLevel = normalizeThinkingLevel(
-                s.thinkingLevel,
-                capabilityInput,
-              );
-              const nextMode = serverState?.mode ?? snapshot.mode;
-              const nextPermissionMode =
-                serverState?.permission_mode ?? snapshot.permissionMode;
-              return {
-                ...s,
-                sessionId: snapshot.sessionId,
-                sessionType: snapshot.sessionType,
-                title: snapshot.title,
-                mode: nextMode,
-                permissionMode: nextPermissionMode,
-                model: snapshot.model ?? s.model,
-                modelKey: snapshot.model ? snapshot.modelKey : s.modelKey,
-                modelProvider: nextModelProvider,
-                modelInfo: nextModelInfo,
-                thinkingLevel: nextThinkingLevel,
-                thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
-                fastModeEnabled: snapshot.model
-                  ? s.fastModeEnabled
-                    && supportsFastMode(capabilityInput, nextModelProvider)
-                  : s.fastModeEnabled,
-                tokenCount: snapshot.tokenCount,
-                tokenUsage: null,
-                error:
-                  serverState !== null
-                    ? sessionAgentErrorMessage(serverState)
-                    : previousSessionId === snapshot.sessionId
-                      ? s.error
-                      : null,
-                messages: hydratedMessages,
-                isLoading: false,
-                isStreaming: isActiveSessionAgentState(serverState?.agent_state),
-                isThinking:
-                  serverState?.agent_state === "streaming"
-                    ? Boolean(
-                        serverState.live_partial_assistant?.thinking?.trim(),
-                      ) || s.isThinking
-                    : false,
-                thinkingContent:
-                  serverState?.live_partial_assistant?.thinking || "",
-                lastEventSequence: serverState?.last_event_sequence ?? null,
-              };
-            });
+                set((s) => {
+                  const sameExactSelection = Boolean(nextSnapshot.modelKey)
+                    && modelKeysEqual(nextSnapshot.modelKey, s.modelKey);
+                  const nextModelProvider = nextSnapshot.model
+                    ? nextSnapshot.modelKey?.provider
+                      ?? (nextSnapshot.model === s.model ? s.modelProvider : null)
+                    : s.modelProvider;
+                  const nextModelInfo = nextSnapshot.model
+                    ? sameExactSelection || (!nextSnapshot.modelKey && nextSnapshot.model === s.model)
+                      ? s.modelInfo
+                      : null
+                    : s.modelInfo;
+                  const capabilityInput = nextModelInfo ?? nextSnapshot.model ?? s.model;
+                  const nextThinkingLevel = normalizeThinkingLevel(
+                    s.thinkingLevel,
+                    capabilityInput,
+                  );
+                  const nextMode = serverState?.mode ?? nextSnapshot.mode;
+                  const nextPermissionMode =
+                    serverState?.permission_mode ?? nextSnapshot.permissionMode;
+                  return {
+                    ...s,
+                    sessionId: nextSnapshot.sessionId,
+                    sessionType: nextSnapshot.sessionType,
+                    title: nextSnapshot.title,
+                    mode: nextMode,
+                    permissionMode: nextPermissionMode,
+                    model: nextSnapshot.model ?? s.model,
+                    modelKey: nextSnapshot.model ? nextSnapshot.modelKey : s.modelKey,
+                    modelProvider: nextModelProvider,
+                    modelInfo: nextModelInfo,
+                    thinkingLevel: nextThinkingLevel,
+                    thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
+                    fastModeEnabled: nextSnapshot.model
+                      ? s.fastModeEnabled
+                        && supportsFastMode(capabilityInput, nextModelProvider)
+                      : s.fastModeEnabled,
+                    tokenCount: nextSnapshot.tokenCount,
+                    tokenUsage: null,
+                    error:
+                      serverState !== null
+                        ? sessionAgentErrorMessage(serverState)
+                        : previousSessionId === nextSnapshot.sessionId
+                          ? s.error
+                          : null,
+                    messages: hydratedMessages,
+                    isLoading: false,
+                    isStreaming: isActiveSessionAgentState(serverState?.agent_state),
+                    isThinking:
+                      serverState?.agent_state === "streaming"
+                        ? Boolean(
+                            serverState.live_partial_assistant?.thinking?.trim(),
+                          ) || s.isThinking
+                        : false,
+                    thinkingContent:
+                      serverState?.live_partial_assistant?.thinking || "",
+                    lastEventSequence: serverState?.last_event_sequence ?? null,
+                  };
+                });
+                return nextSnapshot;
+              } finally {
+                finishSnapshotPublishSpan();
+              }
+            })();
             try {
               storage.set(
                 "krusty-permission-mode",
@@ -1127,7 +1283,7 @@ export function createSessionStore(
             ) {
               get().startStatePolling(sessionId);
             }
-            get().startPresenceHeartbeat(sessionId);
+            startPresenceTransport(sessionId);
             if (
               snapshot.model
               && (
@@ -1137,15 +1293,32 @@ export function createSessionStore(
             ) {
               void persistCurrentSelectedModel(snapshot.model, snapshot.modelKey);
             }
+
+            // Cache compaction is useful for the next visit, not for this first
+            // paint. Keep it out of the visible transcript publication task.
+            await yieldSessionHydrationHost();
+            if (
+              selectionGeneration === sessionSelectionGeneration
+              && get().sessionId === sessionId
+            ) {
+              const finishCacheSpan = beginKrustyPerformanceSpan(
+                'session.cache_compact',
+              );
+              try {
+                sessionCache.set(snapshot);
+              } finally {
+                finishCacheSpan();
+              }
+            }
           } catch (err) {
-            if (loadGeneration !== sessionLoadGeneration || get().sessionId !== sessionId) {
+            if (selectionGeneration !== sessionSelectionGeneration || get().sessionId !== sessionId) {
               return;
             }
             if (isNotFoundApiError(err)) {
               const current = get();
               sessionCache.delete(sessionId);
               lastKnownServerState.delete(sessionId);
-              current.stopPresenceHeartbeat(previousSessionId);
+              stopPresenceTransport(previousSessionId);
               if (workspace.getState().sessionId === sessionId) {
                 workspace.getState().setSession(null);
               }
@@ -1170,7 +1343,10 @@ export function createSessionStore(
               error: toErrorMessage(err),
             });
           }
-          })();
+          })().finally(() => {
+            finishOpenSpan();
+            releaseRequest();
+          });
 
           inFlightSessionLoads.set(sessionId, run);
           try {
@@ -1181,17 +1357,24 @@ export function createSessionStore(
             }
           }
         },
+    cancelPendingSessionLoad() {
+      sessionSelectionGeneration += 1;
+      // Allow a newly visible consumer to join/restart immediately. The
+      // shared network hydration remains single-flight, but stale consumers
+      // will fail their generation guard before transcript processing.
+      inFlightSessionLoads.clear();
+    },
     // -- clearSession -------------------------------------------------------
 
     clearSession() {
       const current = get();
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
-      get().stopPresenceHeartbeat(current.sessionId);
+      stopPresenceTransport(current.sessionId);
       set({
         ...initialState,
         permissionMode: current.permissionMode,
@@ -1216,13 +1399,13 @@ export function createSessionStore(
       sessionType?: import("@krusty/api").SessionType,
     ) {
       const current = get();
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
-      get().stopPresenceHeartbeat(current.sessionId);
+      stopPresenceTransport(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
       try {
         storage.set("krusty-permission-mode", nextPermissionMode);
@@ -1244,7 +1427,9 @@ export function createSessionStore(
         title: normalizeDisplayTitle(title),
       });
       planStore.getState().setWorkflow(null);
-      get().startPresenceHeartbeat(sessionId);
+      // The active-mode lifecycle owns presence intent. A creation can finish
+      // after its mode was hidden, so binding identity must not opt itself back in.
+      startPresenceTransport(sessionId);
     },
 
     // -- setTitle ------------------------------------------------------------
@@ -1435,6 +1620,13 @@ export function createSessionStore(
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration
         && get().sessionId === state.sessionId;
+      const finishConnectSpan = beginKrustyPerformanceSpan(
+        'stream.connect',
+        state.sessionId,
+      );
+      const releaseStreamConnection = trackKrustyPerformanceResource(
+        'stream_connections',
+      );
       get().startStatePolling(state.sessionId);
 
       const ref: AssistantMessageRef = {
@@ -1453,6 +1645,8 @@ export function createSessionStore(
               planStore,
               sessionsStore,
               persistSessionMode: persistMode,
+              isActive: isStreamAttached,
+              onFirstEvent: finishConnectSpan,
             }),
             state.sessionId,
             streamRecovery,
@@ -1484,6 +1678,8 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        finishConnectSpan();
+        releaseStreamConnection();
         if (!isStreamAttached()) {
           localStreamLive = false;
           return;
@@ -1573,6 +1769,9 @@ export function createSessionStore(
 
     startStatePolling(sessionId: string) {
       get().stopStatePolling();
+      releaseStatePollingResource = trackKrustyPerformanceResource(
+        'state_polling',
+      );
       const generation = statePollingGeneration;
       let consecutiveFailures = 0;
 
@@ -1651,45 +1850,34 @@ export function createSessionStore(
         clearTimeout(statePollingTimer);
         statePollingTimer = null;
       }
+      releaseStatePollingResource?.();
+      releaseStatePollingResource = null;
     },
 
     // -- presence heartbeat -------------------------------------------------
 
     startPresenceHeartbeat(sessionId: string) {
-      if (
-        presenceHeartbeatSessionId === sessionId
-        && presenceHeartbeatInterval
-      ) {
-        return;
-      }
-      get().stopPresenceHeartbeat();
-      presenceHeartbeatSessionId = sessionId;
-      void syncPresence(sessionId, get);
-      presenceHeartbeatInterval = setInterval(() => {
-        void syncPresence(sessionId, get);
-      }, PRESENCE_HEARTBEAT_INTERVAL);
+      presenceDesired = true;
+      startPresenceTransport(sessionId);
     },
 
 
     stopPresenceHeartbeat(sessionId?: string | null) {
-      if (presenceHeartbeatInterval) {
-        clearInterval(presenceHeartbeatInterval);
-        presenceHeartbeatInterval = null;
+      if (
+        sessionId
+        && presenceHeartbeatSessionId
+        && sessionId !== presenceHeartbeatSessionId
+      ) {
+        return;
       }
-      presenceHeartbeatSessionId = null;
-
-      if (!sessionId) return;
-
-      const clientId = getPresenceClientId();
-      if (!clientId) return;
-
-      void client.removeSessionPresence(sessionId, clientId).catch(() => {});
+      presenceDesired = false;
+      stopPresenceTransport(sessionId);
     },
 
     // -- cleanup ------------------------------------------------------------
 
     cleanup() {
-      sessionLoadGeneration += 1;
+      sessionSelectionGeneration += 1;
       streamAttachmentGeneration += 1;
       abortController?.abort();
       abortController = null;
@@ -1701,6 +1889,7 @@ export function createSessionStore(
       sessionCache.clear();
       lastKnownServerState.clear();
       inFlightSessionLoads.clear();
+      inFlightSessionHydrations.clear();
       set({
         messages: [],
         queuedMessages: [],

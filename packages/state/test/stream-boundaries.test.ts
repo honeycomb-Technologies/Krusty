@@ -101,6 +101,65 @@ Deno.test('bursty thinking and tool output deltas commit once per frame', async 
   );
 });
 
+Deno.test('queued stream deltas are discarded after the attachment generation changes', () => {
+  type FrameCallback = (timestamp: number) => void;
+  const runtime = globalThis as typeof globalThis & {
+    requestAnimationFrame?: (callback: FrameCallback) => number;
+  };
+  const originalRequestAnimationFrame = runtime.requestAnimationFrame;
+  let queuedFrame: FrameCallback | null = null;
+  let active = true;
+  Object.defineProperty(globalThis, 'requestAnimationFrame', {
+    configurable: true,
+    value: (callback: (timestamp: number) => void) => {
+      queuedFrame = callback;
+      return 1;
+    },
+  });
+
+  try {
+    const ref = { current: createStreamingAssistantMessage() };
+    let state: any = {
+      messages: [ref.current],
+      queuedMessages: [],
+      isLoading: true,
+      isStreaming: true,
+      isThinking: false,
+      thinkingContent: '',
+    };
+    let setCount = 0;
+    const callbacks = createStreamCallbacks(
+      ref,
+      (partial: any) => {
+        setCount += 1;
+        const update = typeof partial === 'function' ? partial(state) : partial;
+        state = { ...state, ...update };
+      },
+      () => state,
+      {
+        planStore: { getState: () => ({ setItems() {} }) } as never,
+        sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+        persistSessionMode: async () => {},
+        isActive: () => active,
+      },
+    );
+
+    callbacks.onTextDelta('belongs to old session');
+    assert(queuedFrame, 'text delta should queue a presentation frame');
+    active = false;
+    const runQueuedFrame = queuedFrame as FrameCallback;
+    runQueuedFrame(0);
+
+    assertEquals(setCount, 0, 'detached frame must not update store state');
+    assertEquals(ref.current.content, '', 'detached content must not enter the live message');
+  } finally {
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+      configurable: true,
+      value: originalRequestAnimationFrame,
+    });
+  }
+});
+
 Deno.test('tool-loop completion starts a distinct live assistant subturn', () => {
   const { callbacks, ref, state } = testHarness();
   const firstId = ref.current.id;

@@ -1,6 +1,4 @@
 import {
-  type ComponentType,
-  type PropsWithChildren,
   useState,
   useRef,
   useEffect,
@@ -19,13 +17,11 @@ import {
   Keyboard,
   LayoutAnimation,
   Image,
-  FlatList,
   Alert,
-  Modal,
   useWindowDimensions,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { ArrowUp, Folder, GitBranch, Maximize2, X, Mic } from 'lucide-react-native';
+import { Maximize2, X } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -33,32 +29,25 @@ import * as SecureStore from '../../platform/secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
-  cancelAnimation,
   useSharedValue,
   useAnimatedStyle,
-  useAnimatedProps,
   withSpring,
   withTiming,
-  Easing,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls } from './AccordionControls';
+import { ChatBarActionButton } from './ChatBarActionButton';
+import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
+import { ChatBarMetaRow } from './ChatBarMetaRow';
+import { ChatBarModelPopover } from './ChatBarModelPopover';
+import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import { resolveComposerSendPayload } from './composerSend';
 import { Waveform } from './Waveform';
-import { CrabIcon } from '../ui/CrabIcon';
+import { MitsuroMark } from '../brand';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
-import { AppBottomSheet } from '../sheets/AppBottomSheet';
-import Svg, {
-  Circle,
-  Defs,
-  FeGaussianBlur,
-  Filter,
-  LinearGradient as SvgLinearGradient,
-  Path,
-  Polygon,
-  Stop,
-} from 'react-native-svg';
+import Svg, { Path, Polygon } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
@@ -124,7 +113,7 @@ function setDraftCache(key: string, value: CachedDraft) {
     })),
   };
   draftCache.delete(key);
-  setDraftCache(key, compact);
+  draftCache.set(key, compact);
   while (draftCache.size > MAX_DRAFT_CACHE) {
     const oldest = draftCache.keys().next().value;
     if (!oldest) break;
@@ -150,16 +139,6 @@ const CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP = 28;
 const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
-const RUN_LINE_HEIGHT = 3;
-const RUN_LINE_BEAM_WIDTH = 370;
-const RUN_LINE_SOFTNESS = 3;
-const RUN_LINE_TAIL_SOFTNESS = 8;
-const RUN_LINE_STROKE_WIDTH = 14;
-const RUN_LINE_CORNER_CLIMB = 35;
-const RUN_LINE_CORNER_RADIUS = 44;
-const RUN_LINE_EDGE_INSET = 2;
-const RUN_LINE_EXIT_EXTENSION = 18;
-const RUN_LINE_EXIT_RISE = 10;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
 const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 /**
@@ -171,7 +150,7 @@ const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 const MODEL_POPOVER_Z_INDEX = 45;
 /** Matches AccordionControls PROVIDER_PILL_STEP (56 + 8 gap). */
 const PROVIDER_PILL_STEP = 64;
-/** Gap between provider dock / model list and the bot+crab FAB column. */
+/** Gap between provider dock / model list and the Agent FAB column. */
 const DOCK_TO_FAB_GAP = 10;
 const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
 const WEB_INPUT_STYLE = Platform.OS === 'web'
@@ -238,7 +217,13 @@ interface PickedImageAsset {
   fileName?: string | null;
   mimeType?: string | null;
   base64?: string | null;
+  width?: number;
+  height?: number;
 }
+
+const MAX_ATTACHED_IMAGES = 4;
+const MAX_IMAGE_EDGE = 2048;
+const MAX_IMAGE_BASE64_CHARS = 8 * 1024 * 1024;
 
 function normalizeSupportedImageMimeType(
   mimeType?: string | null,
@@ -300,18 +285,6 @@ function extensionForImageMimeType(mimeType: string): string {
 
 function defaultImageFileName(mimeType: string, fallbackBaseName: string): string {
   return `${fallbackBaseName}.${extensionForImageMimeType(mimeType)}`;
-}
-
-function fileToBase64(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      resolve(result.split(',')[1] ?? '');
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 function clipboardImageFileName(file: File, index: number): string {
@@ -438,216 +411,22 @@ function ProviderLogo({
   }
 }
 
-const AnimatedPath = Animated.createAnimatedComponent(Path);
-const SvgDefs = Defs as unknown as ComponentType<PropsWithChildren>;
-const normalizedPathLength = { pathLength: 1 };
-const RUN_LINE_DURATION_MS = 1700;
-const RUN_LINE_TONAL_STOPS = [
-  // The gradient is anchored to the screen, not the moving dash. Keep its
-  // opacity even so the rounded side sections do not disappear at x=0/width;
-  // the blurred round dash caps provide the moving wash's soft tails.
-  ['0', '#a55322', 0.82],
-  ['0.08', '#a95724', 0.82],
-  ['0.18', '#b75f27', 0.82],
-  ['0.28', '#c5682a', 0.82],
-  ['0.37', '#d2702d', 0.82],
-  ['0.44', '#dd772f', 0.82],
-  ['0.5', '#e17a30', 0.82],
-  ['0.56', '#dc762f', 0.82],
-  ['0.63', '#d06f2d', 0.82],
-  ['0.72', '#c36729', 0.82],
-  ['0.82', '#b55e26', 0.82],
-  ['0.92', '#a95724', 0.82],
-  ['1', '#a55322', 0.82],
-] as const;
-
-function RunningGradientLine({
-  active,
-  width,
-  cornerClimb,
-  style,
-}: {
-  active: boolean;
-  width: number;
-  cornerClimb: number;
-  style?: any;
-}) {
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    if (!active) {
-      cancelAnimation(progress);
-      progress.value = 0;
-      return;
-    }
-
-    // Explicitly reset every pass instead of relying on Reanimated's repeat
-    // wrapper. react-native-svg can retain the terminal animated dash props on
-    // iOS, which makes subsequent passes look like only the end is looping.
-    const restart = () => {
-      cancelAnimation(progress);
-      progress.value = 0;
-      progress.value = withTiming(1, {
-        duration: RUN_LINE_DURATION_MS,
-        easing: Easing.linear,
-      });
-    };
-
-    restart();
-    const interval = setInterval(restart, RUN_LINE_DURATION_MS);
-    return () => {
-      clearInterval(interval);
-      cancelAnimation(progress);
-    };
-  }, [active, progress]);
-
-  const safeWidth = Math.max(width, 1);
-  const pathHeight = Math.max(
-    RUN_LINE_HEIGHT,
-    cornerClimb + RUN_LINE_EXIT_RISE + RUN_LINE_HEIGHT,
-  );
-  const strokeInset = RUN_LINE_HEIGHT / 2;
-  const baseline = pathHeight - strokeInset;
-  const curveTop = baseline - cornerClimb;
-  const cornerRadius = Math.min(
-    RUN_LINE_CORNER_RADIUS,
-    Math.max(0, safeWidth / 2 - strokeInset),
-  );
-  const effectiveClimb = Math.min(cornerClimb, cornerRadius);
-  const sideInset =
-    cornerRadius > 0
-      ? cornerRadius -
-        Math.sqrt(
-          Math.max(
-            0,
-            cornerRadius ** 2 - (cornerRadius - effectiveClimb) ** 2,
-          ),
-        )
-      : strokeInset;
-  const visibleSideInset = sideInset + RUN_LINE_EDGE_INSET;
-  const visibleCornerRadius = cornerRadius + RUN_LINE_EDGE_INSET;
-  const cornerArcLength =
-    cornerRadius > 0
-      ? cornerRadius *
-        Math.acos((cornerRadius - effectiveClimb) / cornerRadius)
-      : 0;
-  const exitLength = Math.hypot(
-    visibleSideInset + RUN_LINE_EXIT_EXTENSION,
-    curveTop - strokeInset,
-  );
-  const pathLength = Math.max(
-    1,
-    safeWidth -
-      cornerRadius * 2 +
-      cornerArcLength * 2 +
-      exitLength * 2,
-  );
-  const beamLength = Math.min(
-    RUN_LINE_BEAM_WIDTH,
-    Math.max(160, pathLength * 0.8),
-    pathLength * 0.92,
-  );
-  // Web SVG honors pathLength normalization; react-native-svg on iOS does not.
-  // Keep both renderers on the same visual geometry using their native units.
-  const beamFraction = Math.min(0.92, Math.max(0.5, beamLength / pathLength));
-  const usesNormalizedDashUnits = Platform.OS === 'web';
-  const dashPathLengthProps = usesNormalizedDashUnits
-    ? normalizedPathLength
-    : {};
-  const pathUnits = usesNormalizedDashUnits ? 1 : pathLength;
-  const beamUnits = usesNormalizedDashUnits ? beamFraction : beamLength;
-  const beamTravel = pathUnits + beamUnits;
-  const edgePath =
-    effectiveClimb > 0
-      ? [
-          `M ${-RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
-          `L ${visibleSideInset} ${curveTop}`,
-          `C ${visibleSideInset + (visibleCornerRadius - visibleSideInset) * 0.25}`,
-          `${curveTop + effectiveClimb * 0.6}`,
-          `${visibleCornerRadius - (visibleCornerRadius - visibleSideInset) * 0.22}`,
-          `${baseline}`,
-          `${visibleCornerRadius} ${baseline}`,
-          `H ${safeWidth - visibleCornerRadius}`,
-          `C ${safeWidth - visibleCornerRadius + (visibleCornerRadius - visibleSideInset) * 0.22}`,
-          `${baseline}`,
-          `${safeWidth - visibleSideInset - (visibleCornerRadius - visibleSideInset) * 0.25}`,
-          `${curveTop + effectiveClimb * 0.6}`,
-          `${safeWidth - visibleSideInset} ${curveTop}`,
-          `L ${safeWidth + RUN_LINE_EXIT_EXTENSION} ${strokeInset}`,
-        ].join(' ')
-      : `M ${strokeInset} ${baseline} H ${safeWidth - strokeInset}`;
-
-  const washProps = useAnimatedProps(() => ({
-    strokeDashoffset:
-      beamUnits - progress.value * beamTravel,
-  }));
-  if (!active) return null;
-
-  return (
-    <View
-      pointerEvents="none"
-      style={[styles.runLineTrack, { height: pathHeight }, style]}
-    >
-      <Svg width={safeWidth} height={pathHeight}>
-        <SvgDefs>
-          <SvgLinearGradient
-            id="auroraGlassBeam"
-            x1={0}
-            y1={0}
-            x2={safeWidth}
-            y2={0}
-            gradientUnits="userSpaceOnUse"
-          >
-            {RUN_LINE_TONAL_STOPS.map(([offset, color, opacity]) => (
-              <Stop
-                key={offset}
-                offset={offset}
-                stopColor={color}
-                stopOpacity={opacity}
-              />
-            ))}
-          </SvgLinearGradient>
-          <Filter
-            id="auroraGlassSoftness"
-            x="-20%"
-            y="-160%"
-            width="140%"
-            height="420%"
-          >
-            <FeGaussianBlur
-              stdDeviation={`${RUN_LINE_TAIL_SOFTNESS} ${RUN_LINE_SOFTNESS}`}
-            />
-          </Filter>
-        </SvgDefs>
-        <AnimatedPath
-          animatedProps={washProps}
-          d={edgePath}
-          {...dashPathLengthProps}
-          fill="none"
-          stroke="url(#auroraGlassBeam)"
-          filter="url(#auroraGlassSoftness)"
-          strokeOpacity={0.86}
-          strokeWidth={RUN_LINE_STROKE_WIDTH}
-          strokeLinecap="round"
-          strokeDasharray={`${beamUnits} ${beamTravel - beamUnits}`}
-        />
-      </Svg>
-    </View>
-  );
-}
-
 async function prepareClipboardImageAttachment(file: File, index: number): Promise<Attachment> {
   const fallbackBaseName = index === 0 ? 'pasted-image' : `pasted-image-${index + 1}`;
   const fileName = clipboardImageFileName(file, index);
-  return prepareImageAttachment(
-    {
-      uri: URL.createObjectURL(file),
-      fileName,
-      mimeType: file.type || normalizeSupportedImageMimeType(null, fileName, null),
-      base64: await fileToBase64(file),
-    },
-    fallbackBaseName,
-  );
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    return await prepareImageAttachment(
+      {
+        uri: objectUrl,
+        fileName,
+        mimeType: file.type || normalizeSupportedImageMimeType(null, fileName, null),
+      },
+      fallbackBaseName,
+    );
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 async function prepareImageAttachment(
@@ -660,7 +439,11 @@ async function prepareImageAttachment(
     asset.uri,
   );
 
-  if (supportedMimeType && asset.base64) {
+  if (
+    supportedMimeType
+    && asset.base64
+    && asset.base64.length <= MAX_IMAGE_BASE64_CHARS
+  ) {
     return {
       uri: asset.uri,
       type: 'image',
@@ -671,14 +454,23 @@ async function prepareImageAttachment(
   }
 
   try {
+    const maxDimension = Math.max(asset.width ?? 0, asset.height ?? 0);
+    const actions = maxDimension > MAX_IMAGE_EDGE
+      ? [{ resize: asset.width && asset.height && asset.width >= asset.height
+          ? { width: MAX_IMAGE_EDGE }
+          : { height: MAX_IMAGE_EDGE } }]
+      : [];
     const result = await manipulateAsync(
       asset.uri,
-      [],
-      { compress: 0.82, format: SaveFormat.JPEG, base64: true },
+      actions,
+      { compress: 0.78, format: SaveFormat.JPEG, base64: true },
     );
 
     if (!result.base64) {
       throw new Error('Image conversion completed without base64 output.');
+    }
+    if (result.base64.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new Error('Image remains too large after optimization. Choose a smaller image.');
     }
 
     return {
@@ -737,7 +529,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const modelPopoverOpacity = useSharedValue(0);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const transcriptRef = useRef('');
-  const textRef = useRef('');
+  const textRef = useRef(text);
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
   const measuredRootHeightRef = useRef(0);
@@ -748,6 +540,22 @@ function ChatBarComponent(props: ChatBarProps) {
   const draftRef = useRef<CachedDraft>({ text, attachments });
   const activeDraftKeyRef = useRef(draftKey);
   const skipDraftSyncRef = useRef(false);
+  const isStreamingRef = useRef(isStreaming);
+  const disabledRef = useRef(disabled);
+  const attachmentsRef = useRef(attachments);
+  const isRecordingRef = useRef(isRecording);
+  const accordionOpenLocalRef = useRef(accordionOpen);
+  const onSendRef = useRef(onSend);
+  const onStopRef = useRef(onStop);
+  const onModelSelectRef = useRef(onModelSelect);
+  isStreamingRef.current = isStreaming;
+  disabledRef.current = disabled;
+  attachmentsRef.current = attachments;
+  isRecordingRef.current = isRecording;
+  accordionOpenLocalRef.current = accordionOpen;
+  onSendRef.current = onSend;
+  onStopRef.current = onStop;
+  onModelSelectRef.current = onModelSelect;
 
   useLayoutEffect(() => {
     if (activeDraftKeyRef.current === draftKey) {
@@ -785,11 +593,11 @@ function ChatBarComponent(props: ChatBarProps) {
     [],
   );
 
-  const clearModelCloseTimer = () => {
+  const clearModelCloseTimer = useCallback(() => {
     if (!modelCloseTimerRef.current) return;
     clearTimeout(modelCloseTimerRef.current);
     modelCloseTimerRef.current = null;
-  };
+  }, []);
 
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
 
@@ -883,9 +691,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
-  const bgOverlay = isDark
-    ? 'rgba(14, 20, 30, 0.88)'
-    : 'rgba(255, 255, 255, 0.88)';
+  const bgOverlay = t.surfaceOverlay;
   const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
   const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
   const composerBlur = Math.max(theme.colors.glassBlur ?? 20, isDesktop ? 48 : 40);
@@ -1039,26 +845,38 @@ function ChatBarComponent(props: ChatBarProps) {
     setMicVolume(Math.max(0, Math.min(1, (raw + 2) / 12)));
   });
 
-  const toggleRecording = async () => {
+  const toggleRecording = useCallback(async () => {
     if (!ExpoSpeechRecognitionModule) return;
-    if (isRecording) { ExpoSpeechRecognitionModule.stop(); return; }
+    if (isRecordingRef.current) { ExpoSpeechRecognitionModule.stop(); return; }
     const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!granted) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     transcriptRef.current = '';
     setIsRecording(true);
     ExpoSpeechRecognitionModule.start({ lang: 'en-US', interimResults: false, continuous: false });
-  };
+  }, []);
 
   // ── Send ──
-  const handleSend = () => {
-    if (isStreaming) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop(); return; }
-    const trimmed = text.trim();
-    if (!trimmed && attachments.length === 0) return;
+  const handleSend = useCallback(() => {
+    if (isStreamingRef.current) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      onStopRef.current();
+      return;
+    }
+    const payload = resolveComposerSendPayload(
+      textRef.current,
+      attachmentsRef.current,
+    );
+    if (!payload) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (isRecording && ExpoSpeechRecognitionModule) { ExpoSpeechRecognitionModule.stop(); setIsRecording(false); }
-    onSend(trimmed, attachments.length > 0 ? attachments : undefined);
+    if (isRecordingRef.current && ExpoSpeechRecognitionModule) {
+      ExpoSpeechRecognitionModule.stop();
+      setIsRecording(false);
+    }
+    onSendRef.current(payload.content, payload.attachments);
     textRef.current = '';
+    draftRef.current = { text: '', attachments: [] };
+    setDraftCache(activeDraftKeyRef.current, draftRef.current);
     setText('');
     setInputContentHeight(0);
     setAttachments([]);
@@ -1066,8 +884,8 @@ function ChatBarComponent(props: ChatBarProps) {
     setHoveredAttachmentIndex(null);
     setExpandedEditorOpen(false);
     Keyboard.dismiss();
-    if (accordionOpen) setAccordionOpen(false);
-  };
+    if (accordionOpenLocalRef.current) setAccordionOpen(false);
+  }, []);
 
   // ── Attach ──
   const handleAttach = () => {
@@ -1077,7 +895,16 @@ function ChatBarComponent(props: ChatBarProps) {
 
   const pickPhoto = async () => {
     closeAttachPicker();
-    const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], base64: true, quality: 0.8 });
+    if (attachments.length >= MAX_ATTACHED_IMAGES) {
+      Alert.alert('Attachment limit', `Attach up to ${MAX_ATTACHED_IMAGES} images at a time.`);
+      return;
+    }
+    const r = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      base64: false,
+      exif: false,
+      quality: 0.8,
+    });
     if (!r.canceled && r.assets[0]) {
       try {
         const attachment = await prepareImageAttachment(r.assets[0], 'image');
@@ -1092,8 +919,12 @@ function ChatBarComponent(props: ChatBarProps) {
   };
   const pickCamera = async () => {
     closeAttachPicker();
+    if (attachments.length >= MAX_ATTACHED_IMAGES) {
+      Alert.alert('Attachment limit', `Attach up to ${MAX_ATTACHED_IMAGES} images at a time.`);
+      return;
+    }
     const perm = await ImagePicker.requestCameraPermissionsAsync(); if (!perm.granted) return;
-    const r = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.8 });
+    const r = await ImagePicker.launchCameraAsync({ base64: false, exif: false, quality: 0.8 });
     if (!r.canceled && r.assets[0]) {
       try {
         const attachment = await prepareImageAttachment(r.assets[0], 'photo');
@@ -1113,20 +944,33 @@ function ChatBarComponent(props: ChatBarProps) {
   };
 
   // Unified action button: mic when empty, send when has text, stop when streaming/recording
-  const handleActionBtn = () => {
-    if (isStreaming) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop(); return; }
-    if (isRecording) { toggleRecording(); return; }
-    if (canSend) { handleSend(); return; }
-    toggleRecording(); // empty state = start recording
-  };
+  const handleActionBtn = useCallback(() => {
+    if (isStreamingRef.current) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      onStopRef.current();
+      return;
+    }
+    if (isRecordingRef.current) {
+      void toggleRecording();
+      return;
+    }
+    const canSendNow =
+      !disabledRef.current &&
+      (textRef.current.trim().length > 0 || attachmentsRef.current.length > 0);
+    if (canSendNow) {
+      handleSend();
+      return;
+    }
+    void toggleRecording();
+  }, [handleSend, toggleRecording]);
 
-  const handleTextChange = (value: string) => {
+  const handleTextChange = useCallback((value: string) => {
     textRef.current = value;
     setText(value);
     if (!value) {
       setInputContentHeight(0);
     }
-  };
+  }, []);
 
   const toggleAccordion = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -1157,7 +1001,7 @@ function ChatBarComponent(props: ChatBarProps) {
     modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
     modelPopoverOpacity.value = withTiming(1, { duration: 140 });
   };
-  const closeModelPicker = () => {
+  const closeModelPicker = useCallback(() => {
     clearModelCloseTimer();
     setModelRailOpen(false);
     modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
@@ -1167,12 +1011,21 @@ function ChatBarComponent(props: ChatBarProps) {
       setSelectedProviderFilter(null);
       modelCloseTimerRef.current = null;
     }, 180);
-  };
+  }, [clearModelCloseTimer, modelPopoverOpacity, modelPopoverScale]);
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
     opacity: modelPopoverOpacity.value,
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
+
+  const handleModelSelectFromPicker = useCallback((modelId: string) => {
+    onModelSelectRef.current(modelId);
+    closeModelPicker();
+  }, [closeModelPicker]);
+
+  const closeExpandedEditor = useCallback(() => {
+    setExpandedEditorOpen(false);
+  }, []);
 
   const openAttachPicker = () => {
     clearModelCloseTimer();
@@ -1250,9 +1103,9 @@ function ChatBarComponent(props: ChatBarProps) {
   const metaReserveHeight = showComposerChrome
     ? META_ROW_HEIGHT + GAUGE_TOP_GAP
     : 0;
-  // Distance from root bottom to the top of the input/crab row.
+  // Distance from root bottom to the top of the input/Agent row.
   const inputRowBottom = bottomOffset + metaReserveHeight;
-  // Accordion sits just above the crab FAB.
+  // Accordion sits just above the Agent FAB.
   const controlsLayerBottom = showComposerChrome
     ? inputRowBottom + PILL + GAP
     : inputRowBottom;
@@ -1260,7 +1113,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   // The activity line is a screen-edge indicator, independent of the composer
   // safe-area inset. Keep it flush with the bottom edge on every platform.
-  const runLineBottom = 0;
   // Prefer measured column width over viewport so split/toolbox/resize stay in-bounds.
   const bandWidth =
     measuredRootWidth > 0
@@ -1325,7 +1177,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
   // Align under the filter strip (same right edge as filters).
   // controlsLayer is already right-aligned at ROOT_HORIZONTAL_PADDING; bot is the
-  // rightmost control, filters sit 8px left of bot — do NOT also add crab width.
+  // rightmost control, filters sit 8px left of Agent — do NOT add FAB width again.
   const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
@@ -1513,7 +1365,7 @@ function ChatBarComponent(props: ChatBarProps) {
                   }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
                   onBlur={() => setInputFocused(false)}
-                  placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
+                  placeholder={isMako ? "Message Hive..." : "Message Agent..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
                   scrollEnabled={composerBarHeight >= COMPOSER_MAX_HEIGHT}
@@ -1522,27 +1374,16 @@ function ChatBarComponent(props: ChatBarProps) {
                   keyboardAppearance={theme.scheme}
                 />
             }
-            <Pressable
+            <ChatBarActionButton
+              isStreaming={isStreaming}
+              isRecording={isRecording}
+              canSend={canSend}
+              mutedForeground={t.mutedForeground}
+              userMessage={t.userMessage}
+              error={t.error}
               onPress={handleActionBtn}
-              onLongPress={canSend ? toggleRecording : undefined}
-              delayLongPress={300}
-              style={({ pressed }) => [styles.actionBtn, {
-                backgroundColor: isRecording
-                  ? t.error
-                  : canSend
-                    ? pressed ? t.userMessage + 'cc' : isStreaming ? t.error : t.userMessage
-                    : 'transparent',
-              }]}
-            >
-              {isStreaming
-                ? <View style={styles.stopGlyph} />
-                : isRecording
-                  ? <View style={styles.stopGlyph} />
-                  : canSend
-                    ? <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
-                    : <Mic size={18} color={t.mutedForeground} strokeWidth={1.8} />
-              }
-            </Pressable>
+              onLongPress={toggleRecording}
+            />
           </View>
         </View>
 
@@ -1562,7 +1403,7 @@ function ChatBarComponent(props: ChatBarProps) {
               <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
               <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
               <View style={styles.kInner}>
-                <CrabIcon size={26} color={kColor} />
+                <MitsuroMark size={26} color={kColor} strokeWidth={62} />
               </View>
             </Pressable>
           </View>
@@ -1570,7 +1411,7 @@ function ChatBarComponent(props: ChatBarProps) {
       </View>
 
       {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
-          56px crab column (WebKit clips overflow from that narrow column). */}
+          56px Agent column (WebKit clips overflow from that narrow column). */}
       {showComposerChrome && accordionVisible ? (
         <View
           pointerEvents="box-none"
@@ -1621,147 +1462,50 @@ function ChatBarComponent(props: ChatBarProps) {
       ) : null}
 
       {/* Model popover — under the filter row, same width + right edge */}
-      {showComposerChrome && modelPickerOpen && modelPopoverHeight > 0 && (
-        <View
-          style={
-            isDesktop && modelPopoverWidth != null
-              ? {
-                  position: 'absolute' as const,
-                  // Stay below the bot + provider filter row so filters stay visible.
-                  bottom: desktopModelListBottom,
-                  height: modelPopoverHeight,
-                  right: dockRightInset,
-                  width: modelPopoverWidth,
-                  overflow: 'hidden' as const,
-                  // The list does not overlap the FAB/filter hit areas, so it
-                  // can safely sit above their full-width responder shell.
-                  zIndex: MODEL_POPOVER_Z_INDEX,
-                  elevation: MODEL_POPOVER_Z_INDEX,
-                }
-              : [
-                  styles.modelClip,
-                  {
-                    bottom: overlayBottom,
-                    height: modelPopoverHeight,
-                  },
-                ]
-          }
-        >
-          <Animated.View
-            style={[
-              styles.modelPopover,
-              modelPopoverStyle,
-              { borderColor: t.glass.border },
-            ]}
-          >
-            <BlurView
-              intensity={composerBlur}
-              tint={pillTint}
-              style={StyleSheet.absoluteFill}
-            />
-            <View
-              style={[
-                StyleSheet.absoluteFill,
-                {
-                  backgroundColor: isDark
-                    ? 'rgba(14, 20, 30, 0.92)'
-                    : 'rgba(255, 255, 255, 0.92)',
-                  borderRadius: RADIUS,
-                },
-              ]}
-            />
-            <FlatList
-              data={filteredModels}
-              keyExtractor={(m: ModelInfo) => m.id}
-              style={styles.modelList}
-              contentContainerStyle={styles.modelListContent}
-              extraData={model}
-              nestedScrollEnabled
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="none"
-              showsVerticalScrollIndicator={false}
-              renderItem={({ item }: { item: ModelInfo }) => (
-                <Pressable
-                  onPress={() => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    onModelSelect(item.id);
-                    closeModelPicker();
-                  }}
-                  style={({ pressed }) => [
-                    styles.modelItem,
-                    item.id === model && { backgroundColor: t.glass.backgroundElevated },
-                    pressed && { backgroundColor: t.glass.backgroundPressed },
-                  ]}
-                >
-                  <View style={styles.modelRow}>
-                    <View style={styles.modelInfo}>
-                      <Text style={[styles.modelName, { color: t.foreground }]} numberOfLines={1}>
-                        {item.display_name}
-                      </Text>
-                      <Text style={[styles.modelMeta, { color: t.mutedForeground }]}>{item.provider}</Text>
-                    </View>
-                    {item.id === model && (
-                      <Text style={[styles.modelCheck, { color: t.thinking }]}>✓</Text>
-                    )}
-                  </View>
-                </Pressable>
-              )}
-            />
-          </Animated.View>
-        </View>
-      )}
+      {showComposerChrome && modelPickerOpen ? (
+        <ChatBarModelPopover
+          isDesktop={isDesktop}
+          modelPopoverWidth={modelPopoverWidth}
+          desktopModelListBottom={desktopModelListBottom}
+          modelPopoverHeight={modelPopoverHeight}
+          dockRightInset={dockRightInset}
+          overlayBottom={overlayBottom}
+          modelPopoverStyle={modelPopoverStyle}
+          borderColor={t.glass.border}
+          composerBlur={composerBlur}
+          pillTint={pillTint}
+          foreground={t.foreground}
+          mutedForeground={t.mutedForeground}
+          thinking={t.thinking}
+          backgroundElevated={t.glass.backgroundElevated}
+          backgroundPressed={t.glass.backgroundPressed}
+          surfaceOverlayElevated={t.surfaceOverlayElevated}
+          filteredModels={filteredModels}
+          model={model}
+          onSelectModel={handleModelSelectFromPicker}
+        />
+      ) : null}
 
       {/* Composer status row — sits in safe area zone below input */}
-      <View
-        pointerEvents="none"
-        style={[styles.metaRow, !isDesktop && styles.metaRowMobile]}
-      >
-        <View style={styles.metaLeft}>
-          <View style={styles.gaugeRing}>
-            <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
-              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
-              <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
-                strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
-                rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
-              />
-            </Svg>
-            <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
-              {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
-            </Text>
-          </View>
-          {workspaceContext ? (
-            <View style={styles.metaWorkspace}>
-              {workspaceContext.hasBranch ? (
-                <GitBranch size={12} color={t.mutedForeground} strokeWidth={1.8} />
-              ) : (
-                <Folder size={12} color={t.mutedForeground} strokeWidth={1.8} />
-              )}
-              <Text
-                style={[styles.metaWorkspaceText, { color: t.mutedForeground }]}
-                numberOfLines={1}
-              >
-                {workspaceContext.label}
-              </Text>
-            </View>
-          ) : null}
-        </View>
-        <View style={styles.metaRight}>
-          <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
-            {currentModelLabel}
-          </Text>
-          <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
-            |
-          </Text>
-          <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
-            {thinkingLabel}
-          </Text>
-        </View>
-      </View>
-      <RunningGradientLine
+      <ChatBarMetaRow
+        isDesktop={isDesktop}
+        gaugeTokens={gaugeTokens}
+        gaugeRadius={gaugeRadius}
+        gaugeStroke={gaugeStroke}
+        gaugeCircumference={gaugeCircumference}
+        gaugeOffset={gaugeOffset}
+        gaugeColor={gaugeColor}
+        mutedForeground={t.mutedForeground}
+        workspaceContext={workspaceContext}
+        currentModelLabel={currentModelLabel}
+        thinkingLabel={thinkingLabel}
+      />
+      <ChatBarRunningLine
         active={isStreaming}
         width={bandWidth}
         cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
-        style={[styles.runLineEdge, { bottom: runLineBottom }]}
+        theme={theme.scheme}
+        style={styles.runLineEdge}
       />
       <ImagePreviewModal
         visible={Boolean(previewAttachment)}
@@ -1769,64 +1513,21 @@ function ChatBarComponent(props: ChatBarProps) {
         title={previewAttachment?.name}
         onClose={() => setPreviewAttachment(null)}
       />
-      <Modal
+      <ChatBarExpandedEditor
         visible={expandedEditorOpen}
-        transparent
-        animationType="none"
-        onRequestClose={() => setExpandedEditorOpen(false)}
-      >
-        <View style={styles.expandedEditorModal}>
-          <AppBottomSheet
-            visible={expandedEditorOpen}
-            onClose={() => setExpandedEditorOpen(false)}
-            accessibilityLabel="expanded message editor"
-            contentStyle={styles.expandedEditorContent}
-            footer={
-              <View style={styles.expandedEditorFooter}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Send expanded message"
-                  accessibilityState={{ disabled: !canSend }}
-                  disabled={!canSend}
-                  onPress={handleSend}
-                  style={({ pressed }) => [
-                    styles.expandedEditorSend,
-                    {
-                      backgroundColor: canSend
-                        ? pressed
-                          ? `${t.userMessage}cc`
-                          : t.userMessage
-                        : t.border,
-                    },
-                  ]}
-                >
-                  <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
-                </Pressable>
-              </View>
-            }
-          >
-            <TextInput
-              autoFocus
-              value={text}
-              onChangeText={handleTextChange}
-              placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
-              placeholderTextColor={`${t.mutedForeground}70`}
-              multiline
-              maxLength={500000}
-              editable={!disabled}
-              keyboardAppearance={theme.scheme}
-              textAlignVertical="top"
-              style={[
-                styles.expandedEditorInput,
-                WEB_INPUT_STYLE,
-                {
-                  color: t.foreground,
-                },
-              ]}
-            />
-          </AppBottomSheet>
-        </View>
-      </Modal>
+        text={text}
+        onChangeText={handleTextChange}
+        onClose={closeExpandedEditor}
+        onSend={handleSend}
+        canSend={canSend}
+        disabled={disabled}
+        placeholder={isMako ? "Message Hive..." : "Message Agent..."}
+        mutedForeground={t.mutedForeground}
+        foreground={t.foreground}
+        userMessage={t.userMessage}
+        border={t.border}
+        keyboardAppearance={theme.scheme}
+      />
     </View>
   );
 }
@@ -1848,10 +1549,6 @@ const styles = StyleSheet.create({
   attachHoverOverlay: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2 },
   attachName: { fontSize: 9, paddingHorizontal: 3, textAlign: 'center' },
   attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 2 },
-  runLineTrack: {
-    height: RUN_LINE_HEIGHT,
-    overflow: 'visible',
-  },
   runLineEdge: {
     position: 'absolute',
     left: 0,
@@ -1894,13 +1591,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.06)',
   },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
-  actionBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
-  stopGlyph: {
-    width: 12,
-    height: 12,
-    borderRadius: 2,
-    backgroundColor: '#fff',
-  },
   input: {
     flex: 1,
     fontSize: 16,
@@ -1918,35 +1608,6 @@ const styles = StyleSheet.create({
     paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
     paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
     textAlignVertical: 'top',
-  },
-  expandedEditorModal: {
-    flex: 1,
-  },
-  expandedEditorContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-  },
-  expandedEditorInput: {
-    flex: 1,
-    minHeight: 220,
-    paddingHorizontal: 2,
-    paddingVertical: 10,
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  expandedEditorFooter: {
-    minHeight: 64,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-  },
-  expandedEditorSend: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   kCol: {
     width: PILL,
@@ -1978,118 +1639,11 @@ const styles = StyleSheet.create({
   },
   kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  // Clip container — hides the popover as it slides from behind accordion.
-  // Mobile: full width under the bar. Desktop: right-aligned dock width.
-  modelClip: {
-    position: 'absolute',
-    left: ROOT_HORIZONTAL_PADDING,
-    right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
-    height: 4 * PILL + 3 * GAP,
-    overflow: 'hidden',
-    zIndex: MODEL_POPOVER_Z_INDEX,
-    elevation: MODEL_POPOVER_Z_INDEX,
-  },
-  // Model popover — slides out from behind accordion
-  modelPopover: {
-    width: '100%',
-    height: '100%',
-    borderRadius: RADIUS,
-    overflow: 'hidden',
-    borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.28,
-    shadowRadius: 20,
-    elevation: 12,
-  },
   providerInitials: {
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0,
   },
-  modelList: {
-    flex: 1,
-    paddingHorizontal: 8,
-  },
-  modelListContent: {
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
-  modelItem: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginBottom: 4,
-  },
-  modelRow: { flexDirection: 'row', alignItems: 'center' },
-  modelInfo: { flex: 1 },
-  modelName: { fontSize: 15, fontWeight: '500' },
-  modelMeta: { fontSize: 12, marginTop: 2 },
-  modelCheck: { fontSize: 18, fontWeight: '700', marginLeft: 8 },
-  // Composer status row
-  metaRow: {
-    height: META_ROW_HEIGHT + GAUGE_TOP_GAP,
-    paddingTop: GAUGE_TOP_GAP,
-    paddingHorizontal: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  metaRowMobile: {
-    paddingHorizontal: 26,
-  },
-  metaLeft: {
-    flex: 1,
-    maxWidth: '54%',
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  metaRight: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 10,
-  },
-  metaWorkspace: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  metaWorkspaceText: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0,
-  },
-  metaModel: {
-    flexShrink: 1,
-    minWidth: 0,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0,
-    textAlign: 'right',
-  },
-  metaDivider: {
-    flexShrink: 0,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0,
-  },
-  metaThinking: {
-    flexShrink: 0,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0,
-  },
-  gaugeRing: { width: GAUGE_SIZE, height: GAUGE_SIZE, alignItems: 'center', justifyContent: 'center' },
-  gaugeLabel: { position: 'absolute', fontSize: 7, fontWeight: '600', letterSpacing: 0 },
 });
 
 export const ChatBar = memo(ChatBarComponent);

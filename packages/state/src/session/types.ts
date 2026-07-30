@@ -179,6 +179,11 @@ export interface SessionStoreState {
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   /**
+   * Invalidate pending hydration work without clearing the optimistic shell.
+   * Hidden mobile modes use this to prevent stale transcript processing.
+   */
+  cancelPendingSessionLoad: () => void;
+  /**
    * Ensure and load the durable per-user Mako companion session.
    * Does not create a new job/run session — resolves GET/POST /mako/main.
    */

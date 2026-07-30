@@ -116,11 +116,11 @@ async fn send_test_notification(
     let title = req
         .title
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "Krusty".to_string());
+        .unwrap_or_else(|| "Mitsuro".to_string());
     let body = req
         .body
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "Test notification from Krusty".to_string());
+        .unwrap_or_else(|| "Test notification from Mitsuro".to_string());
 
     let stats = push_service
         .notify_user(

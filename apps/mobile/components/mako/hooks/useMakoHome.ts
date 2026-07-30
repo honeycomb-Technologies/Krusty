@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   MakoCrewDocumentKind,
   MakoCrewResponse,
@@ -16,34 +16,53 @@ export function useMakoHome(enabled: boolean) {
   const [isBootstrapping, setIsBootstrapping] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const refreshGenerationRef = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     if (!client || !isConnected) {
       setHome(null);
       setCrew(null);
       setIsLoading(false);
-      return;
+      return Promise.resolve();
     }
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
 
-    setError(null);
-    setIsRefreshing(true);
-    try {
-      const [nextHome, nextCrew] = await Promise.all([
-        client.getMakoHome(),
-        client.getMakoCrew(),
-      ]);
-      setHome(nextHome);
-      setCrew(nextCrew);
-    } catch (refreshError) {
-      setError(
-        refreshError instanceof Error
-          ? refreshError.message
-          : "Failed to load Mako home",
-      );
-    } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
-    }
+    const generation = ++refreshGenerationRef.current;
+    const request = (async () => {
+      setError(null);
+      setIsRefreshing(true);
+      try {
+        const [nextHome, nextCrew] = await Promise.all([
+          client.getMakoHome(),
+          client.getMakoCrew(),
+        ]);
+        if (generation !== refreshGenerationRef.current) return;
+        setHome((current) => JSON.stringify(current) === JSON.stringify(nextHome)
+          ? current
+          : nextHome);
+        setCrew((current) => JSON.stringify(current) === JSON.stringify(nextCrew)
+          ? current
+          : nextCrew);
+      } catch (refreshError) {
+        if (generation !== refreshGenerationRef.current) return;
+        setError(
+          refreshError instanceof Error
+            ? refreshError.message
+            : "Failed to load Hive home",
+        );
+      } finally {
+        if (generation === refreshGenerationRef.current) {
+          setIsLoading(false);
+          setIsRefreshing(false);
+        }
+      }
+    })();
+    refreshPromiseRef.current = request;
+    void request.finally(() => {
+      if (refreshPromiseRef.current === request) refreshPromiseRef.current = null;
+    });
+    return request;
   }, [client, isConnected]);
 
   const bootstrap = useCallback(async () => {
@@ -62,7 +81,7 @@ export function useMakoHome(enabled: boolean) {
       setError(
         bootstrapError instanceof Error
           ? bootstrapError.message
-          : "Failed to bootstrap Mako home",
+          : "Failed to bootstrap Hive home",
       );
     } finally {
       setIsBootstrapping(false);
@@ -86,7 +105,7 @@ export function useMakoHome(enabled: boolean) {
         setError(
           saveError instanceof Error
             ? saveError.message
-            : "Failed to update Mako home",
+            : "Failed to update Hive home",
         );
         throw saveError;
       } finally {
@@ -113,7 +132,7 @@ export function useMakoHome(enabled: boolean) {
         setError(
           saveError instanceof Error
             ? saveError.message
-            : "Failed to update crew profile",
+            : "Failed to update Hive Agent profile",
         );
         throw saveError;
       } finally {
@@ -128,6 +147,10 @@ export function useMakoHome(enabled: boolean) {
       return;
     }
     void refresh();
+    return () => {
+      refreshGenerationRef.current += 1;
+      refreshPromiseRef.current = null;
+    };
   }, [enabled, refresh]);
 
   return {

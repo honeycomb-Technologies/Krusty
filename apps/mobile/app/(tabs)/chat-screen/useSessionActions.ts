@@ -1,8 +1,11 @@
-import { useCallback, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
 import { Alert } from "react-native";
 
 import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
-import type { Attachment as SessionAttachment } from "@krusty/state";
+import {
+  beginKrustyPerformanceSpan,
+  type Attachment as SessionAttachment,
+} from "@krusty/state";
 import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
 import * as Haptics from "../../../platform/haptics";
@@ -19,6 +22,11 @@ import {
   resolveSendIntent,
   type ResolvedSendIntent,
 } from "./sendIntent";
+import { createSessionCreationCoordinator } from "./sessionCreationCoordinator";
+import {
+  createLatestIntentScheduler,
+  type LatestIntentScheduler,
+} from "../../../components/navigation/latestIntentScheduler";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -27,6 +35,11 @@ type SessionStoreApi = LoadedStores["session"];
 type SessionsStoreApi = LoadedStores["sessions"];
 type WorkspaceStoreApi = LoadedStores["workspace"];
 type ModeStores = LoadedStores["modes"];
+type SessionSelectionIntent = {
+  id: string;
+  sessionType: SessionType;
+  force?: boolean;
+};
 
 interface UseSessionActionsArgs {
   client: ConnectionClient;
@@ -63,6 +76,48 @@ export function useSessionActions({
   suppressCompletionRef,
   lastSessionIdByTypeRef,
 }: UseSessionActionsArgs) {
+  const sessionCreationCoordinatorRef = useRef(
+    createSessionCreationCoordinator<SessionResponse | null>(),
+  );
+  const admitSessionSelectionRef = useRef(
+    ({ id, sessionType, force = false }: SessionSelectionIntent) => {
+      const targetStore = modeStores[sessionType].session;
+      if (!force && targetStore.getState().sessionId === id) return;
+      void targetStore.getState().loadSession(id, force);
+    },
+  );
+  admitSessionSelectionRef.current = ({ id, sessionType, force = false }) => {
+    const targetStore = modeStores[sessionType].session;
+    if (!force && targetStore.getState().sessionId === id) return;
+    void targetStore.getState().loadSession(id, force);
+  };
+  const sessionSelectionSchedulerRef = useRef<
+    LatestIntentScheduler<SessionSelectionIntent> | null
+  >(null);
+  if (!sessionSelectionSchedulerRef.current) {
+    sessionSelectionSchedulerRef.current = createLatestIntentScheduler({
+      // Loading a transcript is heavy work. Keep replacing the pending
+      // selection while the user is still tapping and hydrate only the final
+      // quiet destination.
+      quietDelayMs: 72,
+      onFlush: (intent) => admitSessionSelectionRef.current(intent),
+    });
+  }
+  useEffect(() => {
+    const scheduler = sessionSelectionSchedulerRef.current;
+    return () => {
+      scheduler?.cancel();
+    };
+  }, []);
+  const scheduleSessionSelection = useCallback(
+    (intent: SessionSelectionIntent) => {
+      sessionSelectionSchedulerRef.current?.submit(intent);
+    },
+    [],
+  );
+  const cancelPendingSessionSelection = useCallback(() => {
+    sessionSelectionSchedulerRef.current?.cancel();
+  }, []);
   const stopCurrentStream = useCallback(
     (suppressCompletion = true) => {
       if (sessionStore.getState().isStreaming) {
@@ -95,6 +150,7 @@ export function useSessionActions({
       const workspaceMode = (session.workspace_mode ??
         getWorkspaceMode(directory)) as WorkspaceMode;
 
+      // Bind durable identity immediately so the empty shell is interactive.
       target.session
         .getState()
         .initSession(
@@ -116,6 +172,8 @@ export function useSessionActions({
         const modelInfo = currentModelInfo
           ?? models.find((candidate) => candidate.id === currentModel)
           ?? null;
+        // Keep create path local-first; setModel may persist, but we already
+        // have a usable model for the empty composer.
         target.session
           .getState()
           .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);
@@ -124,7 +182,21 @@ export function useSessionActions({
         target.session.getState().setThinkingLevel(currentThinkingLevel);
       }
 
-      await sessionsStore.getState().loadSessions();
+      // Optimistic list patch + soft refresh. Never block New Chat on GET /sessions.
+      sessionsStore.getState().upsertSession({
+        id: session.id,
+        title: session.title || "",
+        updated_at: session.updated_at,
+        token_count: session.token_count ?? null,
+        parent_session_id: session.parent_session_id ?? null,
+        working_dir: session.working_dir ?? null,
+        project_dir: session.project_dir ?? null,
+        workspace_mode: session.workspace_mode,
+        session_type: session.session_type,
+        target_branch: session.target_branch ?? null,
+        permission_mode: session.permission_mode,
+      });
+      void sessionsStore.getState().loadSessions();
     },
     [modeStores, models, sessionsStore],
   );
@@ -141,30 +213,80 @@ export function useSessionActions({
 
       const targetType = requestedType ?? sessionTypeForTab(activeTab);
       const targetStore = modeStores[targetType].session;
-      if (targetStore.getState().sessionId) {
-        targetStore.getState().detachSession();
+      const creationCoordinator = sessionCreationCoordinatorRef.current;
+      sessionSelectionSchedulerRef.current?.cancel();
+      const finishShellSpan = beginKrustyPerformanceSpan(
+        "new_chat.shell",
+        targetType,
+      );
+
+      // Instant local shell: close chrome and clear previous session without
+      // waiting on network. Composer becomes empty/interactive immediately.
+      setDrawerOpen(false);
+      setActiveTab(tabForSessionType(targetType));
+      setActiveToolCallId(null);
+      if (!creationCoordinator.hasPending(targetType)) {
+        if (targetStore.getState().sessionId) {
+          targetStore.getState().detachSession();
+        }
+        // Clear to a blank local draft shell before durable id arrives.
+        targetStore.setState({
+          sessionId: null,
+          title: "",
+          messages: [],
+          isLoading: true,
+          isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          error: null,
+          tokenCount: 0,
+          queuedMessages: [],
+        } as never);
       }
+      finishShellSpan();
 
       try {
-        await ensureModelReady(targetStore);
-        const session = await client.createSession(
-          undefined,
-          directory,
-          targetBranch ?? undefined,
-          directory ? "selected" : "neutral",
+        const session = await creationCoordinator.run(
           targetType,
-          targetStore.getState().permissionMode,
-        );
-        await bootstrapSession(session);
-        lastSessionIdByTypeRef.current[session.session_type] = session.id;
-        setActiveTab(tabForSessionType(session.session_type));
-        setActiveToolCallId(null);
-        setDrawerOpen(false);
-        void Haptics.notificationAsync(
-          Haptics.NotificationFeedbackType.Success,
+          async (isCurrent) => {
+            const finishBindSpan = beginKrustyPerformanceSpan(
+              "new_chat.session_bind",
+              targetType,
+            );
+            try {
+              // Only hard-wait for a model when none is already usable.
+              if (!targetStore.getState().model) {
+                await ensureModelReady(targetStore);
+              } else {
+                void ensureModelReady(targetStore);
+              }
+              const created = await client.createSession(
+                undefined,
+                directory,
+                targetBranch ?? undefined,
+                directory ? "selected" : "neutral",
+                targetType,
+                targetStore.getState().permissionMode,
+              );
+              if (!isCurrent()) return null;
+              await bootstrapSession(created);
+              if (!isCurrent()) return null;
+              lastSessionIdByTypeRef.current[created.session_type] = created.id;
+              void Haptics.notificationAsync(
+                Haptics.NotificationFeedbackType.Success,
+              );
+              return created;
+            } finally {
+              finishBindSpan();
+            }
+          },
         );
         return session;
       } catch {
+        targetStore.setState({
+          isLoading: false,
+          error: "Failed to create session",
+        } as never);
         return null;
       }
     },
@@ -225,16 +347,36 @@ export function useSessionActions({
 
     try {
       const precreate = intent.precreate;
-      const session = await client.createSession(
-        undefined,
-        precreate?.projectDir ?? undefined,
-        precreate?.targetBranch ?? undefined,
-        precreate?.workspaceMode,
-        precreate?.sessionType ?? sessionTypeForTab(activeTab),
-        sessionStore.getState().permissionMode,
+      const targetType = precreate?.sessionType ?? sessionTypeForTab(activeTab);
+      const session = await sessionCreationCoordinatorRef.current.run(
+        targetType,
+        async (isCurrent) => {
+          const finishBindSpan = beginKrustyPerformanceSpan(
+            "new_chat.session_bind",
+            targetType,
+          );
+          try {
+            const created = await client.createSession(
+              undefined,
+              precreate?.projectDir ?? undefined,
+              precreate?.targetBranch ?? undefined,
+              precreate?.workspaceMode,
+              targetType,
+              sessionStore.getState().permissionMode,
+            );
+            if (!isCurrent()) return null;
+            await bootstrapSession(created);
+            if (!isCurrent()) return null;
+            lastSessionIdByTypeRef.current[created.session_type] = created.id;
+            return created;
+          } finally {
+            finishBindSpan();
+          }
+        },
       );
-      await bootstrapSession(session);
-      lastSessionIdByTypeRef.current[session.session_type] = session.id;
+      if (!session) {
+        return null;
+      }
       return { ...intent, sendOptions: undefined };
     } catch {
       return null;
@@ -250,18 +392,22 @@ export function useSessionActions({
 
   const loadSession = useCallback(
     async (session: SessionResponse) => {
-      const targetStore = modeStores[session.session_type].session;
+      sessionCreationCoordinatorRef.current.invalidate(session.session_type);
       // Close drawer and switch mode immediately so the gesture feels instant.
       lastSessionIdByTypeRef.current[session.session_type] = session.id;
       setDrawerOpen(false);
       setActiveTab(tabForSessionType(session.session_type));
       // loadSession already detaches stream callbacks for the leaving session.
       // Avoid an extra detachSession() which can thrash presence/poll state.
-      void targetStore.getState().loadSession(session.id);
+      scheduleSessionSelection({
+        id: session.id,
+        sessionType: session.session_type,
+      });
     },
     [
       lastSessionIdByTypeRef,
       modeStores,
+      scheduleSessionSelection,
       setActiveTab,
       setDrawerOpen,
     ],
@@ -272,14 +418,15 @@ export function useSessionActions({
       setDrawerOpen(false);
       const target = sessions.find((session) => session.id === id);
       const targetType = target?.session_type ?? "mako";
-      const targetStore = modeStores[targetType].session;
+      sessionCreationCoordinatorRef.current.invalidate(targetType);
       lastSessionIdByTypeRef.current[targetType] = id;
       setActiveTab(tabForSessionType(targetType));
-      void targetStore.getState().loadSession(id);
+      scheduleSessionSelection({ id, sessionType: targetType });
     },
     [
       lastSessionIdByTypeRef,
       modeStores,
+      scheduleSessionSelection,
       sessions,
       setActiveTab,
       setDrawerOpen,
@@ -303,29 +450,45 @@ export function useSessionActions({
       );
 
       if (existing) {
+        sessionCreationCoordinatorRef.current.invalidate("code");
         lastSessionIdByTypeRef.current.code = existing.id;
         // loadSession detaches the previous stream attachment; avoid thrashing
         // presence/poll state with an extra detachSession on thread open.
-        void codeStore.getState().loadSession(existing.id);
+        scheduleSessionSelection({ id: existing.id, sessionType: "code" });
         return;
       }
 
+      sessionSelectionSchedulerRef.current?.cancel();
+
       try {
-        await ensureModelReady(codeStore);
-        const session = await client.createSession(
-          undefined,
-          projectDir,
-          targetBranch ?? undefined,
-          "selected",
+        const session = await sessionCreationCoordinatorRef.current.run(
           "code",
-          codeStore.getState().permissionMode,
+          async (isCurrent) => {
+            await ensureModelReady(codeStore);
+            const created = await client.createSession(
+              undefined,
+              projectDir,
+              targetBranch ?? undefined,
+              "selected",
+              "code",
+              codeStore.getState().permissionMode,
+            );
+            if (!isCurrent()) {
+              return null;
+            }
+            await bootstrapSession(created);
+            if (!isCurrent()) {
+              return null;
+            }
+            lastSessionIdByTypeRef.current.code = created.id;
+            setActiveToolCallId(null);
+            void Haptics.notificationAsync(
+              Haptics.NotificationFeedbackType.Success,
+            );
+            return created;
+          },
         );
-        await bootstrapSession(session);
-        lastSessionIdByTypeRef.current.code = session.id;
-        setActiveToolCallId(null);
-        void Haptics.notificationAsync(
-          Haptics.NotificationFeedbackType.Success,
-        );
+        if (!session) return;
       } catch {
         return;
       }
@@ -335,6 +498,7 @@ export function useSessionActions({
       client,
       ensureModelReady,
       modeStores,
+      scheduleSessionSelection,
       sessions,
       setActiveTab,
       setActiveToolCallId,
@@ -506,17 +670,6 @@ export function useSessionActions({
     sessionStore.getState().toggleFastMode();
   }, [models, sessionStore]);
 
-  const handleTabChange = useCallback(
-    async (index: number) => {
-      setActiveTab(index);
-      setDrawerOpen(false);
-    },
-    [
-      setActiveTab,
-      setDrawerOpen,
-    ],
-  );
-
   return {
     stopCurrentStream,
     detachCurrentSession,
@@ -532,6 +685,6 @@ export function useSessionActions({
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    handleTabChange,
+    cancelPendingSessionSelection,
   };
 }

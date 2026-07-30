@@ -261,7 +261,7 @@ function summarizeCadence(runs: MakoCurrentRunSummary[]) {
     return {
       tickIntervalLabel: "30s",
       tickBudgetLabel: "1000",
-      detail: "Default cadence applies until a project-specific Mako policy is present.",
+      detail: "Default cadence applies until a project-specific Hive policy is present.",
     };
   }
 
@@ -462,7 +462,7 @@ function summarizeKnowledgeHealth(
   if (!health || health.scope_count === 0) {
     return {
       value: "Pending",
-      detail: "Knowledge snapshots will appear after Mako has enough workspace history to consolidate.",
+      detail: "Knowledge snapshots will appear after Hive has enough workspace history to consolidate.",
       tone: "default" as const,
     };
   }
@@ -499,7 +499,7 @@ function summarizeDaemonHealth(
   if (!daemon) {
     return {
       value: "Pending",
-      detail: "Daemon stats will appear once Mako has loaded current workspace state.",
+      detail: "Daemon stats will appear once Hive has loaded current workspace state.",
       tone: "default" as const,
     };
   }

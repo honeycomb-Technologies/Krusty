@@ -47,10 +47,10 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
 
   const statusColor =
     status === "active" || status === "running"
-      ? "#4ade80"
+      ? "#7f9a86"
       : status === "idle"
-        ? "#fbbf24"
-        : "#ef4444";
+        ? "#b89a61"
+        : "#b06f73";
 
   const statusLabel =
     status === "running"
@@ -66,10 +66,10 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       <AccessoryBackground>
         <VStack alignment="center">
           <Image
-            systemName={status === "offline" ? "bolt.slash.fill" : "bolt.fill"}
+            systemName="hexagon"
             modifiers={[font({ size: 16 })]}
           />
-          <Text modifiers={[font({ size: 8, weight: "semibold" })]}>Mako</Text>
+          <Text modifiers={[font({ size: 8, weight: "semibold" })]}>Hive</Text>
         </VStack>
       </AccessoryBackground>
     );
@@ -80,9 +80,9 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       <AccessoryBackground>
         <VStack alignment="leading">
           <HStack>
-            <Image systemName="bolt.fill" modifiers={[font({ size: 10 })]} />
+            <Image systemName="hexagon" modifiers={[font({ size: 10 })]} />
             <Text modifiers={[font({ size: 12, weight: "semibold" })]}>
-              Mako — {statusLabel}
+              Hive — {statusLabel}
             </Text>
           </HStack>
           <Text modifiers={[font({ size: 11 }), lineLimit(2), opacity(0.7)]}>
@@ -96,8 +96,8 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
   if (family === "accessoryInline") {
     return (
       <HStack>
-        <Image systemName="bolt.fill" />
-        <Text>Mako: {statusLabel}</Text>
+        <Image systemName="hexagon" />
+        <Text>Hive: {statusLabel}</Text>
       </HStack>
     );
   }
@@ -108,16 +108,16 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
         alignment="leading"
         modifiers={[
           padding({ all: 14 }),
-          background("#0b1119"),
-          foregroundStyle("#ffffff"),
+          background("#0e0e11"),
+          foregroundStyle("#e8e5ea"),
         ]}
       >
         <HStack>
           <Image
-            systemName="bolt.fill"
+            systemName="hexagon"
             modifiers={[foregroundStyle(statusColor), font({ size: 14 })]}
           />
-          <Text modifiers={[font({ size: 13, weight: "bold" })]}>Mako</Text>
+          <Text modifiers={[font({ size: 13, weight: "bold" })]}>Hive</Text>
           <Spacer />
           <Text modifiers={[font({ size: 10 }), foregroundStyle(statusColor)]}>
             {statusLabel}
@@ -139,23 +139,23 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
         alignment="leading"
         modifiers={[
           padding({ all: 14 }),
-          background("#0b1119"),
-          foregroundStyle("#ffffff"),
+          background("#0e0e11"),
+          foregroundStyle("#e8e5ea"),
         ]}
       >
         <HStack>
           <Image
-            systemName="bolt.fill"
+            systemName="hexagon"
             modifiers={[foregroundStyle(statusColor), font({ size: 16 })]}
           />
           <Text modifiers={[font({ size: 15, weight: "bold" })]}>
-            Mako Agent
+            Hive Agent
           </Text>
           <Spacer />
           <Text
             modifiers={[
               font({ size: 11, weight: "medium" }),
-              foregroundStyle("#0b1119"),
+              foregroundStyle("#0e0e11"),
               padding({ horizontal: 8, vertical: 3 }),
               background(statusColor),
               cornerRadius(6),
@@ -182,7 +182,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
             </Text>
             <ProgressView
               value={taskProgress}
-              modifiers={[foregroundStyle("#ff6b35")]}
+              modifiers={[foregroundStyle("#b89a61")]}
             />
           </VStack>
         )}
@@ -207,22 +207,22 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
       alignment="leading"
       modifiers={[
         padding({ all: 16 }),
-        background("#0b1119"),
-        foregroundStyle("#ffffff"),
+        background("#0e0e11"),
+        foregroundStyle("#e8e5ea"),
       ]}
     >
       <HStack>
         <Image
-          systemName="bolt.fill"
+          systemName="hexagon"
           modifiers={[foregroundStyle(statusColor), font({ size: 18 })]}
         />
-        <Text modifiers={[font({ size: 17, weight: "bold" })]}>Mako Agent</Text>
+        <Text modifiers={[font({ size: 17, weight: "bold" })]}>Hive Agent</Text>
         <Spacer />
         <VStack alignment="trailing">
           <Text
             modifiers={[
               font({ size: 11, weight: "medium" }),
-              foregroundStyle("#0b1119"),
+              foregroundStyle("#0e0e11"),
               padding({ horizontal: 8, vertical: 3 }),
               background(statusColor),
               cornerRadius(6),
@@ -234,7 +234,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
             <HStack spacing={4} modifiers={[padding({ top: 4 })]}>
               <Image
                 systemName="circle.fill"
-                modifiers={[foregroundStyle("#4ade80"), font({ size: 6 })]}
+                modifiers={[foregroundStyle("#7f9a86"), font({ size: 6 })]}
               />
               <Text modifiers={[font({ size: 9 }), opacity(0.5)]}>
                 Connected
@@ -254,7 +254,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
         </Text>
         <Text modifiers={[font({ size: 14 }), lineLimit(4), opacity(0.9)]}>
           {briefing ||
-            "No briefing available. Mako will generate one when active."}
+            "No briefing available. Hive will generate one when active."}
         </Text>
       </VStack>
 
@@ -276,7 +276,7 @@ function MakoWidget(props: MakoProps, env: WidgetEnvironment) {
           <Text modifiers={[font({ size: 12 }), opacity(0.7)]}>{taskName}</Text>
           <ProgressView
             value={taskProgress}
-            modifiers={[foregroundStyle("#ff6b35")]}
+            modifiers={[foregroundStyle("#b89a61")]}
           />
         </VStack>
       )}

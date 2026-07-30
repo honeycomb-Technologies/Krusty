@@ -44,7 +44,7 @@ pub(super) fn build_current_snapshot_content(
         .sum::<usize>();
 
     let mut sections = vec![
-        "A compact summary of durable project knowledge, recent outcomes, and current Mako activity. Use this as orientation, then inspect the underlying memories, reports, or runs for detail.".to_string(),
+        "A compact summary of durable project knowledge, recent outcomes, and current Hive activity. Use this as orientation, then inspect the underlying memories, reports, or runs for detail.".to_string(),
     ];
 
     if let Some(project_dir) = project_dir {
@@ -53,7 +53,7 @@ pub(super) fn build_current_snapshot_content(
 
     sections.push(format!("Durable memories: {}", carry_forward.len()));
     sections.push(format!("Recent reports: {}", reports.len()));
-    sections.push(format!("Recent Mako runs: {}", recent_runs.len()));
+    sections.push(format!("Recent Hive runs: {}", recent_runs.len()));
     sections.push(format!("Open tasks: {}", open_tasks));
     sections.push(format!("Failed tasks: {}", failed_tasks));
 

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -10,6 +9,7 @@ import { ChevronDown, ChevronRight, FileText, X } from "lucide-react-native";
 import type { Report } from "@krusty/api";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { DetailPaneSkeleton } from "../ui/Skeleton";
 import { ReportDetailContent } from "./ReportDetailContent";
 
 interface InlineReportCardProps {
@@ -87,7 +87,7 @@ export function InlineReportCard({
               style={[styles.title, { color: t.foreground }]}
               numberOfLines={1}
             >
-              {report?.title ?? "Mako report"}
+              {report?.title ?? "Hive report"}
             </Text>
             {!expanded && report?.summary ? (
               <Text
@@ -113,7 +113,7 @@ export function InlineReportCard({
 
       {expanded ? (
         <View style={[styles.content, { borderTopColor: t.border }]}>
-          {isLoading ? <ActivityIndicator color={t.userMessage} /> : null}
+          {isLoading ? <DetailPaneSkeleton /> : null}
           {error ? <Text style={[styles.error, { color: t.error }]}>{error}</Text> : null}
           {report ? <ReportDetailContent report={report} /> : null}
         </View>

@@ -30,13 +30,8 @@ export function MakoCurrentView({
   const { theme } = useThemeContext();
   const t = theme.colors;
 
-  if (state.isLoading && !state.current && homeState.isLoading && !homeState.home) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator color={t.userMessage} />
-      </View>
-    );
-  }
+  const showBootstrapLoading =
+    state.isLoading && !state.current && homeState.isLoading && !homeState.home;
 
   const status = state.current?.status;
   const pendingApprovalCount = state.current?.approvals.length ?? 0;
@@ -51,7 +46,7 @@ export function MakoCurrentView({
   const blockedPrompt =
     pendingApprovalCount > 0
       ? {
-          title: "Mako needs your approval",
+          title: "Hive needs your approval",
           detail:
             pendingApprovalCount === 1
               ? "Review the pending request and reply in this thread to continue."
@@ -59,11 +54,11 @@ export function MakoCurrentView({
         }
       : waitingRun
         ? {
-            title: "Mako needs your input",
+            title: "Hive needs your input",
             detail:
               waitingRun.diagnostic?.detail ||
               waitingRun.diagnostic?.summary ||
-              "Reply in this thread with the missing direction. Mako will wait here until you do.",
+              "Reply in this thread with the missing direction. Hive will wait here until you do.",
           }
         : null;
 
@@ -87,18 +82,21 @@ export function MakoCurrentView({
       <View style={[styles.metaBlock, { borderBottomColor: t.border }]}>
         <View style={styles.statusLine}>
           <Text style={[styles.statusText, { color: t.mutedForeground }]}>
-            {stateBits.join(" • ")}
+            {showBootstrapLoading ? "Connecting to Hive…" : stateBits.join(" • ")}
           </Text>
+          {showBootstrapLoading || state.isRefreshing || homeState.isRefreshing ? (
+            <ActivityIndicator color={t.userMessage} size="small" />
+          ) : null}
         </View>
 
         {needsBootstrap ? (
           <View style={[styles.focusRow, { borderColor: t.border }]}>
             <View style={styles.focusCopy}>
               <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                Initialize Mako
+                Initialize Hive
               </Text>
               <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                Create soul, identity, heartbeat, memory, channels, and crew.
+                Create identity, voice, heartbeat, memory, channels, and Hive Agents.
               </Text>
             </View>
             <Pressable
@@ -176,6 +174,10 @@ const styles = StyleSheet.create({
   statusLine: {
     paddingTop: 4,
     paddingBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
   statusText: {
     fontSize: 12,

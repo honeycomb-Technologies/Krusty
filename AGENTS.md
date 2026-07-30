@@ -1,10 +1,24 @@
-# AGENTS Guide: Krusty
+# AGENTS Guide: Mitsuro
 
 ## Purpose
-Repository-level engineering guardrails for Krusty - an AI coding assistant with CLI/TUI, web server, ACP editor integration, and autonomous agent modes.
+Repository-level engineering, product, validation, and release guardrails for Mitsuro: an AI coding assistant with mobile, web, desktop, CLI/TUI, ACP editor integration, and autonomous agent modes.
 
 ## AGENTS Strategy
 This is the **only** AGENTS file in the repository. All module-specific invariants live in sections below rather than scattered across subdirectories.
+
+## Product Language and Compatibility
+- **Product name:** Mitsuro.
+- **Company name:** Honeycomb Technologies.
+- **Interactive assistant/session:** Agent. User-facing modes may be named Chat and Code.
+- **Durable autonomous system:** Hive. An individual delegated worker is a Hive Agent.
+- **Activity accent/state:** Pulse, only where the product design calls for that term.
+- Public product copy, screenshots, package descriptions, release notes, and repository prose should use Mitsuro, Agent, Hive, Hive Agent, and Pulse consistently. Do not present Krusty or Mako as current product names.
+- The canonical public repository is `honeycomb-Technologies/Mitsuro`. New mobile launch URLs use `mitsuro://`; `krusty://` remains a compatibility alias.
+- Existing identifiers such as `krusty`, `krusty-*`, `krusty-mako`, `@krusty/*`, `/api/mako/*`, `session_type = "mako"`, `~/.krusty`, Expo slugs, bundle IDs, database fields, native symbols, and deployed service names are compatibility contracts, not user-facing branding.
+- Use legacy identifiers in prose only when naming an exact command, path, package, route, schema value, or migration boundary, and format them as code.
+- Do not mechanically rename compatibility identifiers. A rename requires an explicit migration plan covering aliases, stored data, installed clients, deep links, deployments, rollback, and mixed-version behavior.
+- The supported terminal command remains `krusty` until a deliberate CLI migration ships. A future `mitsuro` command must retain a tested `krusty` compatibility alias for an announced transition period.
+- If product language and an internal identifier differ, prefer clear translation at the UI/API boundary over leaking the internal name into the interface.
 
 ## Core Architecture
 - `crates/krusty-cli`: Terminal client and TUI runtime. Entry point with command parsing.
@@ -39,9 +53,40 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Write code that is composable, testable, and explicit about failure modes.
 - Keep changes small and reversible.
 - Avoid hidden side effects and global state sprawl.
-- Error handling: anyhow + thiserror + custom error enum.
-- Logging: tracing + tracing_subscriber.
-- Async: tokio (no async-std).
+- Preserve the existing UI appearance and interaction model during reliability or performance work unless a redesign is explicitly requested.
+- Prefer measured proof over intuition: establish a baseline, name the suspected bottleneck, make a focused change, and compare the same workload afterward.
+- Inspect current branches, worktrees, dirty files, processes, disk capacity, and runtime authority before consequential edits, cleanup, integration, deployment, or release work.
+- Preserve unrelated dirty work and active processes. Never treat a dirty worktree as disposable or assume its branch tip contains its uncommitted work.
+- Keep source state, committed state, built artifacts, installed clients, and running services distinct in both reasoning and status reports.
+- Do not claim that a code change is deployed, an upload is processed, a TestFlight build is available, or a runtime is healthy without evidence for that exact state.
+- Prefer focused fixes over broad rewrites. When a broad change is genuinely required, keep it staged, reviewable, and reversible.
+- Error handling: `anyhow` + `thiserror` + custom error enums.
+- Logging: `tracing` + `tracing_subscriber`.
+- Async: `tokio` (no `async-std`).
+
+## Task Execution Contract
+- For reviews, audits, explanations, and diagnosis, inspect first and report evidence; do not infer authorization for unrelated mutations, deployments, messages, or releases.
+- For an approved implementation, complete the scoped change, validate it in proportion to risk, review the resulting diff, and carry it to a clear terminal state instead of stopping at a plan.
+- Make reasonable, reversible assumptions when they preserve intent. Ask before a choice that materially changes product behavior, public state, data, cost, security, or release scope.
+- Keep progress updates concise and factual during long-running work. State what is proven, what is inferred, what is still running, and what remains.
+- When blocked, exhaust safe in-scope diagnostics and alternatives before asking the user. Do not label slow, difficult, or merely uncertain work as blocked.
+- Do not hide failed commands, flaky tests, warnings, or incomplete release states. Explain their scope and whether they invalidate the requested outcome.
+- Never delete branches, worktrees, caches, build artifacts, databases, credentials, or generated native projects without first proving ownership, current use, and recovery impact. Destructive cleanup requires explicit authorization.
+- End handoffs with the authoritative path/branch/commit, validations run, runtime or release state, preserved dirty work, and the exact remaining action if anything is unfinished.
+
+## Evidence and Runtime Boundaries
+- Treat static checks, unit/integration tests, a Debug simulator run, a Release simulator run, a locally installed device build, TestFlight processing, TestFlight installation, and production runtime behavior as separate evidence levels.
+- Simulator testing is the default fast loop for navigation, rendering, stress gestures, stream behavior, and most performance regressions. Use Release configuration for performance conclusions.
+- Physical-device testing is required for device-only behavior such as APNs, Live Activities, widgets, background execution, thermal pressure, real cellular transitions, and TestFlight-specific packaging.
+- A successful App Store upload does not prove Apple processing completed. Processing does not prove tester assignment. Tester assignment does not prove the build installed or ran on a phone.
+- A healthy server endpoint proves only that service layer. For chat failures, diagnose these layers independently:
+  1. Honey service/process and route availability.
+  2. Provider credentials and refresh state.
+  3. Selected model and request outcome.
+  4. Client attachment, SSE delivery, parsing, and recovery.
+- Honey is the runtime authority when the client is connected to Honey. A local checkout, a dirty Honey source tree, or a successful local test is not evidence of the running Honey binary.
+- For Honey runtime claims, verify the user service, `/health`, the running executable via `/proc/<pid>/exe`, release symlink or artifact identity, version/hash, and the relevant provider request when safe.
+- Never silently substitute a different provider or model to make a failed request appear successful. Make fallbacks explicit in product behavior and diagnostics.
 
 ## Crate Boundaries
 - `krusty-cli`: terminal UX only. Do not re-implement core runtime logic here.
@@ -144,11 +189,37 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Desktop shell is a host for the Expo web build, not a separate product surface. Keep desktop-specific code focused on windowing, permissions, startup wiring, and packaging.
 - Treat Tauri permissions, deep links, and updater config as security-sensitive.
 
+### Mobile and Shared Client Performance (`apps/mobile`, `packages/state`, `packages/ui`)
+- Keep the interaction path independent from background synchronization. Navigation, opening the composer, switching modes, and creating an optimistic chat shell must not await full catalogs, session lists, or transcript hydration.
+- The active conversation surface owns its transcript subscription and lifecycle. App shells, inactive modes, hidden drawers, and secondary surfaces must not subscribe to or render the full active transcript.
+- Isolate immutable historical turns from the live turn. Use stable keys, structural equality, memoized boundaries, and bounded updates so one token does not re-render the entire transcript or application shell.
+- Coalesce duplicate loads and reconnects with single-flight behavior. Effects must be idempotent, cancelable where possible, narrowly dependent, and responsible for cleaning up listeners, timers, network requests, and subscriptions.
+- Never start network work, subscriptions, persistence, or native side effects during render.
+- Keep expensive secondary surfaces lazy and bounded. Browser and terminal processes may be kept alive after first use when that improves interaction, but hidden surfaces must freeze or stop costly work and tab/process counts must have explicit caps.
+- Avoid mounting multiple chat transcripts or mutually exclusive mode trees at once. Hidden does not mean free.
+- Treat nested virtualized lists, clipping, and React Native New Architecture interactions as correctness-sensitive. Validate list changes in a Release build under rapid navigation before enabling aggressive clipping or recycling behavior.
+- Batch or throttle high-frequency streaming, stick-to-bottom, gesture, presence, widget, and Live Activity updates. Do not enqueue application-wide state updates for every token, pixel, or animation frame.
+- Keep state selectors narrow. Context providers and external stores must not make unrelated screens re-render for chat tokens, timers, connection pings, or diagnostics events.
+- Persist interrupted-turn and draft recovery independently from canonical transcript history. A force quit may lose only the bounded in-flight tail, never corrupt or recursively rewrite the durable draft/session cache.
+- Changes to navigation, chat, mode switching, drawers, toolbox, settings, or session state require a repeatable stress pass that rapidly stacks those interactions and checks responsiveness, memory growth, warnings, and recovery.
+- Performance changes must retain the same visual output unless the task explicitly authorizes a design change.
+
+### Mobile Diagnostics and Privacy
+- Capture client performance and lifecycle telemetry at a shared, structured boundary. Correlate JS and native events with install, app-run, session, trace, build, and platform identifiers without duplicating the server's canonical `LoopEvent` execution trace.
+- Keep production/TestFlight diagnostics bounded, allowlisted, and privacy-safe. Never upload credentials, authorization headers, raw prompts, message bodies, tool output, filesystem contents, or unrestricted stack dumps.
+- Prefer durations, counters, state transitions, dropped-frame/hang signals, memory summaries, lifecycle markers, request classifications, and symbolicated allowlisted frames.
+- Persist bounded diagnostic batches incrementally. A freeze or force quit may prevent a final flush, so useful pre-freeze evidence must not depend on graceful termination.
+- Uploads must be explicit in product behavior, retry-safe, size-limited, ownership-checked, and observable to the user. Server ingestion must be idempotent and apply retention limits.
+- Debug-only tracing may be richer, but it must be compile-time or runtime gated and must not silently ship content-bearing traces in production.
+- Instrumentation must not become the performance problem. Measure its overhead, sample high-frequency events, cap buffers, and drop diagnostics before blocking the UI or chat stream.
+- Keep diagnostic schemas versioned and backward-compatible across mixed TestFlight/client and Honey server versions.
+
 ### CI/CD (`.github/`)
 - Treat workflow changes as production-impacting.
 - Keep CI reproducible and aligned with local developer commands.
 - Avoid secret leakage in logs and artifact names.
 - Keep release workflows backward-compatible for existing tags and packaging paths.
+- Do not spend remote build minutes to discover failures that deterministic local checks or a Release simulator build can catch.
 
 ### Packaging (`aur/`)
 - Keep PKGBUILD/install scripts aligned with released artifacts.
@@ -161,6 +232,26 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Fail with clear, actionable error messages.
 - Any new hook must not duplicate CI logic unnecessarily.
 
+## Public Repository and Documentation Hygiene
+- Keep the public README product-first, concise, accurate, and useful to a new user. Put deep implementation detail in maintained contributor or architecture documentation.
+- Public documentation must clearly distinguish implemented behavior, compatibility behavior, experiments, proposals, and future plans.
+- Do not commit internal research dumps, competitive notes, temporary handoffs, generated traces, profiling bundles, local reports, screenshots containing private data, or abandoned experiments to public-facing documentation paths.
+- Add generated or local-only artifacts to `.gitignore` before they accumulate. If sensitive or misleading content was already committed, removing the current file does not remove Git history; history rewriting requires explicit, coordinated authorization.
+- Never publish credentials, tokens, private host details, personal filesystem paths, customer/user data, or unredacted diagnostics.
+- Avoid stale hard-coded claims about supported providers, models, versions, release availability, or infrastructure when the product can expose the current truth dynamically.
+- Keep documentation links and commands executable from the repository state that contains them. Label platform-specific or compatibility-only commands accurately.
+- Historical product names may appear only where needed to explain a current compatibility contract or migration.
+
+## Build, Cache, and Disk Hygiene
+- Check `df` before large Rust, native iOS, Android, or multi-architecture builds when disk pressure is plausible. Inspect the size and age of `target`, DerivedData, simulator data, downloaded runtimes, CocoaPods caches, and `node_modules` before cleanup.
+- Reuse valid build artifacts and dependency caches. Do not repeatedly rebuild unchanged native layers for TypeScript-, JavaScript-, or documentation-only changes.
+- Do not use `cargo clean`, delete DerivedData, remove `node_modules`, remove Pods, or wipe simulator data as a first response to a build problem. Identify the stale or corrupt layer and remove only the bounded artifact that needs regeneration.
+- Prove reclaimed disk space with `df`; `du` only identifies where space is used.
+- CocoaPods remains part of the Expo iOS native dependency graph. Adding Skia or another native package does not replace Pods or justify removing the Podfile/native project integration.
+- Respect the checked-in lockfiles. When dependencies are stale or missing, prefer the repository's frozen install workflow before changing versions.
+- Check for active `cargo`, Xcode, Metro, Expo, simulator, and package-manager processes before deleting their outputs.
+- Record native dependency changes, generated-project regeneration, and cache invalidation reasons in the handoff or commit context so the next agent does not repeat them blindly.
+
 ## Default Dev Workflow
 - Build and run current local code only; do not require `git pull` for day-to-day refinement.
 - Rust builds inherit `TMPDIR` from `.cargo/config.toml`, pointing rustc temp files at the workspace `target/` directory instead of `/tmp`.
@@ -172,13 +263,18 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 
 ## Release Integration Workflow
 - Keep `main` as the last accepted release baseline. Cross-surface work intended for the next coordinated release belongs on the current dated `codex/release-staging-YYYYMMDD` branch.
-- At the start of any Krusty conversation that may change or release the product, inspect the active branch, every registered worktree, staged and unstaged changes, and the current release-staging branch before editing.
+- At the start of any Mitsuro task that may change or release the product, inspect the active branch, every registered worktree, staged and unstaged changes, active build/deploy processes, and the current release-staging branch before editing.
 - Treat each worktree as an independent Git index. Commit a logical change on its source branch, then deliberately cherry-pick or otherwise reconcile it into release staging; files cannot be staged across worktrees through one shared index.
 - Do not merge preservation, archive, or old rollup branches wholesale. Audit their commits against release staging and integrate only changes that are genuinely missing and still intended.
 - Preserve concurrent dirty work. When a mixed dirty tree must be captured, place it on release staging as an explicit staging snapshot before reorganizing or squashing it for release.
 - Build private Honey previews from the exact release-staging commit. A detached preview mirror is not a source branch and must not become the release authority.
 - Do not push, merge to `main`, tag, publish artifacts, restart the production service, or issue a public release until release staging passes the required validation below and the user explicitly approves the release.
 - One coordinated release may contain multiple logical commits. Prefer an auditable staging history over one unreviewable cross-worktree commit; squash only at the final release boundary when requested.
+- Before a mobile release, reconcile every intended feature branch onto the current release-staging tip, then re-run mobile/native validation on that combined commit. A previously successful build from an older tip is not release evidence.
+- Prefer local static checks, focused regressions, web export, and Release simulator/device validation before consuming EAS build credits.
+- For TestFlight, record the source commit, marketing version, build number, build method, upload result, Apple processing result, tester assignment, and device installation separately.
+- Do not state that a TestFlight build is ready for the user until App Store Connect shows it processed and available to the intended tester group, or the installation is directly confirmed.
+- Production Honey deployment is a separate approval and validation boundary from mobile distribution. Never infer one from the other.
 
 ## Required Validation
 All code must pass before commit:
@@ -190,8 +286,18 @@ cargo fmt --all
 ```
 Web/mobile validation:
 ```bash
-cd apps/mobile && npx expo export --platform web
+cd apps/mobile
+npx tsc --noEmit
+npx expo export --platform web
 ```
+
+Validation must be proportional to the changed surface in addition to the required gates:
+- Run focused regressions for the behavior changed.
+- For Expo dependency or native configuration changes, run Expo Doctor, regenerate native projects only when required, install Pods from the lockfile, and build the relevant Release simulator/device target.
+- For visible UI changes, inspect and interact with the rendered result at the relevant phone and desktop/web sizes.
+- For performance changes, capture before/after evidence using the same build configuration and workload; include memory, responsiveness, dropped-frame/hang, or trace evidence appropriate to the claim.
+- For server/provider changes, test the relevant route and provider outcome without exposing credentials.
+- Documentation-only changes may reuse the already-validated code commit when code and dependency inputs are unchanged, but must pass `git diff --check`, link/path checks, and any repository documentation audit scripts.
 
 ## Dependencies
 Key runtime dependencies (check `Cargo.toml` for versions):

@@ -57,13 +57,6 @@ export function MakoScreen({
       : null;
 
   useEffect(() => {
-    if (!navigation.selectedRunId) {
-      void current.refresh();
-      void home.refresh();
-    }
-  }, [current.refresh, home.refresh, navigation.selectedRunId]);
-
-  useEffect(() => {
     if (!requestedTopLevel) {
       return;
     }
@@ -100,17 +93,17 @@ export function MakoScreen({
 
   const status = current.current?.status.home_status ?? "idle";
   const topLevelTitles: Record<MakoTopLevelView, string> = {
-    mako: "Mako",
+    mako: "Hive",
     attention: "Attention",
     schedule: "Schedule",
     logbook: "Logbook",
     runs: "Runs",
     details: "Details",
-    crew: "Crew",
+    crew: "Agents",
     channels: "Channels",
   };
-  const title = topLevelTitles[navigation.topLevel] ?? "Mako";
-  const subtitle = navigation.topLevel === "mako" ? "Always Swimming." : undefined;
+  const title = topLevelTitles[navigation.topLevel] ?? "Hive";
+  const subtitle = navigation.topLevel === "mako" ? "The hive is always alive." : undefined;
 
   return (
     <SafeAreaView

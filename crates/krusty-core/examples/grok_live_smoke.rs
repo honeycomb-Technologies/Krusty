@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let resolved = resolve_grok_auth(&credentials);
     let token = resolved
         .credential
-        .context("no Grok auth available; run `grok login` or Krusty's Grok OAuth flow")?;
+        .context("no Grok auth available; run `grok login` or Mitsuro's Grok OAuth flow")?;
 
     println!(
         "Resolved Grok auth source: {}",

@@ -1,5 +1,5 @@
 [Unit]
-Description=Krusty Mako autonomous backend daemon
+Description=Mitsuro Hive autonomous backend service
 Requires=krusty-mako.socket
 After=network-online.target krusty-mako.socket
 Wants=network-online.target
@@ -12,7 +12,7 @@ Environment=RUST_LOG=krusty_mako=info
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # User services inherit the user manager's environment. Deployments should add
 # an UnsetEnvironment= drop-in for unrelated credentials and bootstrap tokens;
-# keep only provider/push variables intentionally trusted by Mako.
+# keep only provider/push variables intentionally trusted by Hive.
 Restart=always
 RestartSec=2s
 TimeoutStopSec=45s
@@ -22,7 +22,7 @@ UMask=0077
 LimitNOFILE=65536
 TasksMax=512
 
-# Mako needs the project tree and its own state, but not arbitrary home writes.
+# Hive needs the project tree and its own state, but not arbitrary home writes.
 # It also validates and re-secures the systemd-owned private socket directory.
 NoNewPrivileges=true
 PrivateTmp=true

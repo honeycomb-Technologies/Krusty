@@ -136,12 +136,35 @@ export function Terminal({ visible, style }: TerminalProps) {
     createTab();
   }, [createTab, isWeb, serverUrl, tabs.length, visible]);
 
-  if (!isWeb || !visible) {
+  if (!isWeb) {
     return null;
   }
 
+  // Keep tab metadata warm, but freeze live xterm/websocket processes while
+  // the toolbox is closed to avoid background CPU/memory tax.
+  if (!visible) {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.container,
+          { backgroundColor: t.background, borderTopColor: t.border },
+          styles.hiddenSurface,
+          style,
+        ]}
+      />
+    );
+  }
+
   return (
-    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
+    <View
+      pointerEvents="auto"
+      style={[
+        styles.container,
+        { backgroundColor: t.background, borderTopColor: t.border },
+        style,
+      ]}
+    >
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
         {tabs.map((tab) => {
           const active = activeTabId === tab.id;
@@ -722,6 +745,9 @@ const styles = StyleSheet.create({
   container: {
     height: 320,
     borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  hiddenSurface: {
+    opacity: 0,
   },
   tabBar: {
     flexDirection: "row",

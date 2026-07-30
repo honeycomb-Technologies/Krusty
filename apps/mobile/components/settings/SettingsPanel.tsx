@@ -29,6 +29,7 @@ import {
 	AboutSection,
 	AppearanceSection,
 	ConnectionSection,
+	DiagnosticsSection,
 	McpSection,
 	NotificationsSection,
 	PreviewSection,
@@ -46,6 +47,7 @@ import {
 	toErrorMessage,
 } from "./shared";
 import { styles } from "./styles";
+import { useMobileDiagnostics } from "../../diagnostics/MobileDiagnosticsProvider";
 
 interface SettingsPanelProps {
 	active?: boolean;
@@ -76,6 +78,7 @@ export function SettingsPanel({
 		lastRegistrationError,
 		pendingActionCount,
 	} = useNotifications();
+	const diagnostics = useMobileDiagnostics();
 
 	const [inputUrl, setInputUrl] = useState("");
 	const [inputToken, setInputToken] = useState("");
@@ -99,6 +102,7 @@ export function SettingsPanel({
 	const [skills, setSkills] = useState<SkillInfo[]>([]);
 	const [skillsLoading, setSkillsLoading] = useState(false);
 	const [skillsMessage, setSkillsMessage] = useState<string | null>(null);
+	const [skillPageStart, setSkillPageStart] = useState(0);
 
 	const [previewSettings, setPreviewSettings] =
 		useState<PreviewSettings | null>(null);
@@ -609,6 +613,8 @@ export function SettingsPanel({
 				loading={skillsLoading}
 				skills={skills}
 				message={skillsMessage}
+				pageStart={skillPageStart}
+				onPageStartChange={setSkillPageStart}
 			/>
 
 			<PreviewSection
@@ -633,14 +639,28 @@ export function SettingsPanel({
 				onSelect={setColorScheme}
 			/>
 
-				<NotificationsSection
-					notificationLevel={notificationLevel}
-					registrationState={registrationState}
-					lastRegistrationError={lastRegistrationError}
-					pendingActionCount={pendingActionCount}
-					notifOptions={notifOptions}
-					onSelect={(level) => void changeNotificationLevel(level)}
-				/>
+			<DiagnosticsSection
+				mode={diagnostics.mode}
+				runId={diagnostics.runId}
+				eventCount={diagnostics.eventCount}
+				nativePayloadCount={diagnostics.nativePayloadCount}
+				approximateBytes={diagnostics.approximateBytes}
+				uploadState={diagnostics.uploadState}
+				completionPending={diagnostics.completionPending}
+				isConnected={isConnected}
+				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
+				onStopAndUpload={() => void diagnostics.stopStressRun()}
+				onUpload={() => void diagnostics.flush(false)}
+			/>
+
+			<NotificationsSection
+				notificationLevel={notificationLevel}
+				registrationState={registrationState}
+				lastRegistrationError={lastRegistrationError}
+				pendingActionCount={pendingActionCount}
+				notifOptions={notifOptions}
+				onSelect={(level) => void changeNotificationLevel(level)}
+			/>
 
 			<AboutSection />
 		</ScrollView>

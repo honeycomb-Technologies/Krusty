@@ -178,13 +178,13 @@ impl SessionManager {
         )
     }
 
-    /// Ensure the durable singleton Mako companion chat for a user exists.
+    /// Ensure the durable singleton Hive companion chat for a user exists.
     ///
     /// The companion thread is global (not project-bound), always autonomous, and
     /// shared across every client surface for that user. Job/run sessions created
-    /// by Mako dispatch remain separate work units under the hood.
+    /// by Hive dispatch remain separate work units under the hood.
     pub fn ensure_mako_main_session(&self, user_id: Option<&str>) -> Result<super::SessionInfo> {
-        const MAIN_TITLE: &str = "Mako";
+        const MAIN_TITLE: &str = "Hive";
 
         let mut sessions = self.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
         // Prefer the oldest matching companion candidate so repeated opens stay
@@ -227,7 +227,7 @@ impl SessionManager {
         )?;
 
         self.get_session(&session_id)?
-            .ok_or_else(|| anyhow::anyhow!("failed to load newly created Mako main session"))
+            .ok_or_else(|| anyhow::anyhow!("failed to load newly created Hive main session"))
     }
 
     /// Create a linked child session that inherits the parent's ownership metadata.

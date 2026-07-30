@@ -170,7 +170,7 @@ fn test_ensure_mako_main_session_is_singleton_autonomous_and_global() {
         .expect("main companion should reuse");
 
     assert_eq!(first.id, second.id);
-    assert_eq!(first.title, "Mako");
+    assert_eq!(first.title, "Hive");
     assert_eq!(first.session_type, SessionType::Mako);
     assert_eq!(first.permission_mode, PermissionMode::Autonomous);
     assert!(first.project_dir.is_none());

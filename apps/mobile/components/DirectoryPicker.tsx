@@ -105,7 +105,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
               style={StyleSheet.absoluteFill}
             />
             <View style={[StyleSheet.absoluteFill, {
-              backgroundColor: theme.scheme === 'dark' ? 'rgba(11,17,25,0.92)' : 'rgba(255,255,255,0.92)',
+              backgroundColor: t.surfaceOverlayElevated,
               borderRadius: 22,
               borderWidth: StyleSheet.hairlineWidth,
               borderColor: g.border,

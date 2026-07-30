@@ -1,286 +1,142 @@
-```
-▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌
-█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌
-▐▀▀▄·▐▀▀▄ █▌▐█▌▄▀▀▀█▄ ▐█.▪▐█▌▐█▪
-▐█.█▌▐█•█▌▐█▄█▌▐█▄▪▐█ ▐█▌· ▐█▀·.
-·▀  ▀.▀  ▀ ▀▀▀  ▀▀▀▀  ▀▀▀   ▀ •
-```
+<p align="center">
+  <img src="assets/branding/mitsuro/mitsuro-lockup-horizontal.svg" alt="Mitsuro" width="360">
+</p>
 
-## Overview
+<p align="center">
+  An AI workspace for interactive coding, project research, and long-running agent work.
+</p>
 
-Krusty is a multi-platform AI coding assistant. The `krusty` binary bundles a terminal TUI, a web server with an embedded frontend, and editor integration via ACP. Autonomous Mako execution lives in the separately supervised `krusty-mako` daemon, so it survives client and HTTP-server restarts without creating a second execution owner. The frontend is built with Expo (React Native) and shared across mobile (iOS/Android), web (embedded in the server binary), and desktop (Tauri wrapper).
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="https://github.com/honeycomb-Technologies/Mitsuro/releases">Releases</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-## Repository Layout
+## What is Mitsuro?
 
-```
-crates/
-  krusty-cli/     Terminal UI + CLI entry point (the main binary)
-  krusty-core/    Shared AI, tools, storage, runtime (library)
-  krusty-server/  API server with embedded web frontend (library)
-apps/
-  mobile/         Expo app — iOS, Android, and web (React Native)
-  desktop/        Tauri desktop wrapper around the Expo web build
-packages/
-  api/            TypeScript API client (shared between mobile + desktop)
-  state/          Zustand state management (shared between mobile + desktop)
-  ui/             Design tokens and theme definitions (shared between mobile + desktop)
-wit/              WebAssembly Interface Types for the extension system
-```
+Mitsuro brings conversations, code sessions, and autonomous work into one
+connected workspace.
 
-## Quick Start
+- **Agent** is the interactive experience for coding, questions, and project
+  work.
+- **Hive** runs durable tasks that can continue in the background and recover
+  across restarts.
+- **Your server** owns sessions, tools, and project access. Mobile, web,
+  desktop, terminal, and editor clients connect to the same source of truth.
 
-### Install
+Mitsuro works with multiple AI providers and keeps provider credentials under
+your control. Tool permissions remain explicit, and project data is stored by
+the Mitsuro server rather than split across client-only copies.
+
+## Ways to use it
+
+| Surface | Best for |
+| --- | --- |
+| **iPhone** | Conversations, code sessions, Hive runs, reports, and remote tools |
+| **Web** | The full Mitsuro workspace in a browser |
+| **Desktop** | A native desktop window around the shared web workspace |
+| **Terminal** | Interactive work and direct server control |
+| **Editor** | Connecting compatible editors through ACP |
+
+## Highlights
+
+- Stream conversations and tool activity as work happens.
+- Resume saved sessions and recover interrupted work.
+- Switch between supported providers and models without changing clients.
+- Review approvals, errors, reports, and background runs from the same
+  workspace.
+- Extend the agent with skills, plugins, MCP servers, and local extensions.
+- Keep the server self-hosted and connect privately from your other devices.
+
+## Install
+
+Download the installer, inspect it if desired, and run it:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Mitsuro/main/install.sh
 sh install.sh
 ```
 
-The installer requires the release archive checksum published alongside each GitHub release asset before it installs the binary.
+The installer verifies the published SHA-256 checksum before installing a
+release.
 
-Or from source:
+Start the terminal app:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libudev-dev
-git clone https://github.com/honeycomb-Technologies/Krusty.git
-cd Krusty
+krusty
+```
+
+Start the server and web workspace:
+
+```bash
+krusty serve
+```
+
+Mitsuro is the product name. The installed `krusty` command remains available
+for compatibility with existing installations and automation.
+
+### Build from source
+
+```bash
+git clone https://github.com/honeycomb-Technologies/Mitsuro.git
+cd Mitsuro
 cargo build --release
-./target/release/krusty
 ```
 
-### Commands
+See [Building and deployment](docs/operations/build-and-deploy.md) for platform
+requirements and client build instructions.
 
-| Command | Description |
-|---------|-------------|
-| `krusty` | Launch the interactive TUI |
-| `krusty serve` | Start the web server with embedded web UI (default port 3000) |
-| `krusty serve --port 8080` | Start on a custom port |
-| `krusty acp` | Run as ACP server for editor integration |
-| `krusty mako run "task"` | Submit a task to the autonomous agent |
-| `krusty mako status` | Show Mako session status |
-| `krusty mako attach <id>` | Attach to a running Mako session |
+## Repository guide
 
-`krusty serve` bundles everything — API server, agent runtime, and the embedded Expo web build — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
-
-If `krusty serve` reports Tailscale permission denied, run this once:
-
-```bash
-sudo tailscale set --operator=$USER
-```
-
-## Supported Providers
-
-Configure providers via `/auth` in the TUI or on first run of `krusty serve`. Anthropic and OpenAI support OAuth browser login in addition to API keys.
-
-| Provider | Models |
-|----------|--------|
-| **MiniMax** | MiniMax M2.5 |
-| **Anthropic** | Claude Opus 4.6, Claude Haiku 4.5 |
-| **OpenAI** | GPT-5.5, GPT-5.5 Mini, GPT-5.4, GPT-5.4 Mini, GPT-5.3 Codex |
-| **OpenRouter** | 100+ models (Claude, GPT, Gemini, Llama, DeepSeek, Qwen) |
-| **Z.ai** | GLM-5 |
-
-Switch providers and models anytime with `/model`.
-
-## TUI Controls
-
-### Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message |
-| `Shift+Enter` | New line in input |
-| `Esc` | Interrupt AI response / Close popup |
-| `Ctrl+Q` | Quit application |
-| `Ctrl+G` | Toggle BUILD/PLAN mode |
-| `Ctrl+T` | Toggle plan sidebar |
-| `Ctrl+B` | Open process list |
-| `Ctrl+P` | Toggle plugin window |
-| `Ctrl+F` | Toggle fuzzy/tree file search mode |
-| `Tab` | Cycle thinking level (Off/Low/Medium/High/XHigh) |
-| `@` | Search and attach files |
-| `PgUp/PgDn` | Scroll messages |
-
-### Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/home` | Return to start menu |
-| `/load` | Load previous session (filtered by directory) |
-| `/model` | Select AI model and provider |
-| `/auth` | Manage API keys for providers |
-| `/theme` | Change color theme |
-| `/clear` | Clear current conversation |
-| `/pinch` | Compress context to new session |
-| `/plan` | View and manage active plan |
-| `/mcp` | Manage MCP servers |
-| `/skills` | Browse available skills |
-| `/plugins` | Manage plugins |
-| `/hooks` | Manage pre/post-tool hooks |
-| `/permissions` | Switch between Supervised and Autonomous mode |
-| `/ps` | View background processes |
-| `/terminal` | Open interactive terminal (aliases: `/term`, `/shell`) |
-| `/init` | Generate project context file |
-| `/update` | Check for updates |
-| `/cmd` | Show command help popup |
-
-### Mouse
-
-- Click and drag to select text
-- Scroll wheel to navigate
-- Click links to open in browser
-
-## Features
-
-### Multi-Provider AI
-Configure multiple providers and switch between them seamlessly. Your conversation continues even when switching models.
-
-### Tool Execution
-- **Read/Write/Edit/MultiEdit** - File operations with syntax highlighting
-- **Bash** - Run shell commands with streaming output
-- **Glob/Grep/List** - Search files and content (ripgrep-powered)
-- **Explore** - Spawn parallel sub-agents for codebase analysis
-- **Build** - Spawn parallel builder agents for complex operations
-- **Apply Patch** - Multi-file patch application
-- **Ask User** - Interactive prompts with multi-choice or custom input
-
-### Plan/Build Mode
-Toggle between structured planning and execution modes with `Ctrl+G`:
-- **Plan Mode** - Restricts write operations, focuses on task planning with phases and tasks
-- **Build Mode** - Enables all tools for execution of approved plans
-
-Plans are stored as markdown in `~/.krusty/plans/` and can be managed with `/plan`.
-
-### Terminal Integration
-Open an interactive terminal session with `/terminal` for direct shell access within the TUI.
-
-### Context Compression
-Use `/pinch` to compress long conversations into a new session with summarized context, preserving essential information while reducing token usage.
-
-### Skills
-Agent Skills-compatible, progressively disclosed instruction sets. Krusty
-discovers native, Agent Skills, Pi, OpenCode, Claude, Codex, project, and plugin
-package roots with deterministic precedence and local allow/ask/deny policy.
-Browse and manage them with `/skills`.
-
-### Plugins
-Transactional plugin bundles can contribute TUI components, agent extensions,
-skills, MCP configuration, hooks, and assets. Installs distinguish signed,
-npm-unsigned, and local-unsigned trust; lifecycle scripts are off by default;
-permissions, pinning, updates, reconciliation, and uninstall are explicit.
-Manage them with `/plugins`.
-
-### Agent Extensions
-Trusted local JavaScript/TypeScript workers can register tools, slash commands,
-canonical lifecycle observers, persistent state, and bounded turn context.
-Global, project, and permissioned package roots hot-reload with last-known-good
-recovery.
-
-### Hooks
-Pre and post-tool execution hooks for custom workflows. Configure with `/hooks`.
-
-### Permission Modes
-- **Supervised** (default) - Requires approval for write operations
-- **Autonomous** - Auto-executes all tools
-
-Switch with `/permissions`.
-
-### Sessions
-All conversations are saved locally in SQLite. Resume any session with `/load` (filtered by current directory).
-
-### Themes
-31 built-in themes including krusty (default), tokyo_night, dracula, catppuccin_mocha, gruvbox_dark, nord, one_dark, solarized_dark, synthwave_84, monokai, rosepine, and more. Switch with `/theme`.
-
-### Auto-Updates
-Krusty checks for updates via `/update`. Windows can apply the standalone
-binary update in place after verifying the release SHA-256 manifest.
-Mako-bearing Unix releases distribute `krusty`, the supervised `krusty-mako`
-daemon, and service units as one set, so Krusty fails closed instead of updating
-only one binary. Use a Mako-capable package channel or the checksum-verifying
-installer after that release is published; until then, build the complete set
-from source.
-
-## Configuration
-
-Data stored in `~/.krusty/`:
-
-```
-~/.krusty/
-├── credentials.json  # API keys (encrypted)
-├── preferences.json  # Settings (theme, model, recent models)
-├── extensions/       # Zed WASM plus executable agent extensions
-├── plugins/          # Immutable package snapshots, lockfile, trust, grants
-├── bin/              # Auto-downloaded LSP binaries
-├── skills/           # Custom global skills
-├── plans/            # Markdown plan files
-├── tokens/           # LSP and MCP authentication
-├── mcp_keys.json     # MCP server credentials
-└── logs/             # Application logs
-```
-
-### Project Configuration
-
-Add a `CLAUDE.md` file to your project root for project-specific instructions that are automatically included in context. Generate one with `/init`.
-
-Project-level skills in `.krusty/skills/` override global skills.
-
-## Documentation
-
-Detailed project documentation lives in [`docs/`](docs/README.md):
-
-- **[Architecture](docs/architecture/)** - System overview, data flow, and design decisions
-- **[Core Engine](docs/core-engine/)** - Agent orchestrator, AI providers, tools, context management
-- **[Storage](docs/storage/)** - SQLite persistence layer
-- **[Interfaces](docs/interfaces/)** - TUI, web server/API, ACP editor integration, Mako autonomous mode
-- **[Frontends](docs/frontends/)** - Mobile app (Expo), desktop app (Tauri), shared packages
-- **[Extensions](docs/extensions/)** - Plugin packages, agent extensions, WASM, MCP, plans, and skills
-- **[Operations](docs/operations/)** - Build, CI/CD, packaging, and deployment
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| **Backend** | Rust (tokio, axum, ratatui, rusqlite, wasmtime) |
-| **Mobile** | Expo / React Native (iOS, Android) |
-| **Web** | Expo web export (embedded in Rust binary via rust-embed) |
-| **Desktop** | Tauri v2 (wraps Expo web build) |
-| **Shared Frontend** | TypeScript, React 19, Zustand |
-| **Package Manager** | Cargo (Rust), Bun (TypeScript) |
-| **Database** | SQLite (embedded, local-first) |
-| **Extensions** | Signed/npm/local bundles; Bun agent workers; WebAssembly (Wasmtime, Zed-compatible WIT) |
-| **Protocols** | ACP (editor integration), MCP (tool discovery) |
+| Path | Contents |
+| --- | --- |
+| [`crates/`](crates/) | Shared Rust engine, command-line app, and server |
+| [`apps/mobile/`](apps/mobile/) | Expo app used by the iPhone and web clients |
+| [`apps/desktop/shell/`](apps/desktop/shell/) | Desktop host for the web client |
+| [`packages/`](packages/) | Shared TypeScript API, state, and UI packages |
+| [`docs/`](docs/README.md) | Stable architecture and contributor documentation |
 
 ## Development
 
-### Rust backend
+The repository uses Rust for the core runtime and Expo/React Native for the
+shared client.
 
 ```bash
-cargo fmt --all
-cargo clippy --workspace -- -D warnings
-cargo build --workspace
+cargo check --workspace
 cargo test --workspace
+cargo clippy --workspace -- -D warnings
+cargo fmt --all
 ```
 
-### Expo frontend (mobile + web)
+For the mobile and web client:
 
 ```bash
 cd apps/mobile
-bun install
-bun run start              # dev server (all platforms)
-bun run web                # web only
-npx expo export --platform web  # production web build
+bun install --frozen-lockfile
+npx tsc --noEmit
+npx expo export --platform web
 ```
 
-### Desktop (Tauri)
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Detailed
+engineering guidance lives in [AGENTS.md](AGENTS.md).
 
-```bash
-cd apps/desktop/shell
-bun install
-bun run dev                # Tauri dev with Expo web hot-reload
-bun run build              # production build (DEB, RPM)
-```
+## Documentation
+
+- [Project overview](docs/architecture/overview.md)
+- [Architecture and data flow](docs/architecture/data-flow.md)
+- [Mobile app](docs/frontends/mobile-app.md)
+- [Hive](docs/interfaces/hive.md)
+- [Extensions and integrations](docs/extensions/mcp-and-plugins.md)
+- [Build and deployment](docs/operations/build-and-deploy.md)
+
+## Project status
+
+Mitsuro is under active development. Some internal package, executable, route,
+and storage identifiers still use the legacy `krusty` or `mako` names so
+existing installations keep working. Public product language and new links use
+Mitsuro, Agent, and Hive.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Mitsuro is available under the [MIT License](LICENSE).

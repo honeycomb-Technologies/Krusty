@@ -2,7 +2,7 @@
 name = "krusty-client-state"
 version = "0.9.14"
 edition = "2021"
-description = "Headless Rust state machine for Krusty chat clients"
+description = "Headless Rust state machine for Mitsuro clients"
 
 [dependencies]
 krusty-client = { path = "../krusty-client" }

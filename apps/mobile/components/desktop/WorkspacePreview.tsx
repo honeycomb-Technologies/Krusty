@@ -587,12 +587,35 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
     updateTabNavigation,
   ]);
 
-  if (!isWeb || !visible) {
+  if (!isWeb) {
     return null;
   }
 
+  // Keep tab metadata warm across toolbox open/close, but freeze live preview
+  // content while hidden so port polling/WebViews do not keep burning.
+  if (!visible) {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.container,
+          { backgroundColor: t.background, borderTopColor: t.border },
+          styles.hiddenSurface,
+          style,
+        ]}
+      />
+    );
+  }
+
   return (
-    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
+    <View
+      pointerEvents="auto"
+      style={[
+        styles.container,
+        { backgroundColor: t.background, borderTopColor: t.border },
+        style,
+      ]}
+    >
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
         {previewTabs.map((tab) => {
           const active = activeTabId === tab.id;
@@ -890,6 +913,9 @@ const styles = StyleSheet.create({
   container: {
     height: 380,
     borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  hiddenSurface: {
+    opacity: 0,
   },
   tabBar: {
     flexDirection: "row",

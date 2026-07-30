@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   memo,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -23,14 +24,28 @@ import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
 import {
-  buildTranscriptTurns,
   findTurnIndexForMessage,
-  type TranscriptTurn,
+  splitTranscriptTurnsCached,
+  turnContainsMessage,
+  type TranscriptTurnsCache,
 } from "./transcriptTurns";
+import {
+  findTranscriptRowIndex,
+  splitTranscriptRowsCached,
+  type TranscriptMessageRow,
+  type TranscriptRowsCache,
+} from "./transcriptRows";
 import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@krusty/api";
 import type { SessionType } from "@krusty/api";
+import {
+  beginKrustyPerformanceSpan,
+  recordKrustyPerformanceMetric,
+} from "@krusty/state";
+import { summarizeTranscriptRenderBudget } from "./transcriptRenderBudget";
+
+const MAX_COMMITTED_TRANSCRIPT_CACHES = 4;
 
 interface ChatTranscriptProps {
   messages: ChatMessage[];
@@ -76,6 +91,13 @@ const BOTTOM_CONTROL_INSET = 10;
 const BOTTOM_CONTROL_SIZE = 56;
 const BOTTOM_CONTROL_RADIUS = 18;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
+/** Coalesce streaming stick-to-bottom work onto one rAF per animation frame. */
+const STREAM_STICK_MIN_INTERVAL_MS = 32;
+/** One delayed measurement pass after stream layout settles. */
+const STREAM_STICK_FALLBACK_MS = 120;
+/** Keep cold mode activation bounded; older turns enter only as the user scrolls up. */
+const INITIAL_HISTORICAL_TURN_COUNT = 1;
+const HISTORICAL_TURN_PAGE_SIZE = 2;
 
 interface CachedTranscriptScrollState {
   offset: number;
@@ -171,7 +193,7 @@ function ChatTranscriptComponent({
   const restoredScrollStateRef = useRef(
     transcriptScrollCache.get(scrollStateKey) ?? null,
   );
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlatList<TranscriptMessageRow>>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
   const scrollOffsetRef = useRef(
@@ -184,13 +206,34 @@ function ChatTranscriptComponent({
   const pendingAutoScrollAnimatedRef = useRef(false);
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
+  const streamStickFrameRef = useRef<number | null>(null);
+  const streamStickThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const streamStickFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const streamStickPendingRef = useRef(false);
+  const lastStreamStickAtRef = useRef(0);
   const isUserDraggingRef = useRef(false);
+  const historyRevealArmedRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
+  const isStreamingRef = useRef(isStreaming);
   const loadedSessionIdRef = useRef<string | null>(
     restoredScrollStateRef.current
       ? `${scrollStateKey}::${sessionId ?? "new"}`
       : null,
   );
+  const committedTurnCachesRef = useRef(
+    new Map<string, TranscriptTurnsCache>(),
+  );
+  const committedRowCachesRef = useRef(
+    new Map<string, TranscriptRowsCache>(),
+  );
+  const finishFirstPaintSpanRef = useRef<(() => number | null) | null>(null);
+  const firstPaintGenerationRef = useRef(0);
+  const firstPaintFrameRef = useRef<number | null>(null);
+  const firstPaintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
     restoredScrollStateRef.current?.autoFollow ?? true,
@@ -202,14 +245,221 @@ function ChatTranscriptComponent({
       : "systemChromeMaterialLight";
   const jumpTint =
     theme.scheme === "dark" ? "systemMaterialDark" : "systemMaterialLight";
-  const jumpOverlay =
-    theme.scheme === "dark" ? "rgba(11,17,25,0.6)" : "rgba(255,255,255,0.6)";
+  const jumpOverlay = t.surfaceOverlaySubtle;
+
+  isStreamingRef.current = isStreaming;
 
   const messageCount = messages.length;
-  const turns = useMemo(
-    () => buildTranscriptTurns(messages, isStreaming),
-    [isStreaming, messages],
+  const transcriptCacheKey = `${scrollStateKey}::${sessionId ?? "new"}`;
+  const turnSplit = useMemo(
+    () => {
+      const previous = committedTurnCachesRef.current.get(transcriptCacheKey);
+      const cacheState = !previous
+        ? "miss"
+        : previous.sourceMessages === messages
+          && previous.isStreaming === isStreaming
+          ? "hit"
+          : "tail";
+      const finishDeriveSpan = beginKrustyPerformanceSpan(
+        "transcript.derive",
+        `${sessionType}:${cacheState}`,
+      );
+      try {
+        return splitTranscriptTurnsCached(
+          messages,
+          isStreaming,
+          previous,
+        );
+      } finally {
+        finishDeriveSpan();
+      }
+    },
+    [isStreaming, messages, transcriptCacheKey],
   );
+  const { historicalTurns, liveTurn } = turnSplit;
+  const cachedScrollState = transcriptScrollCache.get(scrollStateKey) ?? null;
+  const initialHistoricalTurnCount =
+    cachedScrollState?.autoFollow === false
+      ? historicalTurns.length
+      : Math.min(INITIAL_HISTORICAL_TURN_COUNT, historicalTurns.length);
+  const [historyWindow, setHistoryWindow] = useState(() => ({
+    key: transcriptCacheKey,
+    count: initialHistoricalTurnCount,
+    sourceLength: historicalTurns.length,
+    preserveRevealedWindow: cachedScrollState?.autoFollow === false,
+  }));
+  const visibleHistoricalTurnCount =
+    historyWindow.key === transcriptCacheKey
+      ? Math.min(historyWindow.count, historicalTurns.length)
+      : initialHistoricalTurnCount;
+  const hiddenHistoricalTurnCount = Math.max(
+    0,
+    historicalTurns.length - visibleHistoricalTurnCount,
+  );
+  const visibleHistoricalTurns = useMemo(
+    () =>
+      hiddenHistoricalTurnCount > 0
+        ? historicalTurns.slice(hiddenHistoricalTurnCount)
+        : historicalTurns,
+    [
+      hiddenHistoricalTurnCount,
+      historicalTurns,
+    ],
+  );
+  const rowSplit = useMemo(
+    () => splitTranscriptRowsCached(
+      visibleHistoricalTurns,
+      liveTurn,
+      committedRowCachesRef.current.get(transcriptCacheKey),
+    ),
+    [liveTurn, transcriptCacheKey, visibleHistoricalTurns],
+  );
+  const { rows: transcriptRows, liveFooterRow } = rowSplit;
+  const visibleLatestTurn =
+    liveTurn
+    ?? visibleHistoricalTurns[visibleHistoricalTurns.length - 1]
+    ?? null;
+  const visibleLatestTurnBudget = useMemo(
+    () =>
+      visibleLatestTurn
+        ? summarizeTranscriptRenderBudget(visibleLatestTurn.messages)
+        : null,
+    [visibleLatestTurn],
+  );
+  useEffect(() => {
+    if (isStreaming || !visibleLatestTurnBudget) return;
+    recordKrustyPerformanceMetric("transcript.visible_messages", {
+      count: visibleLatestTurnBudget.messageCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_render_parts", {
+      count: visibleLatestTurnBudget.renderPartCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_tools", {
+      count: visibleLatestTurnBudget.toolCount,
+    });
+    recordKrustyPerformanceMetric("transcript.visible_markdown_characters", {
+      count: visibleLatestTurnBudget.markdownCharacterCount,
+    });
+  }, [isStreaming, visibleLatestTurnBudget]);
+  useEffect(() => {
+    setHistoryWindow((current) => {
+      if (current.key !== transcriptCacheKey) {
+        return {
+          key: transcriptCacheKey,
+          count: initialHistoricalTurnCount,
+          sourceLength: historicalTurns.length,
+          preserveRevealedWindow: cachedScrollState?.autoFollow === false,
+        };
+      }
+
+      if (current.sourceLength === historicalTurns.length) {
+        if (current.count === 0 && initialHistoricalTurnCount > 0) {
+          return {
+            ...current,
+            count: initialHistoricalTurnCount,
+          };
+        }
+        return current;
+      }
+
+      let count = Math.min(current.count, historicalTurns.length);
+      if (
+        historicalTurns.length > current.sourceLength
+        && current.preserveRevealedWindow
+      ) {
+        // Keep deliberately revealed rows mounted when the former live turn
+        // becomes historical. Default auto-follow stays bounded at one row;
+        // only an explicit upward page/scroll target grows with new turns.
+        count = Math.min(
+          historicalTurns.length,
+          current.count + historicalTurns.length - current.sourceLength,
+        );
+      } else if (count === 0 && initialHistoricalTurnCount > 0) {
+        count = initialHistoricalTurnCount;
+      }
+
+      return {
+        key: transcriptCacheKey,
+        count,
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: current.preserveRevealedWindow,
+      };
+    });
+  }, [
+    cachedScrollState?.autoFollow,
+    historicalTurns.length,
+    initialHistoricalTurnCount,
+    transcriptCacheKey,
+  ]);
+  useEffect(() => {
+    const caches = committedTurnCachesRef.current;
+    caches.delete(transcriptCacheKey);
+    caches.set(transcriptCacheKey, turnSplit.cache);
+    while (caches.size > MAX_COMMITTED_TRANSCRIPT_CACHES) {
+      const oldestKey = caches.keys().next().value;
+      if (oldestKey === undefined) break;
+      caches.delete(oldestKey);
+    }
+  }, [transcriptCacheKey, turnSplit.cache]);
+  useEffect(() => {
+    const caches = committedRowCachesRef.current;
+    caches.delete(transcriptCacheKey);
+    caches.set(transcriptCacheKey, rowSplit.cache);
+    while (caches.size > MAX_COMMITTED_TRANSCRIPT_CACHES) {
+      const oldestKey = caches.keys().next().value;
+      if (oldestKey === undefined) break;
+      caches.delete(oldestKey);
+    }
+  }, [rowSplit.cache, transcriptCacheKey]);
+  const finishFirstPaint = useCallback((generation?: number) => {
+    if (
+      generation !== undefined
+      && generation !== firstPaintGenerationRef.current
+    ) {
+      return;
+    }
+    if (firstPaintFrameRef.current !== null) {
+      cancelAnimationFrame(firstPaintFrameRef.current);
+      firstPaintFrameRef.current = null;
+    }
+    if (firstPaintTimeoutRef.current !== null) {
+      clearTimeout(firstPaintTimeoutRef.current);
+      firstPaintTimeoutRef.current = null;
+    }
+    finishFirstPaintSpanRef.current?.();
+    finishFirstPaintSpanRef.current = null;
+  }, []);
+  const markFirstPaintReady = useCallback(() => {
+    if (
+      !finishFirstPaintSpanRef.current
+      || firstPaintFrameRef.current !== null
+    ) {
+      return;
+    }
+    const generation = firstPaintGenerationRef.current;
+    firstPaintFrameRef.current = requestAnimationFrame(() => {
+      firstPaintFrameRef.current = null;
+      finishFirstPaint(generation);
+    });
+  }, [finishFirstPaint]);
+  useLayoutEffect(() => {
+    finishFirstPaint();
+    const generation = firstPaintGenerationRef.current + 1;
+    firstPaintGenerationRef.current = generation;
+    finishFirstPaintSpanRef.current = beginKrustyPerformanceSpan(
+      "transcript.first_paint",
+      transcriptCacheKey,
+    );
+    // A stable same-size FlatList may not emit another layout callback. Never
+    // let a stale span survive until an unrelated session change.
+    firstPaintTimeoutRef.current = setTimeout(
+      () => finishFirstPaint(generation),
+      1_000,
+    );
+    return () => {
+      finishFirstPaint(generation);
+    };
+  }, [finishFirstPaint, transcriptCacheKey]);
   const layoutSignature = useMemo(
     () => lastMessageLayoutSignature(messages),
     [messages],
@@ -241,6 +491,19 @@ function ChatTranscriptComponent({
       cancelAnimationFrame(bottomAnchorFrameRef.current);
       bottomAnchorFrameRef.current = null;
     }
+    if (streamStickFrameRef.current !== null) {
+      cancelAnimationFrame(streamStickFrameRef.current);
+      streamStickFrameRef.current = null;
+    }
+    if (streamStickThrottleRef.current !== null) {
+      clearTimeout(streamStickThrottleRef.current);
+      streamStickThrottleRef.current = null;
+    }
+    if (streamStickFallbackRef.current !== null) {
+      clearTimeout(streamStickFallbackRef.current);
+      streamStickFallbackRef.current = null;
+    }
+    streamStickPendingRef.current = false;
   }, []);
 
   const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
@@ -272,8 +535,83 @@ function ChatTranscriptComponent({
     flatListRef.current?.scrollToOffset({ animated, offset: targetOffset });
   }, [markProgrammaticScroll]);
 
+  const stickToBottomNow = useCallback(
+    (animated: boolean) => {
+      if (!autoFollowRef.current || isUserDraggingRef.current) {
+        return;
+      }
+      scrollToBottom(animated);
+    },
+    [scrollToBottom],
+  );
+
+  /**
+   * Streaming stick path: coalesce content-size / layout / delta noise into at
+   * most one rAF stick per interval while auto-follow remains enabled.
+   */
+  const requestStreamStick = useCallback(() => {
+    if (!autoFollowRef.current || isUserDraggingRef.current) {
+      return;
+    }
+
+    streamStickPendingRef.current = true;
+
+    const runStick = () => {
+      if (!autoFollowRef.current || isUserDraggingRef.current) {
+        streamStickPendingRef.current = false;
+        return;
+      }
+      streamStickPendingRef.current = false;
+      lastStreamStickAtRef.current = Date.now();
+      stickToBottomNow(false);
+    };
+
+    const scheduleFrame = () => {
+      if (streamStickFrameRef.current !== null) {
+        return;
+      }
+      streamStickFrameRef.current = requestAnimationFrame(() => {
+        streamStickFrameRef.current = null;
+        if (!streamStickPendingRef.current) {
+          return;
+        }
+        runStick();
+      });
+    };
+
+    const elapsed = Date.now() - lastStreamStickAtRef.current;
+    if (elapsed >= STREAM_STICK_MIN_INTERVAL_MS) {
+      scheduleFrame();
+    } else if (streamStickThrottleRef.current === null) {
+      streamStickThrottleRef.current = setTimeout(() => {
+        streamStickThrottleRef.current = null;
+        if (!streamStickPendingRef.current) return;
+        scheduleFrame();
+      }, STREAM_STICK_MIN_INTERVAL_MS - elapsed);
+    }
+
+    // One delayed measurement pass for late Markdown/layout growth. This has a
+    // separate slot from the throttle so neither timer suppresses the other.
+    if (streamStickFallbackRef.current !== null) {
+      clearTimeout(streamStickFallbackRef.current);
+    }
+    streamStickFallbackRef.current = setTimeout(() => {
+      streamStickFallbackRef.current = null;
+      if (!autoFollowRef.current || isUserDraggingRef.current) return;
+      streamStickPendingRef.current = true;
+      scheduleFrame();
+    }, STREAM_STICK_FALLBACK_MS);
+  }, [stickToBottomNow]);
+
   const scheduleBottomAnchor = useCallback(
     (animated: boolean) => {
+      // Streaming auto-follow uses the throttled rAF stick path so content-size
+      // blips do not issue a scroll storm.
+      if (isStreamingRef.current) {
+        requestStreamStick();
+        return;
+      }
+
       clearBottomAnchorTimers();
 
       const anchor = (useAnimated: boolean) => {
@@ -291,16 +629,47 @@ function ChatTranscriptComponent({
       // One bounded fallback catches delayed Markdown measurement without
       // issuing a multi-frame scroll storm for every streamed delta.
       bottomAnchorTimersRef.current = [
-        setTimeout(() => anchor(false), 120),
+        setTimeout(() => anchor(false), STREAM_STICK_FALLBACK_MS),
       ];
     },
-    [clearBottomAnchorTimers, scrollToBottom],
+    [clearBottomAnchorTimers, requestStreamStick, scrollToBottom],
   );
 
   const queueAutoScroll = useCallback((animated: boolean) => {
     pendingAutoScrollRef.current = true;
     pendingAutoScrollAnimatedRef.current = animated;
   }, []);
+
+  const revealOlderHistory = useCallback(() => {
+    if (
+      hiddenHistoricalTurnCount === 0
+      || !historyRevealArmedRef.current
+    ) {
+      return;
+    }
+    historyRevealArmedRef.current = false;
+
+    setHistoryWindow((current) => {
+      const currentCount =
+        current.key === transcriptCacheKey
+          ? current.count
+          : initialHistoricalTurnCount;
+      return {
+        key: transcriptCacheKey,
+        count: Math.min(
+          historicalTurns.length,
+          currentCount + HISTORICAL_TURN_PAGE_SIZE,
+        ),
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: true,
+      };
+    });
+  }, [
+    hiddenHistoricalTurnCount,
+    historicalTurns.length,
+    initialHistoricalTurnCount,
+    transcriptCacheKey,
+  ]);
 
   const updateNearBottom = useCallback((
     offsetY = scrollOffsetRef.current,
@@ -343,12 +712,21 @@ function ChatTranscriptComponent({
 
   const handleListScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-      updateNearBottom(event.nativeEvent.contentOffset.y, {
+      const offsetY = event.nativeEvent.contentOffset.y;
+      scrollOffsetRef.current = offsetY;
+      if (
+        isUserDraggingRef.current
+        && offsetY <= SCROLL_FOLLOW_THRESHOLD
+      ) {
+        revealOlderHistory();
+      } else if (offsetY > SCROLL_FOLLOW_THRESHOLD * 2) {
+        historyRevealArmedRef.current = true;
+      }
+      updateNearBottom(offsetY, {
         allowDisable: Date.now() >= programmaticScrollUntilRef.current,
       });
     },
-    [updateNearBottom],
+    [revealOlderHistory, updateNearBottom],
   );
 
   const handleJumpToLatest = useCallback(() => {
@@ -374,10 +752,12 @@ function ChatTranscriptComponent({
     if (!sessionId) {
       loadedSessionIdRef.current = null;
       restoredScrollStateRef.current = null;
+      historyRevealArmedRef.current = true;
       autoFollowRef.current = true;
       pendingAutoScrollRef.current = false;
       clearBottomAnchorTimers();
       scrollOffsetRef.current = 0;
+      contentHeightRef.current = 0;
       setPlanTrackerHeight(0);
       setIsNearBottom(true);
       return;
@@ -392,10 +772,12 @@ function ChatTranscriptComponent({
     const cached = transcriptScrollCache.get(scrollStateKey) ?? null;
     restoredScrollStateRef.current = cached;
     loadedSessionIdRef.current = selectionKey;
+    historyRevealArmedRef.current = true;
     autoFollowRef.current = cached?.autoFollow ?? true;
     pendingAutoScrollRef.current = false;
     clearBottomAnchorTimers();
     scrollOffsetRef.current = cached?.offset ?? 0;
+    contentHeightRef.current = 0;
     setPlanTrackerHeight(0);
     setIsNearBottom(cached?.autoFollow ?? true);
 
@@ -437,10 +819,20 @@ function ChatTranscriptComponent({
       return;
     }
 
-    if (autoFollowRef.current) {
-      queueAutoScroll(!isStreaming);
-      scheduleBottomAnchor(!isStreaming);
+    if (!autoFollowRef.current) {
+      return;
     }
+
+    // While streaming, only queue/coalesce stick work. Avoid dual schedule
+    // from both layoutSignature ticks and onContentSizeChange.
+    if (isStreaming) {
+      queueAutoScroll(false);
+      requestStreamStick();
+      return;
+    }
+
+    queueAutoScroll(true);
+    scheduleBottomAnchor(true);
   }, [
     clearBottomAnchorTimers,
     isActive,
@@ -448,6 +840,7 @@ function ChatTranscriptComponent({
     layoutSignature,
     messageCount,
     queueAutoScroll,
+    requestStreamStick,
     scheduleBottomAnchor,
   ]);
 
@@ -456,13 +849,22 @@ function ChatTranscriptComponent({
       return;
     }
 
+    // Padding/tracker geometry changes still need an immediate re-anchor, but
+    // stream mode stays on the coalesced stick path.
+    if (isStreaming) {
+      requestStreamStick();
+      return;
+    }
+
     scheduleBottomAnchor(false);
   }, [
     bottomPadding,
     isActive,
+    isStreaming,
     listTopPadding,
     messageCount,
     planTrackerHeight,
+    requestStreamStick,
     scheduleBottomAnchor,
   ]);
 
@@ -471,33 +873,117 @@ function ChatTranscriptComponent({
       return;
     }
 
-    const targetIndex = findTurnIndexForMessage(turns, scrollToMessageId);
+    if (turnContainsMessage(liveTurn, scrollToMessageId)) {
+      autoFollowRef.current = false;
+      requestAnimationFrame(() => {
+        markProgrammaticScroll();
+        const rowIndex = findTranscriptRowIndex(
+          transcriptRows,
+          scrollToMessageId,
+        );
+        if (rowIndex >= 0) {
+          flatListRef.current?.scrollToIndex({
+            index: rowIndex,
+            animated: true,
+            viewPosition: 0.35,
+          });
+        } else {
+          // Only the actively changing tail message remains in the footer.
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }
+        onScrollTargetHandled?.();
+      });
+      return;
+    }
+
+    const targetIndex = findTurnIndexForMessage(
+      historicalTurns,
+      scrollToMessageId,
+    );
     if (targetIndex < 0) {
       onScrollTargetHandled?.();
+      return;
+    }
+
+    const firstVisibleHistoricalIndex =
+      historicalTurns.length - visibleHistoricalTurns.length;
+    if (targetIndex < firstVisibleHistoricalIndex) {
+      setHistoryWindow({
+        key: transcriptCacheKey,
+        count: historicalTurns.length - targetIndex,
+        sourceLength: historicalTurns.length,
+        preserveRevealedWindow: true,
+      });
       return;
     }
 
     autoFollowRef.current = false;
     requestAnimationFrame(() => {
       markProgrammaticScroll();
+      const visibleRowIndex = findTranscriptRowIndex(
+        transcriptRows,
+        scrollToMessageId,
+      );
+      if (visibleRowIndex < 0) {
+        onScrollTargetHandled?.();
+        return;
+      }
       flatListRef.current?.scrollToIndex({
-        index: targetIndex,
+        index: visibleRowIndex,
         animated: true,
         viewPosition: 0.35,
       });
       onScrollTargetHandled?.();
     });
-  }, [isActive, markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
+  }, [
+    historicalTurns,
+    isActive,
+    liveTurn,
+    markProgrammaticScroll,
+    onScrollTargetHandled,
+    scrollToMessageId,
+    transcriptRows,
+    transcriptCacheKey,
+    visibleHistoricalTurns.length,
+  ]);
 
-  const renderTurn = useCallback(
-    ({ item, index }: { item: TranscriptTurn; index: number }) => {
-      const isLastTurn = index === turns.length - 1;
-      return (
-        <TranscriptTurnRow
-          turn={item}
-          isLastTurn={isLastTurn}
-          isStreaming={isStreaming && isLastTurn}
-          isThinking={isThinking && isLastTurn}
+  const renderTranscriptRow = useCallback(
+    ({ item }: { item: TranscriptMessageRow }) => (
+      <TranscriptMessageRowView
+        row={item}
+        isLastTranscriptMessage={false}
+        isStreaming={false}
+        isThinking={false}
+        activeToolCallId={activeToolCallId}
+        sessionId={sessionId}
+        onApproveTool={onApproveTool}
+        onDenyTool={onDenyTool}
+        onSubmitToolResult={onSubmitToolResult}
+        onPlanConfirm={onPlanConfirm}
+      />
+    ),
+    [
+      activeToolCallId,
+      onApproveTool,
+      onDenyTool,
+      onPlanConfirm,
+      onSubmitToolResult,
+      sessionId,
+    ],
+  );
+
+  const liveFooter = useMemo(() => {
+    if (!liveFooterRow) {
+      return <View style={styles.liveFooterSpacer} />;
+    }
+
+    return (
+      <View style={styles.liveFooter}>
+        <TranscriptMessageRowView
+          row={liveFooterRow}
+          isLastTranscriptMessage
+          isStreaming={isStreaming}
+          isThinking={isThinking}
           activeToolCallId={activeToolCallId}
           sessionId={sessionId}
           onApproveTool={onApproveTool}
@@ -505,20 +991,19 @@ function ChatTranscriptComponent({
           onSubmitToolResult={onSubmitToolResult}
           onPlanConfirm={onPlanConfirm}
         />
-      );
-    },
-    [
-      activeToolCallId,
-      isStreaming,
-      isThinking,
-      onApproveTool,
-      onDenyTool,
-      onPlanConfirm,
-      onSubmitToolResult,
-      sessionId,
-      turns.length,
-    ],
-  );
+      </View>
+    );
+  }, [
+    activeToolCallId,
+    isStreaming,
+    isThinking,
+    liveFooterRow,
+    onApproveTool,
+    onDenyTool,
+    onPlanConfirm,
+    onSubmitToolResult,
+    sessionId,
+  ]);
 
   if (messages.length === 0) {
     return (
@@ -532,16 +1017,24 @@ function ChatTranscriptComponent({
     <View style={styles.flex}>
       <FlatList
         ref={flatListRef}
-        data={turns}
-        keyExtractor={(turn) => turn.id}
-        windowSize={6}
-        maxToRenderPerBatch={3}
-        initialNumToRender={8}
-        updateCellsBatchingPeriod={64}
-        removeClippedSubviews
+        data={transcriptRows}
+        keyExtractor={(row) => row.id}
+        // Completed messages are isolated from live tail stream ticks.
+        extraData={liveFooterRow?.id ?? "no-live"}
+        windowSize={3}
+        maxToRenderPerBatch={1}
+        initialNumToRender={1}
+        updateCellsBatchingPeriod={80}
+        // removeClippedSubviews is a known native crash source on iOS New
+        // Architecture with nested message/tool cells and absolute chrome.
+        removeClippedSubviews={false}
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
+          historyRevealArmedRef.current = true;
           clearBottomAnchorTimers();
+          if (scrollOffsetRef.current <= SCROLL_FOLLOW_THRESHOLD) {
+            revealOlderHistory();
+          }
           Keyboard.dismiss();
         }}
         onScrollEndDrag={() => {
@@ -560,7 +1053,9 @@ function ChatTranscriptComponent({
           x: 0,
           y: restoredScrollStateRef.current?.offset ?? 0,
         }}
-        renderItem={renderTurn}
+        renderItem={renderTranscriptRow}
+        ListFooterComponent={liveFooter}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -571,30 +1066,54 @@ function ChatTranscriptComponent({
           },
         ]}
         onLayout={(event) => {
+          markFirstPaintReady();
           listHeightRef.current = event.nativeEvent.layout.height;
           const shouldMaintainBottom =
             autoFollowRef.current && !isUserDraggingRef.current;
           updateNearBottom();
           if (shouldMaintainBottom) {
-            scheduleBottomAnchor(false);
+            if (isStreamingRef.current) {
+              requestStreamStick();
+            } else {
+              scheduleBottomAnchor(false);
+            }
           } else {
             flushAutoScroll();
           }
         }}
         onContentSizeChange={(_width, height) => {
+          markFirstPaintReady();
+          // Ignore no-op measurement blips while streaming.
+          if (
+            isStreamingRef.current &&
+            height === contentHeightRef.current
+          ) {
+            return;
+          }
           contentHeightRef.current = height;
           const shouldMaintainBottom =
             autoFollowRef.current && !isUserDraggingRef.current;
           updateNearBottom();
           if (shouldMaintainBottom) {
-            scheduleBottomAnchor(false);
+            if (isStreamingRef.current) {
+              requestStreamStick();
+            } else {
+              scheduleBottomAnchor(false);
+            }
           } else {
             flushAutoScroll();
           }
         }}
         onScrollToIndexFailed={({ index }) => {
-          const clampedIndex = Math.max(0, Math.min(index, turns.length - 1));
+          const clampedIndex = Math.max(
+            0,
+            Math.min(index, Math.max(transcriptRows.length - 1, 0)),
+          );
           requestAnimationFrame(() => {
+            if (transcriptRows.length === 0) {
+              flatListRef.current?.scrollToEnd({ animated: true });
+              return;
+            }
             flatListRef.current?.scrollToIndex({
               index: clampedIndex,
               animated: true,
@@ -708,9 +1227,9 @@ function ChatTranscriptComponent({
 
 export const ChatTranscript = memo(ChatTranscriptComponent);
 
-interface TranscriptTurnRowProps {
-  turn: TranscriptTurn;
-  isLastTurn: boolean;
+interface TranscriptMessageRowViewProps {
+  row: TranscriptMessageRow;
+  isLastTranscriptMessage: boolean;
   isStreaming: boolean;
   isThinking?: boolean;
   activeToolCallId?: string | null;
@@ -727,9 +1246,9 @@ interface TranscriptTurnRowProps {
   ) => void | Promise<void>;
 }
 
-const TranscriptTurnRow = memo(function TranscriptTurnRow({
-  turn,
-  isLastTurn,
+const TranscriptMessageRowView = memo(function TranscriptMessageRowView({
+  row,
+  isLastTranscriptMessage,
   isStreaming,
   isThinking,
   activeToolCallId,
@@ -738,39 +1257,40 @@ const TranscriptTurnRow = memo(function TranscriptTurnRow({
   onDenyTool,
   onSubmitToolResult,
   onPlanConfirm,
-}: TranscriptTurnRowProps) {
+}: TranscriptMessageRowViewProps) {
   return (
-    <View style={[styles.turn, turn.isLive && styles.turnLive]}>
-      {turn.messages.map((message, messageIndex) => {
-        const isLastMessageInTurn = messageIndex === turn.messages.length - 1;
-        return (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            isLast={isLastTurn && isLastMessageInTurn}
-            isStreaming={isStreaming && isLastMessageInTurn}
-            isThinking={isThinking && isLastMessageInTurn}
-            activeToolCallId={activeToolCallId}
-            onApproveTool={
-              sessionId && onApproveTool
-                ? (toolCallId) => onApproveTool(sessionId, toolCallId)
-                : undefined
-            }
-            onDenyTool={
-              sessionId && onDenyTool
-                ? (toolCallId) => onDenyTool(sessionId, toolCallId)
-                : undefined
-            }
-            onSubmitToolResult={onSubmitToolResult}
-            onPlanConfirm={onPlanConfirm}
-          />
-        );
-      })}
+    <View
+      style={[
+        row.isLastMessageInTurn && styles.turn,
+        row.isLastMessageInTurn && row.isLive && styles.turnLive,
+      ]}
+    >
+      <MessageBubble
+        message={row.message}
+        isLast={isLastTranscriptMessage}
+        isStreaming={isStreaming}
+        isThinking={isThinking}
+        activeToolCallId={activeToolCallId}
+        onApproveTool={
+          sessionId && onApproveTool
+            ? (toolCallId) => onApproveTool(sessionId, toolCallId)
+            : undefined
+        }
+        onDenyTool={
+          sessionId && onDenyTool
+            ? (toolCallId) => onDenyTool(sessionId, toolCallId)
+            : undefined
+        }
+        onSubmitToolResult={onSubmitToolResult}
+        onPlanConfirm={onPlanConfirm}
+      />
     </View>
   );
 }, (previous, next) => (
-  previous.turn.renderSignature === next.turn.renderSignature &&
-  previous.isLastTurn === next.isLastTurn &&
+  previous.row.renderSignature === next.row.renderSignature &&
+  previous.row.isLive === next.row.isLive &&
+  previous.row.isLastMessageInTurn === next.row.isLastMessageInTurn &&
+  previous.isLastTranscriptMessage === next.isLastTranscriptMessage &&
   previous.isStreaming === next.isStreaming &&
   previous.isThinking === next.isThinking &&
   previous.activeToolCallId === next.activeToolCallId &&
@@ -803,6 +1323,12 @@ const styles = StyleSheet.create({
   },
   turnLive: {
     marginBottom: 14,
+  },
+  liveFooter: {
+    // Keep footer spacing identical to previous in-list last turn spacing.
+  },
+  liveFooterSpacer: {
+    height: 0,
   },
   edgeMask: {
     position: "absolute",

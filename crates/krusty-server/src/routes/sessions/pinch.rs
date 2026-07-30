@@ -30,7 +30,7 @@ pub(super) async fn pinch_session(
     let source_session = load_owned_session(&session_manager, &id, user.as_ref())?;
     if source_session.session_type == krusty_core::storage::SessionType::Mako {
         return Err(AppError::Conflict(
-            "Mako compaction must be coordinated by the daemon; /sessions/:id/pinch is unavailable for Mako sessions".into(),
+            "Hive compaction is coordinated by its background service; /sessions/:id/pinch is unavailable for Hive sessions".into(),
         ));
     }
     let _session_guard = state

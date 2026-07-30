@@ -6,7 +6,7 @@ This document traces a single user message from the moment the user presses Ente
 
 ## 1. User Input Arrives
 
-Krusty supports three entry points for user messages. All three converge on the same path: building a `Vec<ModelMessage>` conversation and handing it to the `AgenticOrchestrator`.
+Mitsuro supports three entry points for user messages. All three converge on the same path: building a `Vec<ModelMessage>` conversation and handing it to the `AgenticOrchestrator`.
 
 **TUI (terminal interface).** The user types a message and presses Enter. The TUI appends a `ModelMessage` with `Role::User` to the in-memory conversation, persists it to SQLite via `MessageStore::save_message`, then constructs an `AgenticOrchestrator` and calls `run()`.
 
@@ -45,7 +45,7 @@ At the top of every loop iteration, the orchestrator calls `context::inject_cont
 7. **Delegated run context.** Summaries of recent sub-agent explorations, so the AI can resume or deepen prior investigations instead of starting over.
 8. **Autonomous task context.** Status of any autonomous tasks assigned to this session.
 9. **Report context.** Recent reports generated for this project.
-10. **Coordinator context.** Session-type-specific behavioral guidance (code sessions vs. Mako autonomous sessions).
+10. **Coordinator context.** Session-type-specific behavioral guidance (code sessions vs. Hive autonomous sessions).
 11. **Skills context.** Available skills and their trigger descriptions, so the AI knows what extended capabilities exist.
 
 For chat-only sessions, this entire pipeline is bypassed. Chat sessions get a minimal system prompt with no tool access, no workspace context, and no project data -- just memory injection and a conversational persona.
@@ -163,7 +163,7 @@ All messages (user, assistant, and tool results) are persisted to SQLite through
 
 ## 9. The Event Loop Protocol
 
-The `LoopEvent` / `LoopInput` protocol is the architectural boundary between the agentic core and every presentation surface. Understanding it is key to understanding why Krusty can support a TUI, an HTTP server, and ACP with no code duplication in the core.
+The `LoopEvent` / `LoopInput` protocol is the architectural boundary between the agentic core and every presentation surface. Understanding it is key to understanding why Mitsuro can support a TUI, an HTTP server, and ACP with no code duplication in the core.
 
 ### LoopEvent (orchestrator to presentation)
 

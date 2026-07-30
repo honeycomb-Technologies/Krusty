@@ -34,19 +34,19 @@ impl RecoveryNonResumableReason {
     pub fn message(&self) -> &'static str {
         match self {
             Self::MissingUserObjective => {
-                "Krusty did not auto-resume because no stable user objective was preserved."
+                "Mitsuro did not auto-resume because no stable user objective was preserved."
             }
             Self::EmptyConversation => {
-                "Krusty did not auto-resume because the conversation has no recoverable context."
+                "Mitsuro did not auto-resume because the conversation has no recoverable context."
             }
             Self::PendingToolCall => {
-                "Krusty did not auto-resume because a tool call was only partially received."
+                "Mitsuro did not auto-resume because a tool call was only partially received."
             }
             Self::ToolExecutionInProgress => {
-                "Krusty did not auto-resume because tools may already have run."
+                "Mitsuro did not auto-resume because tools may already have run."
             }
             Self::AwaitingHumanInput => {
-                "Krusty did not auto-resume because it is waiting for human input."
+                "Mitsuro did not auto-resume because it is waiting for human input."
             }
         }
     }
@@ -180,7 +180,7 @@ impl PendingInteractionSnapshot {
             .unwrap_or_else(|| {
                 vec![PendingQuestionSnapshot {
                     header: "Question".to_string(),
-                    question: "Krusty is awaiting user input, but the question payload could not be reconstructed safely.".to_string(),
+                    question: "Mitsuro is awaiting user input, but the question payload could not be reconstructed safely.".to_string(),
                     options: Vec::new(),
                     multi_select: false,
                 }]
@@ -376,7 +376,7 @@ impl SessionRecoveryState {
             (_, Some(LoopStopReason::UserAbort)) => {
                 "Previous turn was interrupted by user cancellation."
             }
-            (_, _) => "Previous turn ended before Krusty could safely finalize it.",
+            (_, _) => "Previous turn ended before Mitsuro could safely finalize it.",
         };
 
         let continuation = match &self.decision {

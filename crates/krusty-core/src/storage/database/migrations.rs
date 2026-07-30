@@ -2562,6 +2562,79 @@ impl Database {
             notification_tx.commit()?;
         }
 
+        // Migration 49: bounded, content-free mobile performance diagnostics.
+        // Payloads are operational metadata only; prompts, responses, file
+        // contents, terminal output, credentials, and raw URLs are forbidden
+        // by the HTTP contract before these rows are written.
+        if current_version < 49 {
+            info!("Running migration 49: mobile performance diagnostics");
+            let diagnostics_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring mobile diagnostics migration lock")?;
+            diagnostics_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS mobile_diagnostic_runs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    installation_id TEXT NOT NULL,
+                    app_version TEXT NOT NULL,
+                    build_number TEXT NOT NULL,
+                    platform TEXT NOT NULL CHECK (platform IN ('ios', 'android', 'web')),
+                    os_version TEXT NOT NULL,
+                    device_class TEXT NOT NULL,
+                    capture_level TEXT NOT NULL CHECK (capture_level IN ('baseline', 'stress')),
+                    started_at_ms INTEGER NOT NULL,
+                    ended_at_ms INTEGER,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'completed')),
+                    event_count INTEGER NOT NULL DEFAULT 0 CHECK (event_count >= 0),
+                    dropped_event_count INTEGER NOT NULL DEFAULT 0 CHECK (dropped_event_count >= 0),
+                    byte_count INTEGER NOT NULL DEFAULT 0 CHECK (byte_count >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_mobile_diagnostic_runs_user_updated
+                    ON mobile_diagnostic_runs(user_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS mobile_diagnostic_events (
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                    occurred_at_ms INTEGER NOT NULL,
+                    monotonic_ms REAL NOT NULL CHECK (monotonic_ms >= 0),
+                    category TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    duration_ms REAL CHECK (duration_ms IS NULL OR duration_ms >= 0),
+                    severity TEXT NOT NULL DEFAULT 'info'
+                        CHECK (severity IN ('debug', 'info', 'warning', 'error', 'fatal')),
+                    attributes_json TEXT NOT NULL DEFAULT '{}'
+                        CHECK (json_valid(attributes_json)),
+                    PRIMARY KEY (run_id, sequence),
+                    FOREIGN KEY (run_id) REFERENCES mobile_diagnostic_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_mobile_diagnostic_events_run_category
+                    ON mobile_diagnostic_events(run_id, category, name);
+
+                CREATE TABLE IF NOT EXISTS mobile_diagnostic_native_payloads (
+                    run_id TEXT NOT NULL,
+                    payload_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('metric', 'diagnostic')),
+                    received_at_ms INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+                    PRIMARY KEY (run_id, payload_id),
+                    FOREIGN KEY (run_id) REFERENCES mobile_diagnostic_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_mobile_diagnostic_native_run_time
+                    ON mobile_diagnostic_native_payloads(run_id, received_at_ms ASC);
+                "#,
+            )?;
+            diagnostics_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (49)",
+                [],
+            )?;
+            diagnostics_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }

@@ -1,12 +1,12 @@
 # The Tool System
 
-The tool system is how Krusty does things. When the AI decides it needs to read a file, search the codebase, run a shell command, or edit code, it makes a tool call. The tool system receives that call, checks whether it's allowed, runs any safety checks, executes the tool, and returns the result. Every action the AI takes in your environment flows through this system.
+The tool system is how Mitsuro does things. When the AI decides it needs to read a file, search the codebase, run a shell command, or edit code, it makes a tool call. The tool system receives that call, checks whether it's allowed, runs any safety checks, executes the tool, and returns the result. Every action the AI takes in your environment flows through this system.
 
 At the center is the **ToolRegistry** -- a HashMap of tool implementations behind an `Arc<RwLock<>>`, with pre-execution and post-execution hooks attached. The registry manages tool registration, lookup, permission enforcement, and the full execution lifecycle. It's defined in `crates/krusty-core/src/tools/registry/runtime.rs`.
 
 ## The Tool Trait
 
-Every tool in Krusty implements the same trait:
+Every tool in Mitsuro implements the same trait:
 
 ```rust
 #[async_trait]
@@ -21,11 +21,11 @@ pub trait Tool: Send + Sync {
 
 `name()` is the identifier the AI uses when requesting a tool. `description()` goes into the tool schema that gets sent to the LLM so it knows what the tool does. `prompt()` is optional extended guidance that gets injected into the system prompt -- it contains the detailed usage instructions that would be too long for the schema description. `parameters_schema()` returns a JSON Schema that the AI's output must conform to. `execute()` does the actual work.
 
-Every tool receives a `ToolContext` that carries the working directory, allowed filesystem root, process registry, permissions, streaming channels, and other runtime state. Tools return a `ToolResult` -- a structured JSON envelope with `ok: true/false`, a data payload, optional warnings, optional diffs, and optional metadata. The filesystem root is a path-containment policy for Krusty-owned file tools; it is not an operating-system sandbox.
+Every tool receives a `ToolContext` that carries the working directory, allowed filesystem root, process registry, permissions, streaming channels, and other runtime state. Tools return a `ToolResult` -- a structured JSON envelope with `ok: true/false`, a data payload, optional warnings, optional diffs, and optional metadata. The filesystem root is a path-containment policy for Mitsuro-owned file tools; it is not an operating-system sandbox.
 
 ## Built-in Tools
 
-Krusty registers its tools at startup via `register_all_tools()` in `crates/krusty-core/src/tools/implementations/mod.rs`. They fall into several categories.
+Mitsuro registers its tools at startup via `register_all_tools()` in `crates/krusty-core/src/tools/implementations/mod.rs`. They fall into several categories.
 
 ### File I/O
 
@@ -49,7 +49,7 @@ Krusty registers its tools at startup via `register_all_tools()` in `crates/krus
 
 ### Execution
 
-**Bash** runs shell commands with real-time output streaming. It supports foreground execution with configurable timeouts (default 30 seconds, max 10 minutes), background execution via `run_in_background`, and process group management for clean cleanup on timeout. Output is streamed to the UI as it arrives, then ANSI-stripped and truncated before being sent back to the AI. Krusty validates and scopes the starting working directory, but a shell can still access whatever files, processes, and network resources the server's OS account can access.
+**Bash** runs shell commands with real-time output streaming. It supports foreground execution with configurable timeouts (default 30 seconds, max 10 minutes), background execution via `run_in_background`, and process group management for clean cleanup on timeout. Output is streamed to the UI as it arrives, then ANSI-stripped and truncated before being sent back to the AI. Mitsuro validates and scopes the starting working directory, but a shell can still access whatever files, processes, and network resources the server's OS account can access.
 
 This makes Bash a **trusted-host capability**. It is appropriate for a private workstation or tailnet server such as Honey, where the authenticated user intentionally grants the agent that account's authority. It must be disabled for hostile public tenants unless each execution is placed in a real OS boundary such as a container, VM, or separately confined user account. ACP deliberately omits Bash and process tools because an editor connection does not supply such a boundary.
 
@@ -74,9 +74,9 @@ Sub-agents can also run in the background via `run_in_background: true`, returni
 
 **AskUserQuestion** prompts the user for input from within the AI's reasoning flow. **Skill** loads specialized instruction sets from `~/.krusty/skills/` or the project's `.krusty/skills/` directory. **Memory** persists knowledge across sessions -- user preferences, project context, feedback. **SetWorkMode**, **EnterPlanMode**, and **SetWorkspaceContext** let the AI toggle between plan mode and build mode or update workspace metadata.
 
-### Mako (Autonomous Mode)
+### Hive (Autonomous Mode)
 
-**CreateTask**, **UpdateTask**, **ListTasks**, **CreateReport**, **ListReports**, **ReadReport** -- these are registered additionally for Mako sessions to support autonomous task tracking and reporting.
+**CreateTask**, **UpdateTask**, **ListTasks**, **CreateReport**, **ListReports**, **ReadReport** -- these are registered additionally for Hive sessions to support autonomous task tracking and reporting.
 
 ## The Execution Lifecycle
 
@@ -104,11 +104,11 @@ Every tool has a `ToolPolicy` that classifies it along several axes:
 - **retry_timeout_once**: Whether the system should retry once on timeout (useful for read tools where transient failures are common).
 - **timeout_override**: Tool-specific timeout (the `agent` tool gets 15 minutes instead of 2).
 
-Krusty runs in one of two permission modes:
+Mitsuro runs in one of two permission modes:
 
 **Supervised** (the default). Read-only tools execute freely. Write tools -- file edits, bash commands, patches -- require the user to approve each call before it runs. The UI presents the tool call parameters and waits for confirmation. This is the mode for interactive sessions where you want oversight.
 
-**Autonomous**. All tools execute without approval. This is the mode for Mako background agents and for users who trust the AI to operate independently. The safety hooks still apply -- autonomous mode doesn't disable the SafetyHook, so genuinely dangerous commands are still blocked.
+**Autonomous**. All tools execute without approval. This is the mode for Hive background agents and for users who trust the AI to operate independently. The safety hooks still apply -- autonomous mode doesn't disable the SafetyHook, so genuinely dangerous commands are still blocked.
 
 Sub-agents inherit their parent's permission mode through `DelegationPolicy`. An explore sub-agent spawned from a supervised parent will have its tools restricted accordingly. Build sub-agents in autonomous mode get full write access; in supervised mode, their write tools are blocked entirely (since there's no interactive approval path for a background sub-agent).
 
@@ -147,11 +147,11 @@ The bash tool additionally strips ANSI escape sequences before truncation, since
 
 ## MCP Tools
 
-Krusty discovers external tools at runtime through the Model Context Protocol. When MCP servers are configured, the `McpManager` connects to them and queries their tool catalogs. Each discovered tool gets wrapped in an `McpTool` struct (in `crates/krusty-core/src/mcp/tool.rs`) that implements the `Tool` trait, making MCP tools indistinguishable from built-in tools at the registry level.
+Mitsuro discovers external tools at runtime through the Model Context Protocol. When MCP servers are configured, the `McpManager` connects to them and queries their tool catalogs. Each discovered tool gets wrapped in an `McpTool` struct (in `crates/krusty-core/src/mcp/tool.rs`) that implements the `Tool` trait, making MCP tools indistinguishable from built-in tools at the registry level.
 
 MCP tool names are namespaced as `mcp__{server}_{tool}` to avoid collisions with built-in tools. Their parameter schemas are sanitized on registration -- the wrapper ensures every schema has `additionalProperties: false`, valid `required` arrays, and proper object structure, since external servers don't always produce schemas that meet Anthropic's strict requirements.
 
-One important detail: MCP tools execute on external servers and bypass Krusty's local sandbox. When a sandboxed context invokes an MCP tool, a warning is logged and included in the result metadata. The execution happens on the remote server, not in the local environment, so local path restrictions don't apply.
+One important detail: MCP tools execute on external servers and bypass Mitsuro's local sandbox. When a sandboxed context invokes an MCP tool, a warning is logged and included in the result metadata. The execution happens on the remote server, not in the local environment, so local path restrictions don't apply.
 
 ## Tool Matching
 
@@ -175,4 +175,4 @@ For the ApplyPatch tool, a related `seek_sequence` function provides four-pass l
 
 Tools are registered in a deterministic order at startup. This matters because the tool list becomes part of the system prompt sent to the AI provider, and Anthropic's prompt caching is sensitive to exact content. If tools were registered in random order (from HashMap iteration), the cached prompt prefix would break between API calls, wasting money on re-processing. The registry sorts tools alphabetically by name before generating the AI tool definitions.
 
-Different contexts get different tool sets. The full TUI session registers everything. ACP mode excludes interactive tools like AskUserQuestion and EnterPlanMode (since the editor can't render those interactions). Mako sessions add autonomous task and report tools on top of the standard set. Sub-agents get a filtered view based on their `DelegationPolicy` -- explore agents see only read-only tools, build agents see write tools too (if the permission mode allows), and no sub-agent gets the `agent` tool itself (preventing recursive delegation loops).
+Different contexts get different tool sets. The full TUI session registers everything. ACP mode excludes interactive tools like AskUserQuestion and EnterPlanMode (since the editor can't render those interactions). Hive sessions add autonomous task and report tools on top of the standard set. Sub-agents get a filtered view based on their `DelegationPolicy` -- explore agents see only read-only tools, build agents see write tools too (if the permission mode allows), and no sub-agent gets the `agent` tool itself (preventing recursive delegation loops).

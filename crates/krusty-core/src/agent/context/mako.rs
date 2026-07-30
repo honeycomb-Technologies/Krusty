@@ -10,7 +10,7 @@ use crate::storage::{
 use super::project::discover_named_file;
 use super::truncate_utf8_bytes;
 
-const MAKO_FILES: &[&str] = &["MAKO.md", "mako.md"];
+const MAKO_FILES: &[&str] = &["HIVE.md", "hive.md", "MAKO.md", "mako.md"];
 const MAX_MAKO_CONTEXT_BYTES: usize = 24 * 1024;
 
 pub(super) fn build_mako_context_sections(
@@ -74,8 +74,8 @@ pub(super) fn build_mako_context_sections_with_home(
     );
 
     if let Some(path) = discover_named_file(project_root, MAKO_FILES) {
-        if let Some(content) = load_mako_context_file(&path, "Mako project overlay") {
-            let label = display_context_file_name(&path, "MAKO.md");
+        if let Some(content) = load_mako_context_file(&path, "Hive project overlay") {
+            let label = display_context_file_name(&path, "HIVE.md");
             sections.push(format!(
                 "[MAKO PROJECT OVERLAY - {}]\n\n{}\n\n[END MAKO PROJECT OVERLAY]",
                 label, content
@@ -145,8 +145,8 @@ pub(super) fn build_mako_context_sections_with_profile(
     }
 
     if let Some(path) = discover_named_file(project_root, MAKO_FILES) {
-        if let Some(content) = load_mako_context_file(&path, "Mako project overlay") {
-            let label = display_context_file_name(&path, "MAKO.md");
+        if let Some(content) = load_mako_context_file(&path, "Hive project overlay") {
+            let label = display_context_file_name(&path, "HIVE.md");
             sections.push(format!(
                 "[MAKO PROJECT OVERLAY - {}]\n\n{}\n\n[END MAKO PROJECT OVERLAY]",
                 label, content

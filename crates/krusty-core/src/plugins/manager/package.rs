@@ -560,7 +560,7 @@ impl PluginManager {
             .await?;
         if manifest_paths.is_empty() {
             bail!(
-                "package {} does not declare any Krusty plugins (expected package.json krusty.plugins or plugin.toml)",
+                "package {} does not declare any Mitsuro plugins (expected compatibility key package.json krusty.plugins or plugin.toml)",
                 package_root.display()
             );
         }
@@ -825,14 +825,14 @@ impl PluginManager {
                         Ok(metadata) => metadata,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                             bail!(
-                                "declared Krusty plugin manifest does not exist: {}",
+                                "declared Mitsuro plugin manifest does not exist: {}",
                                 manifest_path.display()
                             )
                         }
                         Err(error) => {
                             return Err(error).with_context(|| {
                                 format!(
-                                    "failed to inspect declared Krusty plugin manifest {}",
+                                    "failed to inspect declared Mitsuro plugin manifest {}",
                                     manifest_path.display()
                                 )
                             })
@@ -840,7 +840,7 @@ impl PluginManager {
                     };
                     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
                         bail!(
-                            "declared Krusty plugin manifest must be a regular file: {}",
+                            "declared Mitsuro plugin manifest must be a regular file: {}",
                             manifest_path.display()
                         );
                     }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Check,
@@ -23,8 +23,7 @@ import { InlineReportCard } from "../reports/InlineReportCard";
 import { ToolDiffPeek } from "./ToolDiffPeek";
 import {
   buildReadFilePresentation,
-  buildToolDiffPeekRows,
-  toolDiffChangedRowCount,
+  buildToolDiffPeekModel,
 } from "./toolDiffModel";
 import {
   presentTool,
@@ -40,7 +39,7 @@ interface ToolCallCardProps {
   compact?: boolean;
 }
 
-export function ToolCallCard({
+export const ToolCallCard = memo(function ToolCallCard({
   toolCall,
   isStreaming,
   defaultExpanded,
@@ -50,7 +49,23 @@ export function ToolCallCard({
   const t = theme.colors;
   const presentation = useMemo(
     () => presentTool(toolCall, { isStreaming }),
-    [toolCall, isStreaming],
+    [
+      isStreaming,
+      toolCall.arguments,
+      toolCall.delegated,
+      toolCall.delegatedRunId,
+      toolCall.description,
+      toolCall.id,
+      toolCall.name,
+      toolCall.output,
+      toolCall.status,
+    ],
+  );
+  const diffPeek = useMemo(
+    () => presentation.diff && presentation.showDiffPeek
+      ? buildToolDiffPeekModel(presentation.diff, presentation.peekDiffRows)
+      : null,
+    [presentation],
   );
   const [expanded, setExpanded] = useState(
     defaultExpanded ?? presentation.defaultExpanded,
@@ -153,10 +168,16 @@ export function ToolCallCard({
         expanded,
         isStreaming: Boolean(isStreaming),
         colors: t,
+        diffPeek,
       })}
     </View>
   );
-}
+}, (previous, next) =>
+  previous.isStreaming === next.isStreaming &&
+  previous.defaultExpanded === next.defaultExpanded &&
+  previous.compact === next.compact &&
+  sameToolCallPresentation(previous.toolCall, next.toolCall),
+);
 
 function renderBody({
   toolCall,
@@ -164,12 +185,14 @@ function renderBody({
   expanded,
   isStreaming,
   colors,
+  diffPeek,
 }: {
   toolCall: ToolCall;
   presentation: ToolPresentation;
   expanded: boolean;
   isStreaming: boolean;
   colors: ReturnType<typeof useThemeContext>["theme"]["colors"];
+  diffPeek: ReturnType<typeof buildToolDiffPeekModel> | null;
 }) {
   if (presentation.family === "bash") {
     const command =
@@ -227,9 +250,11 @@ function renderBody({
     }
 
     if (presentation.showDiffPeek) {
-      const peekRows = buildToolDiffPeekRows(diff, presentation.peekDiffRows);
-      const changed = toolDiffChangedRowCount(diff);
-      const remaining = Math.max(0, changed - peekRows.length);
+      const peekRows = diffPeek?.rows ?? [];
+      const remaining = Math.max(
+        0,
+        (diffPeek?.changedRowCount ?? 0) - peekRows.length,
+      );
       return (
         <View style={styles.diffBody}>
           {diff.summary ? (
@@ -369,6 +394,24 @@ function renderBody({
   }
 
   return null;
+}
+
+/**
+ * Complete semantic comparison for memoizing settled cards. Large output
+ * strings are compared directly, avoiding a duplicate revision string while
+ * still invalidating equal-sized content changes.
+ */
+export function sameToolCallPresentation(left: ToolCall, right: ToolCall): boolean {
+  return left === right || (
+    left.id === right.id &&
+    left.name === right.name &&
+    left.description === right.description &&
+    left.status === right.status &&
+    left.output === right.output &&
+    left.delegatedRunId === right.delegatedRunId &&
+    left.arguments === right.arguments &&
+    left.delegated === right.delegated
+  );
 }
 
 function StatusIcon({

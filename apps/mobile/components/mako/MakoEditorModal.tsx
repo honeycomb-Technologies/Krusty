@@ -48,10 +48,7 @@ export function MakoEditorModal({
           style={[
             styles.panel,
             {
-              backgroundColor:
-                theme.scheme === "dark"
-                  ? "rgba(11,17,25,0.98)"
-                  : "rgba(255,255,255,0.98)",
+              backgroundColor: t.surfaceOverlayStrong,
               borderColor: t.border,
             },
           ]}

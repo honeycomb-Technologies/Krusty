@@ -1,12 +1,12 @@
 # The Web Server & API
 
-Krusty ships a self-hosted web server built on Axum, Rust's async web framework. The server powers every frontend surface -- the embedded web client, the Expo mobile app, and the desktop shell -- through a single HTTP and WebSocket API. This document walks through the server's architecture, its major API groups, and the services that support them.
+Mitsuro ships a self-hosted web server built on Axum, Rust's async web framework. The server powers every frontend surface -- the embedded web client, the Expo mobile app, and the desktop shell -- through a single HTTP and WebSocket API. This document walks through the server's architecture, its major API groups, and the services that support them.
 
 ## Architecture
 
 The server lives in `crates/krusty-server/`. It exposes an Axum `Router` assembled by the `build_router()` function in `lib.rs`. All shared state lives in a single `AppState` struct that gets cloned (cheaply, via `Arc`) into every request handler.
 
-`AppState` holds everything the server needs at runtime: the AI client, a tool registry, credential store, model registry, MCP manager, process registry, session locks, push notification services, and the Mako runtime manager. Each field is wrapped in an `Arc` (and often an `RwLock`) so concurrent requests can share state safely without contention.
+`AppState` holds everything the server needs at runtime: the AI client, a tool registry, credential store, model registry, MCP manager, process registry, session locks, push notification services, and the Hive runtime manager. Each field is wrapped in an `Arc` (and often an `RwLock`) so concurrent requests can share state safely without contention.
 
 Routes are organized into a protected group and a small public surface. The protected group nests all `/api/*` endpoints and the WebSocket terminal handler behind authentication middleware. Outside that boundary sit the health check (`GET /health`), OAuth callbacks, and the static asset fallback that serves the web frontend.
 
@@ -37,14 +37,14 @@ surfaces. Their API groups accept only the local single-tenant administrator;
 a request carrying `X-User-Id` receives `403 Forbidden` until those managers
 have per-tenant storage and runtime instances. Operator-installed contributions
 may still form part of the server-wide tool/runtime policy, so public
-multi-tenant deployments must isolate the Krusty process per trust domain in
+multi-tenant deployments must isolate the Mitsuro process per trust domain in
 the same way they must isolate host tool execution.
 
 ## The Embedded Web Frontend
 
-Krusty uses `rust-embed` to compile the Expo web build directly into the server binary. At compile time, the `WebAssets` struct includes all files from `apps/mobile/dist`. When a request doesn't match any API route, the `serve_web_app` fallback handler looks for a matching static asset. If none is found, it serves `index.html` for SPA client-side routing.
+Mitsuro uses `rust-embed` to compile the Expo web build directly into the server binary. At compile time, the `WebAssets` struct includes all files from `apps/mobile/dist`. When a request doesn't match any API route, the `serve_web_app` fallback handler looks for a matching static asset. If none is found, it serves `index.html` for SPA client-side routing.
 
-This means a production Krusty build is a single binary with no external files. Run `krusty serve` and every client surface is available immediately at `http://localhost:3000`. If the web build directory is absent at compile time (common during backend-only development), `rust-embed` gracefully produces an empty asset set and the server falls back to a plain-text message confirming the API is running.
+This means a production Mitsuro build is a single binary with no external files. Run `krusty serve` and every client surface is available immediately at `http://localhost:3000`. If the web build directory is absent at compile time (common during backend-only development), `rust-embed` gracefully produces an empty asset set and the server falls back to a plain-text message confirming the API is running.
 
 Static assets get intelligent caching headers. Immutable bundled files (those under `_expo/static/`) receive a one-year `Cache-Control` with the `immutable` directive. HTML files are served with `no-cache` to ensure clients always get the latest shell. Everything else gets a one-hour cache.
 
@@ -90,7 +90,7 @@ Sessions support multi-tenant ownership. When auth headers are present, sessions
 Key session endpoints:
 
 - `GET /api/sessions` -- list sessions, optionally filtered by working directory
-- `POST /api/sessions` -- create a session with optional working directory, model, and session type (Code, Chat, or Mako)
+- `POST /api/sessions` -- create a session with optional working directory, model, and session type (Code, Chat, or Hive)
 - `GET /api/sessions/:id` -- get a session with its messages, supporting pagination via `limit` and `offset`
 - `PATCH /api/sessions/:id` -- update title, working directory, mode, model, or target branch
 - `DELETE /api/sessions/:id` -- delete a session and release its lock
@@ -136,7 +136,7 @@ Delivery uses retry logic with exponential backoff (up to 3 attempts). Stale sub
 
 The `ApnsService` uses JWT token-based authentication with an ES256 `.p8` key from Apple. Configuration comes from environment variables: `KRUSTY_APNS_KEY_PATH`, `KRUSTY_APNS_KEY_ID`, `KRUSTY_APNS_TEAM_ID`, and `KRUSTY_APNS_BUNDLE_ID`. The service caches JWT tokens for 50 minutes (Apple allows up to 60) and sends notifications through Apple's HTTP/2 API.
 
-APNs supports event types including tool approval requests, completions, and Mako status updates. Device tokens are stored in SQLite, and devices that fail repeatedly (more than 10 consecutive failures) are automatically pruned.
+APNs supports event types including tool approval requests, completions, and Hive status updates. Device tokens are stored in SQLite, and devices that fail repeatedly (more than 10 consecutive failures) are automatically pruned.
 
 ## WebSocket Terminal
 
@@ -146,14 +146,14 @@ The client communicates through a JSON message protocol. A `hello` message negot
 
 PTY output flows back through the WebSocket, either as JSON `output` messages or raw binary frames depending on the negotiated mode. Output is coalesced over a 4ms window and batched up to 64KB to reduce WebSocket frame overhead during fast-scrolling output. The terminal session is registered in the process registry so it shows up alongside other tracked processes.
 
-## Mako Runtime
+## Hive Runtime
 
-Mako is Krusty's autonomous agent mode. While normal chat sessions are request-response (the user sends a message, the agent responds), Mako sessions run continuously in the background with full tool access.
+Hive is Mitsuro's autonomous agent mode. While normal chat sessions are request-response (the user sends a message, the agent responds), Hive sessions run continuously in the background with full tool access.
 
-The Mako API at `/api/mako` provides:
+The Hive API at `/api/mako` provides:
 
 - `POST /api/mako/dispatch` -- start a new autonomous task with a description and optional project directory
-- `GET /api/mako/sessions` -- list all Mako sessions with their runtime state
+- `GET /api/mako/sessions` -- list all Hive sessions with their runtime state
 - `GET /api/mako/sessions/:id/status` -- detailed status including task list and agent state
 - `GET /api/mako/sessions/:id/events` -- SSE stream of live events (with replay from persisted trace)
 - `POST /api/mako/sessions/:id/message` -- inject a user message into a running session
@@ -162,7 +162,7 @@ The Mako API at `/api/mako` provides:
 
 The `MakoRuntimeManager` owns the lifecycle of autonomous sessions. Each session gets its own tokio task running the orchestrator loop in `PermissionMode::Autonomous` with a `TickEngine` that injects synthetic ticks every 30 seconds to keep the agent working. Events flow through a broadcast channel so multiple clients can observe the same session.
 
-Mako sessions persist their runtime state (running, sleeping, paused, error) to SQLite. On server restart, `restore_persisted_sessions` resumes any sessions that were running or sleeping. Sleeping sessions that have a future wake time get a scheduled timer; those past due resume immediately.
+Hive sessions persist their runtime state (running, sleeping, paused, error) to SQLite. On server restart, `restore_persisted_sessions` resumes any sessions that were running or sleeping. Sleeping sessions that have a future wake time get a scheduled timer; those past due resume immediately.
 
 ## Authentication
 
@@ -183,9 +183,9 @@ to its principal; an untrusted forwarded header is insufficient.
 
 ## First-Run Setup
 
-When you run `krusty serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. The wizard saves credentials to the encrypted credential store so subsequent starts are immediate.
+When you run `krusty serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. API keys are stored in an owner-readable file written atomically with restrictive permissions on Unix. OAuth providers use the separate token store.
 
-The serve command also integrates with Tailscale. If Tailscale is installed and the device is online, the server automatically configures `tailscale serve` to proxy the local port, making Krusty accessible at `https://<machine-name>.<tailnet>.ts.net`. If permissions are insufficient, it prints a one-time fix command (`sudo tailscale set --operator=$USER`). If Tailscale is not installed, it suggests installing it.
+The serve command also integrates with Tailscale. If Tailscale is installed and the device is online, the server automatically configures `tailscale serve` to proxy the local port, making Mitsuro accessible at `https://<machine-name>.<tailnet>.ts.net`. If permissions are insufficient, it prints a one-time fix command (`sudo tailscale set --operator=$USER`). If Tailscale is not installed, it suggests installing it.
 
 The server writes a PID file on startup and cleans it up on shutdown. If a server is already running on the same machine, `krusty serve` detects it, prints its URL, and exits rather than starting a duplicate instance.
 

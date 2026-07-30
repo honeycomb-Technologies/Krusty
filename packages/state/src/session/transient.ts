@@ -75,16 +75,30 @@ export function upsertTransientAssistantMessage(
   messages: ChatMessage[],
   message: ChatMessage,
 ): ChatMessage[] {
-  const nextMessages = messages.filter((entry) => entry.kind !== 'live_partial');
-  const lastIndex = nextMessages.length - 1;
-  const lastMessage = nextMessages[lastIndex];
+  const lastIndex = messages.length - 1;
+  const lastMessage = messages[lastIndex];
 
   if (lastIndex >= 0 && isTransientAssistantMessage(lastMessage)) {
+    const nextMessages = messages.slice();
     nextMessages[lastIndex] = { ...message, id: lastMessage.id };
     return nextMessages;
   }
 
-  return [...nextMessages, message];
+  // Recovered snapshots can contain an older live_partial away from the tail.
+  // Keep that uncommon cleanup path, but do not filter the entire transcript
+  // for every ordinary stream presentation flush.
+  const stalePartialIndex = messages.findIndex(
+    (entry) => entry.kind === 'live_partial',
+  );
+  if (stalePartialIndex >= 0) {
+    return [
+      ...messages.slice(0, stalePartialIndex),
+      ...messages.slice(stalePartialIndex + 1),
+      message,
+    ];
+  }
+
+  return [...messages, message];
 }
 
 export function finalizeTransientAssistantMessages(

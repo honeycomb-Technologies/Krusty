@@ -277,7 +277,7 @@ where
 fn ensure_supported_plugin_state_version(version: u32, label: &str) -> Result<()> {
     if version != SUPPORTED_PLUGIN_STATE_VERSION {
         bail!(
-            "unsupported {} schema version {}; this Krusty build supports version {}",
+            "unsupported {} schema version {}; this Mitsuro build supports version {}",
             label,
             version,
             SUPPORTED_PLUGIN_STATE_VERSION

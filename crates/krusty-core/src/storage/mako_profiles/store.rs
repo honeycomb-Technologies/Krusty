@@ -24,25 +24,25 @@ pub struct MakoProfileStore {
 pub enum MakoProfileStoreError {
     #[error(transparent)]
     InvalidOwner(#[from] MakoProfileOwnerError),
-    #[error("Mako profile content must not be empty")]
+    #[error("Hive profile content must not be empty")]
     EmptyContent,
     #[error(
-        "Mako profile content exceeds the {MAX_MAKO_PROFILE_DOCUMENT_BYTES}-byte document limit"
+        "Hive profile content exceeds the {MAX_MAKO_PROFILE_DOCUMENT_BYTES}-byte document limit"
     )]
     ContentTooLarge,
-    #[error("invalid Mako crew slug: {0}")]
+    #[error("invalid Hive agent slug: {0}")]
     InvalidCrewSlug(String),
-    #[error("Mako profile revision conflict: expected {expected}, actual {actual}")]
+    #[error("Hive profile revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: i64, actual: i64 },
-    #[error("Mako profile owner collision for profile id {profile_id}")]
+    #[error("Hive profile owner collision for profile id {profile_id}")]
     OwnerCollision { profile_id: String },
-    #[error("Mako profile {0} was not found")]
+    #[error("Hive profile {0} was not found")]
     ProfileNotFound(String),
-    #[error("invalid stored Mako profile document kind: {0}")]
+    #[error("invalid stored Hive profile document kind: {0}")]
     InvalidStoredDocumentKind(String),
-    #[error("invalid stored Mako crew document kind: {0}")]
+    #[error("invalid stored Hive agent document kind: {0}")]
     InvalidStoredCrewDocumentKind(String),
-    #[error("legacy Mako homes may only be imported into the local profile")]
+    #[error("legacy autonomous homes may only be imported into the local Hive profile")]
     LegacyImportRequiresLocalOwner,
     #[error(transparent)]
     Database(#[from] rusqlite::Error),

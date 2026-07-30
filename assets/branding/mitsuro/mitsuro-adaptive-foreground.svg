@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Mitsuro adaptive icon foreground</title>
+  <defs>
+    <linearGradient id="rim" x1=".2" y1=".1" x2=".8" y2=".9">
+      <stop stop-color="#59585F"/><stop offset=".32" stop-color="#292A2F"/><stop offset=".68" stop-color="#090A0C"/><stop offset="1" stop-color="#393A40"/>
+    </linearGradient>
+    <radialGradient id="well" cx="47%" cy="40%" r="66%">
+      <stop stop-color="#1A1B20"/><stop offset=".64" stop-color="#0D0E11"/><stop offset="1" stop-color="#050608"/>
+    </radialGradient>
+    <filter id="shadow" x="-35%" y="-35%" width="170%" height="185%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="25"/><feOffset dy="31"/><feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .78 0"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g transform="translate(512 512) scale(.88) translate(-512 -512)" filter="url(#shadow)">
+    <path fill="#050608" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <g transform="translate(512 512) scale(.86) translate(-512 -512)">
+    <path fill="url(#rim)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+  <g transform="translate(512 512) scale(.74) translate(-512 -512)">
+    <path fill="url(#well)" transform="translate(512 512) rotate(30) scale(.88) translate(-512 -512)" d="M365 132h294c47 0 76 17 99 58l151 269c20 36 20 70 0 106L758 834c-23 41-52 58-99 58H365c-47 0-76-17-99-58L115 565c-20-36-20-70 0-106l151-269c23-41 52-58 99-58Z"/>
+  </g>
+</svg>

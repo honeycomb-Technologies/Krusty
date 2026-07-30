@@ -7,7 +7,6 @@ import {
   ScrollView,
   StyleSheet,
   Dimensions,
-  ActivityIndicator,
 } from 'react-native';
 import { BlurView } from '../platform/blur';
 import Animated, {
@@ -21,8 +20,10 @@ import Animated, {
 import { ArrowLeft, X } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
+import { DetailPaneSkeleton, ListRowsSkeleton } from './ui/Skeleton';
 import { useConnection } from '../hooks/useConnection';
 import { ReportDetailContent } from './reports/ReportDetailContent';
+import { reportSummariesFromResponse } from './reports/reportResponse';
 import type { ReportSummary, Report } from '@krusty/api';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
@@ -84,7 +85,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
       setLoading(true);
       client
         .getReports()
-        .then((res) => setReports(res.reports))
+        .then((res) => setReports(reportSummariesFromResponse(res)))
         .catch(() => {})
         .finally(() => setLoading(false));
     }
@@ -178,10 +179,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
           style={[
             StyleSheet.absoluteFill,
             {
-              backgroundColor:
-                theme.scheme === 'dark'
-                  ? 'rgba(11,17,25,0.92)'
-                  : 'rgba(255,255,255,0.92)',
+              backgroundColor: t.surfaceOverlayElevated,
             },
           ]}
         />
@@ -214,7 +212,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
           </ScrollView>
         ) : loading ? (
           <View style={styles.centered}>
-            <ActivityIndicator color={t.mutedForeground} />
+            <ListRowsSkeleton rows={6} />
           </View>
         ) : reports.length === 0 ? (
           <View style={styles.centered}>
@@ -234,7 +232,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
 
         {detailLoading && (
           <View style={styles.detailOverlay}>
-            <ActivityIndicator color={t.mutedForeground} />
+            <DetailPaneSkeleton />
           </View>
         )}
       </Animated.View>
@@ -257,7 +255,7 @@ export function ReportsContent({ visible }: ReportsContentProps) {
       setLoading(true);
       client
         .getReports()
-        .then((res) => setReports(res.reports))
+        .then((res) => setReports(reportSummariesFromResponse(res)))
         .catch(() => {})
         .finally(() => setLoading(false));
     }
@@ -344,7 +342,7 @@ export function ReportsContent({ visible }: ReportsContentProps) {
         </>
       ) : loading ? (
         <View style={styles.centered}>
-          <ActivityIndicator color={t.mutedForeground} />
+          <ListRowsSkeleton rows={6} />
         </View>
       ) : reports.length === 0 ? (
         <View style={styles.centered}>
@@ -364,7 +362,7 @@ export function ReportsContent({ visible }: ReportsContentProps) {
 
       {detailLoading && (
         <View style={styles.detailOverlay}>
-          <ActivityIndicator color={t.mutedForeground} />
+          <DetailPaneSkeleton />
         </View>
       )}
     </View>

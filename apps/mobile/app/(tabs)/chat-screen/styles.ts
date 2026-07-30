@@ -243,7 +243,7 @@ export const styles = StyleSheet.create({
     maxHeight: "60%",
     paddingTop: 20,
     paddingBottom: 40,
-    backgroundColor: "#1a1f2e",
+    backgroundColor: "#141519",
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "rgba(255,255,255,0.1)",
   },

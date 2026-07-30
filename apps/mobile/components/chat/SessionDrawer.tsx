@@ -99,7 +99,7 @@ function formatTime(dateStr: string): string {
 function modeTitle(mode: SessionType): string {
   if (mode === "chat") return "Chat threads";
   if (mode === "code") return "Code threads";
-  return "Mako threads";
+  return "Hive threads";
 }
 
 export function SessionDrawer({
@@ -127,6 +127,7 @@ export function SessionDrawer({
 
   const pickerProgress = useSharedValue(0);
   const [pickerVisible, setPickerVisible] = useState(false);
+  const pickerHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickerPath, setPickerPath] = useState("");
   const [pickerParent, setPickerParent] = useState<string | null>(null);
   const [pickerDirs, setPickerDirs] = useState<DirEntry[]>([]);
@@ -227,17 +228,28 @@ export function SessionDrawer({
     }
   }, [client, pickerReady]);
 
-  useEffect(() => {
-    if (isOpen && activeMode === "code") {
-      void loadPickerRoot();
-    }
-  }, [activeMode, isOpen, loadPickerRoot]);
+  // Directory browse is explicit user cost. Do not preload on every code drawer open.
+  // loadPickerRoot still runs from showPicker().
 
   useEffect(() => {
     if (!isOpen) {
+      if (pickerHideTimerRef.current) {
+        clearTimeout(pickerHideTimerRef.current);
+        pickerHideTimerRef.current = null;
+      }
       pickerProgress.value = withTiming(0, { duration: 150 });
-      const timer = setTimeout(() => setPickerVisible(false), 160);
-      return () => clearTimeout(timer);
+      // Fully dismiss the directory slide when threads close so it cannot
+      // reappear half-open on the next threads open.
+      pickerHideTimerRef.current = setTimeout(() => {
+        setPickerVisible(false);
+        pickerHideTimerRef.current = null;
+      }, 160);
+      return () => {
+        if (pickerHideTimerRef.current) {
+          clearTimeout(pickerHideTimerRef.current);
+          pickerHideTimerRef.current = null;
+        }
+      };
     }
   }, [isOpen, pickerProgress]);
 
@@ -274,6 +286,10 @@ export function SessionDrawer({
   );
 
   const showPicker = useCallback(() => {
+    if (pickerHideTimerRef.current) {
+      clearTimeout(pickerHideTimerRef.current);
+      pickerHideTimerRef.current = null;
+    }
     setPickerVisible(true);
     pickerProgress.value = withSpring(1, {
       damping: 20,
@@ -284,11 +300,18 @@ export function SessionDrawer({
   }, [loadPickerRoot, pickerProgress]);
 
   const hidePicker = useCallback(() => {
+    if (pickerHideTimerRef.current) {
+      clearTimeout(pickerHideTimerRef.current);
+      pickerHideTimerRef.current = null;
+    }
     pickerProgress.value = withTiming(0, {
       duration: 200,
       easing: Easing.out(Easing.cubic),
     });
-    setTimeout(() => setPickerVisible(false), 210);
+    pickerHideTimerRef.current = setTimeout(() => {
+      setPickerVisible(false);
+      pickerHideTimerRef.current = null;
+    }, 210);
   }, [pickerProgress]);
 
   const pickerStyle = useAnimatedStyle(() => ({
@@ -515,6 +538,8 @@ export function SessionDrawer({
       footer={footer}
       accessibilityLabel={modeTitle(activeMode)}
       testID="mobile-threads-sheet"
+      // Threads + directory picker should fully unmount when closed.
+      retainContent={false}
     >
       <View style={styles.content}>
         <View style={styles.heading}>
@@ -539,7 +564,7 @@ export function SessionDrawer({
               windowSize={7}
               maxToRenderPerBatch={8}
               initialNumToRender={12}
-              removeClippedSubviews
+              removeClippedSubviews={false}
               showsVerticalScrollIndicator={false}
             />
           ) : (
@@ -564,7 +589,7 @@ export function SessionDrawer({
                 const active = session.session_id === activeSessionId;
                 const runtime = session.runtime;
                 const runtimeLabel = runtime?.status ?? session.agent_state;
-                const crew = runtime?.crew_slug || "Mako default";
+                const crew = runtime?.crew_slug || "Hive default";
                 return (
                   <Pressable
                     accessibilityRole="button"
@@ -586,7 +611,7 @@ export function SessionDrawer({
                           { color: active ? t.userMessage : t.foreground },
                         ]}
                       >
-                        {session.title || "Untitled Mako"}
+                        {session.title || "Untitled Hive"}
                       </Text>
                       <View
                         style={[
@@ -618,13 +643,13 @@ export function SessionDrawer({
               windowSize={7}
               maxToRenderPerBatch={8}
               initialNumToRender={12}
-              removeClippedSubviews
+              removeClippedSubviews={false}
               showsVerticalScrollIndicator={false}
             />
           ) : (
             <View style={styles.listContent}>
               <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-                No Mako threads yet
+                No Hive threads yet
               </Text>
             </View>
           )

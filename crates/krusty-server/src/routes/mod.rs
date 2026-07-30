@@ -14,6 +14,7 @@ mod hooks;
 mod mako;
 mod mcp;
 mod memories;
+mod mobile_diagnostics;
 mod models;
 pub mod oauth;
 pub(crate) mod plugins;
@@ -49,6 +50,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/credentials", credentials::router())
         .nest("/mako", mako::router())
         .nest("/memories", memories::router())
+        .nest("/mobile-diagnostics", mobile_diagnostics::router())
         .nest("/processes", processes::router())
         .nest("/ports", ports::router())
         .nest("/settings/preview", preview_settings::router())

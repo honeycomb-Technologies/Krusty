@@ -12,6 +12,7 @@ import { useConnection } from '../../hooks/useConnection';
 import { SessionList, type SessionListProps } from '../chat/SessionList';
 import { PlanTracker } from '../chat/PlanTracker';
 import { SettingsModal } from '../SettingsModal';
+import { MitsuroWordmark } from '../brand';
 
 const SIDEBAR_WIDTH = 280;
 
@@ -42,7 +43,7 @@ export function DesktopShell({
 
   // Match the mobile drawer's blur/overlay values
   const blurIntensity = 40;
-  const bgOverlay = isDark ? 'rgba(11,17,25,0.88)' : 'rgba(255,255,255,0.88)';
+  const bgOverlay = t.surfaceOverlay;
   const blurTint = isDark ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight';
 
   const handleNewChat = useCallback(() => {
@@ -70,7 +71,7 @@ export function DesktopShell({
           <View style={styles.sidebarContent}>
             {/* Header with collapse button */}
             <View style={styles.sidebarHeader}>
-              <Text style={[styles.sidebarTitle, { color: t.foreground }]}>Krusty</Text>
+              <MitsuroWordmark width={118} color={t.foreground} />
               <Pressable onPress={toggleSidebar} style={styles.iconBtn}>
                 <PanelLeftClose size={18} color={t.mutedForeground} strokeWidth={1.8} />
               </Pressable>

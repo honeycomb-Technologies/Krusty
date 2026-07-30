@@ -1,14 +1,14 @@
 # Agent Extensions
 
 Agent extensions are executable JavaScript or TypeScript modules that extend
-Krusty's agent runtime. They can register model-callable tools, slash commands,
-lifecycle observers, and bounded context for each turn. This is Krusty's
-counterpart to Pi's extension API and OpenCode's plugin hooks; it is separate from Krusty's
+Mitsuro's agent runtime. They can register model-callable tools, slash commands,
+lifecycle observers, and bounded context for each turn. This is Mitsuro's
+counterpart to Pi's extension API and OpenCode's plugin hooks; it is separate from Mitsuro's
 Zed-compatible WASM extension ABI, which targets editor and language features.
 
 ## Discovery and precedence
 
-Krusty loads extensions from three scopes:
+Mitsuro loads extensions from three scopes:
 
 1. package roots contributed by enabled plugin bundles;
 2. the global `~/.krusty/extensions/agent/` root;
@@ -73,7 +73,7 @@ grant before their roots are activated.
 ```
 
 The entry must remain inside its extension directory. Worker environments are
-cleared, then receive only `PATH`, `HOME`, Krusty's scoped runtime variables,
+cleared, then receive only `PATH`, `HOME`, Mitsuro's scoped runtime variables,
 and explicitly declared uppercase environment variables.
 
 Agent extensions run as trusted local code in persistent Bun workers. The
@@ -134,7 +134,7 @@ through the central permission and approval policy. Slash commands appear in
 TUI autocomplete and execute asynchronously.
 
 Pi-style `tool_call` and OpenCode-style `tool.execute.before` interceptors can
-block a call or normalize its arguments. Krusty's central safety and approval
+block a call or normalize its arguments. Mitsuro's central safety and approval
 hooks then evaluate the effective arguments, so an extension cannot bypass the
 host policy by rewriting a call. `tool_result` and `tool.execute.after` are
 observational and cannot rewrite the canonical result retained in history.

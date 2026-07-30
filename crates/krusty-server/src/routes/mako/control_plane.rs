@@ -302,7 +302,7 @@ fn ensure_owned_mako_session(
         &open_session_manager(state)?,
         session_id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user,
     )?;
     Ok(())
@@ -324,7 +324,7 @@ fn require_owned_controller(
 ) -> Result<MakoController, AppError> {
     owned_controller(state, user, session_id)?.ok_or_else(|| {
         AppError::NotFound(format!(
-            "Mako controller for session {session_id} not found"
+            "Hive controller for session {session_id} not found"
         ))
     })
 }
@@ -352,9 +352,9 @@ fn owned_run(
 ) -> Result<MakoRun, AppError> {
     let run = MakoRunStore::new(Database::new(&state.db_path)?)
         .get_run(run_id)?
-        .ok_or_else(|| AppError::NotFound(format!("Mako run {run_id} not found")))?;
+        .ok_or_else(|| AppError::NotFound(format!("Hive run {run_id} not found")))?;
     if run.controller_id != controller.id {
-        return Err(AppError::NotFound(format!("Mako run {run_id} not found")));
+        return Err(AppError::NotFound(format!("Hive run {run_id} not found")));
     }
     Ok(run)
 }
@@ -384,7 +384,7 @@ async fn schedule_definition(
         &session_manager,
         session_id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user,
     )?;
     let explicit_model = trimmed_nonempty(request.model.as_deref()).map(ToOwned::to_owned);
@@ -401,7 +401,7 @@ async fn schedule_definition(
     });
     if requested_model.is_none() && requested_key.is_none() {
         return Err(AppError::Conflict(
-            "Mako session has no daemon-frozen model; dispatch a new Mako session or provide an explicit schedule model".into(),
+            "Hive session has no frozen model; start a new Hive session or provide an explicit schedule model".into(),
         ));
     }
     let resolved_model = resolve_mako_model(

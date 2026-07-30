@@ -111,7 +111,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Runs are the work ledger. Open a run to see what Mako is doing now, waiting on, or has already finished.
+        Runs are the work ledger. Open a run to see what Hive is doing now, waiting on, or has already finished.
       </Text>
 
       {actionError ? (

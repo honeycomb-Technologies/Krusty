@@ -11,8 +11,16 @@ import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
 import { NotificationProvider } from '../hooks/useNotifications';
+import { configureKrustyPerformance } from '@krusty/state';
+import { MobileDiagnosticsProvider } from '../diagnostics/MobileDiagnosticsProvider';
+import { installJsHotPathProbe } from '../diagnostics/jsHotPathProbe';
 
-const BOOT_BACKGROUND = '#0b1119';
+const BOOT_BACKGROUND = '#0e0e11';
+
+installJsHotPathProbe();
+configureKrustyPerformance(
+  __DEV__ || process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
+);
 
 LogBox.ignoreLogs([
   'Invalid DOM property `%s`. Did you mean `%s`? transform-origin transformOrigin',
@@ -41,21 +49,19 @@ if (!globalWithKrustyLogFilter.__krustySvgWarningFilterInstalled) {
 
 function RootNavigator() {
   const { theme } = useThemeContext();
-  const { client, isConfigured } = useConnection();
+  const { client, isConfigured, hasLoadedConnection } = useConnection();
   useDeepLink();
   const router = useRouter();
   const segments = useSegments();
 
   useEffect(() => {
+    if (!hasLoadedConnection) return;
     const inOnboarding = segments[0] === 'onboarding';
-    const inNavigationPreview = segments[0] === 'navigation-preview';
 
-    if (!isConfigured && !inOnboarding && !inNavigationPreview) {
+    if (!isConfigured && !inOnboarding) {
       router.replace('/onboarding');
-    } else if (isConfigured && inOnboarding) {
-      router.replace('/(tabs)');
     }
-  }, [isConfigured, segments]);
+  }, [hasLoadedConnection, isConfigured, router, segments]);
 
   const content = (
     <>
@@ -98,7 +104,9 @@ export default function RootLayout() {
           <SplashWrapper>
             <ThemeProvider>
               <ConnectionProvider>
-                <RootNavigator />
+                <MobileDiagnosticsProvider>
+                  <RootNavigator />
+                </MobileDiagnosticsProvider>
               </ConnectionProvider>
             </ThemeProvider>
           </SplashWrapper>

@@ -38,7 +38,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
 
   if (family === "accessoryCircular") {
     return (
-      <AccessoryBackground modifiers={[widgetURL("krusty://chat")]}>
+      <AccessoryBackground modifiers={[widgetURL("mitsuro://chat")]}>
         <VStack alignment="center">
           <Image
             systemName={
@@ -56,7 +56,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
 
   if (family === "accessoryRectangular") {
     return (
-      <AccessoryBackground modifiers={[widgetURL("krusty://chat")]}>
+      <AccessoryBackground modifiers={[widgetURL("mitsuro://chat")]}>
         <VStack alignment="leading">
           <HStack>
             <Image
@@ -64,7 +64,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
               modifiers={[font({ size: 10 })]}
             />
             <Text modifiers={[font({ size: 12, weight: "semibold" })]}>
-              {hasActiveSession ? sessionTitle : "Krusty"}
+              {hasActiveSession ? sessionTitle : "Mitsuro"}
             </Text>
           </HStack>
           <Text modifiers={[font({ size: 11 }), lineLimit(2), opacity(0.7)]}>
@@ -85,25 +85,25 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
         alignment="leading"
         modifiers={[
           padding({ all: 14 }),
-          background("#0b1119"),
-          foregroundStyle("#ffffff"),
-          widgetURL("krusty://chat"),
+          background("#0e0e11"),
+          foregroundStyle("#e8e5ea"),
+          widgetURL("mitsuro://chat"),
         ]}
       >
         <HStack>
           <Image
             systemName={serverConnected ? "circle.fill" : "circle"}
             modifiers={[
-              foregroundStyle(serverConnected ? "#4ade80" : "#ef4444"),
+              foregroundStyle(serverConnected ? "#7f9a86" : "#b06f73"),
               font({ size: 8 }),
             ]}
           />
-          <Text modifiers={[font({ size: 11 }), opacity(0.5)]}>Krusty</Text>
+          <Text modifiers={[font({ size: 11 }), opacity(0.5)]}>Mitsuro</Text>
           <Spacer />
           {isStreaming && (
             <Image
               systemName="ellipsis.bubble.fill"
-              modifiers={[foregroundStyle("#ff6b35"), font({ size: 12 })]}
+              modifiers={[foregroundStyle("#b89a61"), font({ size: 12 })]}
             />
           )}
         </HStack>
@@ -127,7 +127,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
           <VStack alignment="center" spacing={6}>
             <Image
               systemName="plus.bubble.fill"
-              modifiers={[foregroundStyle("#ff6b35"), font({ size: 24 })]}
+              modifiers={[foregroundStyle("#b89a61"), font({ size: 24 })]}
             />
             <Text modifiers={[font({ size: 12 }), opacity(0.6)]}>New Chat</Text>
           </VStack>
@@ -153,30 +153,32 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
       alignment="leading"
       modifiers={[
         padding({ all: 14 }),
-        background("#0b1119"),
-        foregroundStyle("#ffffff"),
-        widgetURL("krusty://chat"),
+        background("#0e0e11"),
+        foregroundStyle("#e8e5ea"),
+        widgetURL("mitsuro://chat"),
       ]}
     >
       <HStack>
         <Image
           systemName={serverConnected ? "circle.fill" : "circle"}
           modifiers={[
-            foregroundStyle(serverConnected ? "#4ade80" : "#ef4444"),
+            foregroundStyle(serverConnected ? "#7f9a86" : "#b06f73"),
             font({ size: 8 }),
           ]}
         />
         <Text modifiers={[font({ size: 13, weight: "bold" })]}>
-          Krusty Chat
+          Mitsuro Chat
         </Text>
         <Spacer />
         {isStreaming && (
           <HStack spacing={4}>
             <Image
               systemName="ellipsis.bubble.fill"
-              modifiers={[foregroundStyle("#ff6b35"), font({ size: 12 })]}
+              modifiers={[foregroundStyle("#b89a61"), font({ size: 12 })]}
             />
-            <Text modifiers={[font({ size: 11 }), foregroundStyle("#ff6b35")]}>
+            <Text
+              modifiers={[font({ size: 11 }), foregroundStyle("#b89a61")]}
+            >
               Streaming
             </Text>
           </HStack>
@@ -202,14 +204,14 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
         <HStack alignment="center" spacing={8}>
           <Image
             systemName="plus.bubble.fill"
-            modifiers={[foregroundStyle("#ff6b35"), font({ size: 28 })]}
+            modifiers={[foregroundStyle("#b89a61"), font({ size: 28 })]}
           />
           <VStack alignment="leading">
             <Text modifiers={[font({ size: 14, weight: "medium" })]}>
               Start a New Chat
             </Text>
             <Text modifiers={[font({ size: 11 }), opacity(0.5)]}>
-              Tap to open Krusty
+              Tap to open Mitsuro
             </Text>
           </VStack>
         </HStack>

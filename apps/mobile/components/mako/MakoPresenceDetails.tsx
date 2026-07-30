@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -11,6 +10,7 @@ import type {
   MakoHomeDocumentKind,
 } from "@krusty/api";
 import { useThemeContext } from "../../hooks/useTheme";
+import { DetailPaneSkeleton, ListRowsSkeleton } from "../ui/Skeleton";
 import { MakoEditorModal } from "./MakoEditorModal";
 import { MakoStatusBadge } from "./MakoStatusBadge";
 import type { MakoHomeState } from "./types";
@@ -211,7 +211,8 @@ export function MakoPresenceDetails({
 
       {state.isLoading && !home ? (
         <View style={styles.loading}>
-          <ActivityIndicator color={t.userMessage} />
+          <DetailPaneSkeleton />
+          <ListRowsSkeleton rows={3} />
         </View>
       ) : null}
 
@@ -219,7 +220,7 @@ export function MakoPresenceDetails({
         <View style={[styles.detailRow, { borderColor: t.border }]}>
           <View style={styles.detailCopy}>
             <Text style={[styles.detailValue, { color: t.foreground }]}>
-              Mako home is not initialized yet.
+              Hive home is not initialized yet.
             </Text>
             <Text style={[styles.crewMeta, { color: t.mutedForeground }]}>
               Create the global soul, identity, heartbeat, memory, channels, and default crew files.
@@ -239,7 +240,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "identity",
                 title: "Edit identity",
-                subtitle: "Visible name, presence, and top-level operator identity for Mako.",
+                subtitle: "Visible name, presence, and top-level operator identity for Hive.",
                 initialValue: home?.identity?.content ?? "",
               });
             }}
@@ -253,7 +254,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "soul",
                 title: "Edit soul",
-                subtitle: "The voice, stance, and behavioral center of Mako.",
+                subtitle: "The voice, stance, and behavioral center of Hive.",
                 initialValue: home?.soul?.content ?? "",
               });
             }}
@@ -267,7 +268,7 @@ export function MakoPresenceDetails({
                 scope: "home",
                 kind: "heartbeat",
                 title: "Edit heartbeat",
-                subtitle: "Recurring checks and quiet operator habits that keep Mako alive.",
+                subtitle: "Recurring checks and quiet operator habits that keep Hive alive.",
                 initialValue: home?.heartbeat?.content ?? "",
               });
             }}
@@ -282,7 +283,7 @@ export function MakoPresenceDetails({
                   scope: "home",
                   kind: "channels",
                   title: "Edit channels",
-                  subtitle: "How Mako routes updates, approvals, and presence across surfaces.",
+                  subtitle: "How Hive routes updates, approvals, and presence across surfaces.",
                   initialValue: home?.channels?.content ?? "",
                 });
               }}
@@ -292,7 +293,7 @@ export function MakoPresenceDetails({
       ) : null}
 
       <View style={styles.sectionHeader}>
-        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Crew</Text>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Hive Agents</Text>
         <Text style={[styles.countText, { color: t.mutedForeground }]}>
           {crew.length}
         </Text>
@@ -322,7 +323,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "identity",
                 title: `Edit ${member.slug} identity`,
-                subtitle: "Name, role, and external presence for this crew member.",
+                subtitle: "Name, role, and external presence for this Hive Agent.",
                 initialValue: member.identity?.content ?? "",
               });
             }}
@@ -332,7 +333,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "soul",
                 title: `Edit ${member.slug} soul`,
-                subtitle: "How this crew member thinks, writes, and behaves.",
+                subtitle: "How this Hive Agent thinks, writes, and behaves.",
                 initialValue: member.soul?.content ?? "",
               });
             }}
@@ -342,7 +343,7 @@ export function MakoPresenceDetails({
                 slug: member.slug,
                 kind: "memory",
                 title: `Edit ${member.slug} memory`,
-                subtitle: "Durable notes and role-specific memory for this crew member.",
+                subtitle: "Durable notes and role-specific memory for this Hive Agent.",
                 initialValue: member.memory?.content ?? "",
               });
             }}

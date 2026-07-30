@@ -1,3 +1,4 @@
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -15,8 +16,11 @@ import {
   RefreshCw,
   Sun,
   Monitor,
+  Play,
   Wifi,
   WifiOff,
+  Square,
+  Upload,
   X,
 } from "lucide-react-native";
 
@@ -46,6 +50,12 @@ import {
   previewStatusText,
 } from "./shared";
 import { styles } from "./styles";
+import {
+  clampSkillPageStart,
+  nextSkillPageStart,
+  previousSkillPageStart,
+  SKILL_PAGE_SIZE,
+} from "./skillWindow";
 
 export function SettingsHeader({ onClose }: { onClose?: () => void }) {
   const { theme } = useThemeContext();
@@ -69,6 +79,121 @@ export function SettingsHeader({ onClose }: { onClose?: () => void }) {
         </Pressable>
       ) : null}
     </View>
+  );
+}
+
+export function DiagnosticsSection({
+  mode,
+  runId,
+  eventCount,
+  nativePayloadCount,
+  approximateBytes,
+  uploadState,
+  completionPending,
+  isConnected,
+  onStart,
+  onStopAndUpload,
+  onUpload,
+}: {
+  mode: "baseline" | "stress";
+  runId: string | null;
+  eventCount: number;
+  nativePayloadCount: number;
+  approximateBytes: number;
+  uploadState: "idle" | "pending" | "uploading" | "uploaded" | "failed" | "unavailable";
+  completionPending: boolean;
+  isConnected: boolean;
+  onStart: () => void;
+  onStopAndUpload: () => void;
+  onUpload: () => void;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+  const statusTone = uploadState === "uploaded"
+    ? "success"
+    : uploadState === "failed" || uploadState === "unavailable"
+      ? "error"
+      : mode === "stress" || uploadState === "pending"
+        ? "warning"
+        : "neutral";
+
+  return (
+    <>
+      <SectionTitle
+        title="Internal diagnostics"
+        subtitle="Content-free performance capture uploaded securely to Honey"
+      />
+      <GlassCard>
+        <View style={styles.stack}>
+          <View style={styles.subsectionHeader}>
+            <View style={styles.rowContent}>
+              <Text style={[styles.rowTitle, { color: t.foreground }]}>Stress capture</Text>
+              <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+                {runId ? `Run ${runId.slice(-12)}` : "Recorder starting…"}
+              </Text>
+            </View>
+            <Pill
+              label={mode === "stress" ? "Recording" : uploadState}
+              tone={statusTone}
+            />
+          </View>
+
+          <View style={styles.pillRow}>
+            <Pill label={`${eventCount} events`} tone="info" />
+            {nativePayloadCount > 0 ? (
+              <Pill label={`${nativePayloadCount} native reports`} tone="warning" />
+            ) : null}
+            <Pill label={`${Math.ceil(approximateBytes / 1024)} KB`} />
+            <Pill label="No chat or file content" tone="success" />
+          </View>
+
+          <View style={styles.actionsWrap}>
+            {mode === "stress" ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={isConnected
+                  ? "Stop and upload diagnostic capture"
+                  : "Stop and save diagnostic capture"}
+                onPress={onStopAndUpload}
+                style={[styles.smallActionBtn, { borderColor: t.border }]}
+              >
+                <Square size={14} color={t.warning} strokeWidth={1.8} />
+                <Text style={[styles.smallActionText, { color: t.warning }]}>Stop & {isConnected ? "upload" : "save"}</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Start diagnostic capture"
+                onPress={onStart}
+                disabled={!runId || completionPending || uploadState === "uploading"}
+                style={[styles.smallActionBtn, { borderColor: t.border }]}
+              >
+                <Play size={14} color={t.userMessage} strokeWidth={1.8} />
+                <Text style={[styles.smallActionText, { color: t.userMessage }]}>Start 10-minute capture</Text>
+              </Pressable>
+            )}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={mode === "stress"
+                ? "Upload diagnostic checkpoint"
+                : "Upload diagnostics now"}
+              onPress={onUpload}
+              disabled={!isConnected || uploadState === "uploading" || (eventCount === 0 && nativePayloadCount === 0)}
+              style={[styles.smallActionBtn, { borderColor: t.border }]}
+            >
+              {uploadState === "uploading" ? (
+                <ActivityIndicator color={t.foreground} size="small" />
+              ) : (
+                <Upload size={14} color={t.foreground} strokeWidth={1.8} />
+              )}
+              <Text style={[styles.smallActionText, { color: t.foreground }]}>
+                {mode === "stress" ? "Upload checkpoint" : "Upload now"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </GlassCard>
+    </>
   );
 }
 
@@ -552,14 +677,33 @@ export function SkillsSection({
   loading,
   skills,
   message,
+  pageStart,
+  onPageStartChange,
 }: {
   isConnected: boolean;
   loading: boolean;
   skills: SkillInfo[];
   message: string | null;
+  pageStart: number;
+  onPageStartChange: (nextStart: number) => void;
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
+  const clampedSkillPageStart = clampSkillPageStart(
+    pageStart,
+    skills.length,
+  );
+  const visibleSkills = useMemo(
+    () =>
+      skills.slice(
+        clampedSkillPageStart,
+        clampedSkillPageStart + SKILL_PAGE_SIZE,
+      ),
+    [clampedSkillPageStart, skills],
+  );
+  const skillPageEnd = clampedSkillPageStart + visibleSkills.length;
+  const hasPreviousSkillPage = clampedSkillPageStart > 0;
+  const hasNextSkillPage = skillPageEnd < skills.length;
 
   return (
     <>
@@ -581,40 +725,92 @@ export function SkillsSection({
             {skills.length === 0 ? (
               <Text style={[styles.emptyText, { color: t.mutedForeground }]}>No skills reported by the current server.</Text>
             ) : (
-              skills.map((skill) => (
-                <View
+              visibleSkills.map((skill) => (
+                <SkillRow
                   key={`${skill.source}:${skill.name}`}
-                  style={[styles.subsection, { borderColor: t.border }]}
-                >
-                  <View style={styles.subsectionHeader}>
-                    <View style={styles.rowContent}>
-                      <Text style={[styles.rowTitle, { color: t.foreground }]}>{skill.name}</Text>
-                      <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}> 
-                        {skill.description}
-                      </Text>
-                    </View>
-                    <Pill
-                      label={skill.source}
-                      tone={skill.source === "project" ? "info" : "neutral"}
-                    />
-                  </View>
-
-                  <View style={styles.pillRow}>
-                    {skill.version ? <Pill label={`v${skill.version}`} /> : null}
-                    {skill.author ? <Pill label={skill.author} /> : null}
-                    {skill.tags.slice(0, 4).map((tag) => (
-                      <Pill key={tag} label={`#${tag}`} tone="info" />
-                    ))}
-                  </View>
-                </View>
+                  skill={skill}
+                />
               ))
             )}
+            {hasPreviousSkillPage || hasNextSkillPage ? (
+              <View style={styles.actionsWrap}>
+                {hasPreviousSkillPage ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Show previous skills"
+                    onPress={() =>
+                      onPageStartChange(
+                        previousSkillPageStart(clampedSkillPageStart),
+                      )
+                    }
+                    style={[styles.smallActionBtn, { borderColor: t.border }]}
+                  >
+                    <Text style={[styles.smallActionText, { color: t.userMessage }]}>
+                      Previous
+                    </Text>
+                  </Pressable>
+                ) : null}
+                <Pill
+                  label={`${clampedSkillPageStart + 1}-${skillPageEnd} of ${skills.length}`}
+                  tone="info"
+                />
+                {hasNextSkillPage ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Show next skills"
+                    onPress={() =>
+                      onPageStartChange(
+                        nextSkillPageStart(
+                          clampedSkillPageStart,
+                          skills.length,
+                        ),
+                      )
+                    }
+                    style={[styles.smallActionBtn, { borderColor: t.border }]}
+                  >
+                    <Text style={[styles.smallActionText, { color: t.userMessage }]}>
+                      Next
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
           </View>
         )}
       </GlassCard>
     </>
   );
 }
+
+const SkillRow = memo(function SkillRow({ skill }: { skill: SkillInfo }) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <View style={[styles.subsection, { borderColor: t.border }]}>
+      <View style={styles.subsectionHeader}>
+        <View style={styles.rowContent}>
+          <Text style={[styles.rowTitle, { color: t.foreground }]}>{skill.name}</Text>
+          <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+            {skill.description}
+          </Text>
+        </View>
+        <Pill
+          label={skill.source}
+          tone={skill.source === "project" ? "info" : "neutral"}
+        />
+      </View>
+
+      <View style={styles.pillRow}>
+        {skill.version ? <Pill label={`v${skill.version}`} /> : null}
+        {skill.author ? <Pill label={skill.author} /> : null}
+        {skill.tags.slice(0, 4).map((tag) => (
+          <Pill key={tag} label={`#${tag}`} tone="info" />
+        ))}
+      </View>
+    </View>
+  );
+});
 
 export function PreviewSection({
   isConnected,
@@ -1011,8 +1207,10 @@ export function AboutSection() {
         <View style={styles.row}>
           <Cpu size={20} color={t.mutedForeground} strokeWidth={1.8} />
           <View style={styles.rowContent}>
-            <Text style={[styles.rowTitle, { color: t.foreground }]}>Krusty</Text>
-            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>Expo mobile + web surface</Text>
+            <Text style={[styles.rowTitle, { color: t.foreground }]}>Mitsuro</Text>
+            <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+              By Honeycomb Technologies
+            </Text>
           </View>
         </View>
       </GlassCard>

@@ -141,7 +141,7 @@ pub(super) async fn main_session(
 
     let session = session_manager.ensure_mako_main_session(user_id)?;
     if !session_visible_to_user(&session, user_id) {
-        return Err(AppError::NotFound("Mako main session".into()));
+        return Err(AppError::NotFound("Hive main session".into()));
     }
 
     let agent_state = load_agent_state_or_idle(&session_manager, &session.id)?.state;
@@ -408,7 +408,7 @@ pub(super) async fn session_status(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
 
@@ -446,7 +446,7 @@ pub(super) async fn observe_events(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
 
@@ -529,7 +529,7 @@ pub(super) async fn send_message(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
 
@@ -569,7 +569,7 @@ pub(super) async fn pause_session(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
@@ -598,7 +598,7 @@ pub(super) async fn schedule_session(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
     let wake_at = parse_requested_wake_at(Some(req.start_at.as_str()))?
@@ -633,7 +633,7 @@ pub(super) async fn set_priority(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
     let idempotency_key = idempotency_key_from_headers(&headers)?;
@@ -663,7 +663,7 @@ pub(super) async fn set_crew(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
 
@@ -705,7 +705,7 @@ pub(super) async fn resume_session(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
     bind_frozen_session_model(&state, user.as_ref(), &id).await?;
@@ -734,7 +734,7 @@ pub(super) async fn cancel_session(
         &session_manager,
         &id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user.as_ref(),
     )?;
 
@@ -767,12 +767,12 @@ async fn bind_frozen_session_model(
         &session_manager,
         session_id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user,
     )?;
     if session.model.is_none() && session.model_key.is_none() {
         return Err(AppError::Conflict(
-            "Mako session has no daemon-frozen model; dispatch a new Mako session".into(),
+            "Hive session has no frozen model; start a new Hive session".into(),
         ));
     }
     let resolved = resolve_mako_model(

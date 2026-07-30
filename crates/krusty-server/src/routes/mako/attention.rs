@@ -158,7 +158,7 @@ fn load_attention_thread_context(
         &session_manager,
         thread_session_id,
         SessionType::Mako,
-        "Mako",
+        "Hive",
         user,
     )?;
     let db = Database::new(&state.db_path)?;
@@ -306,7 +306,7 @@ fn build_attention_items(
                     project_label(approval.project_dir.as_deref())
                 ),
                 detail: format!(
-                    "Mako is waiting for approval to continue {}.",
+                    "Hive is waiting for approval to continue {}.",
                     approval.session_title
                 ),
                 created_at: approval.requested_at.clone(),
@@ -482,7 +482,7 @@ fn build_scheduled_started_attention_item(
         section: "updates".to_string(),
         title: "Scheduled run started".to_string(),
         summary: format!("Started on schedule: {}", run.title),
-        detail: format!("Mako started this scheduled run in {project}."),
+        detail: format!("Hive started this scheduled run in {project}."),
         created_at: created_at.clone(),
         read: false,
         cleared: false,

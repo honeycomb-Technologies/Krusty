@@ -1268,7 +1268,7 @@ const styles = StyleSheet.create({
     flexGrow: 0,
     flexShrink: 0,
     overflow: 'visible',
-    // Same gap ChatBar uses between model list and crab FAB column.
+    // Same gap ChatBar uses between model list and the Agent FAB column.
     marginRight: MODEL_BUTTON_GAP,
   },
   modelFilterRowDesktop: {

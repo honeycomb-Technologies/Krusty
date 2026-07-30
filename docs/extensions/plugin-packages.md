@@ -1,6 +1,6 @@
-# Krusty Plugin Packages
+# Mitsuro Plugin Packages
 
-Krusty plugin packages are npm-shaped packages that declare one or more Krusty plugins. This follows Pi's package/resource-loader model while keeping Krusty's execution backends explicit.
+Mitsuro plugin packages are npm-shaped packages that declare one or more Mitsuro plugins. This follows Pi's package/resource-loader model while keeping Mitsuro's execution backends explicit.
 
 ## Package manifest
 
@@ -16,7 +16,7 @@ A package declares plugin manifests in `package.json`:
 }
 ```
 
-If `package.json` does not contain `krusty.plugins`, Krusty falls back to `./plugin.toml` when present.
+If `package.json` does not contain `krusty.plugins`, Mitsuro falls back to `./plugin.toml` when present.
 An explicit list may contain at most 256 unique, normalized manifest paths.
 Each manifest is limited to 1 MiB and all manifests in one package are limited
 to 8 MiB in aggregate, bounding both parser work and package fan-out.
@@ -56,7 +56,7 @@ to ensure that neither path traversal nor symlinks can escape the immutable
 installed snapshot.
 
 `hooks` accepts declarative `.json` or `.toml` command-hook configurations only.
-Executable JavaScript or TypeScript belongs in `agent_extensions`. Krusty accepts
+Executable JavaScript or TypeScript belongs in `agent_extensions`. Mitsuro accepts
 its flat hook form and the command subset of Codex/Claude event maps:
 
 ```json
@@ -118,7 +118,7 @@ signature_scheme = "manifest-envelope-v1"
 ```
 
 `artifact_kind` is covered by the release-envelope signature. A ZIP bundle may
-omit `entry_component` when it declares another component. Krusty verifies the
+omit `entry_component` when it declares another component. Mitsuro verifies the
 signature and compressed-artifact digest before extraction, writes the signed
 manifest itself, and then extracts into a fresh manager-owned transaction.
 Archive paths must be enclosed relative paths and may not contain backslashes,
@@ -126,7 +126,7 @@ drive/alternate-stream colons, duplicates, or `plugin.toml`. Entries are
 create-new: archive content cannot replace the signed manifest or another
 entry. Unix symlinks and special entry types such as devices, FIFOs, and
 sockets fail closed. Windows ZIPs without Unix mode metadata remain portable:
-Krusty uses the directory marker and always creates other entries as new regular
+Mitsuro uses the directory marker and always creates other entries as new regular
 files. ZIP64 and multi-disk archives are rejected before central-directory
 allocation because their extended counts are unnecessary under these limits.
 The archive is limited to the same 100,000 materialized filesystem entries,
@@ -138,7 +138,7 @@ must exist before the transaction is published. This signed bundle path is
 fully supported on non-Unix platforms even though unsigned local/npm snapshots
 fail closed there.
 
-`signature_scheme` is mandatory and is part of the signed envelope. Krusty
+`signature_scheme` is mandatory and is part of the signed envelope. Mitsuro
 does not guess whether a legacy signature covered only artifact bytes: a legacy
 publisher must add the scheme and re-sign the manifest. Unknown schemes fail
 closed so future protocols cannot be confused with this envelope format.
@@ -156,13 +156,13 @@ cannot name another publisher's trusted key:
 
 Key IDs are immutable; publisher key rotation uses a new ID instead of silently
 reassigning existing trusted key material.
-Old trust files may contain key material without a publisher binding. Krusty
+Old trust files may contain key material without a publisher binding. Mitsuro
 never infers that binding from the allowlist. Re-run `/plugins add-key` with the
 publisher and original key material, or use
 `PluginManager::bind_existing_trusted_key_to_publisher` to explicitly bind an
 existing stored key.
 Publishers can generate the exact domain-separated bytes with the exported
-`krusty_core::plugins::plugin_release_signing_payload` helper; Krusty verifies
+`krusty_core::plugins::plugin_release_signing_payload` helper; Mitsuro verifies
 that envelope before it downloads the referenced artifact, then verifies the
 artifact digest before publication.
 
@@ -187,11 +187,11 @@ npm package:
 /plugins install npm:@krusty/example-plugin@1.2.3
 ```
 
-Krusty never executes directly from a mutable source directory. It stages a
+Mitsuro never executes directly from a mutable source directory. It stages a
 manager-owned snapshot, validates every manifest and component, atomically
 publishes the snapshot, and finally atomically swaps `plugins.lock`. A failed
 lock write rolls the snapshot back; `/plugins reconcile` removes snapshots left
-by an interrupted process. Mutations are serialized across Krusty processes by
+by an interrupted process. Mutations are serialized across Mitsuro processes by
 a bounded OS advisory lock on one stable, no-follow lock file; descriptor close
 releases it after normal exit or a crash without deleting a successor's lock.
 
@@ -199,7 +199,7 @@ Unsigned local and npm package installation currently requires Unix. Windows
 and other non-Unix builds reject those requests before creating a staging
 transaction because Rust's stable filesystem API does not expose the complete
 combination of no-follow opens, stable directory/file identity, and hard-link
-counts used by the immutable snapshot proof. Krusty does not silently install a
+counts used by the immutable snapshot proof. Mitsuro does not silently install a
 weaker snapshot on those platforms. Signed single-component and signed ZIP
 bundle manifests use the separate authenticated-artifact path and remain
 available with full multi-resource distribution support.
@@ -217,7 +217,7 @@ stdout and stderr are drained continuously while only their recent bounded
 tails are retained. Commands have a ten-minute timeout; expiry terminates the
 complete process tree before the staged transaction is discarded.
 
-While npm install or an explicitly approved build is running, Krusty also
+While npm install or an explicitly approved build is running, Mitsuro also
 rescans the complete staging root against the entry, aggregate-byte, and
 per-file limits. A live violation terminates the same process tree and aborts
 the transaction; a strict final scan remains mandatory before publication.
@@ -225,7 +225,7 @@ This polling check bounds normal package growth and catches abusive writers
 quickly, but it is not a kernel filesystem quota, and explicit script consent
 still grants code the host account's authority outside the staging directory.
 
-Local and npm installs are bounded before publication. Krusty walks the complete
+Local and npm installs are bounded before publication. Mitsuro walks the complete
 staging tree in deterministic filename order and permits at most 100,000
 filesystem entries (including the snapshot root and directories), 512 MiB of
 special files such as sockets, devices, and FIFOs are rejected rather than
@@ -289,7 +289,7 @@ make the requested authority reviewable, but they cannot sandbox a trusted Bun
 worker or native library after `process` is granted. Installable
 `runtime = "wasm"` entries do not require a process grant because they currently
 present a managed descriptor without executing plugin code. Executable
-Wasmtime isolation belongs to Krusty's separate Zed-compatible editor/language
+Wasmtime isolation belongs to Mitsuro's separate Zed-compatible editor/language
 host and is not a drop-in package TUI or agent-extension runtime.
 
 Native and JS manifests with an `entry_component` are rejected unless they
@@ -302,7 +302,7 @@ components do not require a process declaration or grant.
 ## Declarative package hooks
 
 Entries under `hooks` are JSON or TOML command-hook configuration files. They
-accept Krusty's flat hook format and the Codex/Claude-style event map. For
+accept Mitsuro's flat hook format and the Codex/Claude-style event map. For
 example:
 
 ```json
@@ -368,7 +368,7 @@ plus strict byte limits. Local manifests and artifacts are opened once and read
 through a `max + 1` bounded handle, closing metadata/read races that could
 otherwise bypass the declared size cap.
 
-Only the built-in catalog can confer the `official` label. Krusty clears that
+Only the built-in catalog can confer the `official` label. Mitsuro clears that
 flag on entries loaded from configured third-party catalogs.
 
 Register a catalog source with:
@@ -383,14 +383,14 @@ Register a catalog source with:
 
 ### native
 
-Native plugins are dynamic libraries loaded through Krusty's C ABI. They are unsafe by design and are equivalent to executing arbitrary local code.
+Native plugins are dynamic libraries loaded through Mitsuro's C ABI. They are unsafe by design and are equivalent to executing arbitrary local code.
 
 Rules:
 
 - Export `krusty_plugin_entry`.
 - Return a `KrustyNativePluginV1` function table.
 - Do not expose Rust trait objects across the dylib boundary.
-- Keep persistent application state in the Krusty host when hot reload must preserve it.
+- Keep persistent application state in the Mitsuro host when hot reload must preserve it.
 - Treat plugin `Drop`/reload as shell lifecycle, not necessarily runtime shutdown.
 
 Native reload uses a shadow copy of the entry dylib in `.krusty-shadow/` under the package/install root. This lets a source dylib be rebuilt while the old loaded copy remains mapped by the OS.
@@ -402,14 +402,14 @@ handle and deletes its shadow copy.
 
 Package manifests accept `runtime = "wasm"`, but the installable TUI component
 currently presents a managed descriptor and does not execute package code.
-Krusty's executable Zed-compatible WASM extension host is loaded from the
+Mitsuro's executable Zed-compatible WASM extension host is loaded from the
 global extension root and exposes a separate editor/language ABI. Bundle-only
 packages should omit `entry_component` and contribute `agent_extensions`,
 `skills`, hooks, or MCP instead.
 
 ### js
 
-`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Krusty looks for libnode at `KRUSTY_LIBNODE` first, then `EDON_LIBNODE_PATH`.
+`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Mitsuro looks for libnode at `KRUSTY_LIBNODE` first, then `EDON_LIBNODE_PATH`.
 
 JS/TS plugins register a small text-mode TUI object:
 
@@ -424,7 +424,7 @@ JS/TS plugins register a small text-mode TUI object:
 });
 ```
 
-Krusty evaluates `.ts`, `.tsx`, `.mts`, and `.cts` entries with edon's TypeScript evaluator and `.js` entries with the CommonJS evaluator. This is intentionally small for the first pass: text rendering and lifecycle hooks are supported; richer host callbacks/input APIs can be added once the runtime contract stabilizes.
+Mitsuro evaluates `.ts`, `.tsx`, `.mts`, and `.cts` entries with edon's TypeScript evaluator and `.js` entries with the CommonJS evaluator. This is intentionally small for the first pass: text rendering and lifecycle hooks are supported; richer host callbacks/input APIs can be added once the runtime contract stabilizes.
 
 ## Reload
 

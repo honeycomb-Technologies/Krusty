@@ -7,16 +7,10 @@ import {
   Toolbox,
 } from "lucide-react-native";
 import type { SessionType } from "@krusty/api";
-import Animated, {
-  Easing,
-  FadeIn,
-  FadeOut,
-  LinearTransition,
-} from "react-native-reanimated";
 
 import { useThemeContext } from "../../hooks/useTheme";
 import * as Haptics from "../../platform/haptics";
-import { MakoSharkIcon } from "../ui/MakoSharkIcon";
+import { HiveIcon } from "../brand";
 
 const MODES: Array<{
   id: SessionType;
@@ -29,13 +23,8 @@ const MODES: Array<{
 }> = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "code", label: "Code", icon: Code2 },
-  { id: "mako", label: "Mako", icon: MakoSharkIcon },
+  { id: "mako", label: "Hive", icon: HiveIcon },
 ];
-
-const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
-const modeLayoutTransition = LinearTransition.duration(180).easing(
-  Easing.out(Easing.cubic),
-);
 
 interface MobileAppHeaderProps {
   mode: SessionType;
@@ -102,11 +91,10 @@ export function MobileAppHeader({
               const active = item.id === mode;
               const Icon = item.icon;
               return (
-                <AnimatedPressable
+                <Pressable
                   key={item.id}
-                  layout={modeLayoutTransition}
-                  accessibilityRole="tab"
-                  accessibilityLabel={item.label}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Switch to ${item.label}`}
                   accessibilityState={{ selected: active }}
                   onPress={() => {
                     impact();
@@ -126,15 +114,11 @@ export function MobileAppHeader({
                     color={active ? t.foreground : t.mutedForeground}
                   />
                   {active ? (
-                    <Animated.Text
-                      entering={FadeIn.duration(140)}
-                      exiting={FadeOut.duration(90)}
-                      style={[styles.modeLabel, { color: t.foreground }]}
-                    >
+                    <Text style={[styles.modeLabel, { color: t.foreground }]}>
                       {item.label}
-                    </Animated.Text>
+                    </Text>
                   ) : null}
-                </AnimatedPressable>
+                </Pressable>
               );
             })}
           </View>

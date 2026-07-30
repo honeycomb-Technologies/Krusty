@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible problem in Mitsuro
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove credentials, tokens, private paths, and personal data before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release, TestFlight build, or commit
+      placeholder: 0.9.14, build 266, or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - iPhone app
+        - Web app
+        - Desktop app
+        - Terminal
+        - Server
+        - Editor integration
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: Tell us exactly what you did and when the problem appeared.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or redacted logs
+      description: Drag files here. Do not include secrets or private project data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed credentials and private data.
+          required: true

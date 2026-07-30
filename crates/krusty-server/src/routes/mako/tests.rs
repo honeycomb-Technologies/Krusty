@@ -706,7 +706,7 @@ async fn session_status_rejects_non_mako_session() {
         Err(AppError::BadRequest(message)) => {
             assert_eq!(
                 message,
-                format!("Session {} is not a Mako session", session_id)
+                format!("Session {} is not a Hive session", session_id)
             )
         }
         Ok(_) => panic!("code session should not load through mako status"),

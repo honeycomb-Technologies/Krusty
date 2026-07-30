@@ -37,6 +37,7 @@ mod mako_runtime_state;
 mod mako_schedules;
 mod memories;
 mod messages;
+pub mod mobile_diagnostics;
 pub mod notification_intents;
 mod plans;
 mod preferences;
@@ -116,6 +117,11 @@ pub(crate) use memories::{
     load_canonical_for_provenance_from_connection, save_canonical_in_transaction,
 };
 pub use messages::{MessageStore, StoredMessageRecord};
+pub use mobile_diagnostics::{
+    MobileDiagnosticCategoryCount, MobileDiagnosticEvent, MobileDiagnosticEventInput,
+    MobileDiagnosticNativePayload, MobileDiagnosticNativePayloadInput, MobileDiagnosticReport,
+    MobileDiagnosticRun, MobileDiagnosticRunInput, MobileDiagnosticStore,
+};
 pub use notification_intents::{NotificationIntent, NotificationIntentStore};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;

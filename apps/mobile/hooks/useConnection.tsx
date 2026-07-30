@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, type React
 import * as SecureStore from '../platform/secure-store';
 import { platformFetch } from '../platform/fetch';
 import { KrustyClient } from '@krusty/api';
+import { recordRequestDiagnostic } from '../diagnostics/mobileDiagnostics';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -10,6 +11,7 @@ interface ConnectionContextValue {
   status: ConnectionStatus;
   isConnected: boolean;
   isConfigured: boolean;
+  hasLoadedConnection: boolean;
   serverUrl: string | null;
   serverToken: string | null;
   error: string | null;
@@ -23,6 +25,7 @@ const ConnectionContext = createContext<ConnectionContextValue>({
   status: 'disconnected',
   isConnected: false,
   isConfigured: false,
+  hasLoadedConnection: false,
   serverUrl: null,
   serverToken: null,
   error: null,
@@ -75,7 +78,16 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const newClient = new KrustyClient({ baseUrl: url, token, ...(platformFetch ? { fetchImpl: platformFetch as unknown as typeof fetch } : {}) });
+      const newClient = new KrustyClient({
+        baseUrl: url,
+        token,
+        ...(platformFetch
+          ? { fetchImpl: platformFetch as unknown as typeof fetch }
+          : {}),
+        requestObserver: ({ name, outcome, durationMs, code }) => {
+          recordRequestDiagnostic(name, outcome, durationMs, code);
+        },
+      });
 
       // Verify connection with health check
       const healthy = await newClient.checkHealth();
@@ -147,6 +159,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         status,
         isConnected: status === 'connected',
         isConfigured,
+        hasLoadedConnection: loaded,
         serverUrl,
         serverToken,
         error,

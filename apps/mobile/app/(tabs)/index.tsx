@@ -1,6 +1,12 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
-  AppState,
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  startTransition,
+} from "react";
+import {
   View,
   Text,
   Pressable,
@@ -14,7 +20,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
-import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
 import { useConnection } from "../../hooks/useConnection";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
@@ -25,9 +30,7 @@ import {
   useWorkspaceStore,
 } from "../../hooks/useStores";
 import { useShallow } from "zustand/react/shallow";
-import { ChatTranscript } from "../../components/chat/ChatTranscript";
-import { KrustyLogo } from "../../components/ui/KrustyLogo";
-import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
+import { HiveIcon } from "../../components/brand";
 import {
   ChatBar,
   type Attachment as ChatBarAttachment,
@@ -36,21 +39,17 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
-import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
+import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
+import { createLatestIntentScheduler } from "../../components/navigation/latestIntentScheduler";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
-import { useLiveActivity } from "../../hooks/useLiveActivity";
-import { useWidgetSync } from "../../hooks/useWidgetSync";
-import { useNotifications } from "../../hooks/useNotifications";
-import { getToolDiffStats } from "../../components/chat/toolDiffModel";
+import { useMobileDiagnosticMode } from "../../diagnostics/MobileDiagnosticsProvider";
 import Animated, { runOnJS } from "react-native-reanimated";
 
 import type {
-  ModelInfo,
-  ModelKey,
   SessionResponse,
   SessionType,
 } from "@krusty/api";
@@ -62,19 +61,14 @@ import type {
   ThinkingLevel,
 } from "@krusty/state";
 import {
+  beginKrustyPerformanceSpan,
   modelKeysEqual,
-  resolveUsableModel,
   supportsFastMode,
 } from "@krusty/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
   CHAT_BAR_ZONE,
-  SELECTED_MODEL_KEY,
-  flattenToolCalls,
-  getActiveToolCall,
-  getLastAssistantMessage,
-  normalizeProviderId,
   sessionTypeForTab,
   tabForSessionType,
 } from "./chat-screen/helpers";
@@ -85,6 +79,8 @@ import {
   styles,
 } from "./chat-screen/styles";
 import { useSessionActions } from "./chat-screen/useSessionActions";
+import { useSessionController } from "./chat-screen/useSessionController";
+import { ActiveConversationSurface } from "./chat-screen/ActiveConversationSurface";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type MobileSheet = "threads" | "toolbox" | null;
@@ -133,13 +129,50 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
 
+  const [requestedMode, setRequestedMode] = useState<SessionType>("chat");
   const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  const activeModeRef = useRef(activeMode);
+  activeModeRef.current = activeMode;
+  const finishModeSwitchSpanRef = useRef<(() => number | null) | null>(null);
+  // Header selection responds immediately; heavy surface/store work waits for
+  // a short quiet window and commits only the latest requested mode. A hard
+  // deadline here admitted another expensive surface every 80ms during
+  // sustained stress input, allowing React transitions to accumulate.
+  const modeIntentSchedulerRef = useRef<ReturnType<
+    typeof createLatestIntentScheduler<SessionType>
+  > | null>(null);
+  if (!modeIntentSchedulerRef.current) {
+    modeIntentSchedulerRef.current = createLatestIntentScheduler({
+      quietDelayMs: 72,
+      onFlush: (mode) => {
+        if (mode === activeModeRef.current) {
+          finishModeSwitchSpanRef.current?.();
+          finishModeSwitchSpanRef.current = null;
+          return;
+        }
+        startTransition(() => setActiveMode(mode));
+      },
+    });
+  }
+  useEffect(() => {
+    const scheduler = modeIntentSchedulerRef.current;
+    return () => {
+      scheduler?.cancel();
+    };
+  }, []);
+  useMobileDiagnosticMode(activeMode);
+  const finishToolboxOpenSpanRef = useRef<(() => number | null) | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
+  // Every action/store binding follows the committed deferred mode. Only the
+  // header reflects requestedMode immediately, so a rapid send can never pair
+  // the destination tab with the previous mode's session store.
   const activeTab = tabForSessionType(activeMode);
   const setActiveTab = useCallback((index: number) => {
-    setActiveMode(sessionTypeForTab(index));
+    const mode = sessionTypeForTab(index);
+    setRequestedMode(mode);
+    modeIntentSchedulerRef.current?.submit(mode);
   }, []);
   const {
     session: sessionStore,
@@ -150,16 +183,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  // Subscribe once per active mode. Streaming text still re-renders this shell
-  // when messages change (needed for tool approvals / live activity), but we
-  // avoid 14 independent store subscriptions re-firing the whole screen.
+  // Shell chrome only. Live transcript messages stay in ActiveConversationSurface
+  // so stream tokens do not re-render the whole product shell.
   const sessionView = useSessionStore(
     useShallow((state) => ({
       sessionId: state.sessionId,
       title: state.title,
-      messages: state.messages,
       isStreaming: state.isStreaming,
-      isThinking: state.isThinking,
       model: state.model,
       modelKey: state.modelKey,
       thinkingLevel: state.thinkingLevel,
@@ -168,15 +198,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       mode: state.mode,
       tokenCount: state.tokenCount,
       error: state.error,
-      isLoading: state.isLoading,
     })),
+    activeMode,
+  );
+  const makoThinking = useSessionStore(
+    (state) => (activeMode === "mako" ? state.isThinking : false),
+    activeMode,
+  );
+  const makoLoading = useSessionStore(
+    (state) => (activeMode === "mako" ? state.isLoading : false),
     activeMode,
   );
   const sessionId = sessionView.sessionId ?? null;
   const sessionTitle = sessionView.title ?? null;
-  const messages = sessionView.messages ?? [];
   const isStreaming = sessionView.isStreaming ?? false;
-  const isThinking = sessionView.isThinking ?? false;
   const model = sessionView.model ?? null;
   const modelKey = sessionView.modelKey ?? null;
   const thinkingLevel = sessionView.thinkingLevel ?? "medium";
@@ -185,15 +220,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const mode = sessionView.mode ?? "build";
   const tokenCount = sessionView.tokenCount ?? 0;
   const error = sessionView.error ?? null;
-  const isLoading = sessionView.isLoading ?? false;
   const workspaceDirectory =
     useWorkspaceStore((state) => state.directory, activeMode) ?? null;
   const workspaceTargetBranch =
     useWorkspaceStore((state) => state.targetBranch, activeMode) ?? null;
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
-  const [defaultModelKey, setDefaultModelKey] = useState<ModelKey | null>(null);
-  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
   const [desktopToolboxOpen, setDesktopToolboxOpen] = useState(false);
@@ -209,6 +239,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const toolboxOpen = isDesktop
     ? desktopToolboxOpen
     : activeSheet === "toolbox";
+  useEffect(() => {
+    if (!toolboxOpen) return;
+    finishToolboxOpenSpanRef.current?.();
+    finishToolboxOpenSpanRef.current = null;
+  }, [toolboxOpen]);
   const [toolboxTabByMode, setToolboxTabByMode] = useState<
     Record<SessionType, number>
   >({
@@ -232,6 +267,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [errorBannerHeight, setErrorBannerHeight] = useState(0);
   /** Measured desktop chat pane width (split host, before soft-cap). */
   const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
+  const {
+    models,
+    ensureModelReady,
+    lastSessionIdByTypeRef,
+  } = useSessionController({
+    client,
+    isConnected,
+    activeMode,
+    sessionStore,
+    sessionsStore,
+    modeStores: stores.modes,
+    sessions,
+  });
+
   const selectedModelInfo = useMemo(
     () =>
       (modelKey
@@ -249,88 +298,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     if (!model || !selectedModelInfo) {
       return;
     }
-    sessionStore.getState().setModel(model, selectedModelInfo.provider, selectedModelInfo);
+    const current = sessionStore.getState();
+    if (
+      current.model === model
+      && modelKeysEqual(current.modelKey, selectedModelInfo.key ?? null)
+      && current.modelProvider === (selectedModelInfo.provider ?? null)
+      && JSON.stringify(current.modelInfo) === JSON.stringify(selectedModelInfo)
+    ) {
+      return;
+    }
+    current.setModel(model, selectedModelInfo.provider, selectedModelInfo);
   }, [model, selectedModelInfo, sessionStore]);
 
-  const previousStreamingRef = useRef(false);
-  const currentStreamSessionIdRef = useRef<string | null>(null);
-  const streamStartedAtRef = useRef<number | null>(null);
-  const liveActivitySessionIdRef = useRef<string | null>(null);
-  const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
-  const sessionsRefreshInFlightRef = useRef(false);
-  const toolActivityRef = useRef<{
-    signature: string;
-    toolCalls: ReturnType<typeof flattenToolCalls>;
-    awaitingApprovalCalls: ReturnType<typeof flattenToolCalls>;
-    activeToolCall: ReturnType<typeof getActiveToolCall>;
-    activityDiff: { additions: number; deletions: number };
-  } | null>(null);
-  const lastSessionIdByTypeRef = useRef<Record<SessionType, string | null>>({
-    chat: null,
-    code: null,
-    mako: null,
-  });
-  const attemptedWorkspaceSessionHydrationRef = useRef<
-    Record<SessionType, string | null>
-  >({
-    chat: null,
-    code: null,
-    mako: null,
-  });
-  const lastAssistantMessage = useMemo(
-    () => getLastAssistantMessage(messages),
-    [messages],
-  );
-  const toolActivity = useMemo(() => {
-    const toolCalls = flattenToolCalls(messages);
-    const previous = toolActivityRef.current;
-    const signature = toolCalls
-      .map((toolCall) =>
-        [
-          toolCall.id,
-          toolCall.status,
-          toolCall.output?.length ?? 0,
-          toolCall.delegated?.thinking?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|");
-    if (previous && previous.signature === signature) {
-      return previous;
-    }
-
-    const next = {
-      signature,
-      toolCalls,
-      awaitingApprovalCalls: toolCalls.filter(
-        (toolCall) => toolCall.status === "awaiting_approval",
-      ),
-      activeToolCall: getActiveToolCall(toolCalls),
-      activityDiff: toolCalls.reduce(
-        (total, toolCall) => {
-          const stats = getToolDiffStats(toolCall);
-          if (stats) {
-            total.additions += stats.additions;
-            total.deletions += stats.deletions;
-          }
-          return total;
-        },
-        { additions: 0, deletions: 0 },
-      ),
-    };
-    toolActivityRef.current = next;
-    return next;
-  }, [messages]);
-  const {
-    toolCalls,
-    awaitingApprovalCalls,
-    activeToolCall,
-    activityDiff,
-  } = toolActivity;
-
-  const lastAssistantSnippet =
-    lastAssistantMessage?.content?.slice(0, 200) ?? "";
-  const showTranscriptError = Boolean(error && messages.length > 0);
 
   const handleToolApprovalAction = useCallback(
     async (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -427,317 +407,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionId,
   ]);
 
-  const {
-    notificationLevel,
-    notifyToolApproval,
-    notifyStreamComplete,
-    submitToolApprovalAction,
-  } = useNotifications();
-  const handleLiveActivityToolApproval = useCallback(
-    (targetSessionId: string, toolCallId: string, approved: boolean) => {
-      void submitToolApprovalAction(targetSessionId, toolCallId, approved);
-    },
-    [submitToolApprovalAction],
-  );
-  const { startActivity, updateActivity, endActivity } = useLiveActivity({
-    onToolApproval: handleLiveActivityToolApproval,
-  });
-
-  useWidgetSync({
-    sessionId,
-    hasActiveSession: Boolean(sessionId),
-    sessionTitle: sessionTitle || "Untitled",
-    lastMessage: lastAssistantSnippet,
-    model: model || "",
-    isStreaming,
-    tokenCount,
-    serverConnected: isConnected,
-  });
-
   const t = theme.colors;
-
-  const loadModelCatalog = useCallback(async () => {
-    if (!client || !isConnected) {
-      return null;
-    }
-
-    const [response, credentials] = await Promise.all([
-      client.getModels(),
-      client.getCredentials().catch(() => []),
-    ]);
-    const nextConfiguredProviders = credentials
-      .filter((provider) => provider.configured || provider.has_oauth)
-      .map((provider) => normalizeProviderId(provider.name));
-    setModels(response.models);
-    setDefaultModelId(response.default_model ?? null);
-    setDefaultModelKey(response.default_model_key ?? null);
-    setConfiguredProviders(nextConfiguredProviders);
-    return {
-      response,
-      configuredProviders: nextConfiguredProviders,
-    };
-  }, [client, isConnected]);
-
-  const ensureModelReady = useCallback(async (
-    targetStore: LoadedStores["session"] = sessionStore,
-  ) => {
-    const existingModel = targetStore.getState().model;
-    let catalog = models;
-    let fallbackDefault = defaultModelId;
-    let fallbackDefaultKey = defaultModelKey;
-    let allowedProviders = configuredProviders;
-
-    if (catalog.length === 0) {
-      const result = await loadModelCatalog().catch(() => null);
-      if (!result) {
-        return null;
-      }
-      catalog = result.response.models;
-      fallbackDefault = result.response.default_model ?? null;
-      fallbackDefaultKey = result.response.default_model_key ?? null;
-      allowedProviders = result.configuredProviders;
-    }
-
-    const selectedModel = resolveUsableModel(
-      existingModel,
-      fallbackDefault,
-      catalog,
-      allowedProviders,
-      targetStore.getState().modelKey,
-      fallbackDefaultKey,
-    );
-
-    if (selectedModel) {
-      targetStore
-        .getState()
-        .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
-      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
-      return selectedModel.id;
-    }
-
-    targetStore.getState().setModel(null);
-    await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
-    return null;
-  }, [
-    configuredProviders,
-    defaultModelId,
-    defaultModelKey,
-    loadModelCatalog,
-    models,
-  ]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    void sessionsStore.getState().loadSessions();
-    for (const type of ["chat", "code", "mako"] as const) {
-      void ensureModelReady(stores.modes[type].session);
-    }
-  }, [client, ensureModelReady, isConnected, sessionsStore, stores.modes]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    const refreshHandle = setInterval(() => {
-      if (AppState.currentState === "active") {
-        void loadModelCatalog().catch(() => null);
-      }
-    }, 5 * 60 * 1000);
-
-    return () => clearInterval(refreshHandle);
-  }, [client, isConnected, loadModelCatalog]);
-
-  useEffect(() => {
-    if (!client || !isConnected || sessions.length === 0) {
-      return;
-    }
-
-    for (const type of ["chat", "code", "mako"] as const) {
-      const slot = stores.modes[type];
-      if (slot.session.getState().sessionId) {
-        continue;
-      }
-      const persistedId = slot.workspace.getState().sessionId;
-      const persisted = persistedId
-        ? sessions.find(
-            (candidate) =>
-              candidate.id === persistedId && candidate.session_type === type,
-          )
-        : null;
-      const recent = sessions
-        .filter((candidate) => candidate.session_type === type)
-        .sort(
-          (left, right) =>
-            new Date(right.updated_at).getTime() -
-            new Date(left.updated_at).getTime(),
-        )[0];
-      const targetId = persisted?.id ?? recent?.id ?? null;
-      if (
-        !targetId ||
-        attemptedWorkspaceSessionHydrationRef.current[type] === targetId
-      ) {
-        continue;
-      }
-
-      attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
-      lastSessionIdByTypeRef.current[type] = targetId;
-      void slot.session.getState().loadSession(targetId, true).catch(() => {
-        void sessionsStore.getState().loadSessions();
-      });
-    }
-  }, [client, isConnected, sessions, sessionsStore, stores.modes]);
-
-  useEffect(() => {
-    if (!client || !isConnected) {
-      return;
-    }
-
-    const refreshHandle = setInterval(() => {
-      if (
-        AppState.currentState !== "active" ||
-        sessionStore.getState().isStreaming ||
-        sessionsRefreshInFlightRef.current
-      ) return;
-
-      sessionsRefreshInFlightRef.current = true;
-      void sessionsStore.getState().loadSessions().finally(() => {
-        sessionsRefreshInFlightRef.current = false;
-      });
-    }, 30_000);
-
-    return () => clearInterval(refreshHandle);
-  }, [client, isConnected, sessionStore, sessionsStore]);
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState !== "active") {
-        return;
-      }
-
-      // Refresh only the active mode on resume. Background modes warm lazily
-      // when the user switches to them, which avoids a resume network storm.
-      const activeSlot = stores.modes[activeMode];
-      const currentSessionId =
-        activeSlot.session.getState().sessionId ??
-        activeSlot.workspace.getState().sessionId;
-      if (
-        currentSessionId &&
-        !activeSlot.session.getState().isStreaming
-      ) {
-        void activeSlot.session.getState().loadSession(currentSessionId, true);
-      }
-      void loadModelCatalog().catch(() => null);
-    });
-
-    return () => subscription.remove();
-  }, [activeMode, loadModelCatalog, stores.modes]);
-
-  useEffect(() => {
-    const nextNotifiedIds = new Set<string>();
-    if (!sessionId) {
-      notifiedApprovalIdsRef.current = nextNotifiedIds;
-      return;
-    }
-
-    for (const toolCall of awaitingApprovalCalls) {
-      nextNotifiedIds.add(toolCall.id);
-      if (notifiedApprovalIdsRef.current.has(toolCall.id)) {
-        continue;
-      }
-
-      void notifyToolApproval(toolCall.id, toolCall.name, sessionId);
-      if (notificationLevel !== "silent") {
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      }
-    }
-
-    notifiedApprovalIdsRef.current = nextNotifiedIds;
-  }, [awaitingApprovalCalls, notificationLevel, notifyToolApproval, sessionId]);
-
-  useEffect(() => {
-    const awaitingApproval =
-      awaitingApprovalCalls[awaitingApprovalCalls.length - 1] ?? null;
-    const shouldKeepActivity =
-      Boolean(sessionId) && (isStreaming || Boolean(awaitingApproval));
-
-    if (isStreaming && !previousStreamingRef.current) {
-      suppressCompletionRef.current = false;
-      currentStreamSessionIdRef.current = sessionId;
-      streamStartedAtRef.current = Date.now();
-    }
-
-    if (
-      shouldKeepActivity &&
-      liveActivitySessionIdRef.current !== sessionId
-    ) {
-      startActivity(sessionId!, sessionTitle || "Chat");
-      liveActivitySessionIdRef.current = sessionId;
-    }
-
-    if (shouldKeepActivity) {
-      updateActivity({
-        chatTitle: sessionTitle || "Chat",
-        status: awaitingApproval ? "needs_input" : "working",
-        toolCount: toolCalls.length,
-        filesAdded: activityDiff.additions,
-        filesRemoved: activityDiff.deletions,
-        toolApprovalId: awaitingApproval?.id,
-        toolApprovalName: awaitingApproval?.name,
-        toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
-      });
-    } else if (liveActivitySessionIdRef.current === sessionId) {
-      endActivity();
-      liveActivitySessionIdRef.current = null;
-    }
-
-    if (
-      previousStreamingRef.current &&
-      !isStreaming &&
-      !awaitingApproval &&
-      !suppressCompletionRef.current &&
-      currentStreamSessionIdRef.current &&
-      currentStreamSessionIdRef.current === sessionId
-    ) {
-      const startedAt = streamStartedAtRef.current ?? Date.now();
-      const elapsedSeconds = Math.max(
-        0,
-        Math.floor((Date.now() - startedAt) / 1000),
-      );
-      void notifyStreamComplete(
-        currentStreamSessionIdRef.current,
-        sessionTitle || "Chat",
-        tokenCount,
-        elapsedSeconds,
-      );
-      currentStreamSessionIdRef.current = null;
-      streamStartedAtRef.current = null;
-    }
-
-    if (!shouldKeepActivity && !isStreaming) {
-      suppressCompletionRef.current = false;
-      currentStreamSessionIdRef.current = null;
-      streamStartedAtRef.current = null;
-    }
-
-    previousStreamingRef.current = isStreaming;
-  }, [
-    activityDiff.additions,
-    activityDiff.deletions,
-    awaitingApprovalCalls,
-    endActivity,
-    isStreaming,
-    notifyStreamComplete,
-    sessionId,
-    sessionTitle,
-    startActivity,
-    tokenCount,
-    toolCalls.length,
-    updateActivity,
-  ]);
 
   const {
     stopCurrentStream,
@@ -752,7 +422,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     handleSend,
     handleModelSelect,
     handleFastModeToggle,
-    handleTabChange,
+    cancelPendingSessionSelection,
   } = useSessionActions({
     client,
     activeTab,
@@ -820,14 +490,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         }
         if (normalizedAttachments.length > 0) {
           sessionStore.setState({
-            error: "Start the Mako thread with text, then attach files in the conversation.",
+            error: "Start the Hive thread with text, then attach files in the conversation.",
           });
           return;
         }
         const resolvedModel = await ensureModelReady();
         if (!resolvedModel) {
           sessionStore.setState({
-            error: "Choose an available model before starting Mako.",
+            error: "Choose an available model before starting Hive.",
           });
           return;
         }
@@ -847,7 +517,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             error:
               dispatchError instanceof Error
                 ? dispatchError.message
-                : "Failed to start the Mako thread.",
+                : "Failed to start the Hive thread.",
           });
         }
         return;
@@ -864,23 +534,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       sessionsStore,
       workspaceDirectory,
     ],
-  );
-
-  const handleNewMakoSession = useCallback(() => {
-    setActiveMode("mako");
-    setActiveSheet(null);
-    const makoStore = stores.modes.mako.session;
-    makoStore.getState().detachSession();
-    makoStore.getState().clearSession();
-  }, [stores.modes]);
-
-  const handleSelectMakoView = useCallback(
-    (view: MakoTopLevelView) => {
-      handleTabChange(2);
-      setMakoTopLevel(view);
-      setDrawerOpen(false);
-    },
-    [handleTabChange],
   );
 
   const handleRenameSession = useCallback(() => {
@@ -931,6 +584,18 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       setActiveSheet(null);
     }
   }, [isDesktop]);
+  const handleToolboxOpen = useCallback(() => {
+    finishToolboxOpenSpanRef.current?.();
+    finishToolboxOpenSpanRef.current = beginKrustyPerformanceSpan(
+      "toolbox.open",
+      activeMode,
+    );
+    if (isDesktop) {
+      setDesktopToolboxOpen(true);
+    } else {
+      setActiveSheet("toolbox");
+    }
+  }, [activeMode, isDesktop]);
 
   // Prefer measured host; fall back to window so the band never full-bleeds.
   const effectivePaneWidth = useMemo(() => {
@@ -945,21 +610,70 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // Empty and placeholder sessions stay visually quiet. A real persisted title
   // appears only after the conversation has one.
   const displayTitle = displayThreadTitle(sessionTitle);
+  // The selected pill reflects requestedMode immediately while expensive
+  // surface activation waits for the quiet window. Read the requested store's
+  // already-known title during that short gap so Code never appears above the
+  // previous mode's title. The committed selector resumes ownership once both
+  // modes agree.
+  const requestedModeDisplayTitle =
+    requestedMode === activeMode
+      ? displayTitle
+      : displayThreadTitle(
+          stores.modes[requestedMode].session.getState().title,
+        );
 
   const handleModeChange = useCallback(
     (mode: SessionType) => {
-      if (mode === activeMode) {
-        return;
-      }
+      if (mode === requestedMode) return;
+      cancelPendingSessionSelection();
+      finishModeSwitchSpanRef.current?.();
+      finishModeSwitchSpanRef.current = beginKrustyPerformanceSpan(
+        "mode.switch",
+        `${activeMode}->${mode}`,
+      );
       setActiveSheet(null);
-      void handleTabChange(tabForSessionType(mode));
+      setActiveTab(tabForSessionType(mode));
     },
-    [activeMode, handleTabChange],
+    [
+      activeMode,
+      cancelPendingSessionSelection,
+      requestedMode,
+      setActiveTab,
+    ],
   );
+  useEffect(() => {
+    finishModeSwitchSpanRef.current?.();
+    finishModeSwitchSpanRef.current = null;
+  }, [activeMode]);
+
+  const handleNewMakoSession = useCallback(() => {
+    handleModeChange("mako");
+    setActiveSheet(null);
+    const makoStore = stores.modes.mako.session;
+    makoStore.getState().detachSession();
+    makoStore.getState().clearSession();
+  }, [handleModeChange, stores.modes]);
+
+  const handleSelectMakoView = useCallback(
+    (view: MakoTopLevelView) => {
+      handleModeChange("mako");
+      setMakoTopLevel(view);
+      setDrawerOpen(false);
+    },
+    [handleModeChange],
+  );
+  const modeSwipeBlocked =
+    isDesktop || drawerOpen || toolboxOpen || bottomControlsOpen;
+  const modeSwipeBlockedRef = useRef(modeSwipeBlocked);
+  modeSwipeBlockedRef.current = modeSwipeBlocked;
   const handleModeSwipe = useCallback(
     (translationX: number, velocityX: number) => {
+      // A pan can begin before a drawer, toolbox, or composer overlay claims
+      // the interaction. Re-check current ownership when its native end event
+      // returns to JS so stale gestures cannot close newly opened chrome.
+      if (modeSwipeBlockedRef.current) return;
       const nextMode = modeForHorizontalSwipe(
-        activeMode,
+        requestedMode,
         translationX,
         velocityX,
       );
@@ -969,28 +683,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       handleModeChange(nextMode);
     },
-    [activeMode, handleModeChange],
+    [handleModeChange, requestedMode],
   );
   const modeSwipeGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(
-          !isDesktop &&
-            !drawerOpen &&
-            !toolboxOpen &&
-            !bottomControlsOpen,
-        )
+        .enabled(!modeSwipeBlocked)
         .activeOffsetX([-28, 28])
         .failOffsetY([-20, 20])
         .onEnd((event) => {
           runOnJS(handleModeSwipe)(event.translationX, event.velocityX);
         }),
     [
-      bottomControlsOpen,
-      drawerOpen,
       handleModeSwipe,
-      isDesktop,
-      toolboxOpen,
+      modeSwipeBlocked,
     ],
   );
 
@@ -1031,9 +737,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onPress={() => handleSelectMakoView("mako")}
           style={styles.toolboxCornerBtn}
           accessibilityRole="button"
-          accessibilityLabel="Open Mako"
+          accessibilityLabel="Open Hive"
         >
-          <MakoSharkIcon
+          <HiveIcon
             size={20}
             color={t.mutedForeground}
             strokeWidth={1.8}
@@ -1042,7 +748,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         <Pressable
           onPress={() => {
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setDesktopToolboxOpen((open) => !open);
+            if (toolboxOpen) {
+              handleToolboxClose();
+            } else {
+              handleToolboxOpen();
+            }
           }}
           style={[
             styles.toolboxCornerBtn,
@@ -1062,13 +772,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   ) : (
     <Animated.View style={entrance.topBarStyle}>
       <MobileAppHeader
-        mode={activeMode}
-        title={displayTitle}
+        mode={requestedMode}
+        title={requestedModeDisplayTitle}
         onModeChange={handleModeChange}
         onOpenThreads={() => setActiveSheet("threads")}
-        onOpenToolbox={() => setActiveSheet("toolbox")}
+        onOpenToolbox={handleToolboxOpen}
         onTitlePress={
-          sessionId && displayTitle && activeMode !== "mako"
+          requestedMode === activeMode
+            && sessionId
+            && requestedModeDisplayTitle
+            && activeMode !== "mako"
             ? handleRenameSession
             : undefined
         }
@@ -1079,70 +792,27 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // One transcript tree only. Keeping three absolute FlatLists mounted for
   // "warm modes" crashed native on mode switch (especially leaving chat).
   // Session switches still avoid remount via no key + scroll restore.
+  // Messages subscription is isolated inside ActiveConversationSurface.
   const chatTranscriptSurface = (
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <ChatTranscript
-          messages={messages}
-          sessionId={sessionId}
-          sessionType={activeMode === "code" ? "code" : "chat"}
-          scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
-          isStreaming={isStreaming}
-          isThinking={isThinking}
-          isLoading={isLoading}
+        <ActiveConversationSurface
+          activeMode={activeMode}
+          sessionType={activeMode}
           activeToolCallId={activeToolCallId}
+          bottomPadding={composerReserveHeight}
+          hideJumpToLatest={bottomControlsOpen}
+          showPlanTracker={activeMode !== "mako"}
+          errorBannerHeight={errorBannerHeight}
+          onErrorBannerHeightChange={(nextHeight) => {
+            setErrorBannerHeight((current) =>
+              current === nextHeight ? current : nextHeight,
+            );
+          }}
           onApproveTool={handleApproveTranscriptTool}
           onDenyTool={handleDenyTranscriptTool}
           onSubmitToolResult={handleSubmitTranscriptTool}
           onPlanConfirm={handleTranscriptPlanConfirm}
-          emptyState={
-            <View style={styles.empty}>
-              <KrustyLogo />
-              {error ? (
-                <Text style={[styles.emptyHint, { color: t.error }]}>
-                  {error}
-                </Text>
-              ) : null}
-            </View>
-          }
-          bottomPadding={
-            composerReserveHeight
-            + (showTranscriptError ? errorBannerHeight + 10 : 0)
-          }
-          hideJumpToLatest={bottomControlsOpen}
         />
-
-        {showTranscriptError ? (
-          <View
-            accessibilityRole="alert"
-            accessibilityLiveRegion="polite"
-            onLayout={(event) => {
-              const nextHeight = Math.ceil(event.nativeEvent.layout.height);
-              setErrorBannerHeight((current) =>
-                current === nextHeight ? current : nextHeight,
-              );
-            }}
-            style={[
-              styles.errorBanner,
-              {
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: composerReserveHeight + 10,
-                marginBottom: 0,
-                zIndex: 30,
-                borderColor: `${t.error}40`,
-                backgroundColor: `${t.error}14`,
-              },
-            ]}
-          >
-            <Text
-              selectable
-              style={[styles.errorBannerText, { color: t.error }]}
-            >
-              {error}
-            </Text>
-          </View>
-        ) : null}
       </Animated.View>
   );
 
@@ -1249,7 +919,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               onTabChange={setToolboxTab}
               sessionType={activeMode}
               projectDirectory={workspaceDirectory}
-              onOpenSettings={() => router.push("/(tabs)/settings")}
+              onOpenSettings={() => router.navigate("/(tabs)/settings")}
               onOpenMakoRun={(id) => void loadSessionById(id)}
               onOpenProject={(path, branch) =>
                 void openProjectInCode(path, branch)
@@ -1270,7 +940,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             projectDirectory={workspaceDirectory}
             onOpenSettings={() => {
               setActiveSheet(null);
-              router.push("/(tabs)/settings");
+              router.navigate("/(tabs)/settings");
             }}
             onOpenMakoRun={(id) => void loadSessionById(id)}
             onOpenProject={(path, branch) =>
@@ -1285,11 +955,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const makoChat: MakoChatContext = {
     sessionId,
     title: sessionTitle,
-    messages,
     error,
-    isLoading,
+    isLoading: makoLoading,
     isStreaming,
-    isThinking,
+    isThinking: makoThinking,
     activeToolCallId,
     thinkingLevel: thinkingLevel as ThinkingLevel,
     permissionMode: permissionMode as PermissionMode,
@@ -1354,17 +1023,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             backgroundColor: t.background,
           }}
         >
-          {/* Single active surface only. Multi-mounted absolute FlatLists were
-              crashing on mode switch in 0.9.18. */}
-          {activeMode === "mako" ? (
-            <MakoThreadSurface
-              chat={makoChat}
-              showComposer={false}
-              externalBottomPadding={composerReserveHeight}
-            />
-          ) : (
-            chatTranscriptSurface
-          )}
+          {/* One stable native transcript tree for every mobile mode. Parallel
+              FlatLists crashed under New Architecture, while swapping the
+              Mako tree forced expensive Fabric unmount/mount transactions. */}
+          {chatTranscriptSurface}
         </View>
       </View>
     </GestureDetector>
@@ -1388,7 +1050,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         projectDirectory={workspaceDirectory}
         onOpenSettings={() => {
           setActiveSheet(null);
-          router.push("/(tabs)/settings");
+          router.navigate("/(tabs)/settings");
         }}
         onOpenMakoRun={(id) => void loadSessionById(id)}
         onOpenProject={(path, branch) =>
@@ -1473,12 +1135,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       onNewSession={() => void handleNewSession("chat")}
       onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
       onDeleteSession={handleDeleteSession}
-      onOpenSettings={() => router.push("/(tabs)/settings")}
+      onOpenSettings={() => router.navigate("/(tabs)/settings")}
       activeTab={activeTab}
-      onTabChange={handleTabChange}
+      onTabChange={(index) => handleModeChange(sessionTypeForTab(index))}
       activeMakoView={makoTopLevel}
       onSelectMakoView={handleSelectMakoView}
     >
+      <StreamSideEffectsCoordinator
+        activeMode={activeMode}
+        suppressCompletionRef={suppressCompletionRef}
+      />
       {renameModal}
       {isDesktop ? (
         activeTab === 2 ? makoContent : chatContent
@@ -1500,7 +1166,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onDeleteSession={handleDeleteSession}
           onOpenSettings={() => {
             setDrawerOpen(false);
-            router.push("/(tabs)/settings");
+            router.navigate("/(tabs)/settings");
           }}
           activeMode={activeMode}
         />

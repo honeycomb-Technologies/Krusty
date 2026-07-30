@@ -13,6 +13,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { ListRowsSkeleton } from "../ui/Skeleton";
 import type { MakoCurrentRunSummary, MakoGlobalSchedule } from "@krusty/api";
 import type { MakoCurrentState } from "./types";
 import {
@@ -186,7 +187,7 @@ function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] 
         detailParts.push(`branch ${run.target_branch}`);
       }
       if (run.runtime?.crew_slug) {
-        detailParts.push(`${run.runtime.crew_slug} crew`);
+        detailParts.push(`${run.runtime.crew_slug} agent`);
       }
 
       return [
@@ -197,7 +198,7 @@ function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] 
           dayKey: dayKey(wakeAt),
           timeValue: timeValue(wakeAt),
           title: run.title || "Untitled run",
-          detail: detailParts.join(" • ") || "Scheduled by Mako",
+          detail: detailParts.join(" • ") || "Scheduled by Hive",
           seriesKey: scheduleSeriesKey(run, wakeAt),
         },
       ];
@@ -655,7 +656,7 @@ export function MakoScheduleView({
       setCommitments(await client.listMakoSchedules({ limit: 200 }));
     } catch (error) {
       setCommitmentsError(
-        error instanceof Error ? error.message : "Failed to load Mako schedules.",
+        error instanceof Error ? error.message : "Failed to load Hive schedules.",
       );
     } finally {
       setIsLoadingCommitments(false);
@@ -828,7 +829,7 @@ export function MakoScheduleView({
         }
       >
         <Text style={[styles.description, { color: t.mutedForeground }]}>
-          What Mako is committed to, when it will wake, and whether each
+          What Hive is committed to, when it will wake, and whether each
           commitment is active.
         </Text>
 
@@ -856,9 +857,7 @@ export function MakoScheduleView({
           ) : null}
 
           {isLoadingCommitments && commitments.length === 0 ? (
-            <Text style={[styles.empty, { color: t.mutedForeground }]}>
-              Loading commitments...
-            </Text>
+            <ListRowsSkeleton rows={4} />
           ) : commitments.length === 0 ? (
             <Text style={[styles.empty, { color: t.mutedForeground }]}>
               Nothing is scheduled yet.

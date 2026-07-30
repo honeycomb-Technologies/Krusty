@@ -58,9 +58,9 @@ export function MakoSetCourseComposer({
     >
       <View style={styles.header}>
         <View style={styles.copy}>
-          <Text style={[styles.title, { color: t.foreground }]}>Set course</Text>
+          <Text style={[styles.title, { color: t.foreground }]}>Start a run</Text>
           <Text style={[styles.subtitle, { color: t.mutedForeground }]}>
-            Give Mako a direction, a follow-up, or a correction.
+            Give Hive a direction, a follow-up, or a correction.
           </Text>
         </View>
         <View
@@ -152,10 +152,10 @@ export function MakoSetCourseComposer({
         >
           <Text style={styles.buttonLabel}>
             {isSubmitting
-              ? "Setting..."
+              ? "Starting..."
               : schedulePreset === "now"
-                ? "Set course"
-                : "Schedule course"}
+                ? "Start run"
+                : "Schedule run"}
           </Text>
         </Pressable>
       </View>

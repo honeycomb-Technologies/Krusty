@@ -33,7 +33,7 @@ function kindLabel(item: MakoAttentionFeedItem): string {
     case "scheduled_run_completed":
       return "Schedule";
     case "delegated_task_completed":
-      return "Crew update";
+      return "Agent update";
     default:
       return "Update";
   }
@@ -157,7 +157,7 @@ export function MakoAttentionItem({
 
             <Pressable onPress={() => onOpenThread(item)} style={styles.action}>
               <Text style={[styles.secondaryActionLabel, { color: t.mutedForeground }]}>
-                Jump to Mako
+                Jump to Hive
               </Text>
             </Pressable>
 

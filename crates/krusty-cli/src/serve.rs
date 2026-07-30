@@ -199,7 +199,7 @@ fn print_tailscale_status(setup: TailscaleServeSetup) {
             println!("  Details: {}\n", detail);
         }
         TailscaleServeSetup::NotInstalled => {
-            println!("  Tip: Install Tailscale to access Krusty from any device.");
+            println!("  Tip: Install Tailscale to access Mitsuro from any device.");
             println!("       https://tailscale.com/download\n");
         }
         TailscaleServeSetup::Offline => {
@@ -214,7 +214,7 @@ fn print_tailscale_status(setup: TailscaleServeSetup) {
 fn print_banner(port: u16, starting: bool) {
     println!();
     println!(
-        "  \x1b[1;36mKrusty\x1b[0m server {}",
+        "  \x1b[1;37mMitsuro\x1b[0m server {}",
         if starting { "starting" } else { "running" }
     );
     println!("  ─────────────────────────────────────");
@@ -224,7 +224,7 @@ fn print_banner(port: u16, starting: bool) {
 /// Interactive CLI setup wizard for first-time configuration.
 fn run_setup_wizard() -> Result<()> {
     println!();
-    println!("  \x1b[1;36mKrusty\x1b[0m — First-time setup");
+    println!("  \x1b[1;37mMitsuro\x1b[0m — First-time setup");
     println!("  ─────────────────────────────────────");
     println!();
 

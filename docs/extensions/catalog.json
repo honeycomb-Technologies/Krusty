@@ -10,8 +10,8 @@
       "description": "Reference package for hot-reloadable native Rust TUI plugins.",
       "runtime": "native",
       "tags": ["example", "native", "hot-reload", "tui"],
-      "homepage": "https://github.com/honeycomb-Technologies/Krusty/tree/main/examples/plugins/native-rust",
-      "repository": "https://github.com/honeycomb-Technologies/Krusty",
+      "homepage": "https://github.com/honeycomb-Technologies/Mitsuro/tree/main/examples/plugins/native-rust",
+      "repository": "https://github.com/honeycomb-Technologies/Mitsuro",
       "official": true
     },
     {
@@ -23,8 +23,8 @@
       "description": "Reference package for TypeScript TUI plugins executed through edon/libnode.",
       "runtime": "js",
       "tags": ["example", "typescript", "edon", "libnode", "tui"],
-      "homepage": "https://github.com/honeycomb-Technologies/Krusty/tree/main/examples/plugins/js-ts",
-      "repository": "https://github.com/honeycomb-Technologies/Krusty",
+      "homepage": "https://github.com/honeycomb-Technologies/Mitsuro/tree/main/examples/plugins/js-ts",
+      "repository": "https://github.com/honeycomb-Technologies/Mitsuro",
       "official": true
     }
   ]

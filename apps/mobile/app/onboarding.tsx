@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
 import { useConnection } from '../hooks/useConnection';
+import { MitsuroWordmark } from '../components/brand';
 import { router } from 'expo-router';
 
 function inferInitialServerUrl(): string {
@@ -68,7 +69,7 @@ export default function OnboardingScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.header}>
-          <Text style={[styles.title, { color: t.foreground }]}>Krusty</Text>
+          <MitsuroWordmark width={200} color={t.foreground} />
           <Text style={[styles.subtitle, { color: t.mutedForeground }]}>
             Connect to your server
           </Text>
@@ -78,6 +79,7 @@ export default function OnboardingScreen() {
           <View style={[styles.inputGroup, { backgroundColor: g.background, borderColor: g.border }]}>
             <Text style={[styles.label, { color: t.mutedForeground }]}>Server URL</Text>
             <TextInput
+              accessibilityLabel="Server URL"
               style={[styles.input, { color: t.foreground }]}
               value={serverUrl}
               onChangeText={setServerUrl}
@@ -93,6 +95,7 @@ export default function OnboardingScreen() {
           <View style={[styles.inputGroup, { backgroundColor: g.background, borderColor: g.border }]}>
             <Text style={[styles.label, { color: t.mutedForeground }]}>Remote Access Token</Text>
             <TextInput
+              accessibilityLabel="Remote access token"
               style={[styles.input, { color: t.foreground }]}
               value={token}
               onChangeText={setToken}
@@ -109,6 +112,8 @@ export default function OnboardingScreen() {
           )}
 
           <Pressable
+            accessibilityLabel="Connect to server"
+            accessibilityRole="button"
             style={({ pressed }) => [
               styles.button,
               {
@@ -128,7 +133,7 @@ export default function OnboardingScreen() {
         </View>
 
         <Text style={[styles.hint, { color: t.mutedForeground }]}>
-          Start your Krusty server with `krusty serve` and find your Tailscale URL in Settings → Remote Access.
+          Start your Mitsuro server with `krusty serve` and find your Tailscale URL in Settings → Remote Access.
         </Text>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -148,14 +153,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 48,
   },
-  title: {
-    fontSize: 34,
-    fontWeight: '700',
-    letterSpacing: -0.5,
-  },
   subtitle: {
     fontSize: 17,
-    marginTop: 8,
+    marginTop: 12,
   },
   form: {
     gap: 16,

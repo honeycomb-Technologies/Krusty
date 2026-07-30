@@ -25,7 +25,7 @@ function crewSummary(member: MakoCrewRuntimeMember): string {
   if (member.failed_run_count > 0) {
     parts.push(`${member.failed_run_count} failed`);
   }
-  return parts.join(" • ") || "Distinct crew presence";
+  return parts.join(" • ") || "Distinct Hive Agent";
 }
 
 export function MakoCrewPicker({
@@ -47,9 +47,9 @@ export function MakoCrewPicker({
         style={[styles.row, { borderColor: t.border }]}
       >
         <View style={styles.copy}>
-          <Text style={[styles.title, { color: t.foreground }]}>Mako default</Text>
+          <Text style={[styles.title, { color: t.foreground }]}>Hive default</Text>
           <Text style={[styles.detail, { color: t.mutedForeground }]}>
-            Use Mako&apos;s primary identity and home layers for this run.
+            Use Hive&apos;s primary identity and home layers for this run.
           </Text>
         </View>
         <Text

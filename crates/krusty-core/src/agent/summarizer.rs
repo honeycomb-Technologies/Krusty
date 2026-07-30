@@ -31,9 +31,9 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// so it doesn't need to be verbose.
 const SUMMARIZATION_MAX_TOKENS: usize = 4000;
 
-/// Summarization instructions — placed in the appended user message (not system prompt)
-/// so that the system prompt matches the parent conversation's cached prefix.
-const SUMMARIZATION_INSTRUCTIONS: &str = r#"Analyze the conversation above and produce a structured summary for continuing this work in a new session.
+/// Summarization instructions live in the final user message so the dedicated
+/// system prefix stays small and reusable across compaction requests.
+const SUMMARIZATION_INSTRUCTIONS: &str = r#"Analyze the conversation above and produce a structured summary for continuing this work after in-place compaction.
 
 You MUST respond with a valid JSON object (no markdown code blocks, no extra text):
 {

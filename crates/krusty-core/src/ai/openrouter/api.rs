@@ -37,7 +37,7 @@ pub async fn fetch_models_with_client(
         .header("Authorization", format!("Bearer {}", api_key))
         .header(
             "HTTP-Referer",
-            "https://github.com/honeycomb-Technologies/Krusty",
+            "https://github.com/honeycomb-Technologies/Mitsuro",
         )
         .send()
         .await?;

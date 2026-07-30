@@ -1,0 +1,17 @@
+:root {
+  --mitsuro-graphite-950: #0e0e11;
+  --mitsuro-graphite-900: #141519;
+  --mitsuro-graphite-850: #19181d;
+  --mitsuro-graphite-800: #222027;
+  --mitsuro-graphite-700: #39343f;
+  --mitsuro-wax-100: #e8e5ea;
+  --mitsuro-wax-400: #9e98a3;
+  --mitsuro-brass-500: #b89a61;
+  --mitsuro-brass-300: #d4bd89;
+  --mitsuro-brass-700: #6f5b35;
+  --mitsuro-violet-500: #75617e;
+  --mitsuro-violet-400: #9a82a5;
+  --mitsuro-pewter-400: #a7a3aa;
+  --mitsuro-success: #7f9a86;
+  --mitsuro-danger: #b06f73;
+}

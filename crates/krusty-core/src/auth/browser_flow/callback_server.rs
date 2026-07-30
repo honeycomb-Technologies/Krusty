@@ -117,13 +117,17 @@ fn respond_with_success(request: tiny_http::Request) {
             align-items: center;
             height: 100vh;
             margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background:
+                radial-gradient(circle at top, rgba(117, 97, 126, 0.24), transparent 42%),
+                #0c0d10;
+            color: #e8e5ea;
         }
         .container {
             text-align: center;
             padding: 2rem;
-            background: rgba(255, 255, 255, 0.1);
+            background: #19181d;
+            border: 1px solid rgba(232, 229, 234, 0.12);
+            box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
             border-radius: 1rem;
             backdrop-filter: blur(10px);
         }
@@ -139,7 +143,7 @@ fn respond_with_success(request: tiny_http::Request) {
     <div class="container">
         <div class="checkmark">✓</div>
         <h1>Authentication Successful!</h1>
-        <p>You can close this window and return to Krusty.</p>
+        <p>You can close this window and return to Mitsuro.</p>
     </div>
 </body>
 </html>"#;
@@ -168,13 +172,17 @@ fn respond_with_error(request: tiny_http::Request, message: &str) {
             align-items: center;
             height: 100vh;
             margin: 0;
-            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
-            color: white;
+            background:
+                radial-gradient(circle at top, rgba(117, 97, 126, 0.18), transparent 42%),
+                #0c0d10;
+            color: #e8e5ea;
         }}
         .container {{
             text-align: center;
             padding: 2rem;
-            background: rgba(255, 255, 255, 0.1);
+            background: #19181d;
+            border: 1px solid rgba(180, 100, 108, 0.35);
+            box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
             border-radius: 1rem;
             backdrop-filter: blur(10px);
         }}

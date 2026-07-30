@@ -11,6 +11,7 @@ import {
   hasClosedHtmlFence,
   isHtmlPreviewLanguage,
 } from './htmlPreviewModel';
+import { canRenderAsPlainChatText } from './markdownFastPath';
 
 interface MarkdownContentProps {
   content: string;
@@ -24,6 +25,7 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
   const [hoveredImageKey, setHoveredImageKey] = useState<unknown>(null);
   const [copiedCodeKey, setCopiedCodeKey] = useState<unknown>(null);
   const renderContent = stabilizeStreamingMarkdown(content);
+  const renderAsPlainText = canRenderAsPlainChatText(renderContent);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -51,7 +53,7 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
         style={[
           codeBlockStyles.container,
           {
-            backgroundColor: isDark ? '#090d12' : '#f3f5f7',
+            backgroundColor: t.codeSurface,
             borderColor: t.border,
           },
         ]}
@@ -104,6 +106,20 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
       </View>
     );
   };
+
+  if (renderAsPlainText) {
+    return (
+      <Text
+        selectable
+        style={[
+          markdownFastPathStyles.text,
+          { color: isUser ? t.userMessage : t.foreground },
+        ]}
+      >
+        {renderContent}
+      </Text>
+    );
+  }
 
   return (
     <>
@@ -165,14 +181,24 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
       >
         {renderContent}
       </Markdown>
-      <ImagePreviewModal
-        visible={Boolean(previewImage)}
-        uri={previewImage?.uri}
-        title={previewImage?.title}
-        onClose={() => setPreviewImage(null)}
-      />
+      {previewImage ? (
+        <ImagePreviewModal
+          visible
+          uri={previewImage.uri}
+          title={previewImage.title}
+          onClose={() => setPreviewImage(null)}
+        />
+      ) : null}
     </>
   );
+});
+
+const markdownFastPathStyles = StyleSheet.create({
+  text: {
+    fontSize: 15,
+    lineHeight: 22,
+    marginVertical: 2,
+  },
 });
 
 /**

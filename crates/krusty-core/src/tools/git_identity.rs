@@ -33,7 +33,7 @@ pub enum GitIdentityMode {
 impl Default for GitIdentity {
     fn default() -> Self {
         Self {
-            name: "Krusty".to_string(),
+            name: "Mitsuro".to_string(),
             email: "krusty@users.noreply.github.com".to_string(),
             mode: GitIdentityMode::CoAuthor,
         }
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn default_identity() {
         let id = GitIdentity::default();
-        assert_eq!(id.name, "Krusty");
+        assert_eq!(id.name, "Mitsuro");
         assert_eq!(id.email, "krusty@users.noreply.github.com");
         assert_eq!(id.mode, GitIdentityMode::CoAuthor);
     }
@@ -116,7 +116,7 @@ mod tests {
         let id = GitIdentity::default();
         assert_eq!(
             id.trailer_line(),
-            "Co-Authored-By: Krusty <krusty@users.noreply.github.com>"
+            "Co-Authored-By: Mitsuro <krusty@users.noreply.github.com>"
         );
     }
 
@@ -126,7 +126,7 @@ mod tests {
         let cmd = r#"git commit -m "fix: something""#;
         let result = id.apply_to_command(cmd);
         assert!(result.contains("--trailer"));
-        assert!(result.contains("Co-Authored-By: Krusty"));
+        assert!(result.contains("Co-Authored-By: Mitsuro"));
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         };
         let vars = id.env_vars();
         assert_eq!(vars.len(), 4);
-        assert!(vars.contains(&("GIT_AUTHOR_NAME", "Krusty")));
+        assert!(vars.contains(&("GIT_AUTHOR_NAME", "Mitsuro")));
         assert!(vars.contains(&("GIT_AUTHOR_EMAIL", "krusty@users.noreply.github.com")));
     }
 

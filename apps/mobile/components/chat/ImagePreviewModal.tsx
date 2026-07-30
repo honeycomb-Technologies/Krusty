@@ -60,9 +60,7 @@ export function ImagePreviewModal({
             style={[
               StyleSheet.absoluteFill,
               {
-                backgroundColor: isDark
-                  ? "rgba(11,17,25,0.96)"
-                  : "rgba(255,255,255,0.96)",
+                backgroundColor: t.surfaceOverlayStrong,
               },
             ]}
           />

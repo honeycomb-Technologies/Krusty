@@ -2,7 +2,7 @@
 name = "krusty-mako"
 version = "0.1.0"
 edition = "2021"
-description = "Independently supervised backend daemon for Mako"
+description = "Independently supervised backend service for Mitsuro Hive"
 
 [dependencies]
 anyhow = "1.0"

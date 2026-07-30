@@ -1,6 +1,6 @@
 # Mobile App (Expo/React Native)
 
-The Krusty mobile app is the primary user interface for interacting with the Krusty server from a phone, tablet, or web browser. It is built with Expo and React Native, lives at `apps/mobile/` in the monorepo, and uses a single codebase to produce native iOS and Android apps as well as a web build that can be embedded directly into the Krusty server.
+The Mitsuro mobile app is the primary user interface for interacting with the Mitsuro server from a phone, tablet, or web browser. It is built with Expo and React Native, lives at `apps/mobile/` in the monorepo, and uses a single codebase to produce native iOS and Android apps as well as a web build that can be embedded directly into the Mitsuro server.
 
 ## Architecture Overview
 
@@ -22,7 +22,7 @@ The `RootNavigator` component inside the layout handles a simple routing guard: 
 One of the more unusual things about this codebase is that the same React Native app serves two very different roles:
 
 1. **Native mobile app** -- compiled and distributed through EAS Build as an iOS/Android binary
-2. **Web frontend** -- exported as a static single-page application and embedded into the Krusty server's HTTP interface
+2. **Web frontend** -- exported as a static single-page application and embedded into the Mitsuro server's HTTP interface
 
 This works because Expo supports a web target through Metro bundler and `react-native-web`. The `app.json` configuration sets `"web": { "bundler": "metro", "output": "single" }`, which tells Expo to produce a single-file web build. The `web:build` script in `package.json` runs `expo export --platform web` to generate this output.
 
@@ -99,11 +99,10 @@ Components are organized into six directories under `components/`:
 **`ui/`** -- Shared primitive components:
 
 - `GlassCard` -- A translucent card with blur effects, used throughout the app for list items and panels.
-- `KrustyLogo` -- The animated crab logo shown on the empty chat state.
-- `CrabIcon` -- A smaller static crab icon used in the ChatBar.
+- `MitsuroLogo` and `MitsuroWordmark` -- The canonical rounded-cell mark and lowercase product wordmark used in branded app states.
 - `SegmentControl` -- A segmented control widget.
 
-There are also two top-level components: `ReportsViewer` for browsing Mako reports and `SettingsModal` for the desktop settings overlay.
+There are also two top-level components: `ReportsViewer` for browsing Hive reports and `SettingsModal` for the desktop settings overlay.
 
 ## Custom Hooks
 
@@ -117,7 +116,7 @@ The `hooks/` directory contains ten hooks that manage the app's reactive behavio
 
 **`useBreakpoint`** -- Reads window dimensions and returns a `mobile` / `tablet` / `desktop` breakpoint. The thresholds are 768px for tablet and 1024px for desktop. Components use `isDesktop` to decide between the sidebar layout and the mobile drawer layout.
 
-**`useNotifications`** -- Registers push notification categories (tool approval, stream complete, Mako update) with actionable buttons. Handles notification responses to approve/deny tools or navigate to specific sessions. Only loads `expo-notifications` on native platforms.
+**`useNotifications`** -- Registers push notification categories (tool approval, stream complete, Hive update) with actionable buttons. Handles notification responses to approve/deny tools or navigate to specific sessions. Only loads `expo-notifications` on native platforms.
 
 **`useLiveActivity`** -- Manages iOS Live Activities during streaming. Starts a `ChatStreamActivity` that shows the model, status, elapsed time, token count, and progress on the lock screen and Dynamic Island. Includes approve/deny buttons for tool approvals directly in the Live Activity. Updated every second while active.
 
@@ -147,7 +146,7 @@ Components subscribe to individual slices of these stores via selector hooks lik
 
 The app includes two home screen widgets and one Live Activity, all built with `expo-widgets` and authored in JSX using `@expo/ui/swift-ui` components:
 
-**MakoWidget** -- Displays the status of the Mako autonomous agent. Supports six size families: `systemSmall`, `systemMedium`, `systemLarge`, `accessoryCircular`, `accessoryRectangular`, and `accessoryInline`. The small widget shows agent status and briefing text. The medium and large variants add task progress bars and completion counts. Lock screen accessories show a compact bolt icon with status text.
+**MakoWidget** -- The compatibility component name for the Hive autonomous-mode widget. It supports six size families: `systemSmall`, `systemMedium`, `systemLarge`, `accessoryCircular`, `accessoryRectangular`, and `accessoryInline`. The small widget shows agent status and briefing text. The medium and large variants add task progress bars and completion counts. Lock-screen accessories use the product's rounded-cell symbol with status text.
 
 **ChatWidget** -- Shows the active chat session with title, last message preview, model name, and token count. Supports `systemSmall`, `systemMedium`, `accessoryCircular`, and `accessoryRectangular`. Includes a `widgetURL` modifier so tapping the widget opens the app directly to the chat. When no session is active, it shows a "New Chat" prompt.
 
@@ -181,7 +180,7 @@ The `assets/` directory contains:
 
 ## Onboarding
 
-First-time users see the onboarding screen, which asks for two pieces of information: the Krusty server URL and a remote access token. The server URL is typically a Tailscale address (e.g., `https://device.tail123.ts.net:8443`), and the token is generated by the server. The screen validates the connection with a health check and authentication bootstrap before navigating to the main chat.
+First-time users see the onboarding screen, which asks for two pieces of information: the Mitsuro server URL and a remote access token. The server URL is typically a Tailscale address (e.g., `https://device.tail123.ts.net:8443`), and the token is generated by the server. The screen validates the connection with a health check and authentication bootstrap before navigating to the main chat.
 
 Alternatively, users can skip manual entry entirely by using a deep link. The server provides a one-tap connection URL in the format `krusty://connect?url=...&token=...` that the `useDeepLink` hook handles automatically.
 

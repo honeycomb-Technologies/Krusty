@@ -7,9 +7,21 @@ export interface Theme {
   scheme: ResolvedScheme;
   colors: {
     background: string;
+    surface: string;
+    surfaceElevated: string;
+    surfaceStrong: string;
+    surfaceOverlaySubtle: string;
+    surfaceOverlay: string;
+    surfaceOverlayElevated: string;
+    surfaceOverlayStrong: string;
+    codeSurface: string;
     foreground: string;
     primary: string;
     primaryMuted: string;
+    accent: string;
+    accentPressed: string;
+    accentSurface: string;
+    onAccent: string;
     userMessage: string;
     userMessageBg: string;
     aiMessage: string;
@@ -51,9 +63,27 @@ export function createTheme(scheme: ResolvedScheme): Theme {
     scheme,
     colors: {
       background: isDark ? colors.background : colors.light.background,
+      surface: isDark ? colors.surface : colors.light.surface,
+      surfaceElevated: isDark ? colors.surfaceElevated : colors.light.surfaceElevated,
+      surfaceStrong: isDark ? colors.surfaceStrong : colors.light.surfaceStrong,
+      surfaceOverlaySubtle: isDark
+        ? colors.surfaceOverlaySubtle
+        : colors.light.surfaceOverlaySubtle,
+      surfaceOverlay: isDark ? colors.surfaceOverlay : colors.light.surfaceOverlay,
+      surfaceOverlayElevated: isDark
+        ? colors.surfaceOverlayElevated
+        : colors.light.surfaceOverlayElevated,
+      surfaceOverlayStrong: isDark
+        ? colors.surfaceOverlayStrong
+        : colors.light.surfaceOverlayStrong,
+      codeSurface: isDark ? colors.codeSurface : colors.light.codeSurface,
       foreground: isDark ? colors.foreground : colors.light.foreground,
       primary: isDark ? colors.primary : colors.light.primary,
-      primaryMuted: isDark ? colors.primaryMuted : 'rgba(10, 10, 10, 0.7)',
+      primaryMuted: isDark ? colors.primaryMuted : 'rgba(36, 35, 38, 0.70)',
+      accent: colors.accent,
+      accentPressed: colors.accentPressed,
+      accentSurface: colors.accentSurface,
+      onAccent: colors.onAccent,
       userMessage: colors.userMessage,
       userMessageBg: isDark ? colors.userMessageBg : colors.light.userMessageBg,
       aiMessage: isDark ? colors.aiMessage : colors.light.aiMessage,

@@ -157,7 +157,7 @@ pub(super) async fn update_home_document(
 ) -> Result<Json<MakoHomeResponse>, AppError> {
     let kind = MakoProfileDocumentKind::parse(&kind).ok_or_else(|| {
         AppError::BadRequest(
-            "invalid Mako profile document kind; memory is managed by the memory API".to_string(),
+            "invalid Hive profile document kind; memory is managed by the memory API".to_string(),
         )
     })?;
     let content = trimmed_nonempty(Some(req.content.as_str()))
@@ -188,7 +188,7 @@ pub(super) async fn update_crew_document(
     }
     let kind = MakoCrewProfileDocumentKind::parse(&kind).ok_or_else(|| {
         AppError::BadRequest(
-            "invalid Mako crew profile kind; crew memory is canonical memory, not identity"
+            "invalid Hive agent profile kind; agent memory is canonical memory, not identity"
                 .to_string(),
         )
     })?;
@@ -397,7 +397,7 @@ pub(super) fn build_mako_bootstrap_response_from_dir(
     mako_home: &std::path::Path,
 ) -> Result<MakoBootstrapResponse, AppError> {
     let result = bootstrap_mako_home(mako_home)
-        .map_err(|error| AppError::Internal(format!("Failed to bootstrap Mako home: {}", error)))?;
+        .map_err(|error| AppError::Internal(format!("Failed to bootstrap Hive home: {}", error)))?;
     Ok(MakoBootstrapResponse {
         ok: true,
         created_files: result.created_files,
@@ -485,7 +485,7 @@ fn build_mako_crew_response_from_loaded_profile(
         task_store,
         delegated_store,
     )
-    .map_err(|error| AppError::Internal(format!("Failed to summarize Mako crew: {}", error)))?;
+    .map_err(|error| AppError::Internal(format!("Failed to summarize Hive agents: {}", error)))?;
 
     Ok(MakoCrewResponse {
         members: runtime
