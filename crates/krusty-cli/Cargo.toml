@@ -1,6 +1,6 @@
 [package]
 name = "krusty"
-version = "0.9.14"
+version = "0.9.20"
 edition = "2021"
 description = "Mitsuro AI coding runtime and compatibility CLI"
 default-run = "krusty"

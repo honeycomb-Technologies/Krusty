@@ -13,7 +13,7 @@ body:
     attributes:
       label: Version
       description: Release, TestFlight build, or commit
-      placeholder: 0.9.14, build 266, or commit SHA
+      placeholder: 0.9.20, build 266, or commit SHA
     validations:
       required: true
   - type: dropdown
