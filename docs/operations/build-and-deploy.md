@@ -93,7 +93,7 @@ The publish job fails closed unless GitHub reports the release tag as protected 
 The fastest way to install Mitsuro is the one-liner:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Mitsuro/main/install.sh | sh
 ```
 
 The script (`install.sh`) detects the host OS and architecture, fetches the latest release from the GitHub API, downloads the exact archive and its required SHA-256 manifest, verifies the manifest record and archive before extraction, and rejects unsafe archive paths or entry types. On Unix it stages an immutable release containing `krusty`, `krusty-mako`, and the service units, then switches one managed release pointer; a service reload/restart failure restores the prior binary and unit set. Existing direct installs are retained as a rollback release, and releases are not pruned automatically. On default Linux installs the units are linked into `~/.config/systemd/user`; custom `INSTALL_DIR` values deliberately skip automatic unit management. Windows remains a verified standalone-binary install. The script supports Linux (x86_64, aarch64), macOS (Intel and Apple Silicon), and Windows under MSYS/Cygwin. If the install directory is not already in `PATH`, it prints the line you need to add to your shell config.
@@ -241,7 +241,7 @@ The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progr
 
 The App Store Connect app ID (`6761496828`) is configured in `eas.json`. Apple credentials are stored as GitHub secrets.
 
-For safe no-TestFlight validation of docs/tooling changes, inspect the workflow definition and repository metadata only (for example, `gh workflow view mobile-testflight.yml --repo honeycomb-Technologies/Krusty`, `scripts/check-default-branch-preflight.sh`, and `git diff --check`). Do not validate this path by pushing mobile changes to `main`, running `gh workflow run mobile-testflight.yml`, or submitting a build unless Jacob/Bob explicitly approves a TestFlight release attempt.
+For safe no-TestFlight validation of docs/tooling changes, inspect the workflow definition and repository metadata only (for example, `gh workflow view mobile-testflight.yml --repo honeycomb-Technologies/Mitsuro`, `scripts/check-default-branch-preflight.sh`, and `git diff --check`). Do not validate this path by pushing mobile changes to `main`, running `gh workflow run mobile-testflight.yml`, or submitting a build unless a release attempt has been explicitly approved.
 
 ## Desktop builds
 

@@ -45,7 +45,6 @@ reject_matches() {
     --glob '!dist/**' \
     --glob '!build/**' \
     --glob '!.git/**' \
-    --glob '!docs/archive/**' \
     --glob '!**/*.lock' \
     --glob '!**/test/**' \
     --glob '!**/tests/**' \
@@ -138,7 +137,7 @@ reject_matches \
 
 reject_matches \
   "active sources contain no retired GitHub repository URL" \
-  'github\.com/honeycomb-Technologies/Krusty' \
+  '(github\.com|raw\.githubusercontent\.com|api\.github\.com/repos)/honeycomb-Technologies/Krusty' \
   .
 
 printf '\nCompatibility identifiers intentionally retained\n'
@@ -146,7 +145,6 @@ printf '  binary/package: krusty, krusty-mako, @krusty/*\n'
 printf '  transport/state: /mako, session_type=mako, ~/.krusty, legacy krusty:// alias\n'
 printf '  platform IDs: existing bundle IDs, Expo slug, native module symbols\n'
 printf '  source symbols: Mako* and Krusty* types until a separate migration\n'
-printf '  archive docs: historical names are preserved as historical evidence\n'
 printf '  TUI: legacy visual surface is frozen pending a ground-up rebuild\n'
 
 if (( failures > 0 )); then

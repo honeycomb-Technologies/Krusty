@@ -21,4 +21,4 @@ pub use types::{UpdateInfo, UpdateStatus};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// GitHub repo for releases
-pub(super) const GITHUB_REPO: &str = "honeycomb-Technologies/Krusty";
+pub(super) const GITHUB_REPO: &str = "honeycomb-Technologies/Mitsuro";

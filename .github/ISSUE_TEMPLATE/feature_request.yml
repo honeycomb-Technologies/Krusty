@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a focused improvement to Mitsuro
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is difficult today, and who does it affect?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the result rather than a specific implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - iPhone app
+        - Web app
+        - Desktop app
+        - Terminal
+        - Server
+        - Editor integration
+        - Cross-product
+    validations:
+      required: true

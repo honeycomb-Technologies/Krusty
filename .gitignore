@@ -1,7 +1,6 @@
-# Krusty Dev .gitignore
+# Mitsuro development files
 
-# Internal configuration
-CLAUDE.md
+# Local agent configuration
 .claude/worktrees/
 
 # Build outputs
@@ -35,15 +34,30 @@ Thumbs.db
 node_modules/
 frontend/node_modules
 frontend/build
+.expo/
+coverage/
 
 # Lockfile policy: Bun only
 **/package-lock.json
 **/pnpm-lock.yaml
 **/yarn.lock
 
-# Never publish archive snapshots from this repo
+# Never publish internal working material from this repo
 apps/**/legacy*/
 apps/**/legacy-*/
+/docs/archive/
+/docs/drafts/
+/docs/internal/
+/research/
+/experiments/
+/scratch/
+/artifacts/
+/STAGING_NOTES.md
+/AUDIT.md
+/AUDIT_TODO.md
+*.xcresult/
+*.memgraph
+*.trace
 
 # Secrets, credentials, and keys — never commit these
 .env
@@ -58,7 +72,3 @@ oauth.json
 *.jks
 *.keystore
 .krusty/
-
-# Python test caches
-**/__pycache__/
-*.py[cod]

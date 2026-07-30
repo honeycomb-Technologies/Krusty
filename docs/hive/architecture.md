@@ -1,4 +1,4 @@
-# Hive Backend Architecture V2
+# Hive Backend Architecture
 
 ## Status
 

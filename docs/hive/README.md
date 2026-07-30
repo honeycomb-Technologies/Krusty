@@ -1,16 +1,11 @@
 # Hive Engineering Documentation
 
-Current Hive documentation is intentionally limited to implemented runtime and
-operational behavior:
+These documents describe the implemented Hive runtime and its operational
+behavior:
 
-- [Backend Architecture](./MAKO_BACKEND_ARCHITECTURE_V2.md)
-- [Hive Autonomous Mode](../interfaces/mako-autonomous-mode.md)
+- [Hive overview and controls](../interfaces/hive.md)
+- [Backend architecture](./architecture.md)
 - [Build and Deployment](../operations/build-and-deploy.md)
-
-Historical product models, competitive reviews, roadmaps, screen maps, and
-implementation plans are preserved in the
-[Hive Product History](../archive/mako-product-history/README.md). They are not
-the current product contract.
 
 ## Durable data privacy
 

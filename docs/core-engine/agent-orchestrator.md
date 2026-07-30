@@ -82,7 +82,8 @@ Compaction is a multi-pass process that tries to shrink the conversation without
 
 If compaction succeeds, the orchestrator emits a `ContextCompacted` event, persists the compacted conversation, and continues. If it fails (the result is still above the hard failure threshold), the loop terminates with `ContextCompactionFailed`.
 
-This is different from "pinch" (session continuation), which creates an entirely new session with a handoff artifact. Compaction keeps the same session alive by trimming history in place.
+The `/pinch` command is the manual form of this same in-place compaction. It
+keeps the session ID, durable history, and client thread intact.
 
 ### 4. Stream the AI response
 
@@ -185,23 +186,29 @@ The `UserPreToolHook` and `UserPostToolHook` wrappers adapt user hooks into the 
 
 ## Context Ledger
 
-The `ContextLedger` in `crates/krusty-core/src/agent/context_ledger.rs` tracks the high-level state of the conversation for compaction and continuation decisions. It counts canonical messages, summarized messages, dropped messages, pinned messages (like project instructions), and replayed messages. It also extracts the latest user objective — the most recent user message that contains actual text (not just tool results).
+The `ContextLedger` in `crates/krusty-core/src/agent/context_ledger.rs` tracks the high-level state of the conversation for compaction and recovery decisions. It counts canonical messages, summarized messages, dropped messages, pinned messages (like project instructions), and replayed messages. It also extracts the latest user objective — the most recent user message that contains actual text (not just tool results).
 
-The ledger produces two persistence artifacts:
+The ledger records:
 
 - **ContextLedgerRecord** — a snapshot of all counters and the last compaction event, serialized to the database after every state change
-- **ContinuationContract** — a `Resumable` or `NonResumable` decision used by the pinch system. If the conversation has messages and a clear user objective, it's resumable. If the conversation is empty or has no extractable objective, it's non-resumable.
+- **ContinuationContract** — a `Resumable` or `NonResumable` decision retained for compatibility with older continuation flows
 
 ## Summarization
 
-When a session reaches the end of its useful context window, the pinch system can create a continuation session. The summarizer in `crates/krusty-core/src/agent/summarizer.rs` calls the AI to produce a structured JSON summary with four fields:
+When a session approaches its useful context limit, the compaction pipeline
+summarizes older history and continues in the same session. Manual `/pinch`,
+automatic pressure handling, and provider-overflow recovery use this shared
+in-place path. The summarizer in
+`crates/krusty-core/src/agent/summarizer.rs` produces four fields:
 
 - `work_summary` — 2-3 paragraphs of what was accomplished
 - `key_decisions` — architectural choices and trade-offs
 - `pending_tasks` — incomplete work and identified next steps
 - `important_files` — the top 10 most relevant file paths
 
-The summarizer is cache-safe: when conversation history exists, it reuses the parent conversation's cached prefix (same system prompt, same message sequence) and appends the summarization instruction as a new user message. This means the provider only needs to process the summarization instruction itself — everything before it is already cached. This saves significant cost on long conversations.
+Summarization uses a short, stable system prefix and a bounded transcript
+prompt. It does not claim to reuse the full parent request prefix because the
+parent's project and tool instruction layers are not reproduced.
 
 ## Session Recovery
 

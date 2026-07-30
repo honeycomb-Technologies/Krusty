@@ -2,10 +2,10 @@
 set -e
 
 # Mitsuro installer (compatibility package and binary: krusty)
-# Usage: curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh && sh install.sh
+# Usage: curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Mitsuro/main/install.sh && sh install.sh
 # Validation: sh install.sh --self-test
 
-REPO="honeycomb-Technologies/Krusty"
+REPO="honeycomb-Technologies/Mitsuro"
 BINARY="krusty"
 DAEMON_BINARY="krusty-mako"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"

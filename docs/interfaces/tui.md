@@ -129,7 +129,7 @@ The command system maps input prefixed with `/` to application actions. Commands
 | `/init` | Analyze codebase and generate KRAB.md |
 | `/theme` | Open theme picker |
 | `/clear` | Clear chat messages and blocks |
-| `/pinch` | Continue in new session with summarized context |
+| `/pinch` | Compact older context and continue in the same session |
 | `/cmd` | Show all keyboard controls |
 | `/terminal` | Open interactive terminal pane |
 | `/ps` | View background processes |
@@ -250,7 +250,10 @@ The orchestrator emits events covering the full lifecycle: text and thinking del
 
 Each event is translated into visual state: text deltas append to the current assistant message, tool events create or update blocks, approval events show decision prompts, and plan events update the sidebar.
 
-When the orchestrator finishes, the TUI reloads the full conversation from the database to ensure it matches what was persisted, then clears all streaming state and checks whether auto-pinch (context compaction into a new session) should be triggered.
+When the orchestrator finishes, the TUI reloads the full conversation from the
+database to ensure it matches what was persisted, then clears streaming state.
+When context pressure requires it, automatic compaction summarizes older
+history in place and continues in the same session.
 
 ## Plugins
 

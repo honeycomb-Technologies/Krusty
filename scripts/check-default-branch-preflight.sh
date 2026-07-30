@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-# Read-only Krusty governance/default-branch preflight.
+# Read-only Mitsuro governance/default-branch preflight.
 #
 # Verifies that the repository's authoritative default branch, the remote HEAD,
 # and the local origin/HEAD tracking symref all agree on main. It also checks

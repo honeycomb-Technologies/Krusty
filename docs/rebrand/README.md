@@ -10,4 +10,6 @@ Compatibility identifiers such as crate names, database fields, API routes, lega
 
 The canonical GitHub repository is `honeycomb-Technologies/Mitsuro`, the App Store Connect product name is Mitsuro, and new mobile launch URLs use `mitsuro://`. The previous `krusty://` scheme remains registered as a compatibility alias.
 
-See [`SURFACE_AUDIT.md`](SURFACE_AUDIT.md) for the completed surface inventory, the intentionally deferred TUI, and the exact compatibility boundary.
+Internal package names, executable names, routes, storage paths, and platform
+identifiers may retain legacy compatibility values until they can be migrated
+without breaking existing installations.

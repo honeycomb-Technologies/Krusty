@@ -183,7 +183,7 @@ to its principal; an untrusted forwarded header is insufficient.
 
 ## First-Run Setup
 
-When you run `krusty serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. The wizard saves credentials to the encrypted credential store so subsequent starts are immediate.
+When you run `krusty serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. API keys are stored in an owner-readable file written atomically with restrictive permissions on Unix. OAuth providers use the separate token store.
 
 The serve command also integrates with Tailscale. If Tailscale is installed and the device is online, the server automatically configures `tailscale serve` to proxy the local port, making Mitsuro accessible at `https://<machine-name>.<tailnet>.ts.net`. If permissions are insufficient, it prints a one-time fix command (`sudo tailscale set --operator=$USER`). If Tailscale is not installed, it suggests installing it.
 

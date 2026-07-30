@@ -29,7 +29,7 @@ with_fake_commands() {
 set -euo pipefail
 
 if [[ "${1:-}" == "repo" && "${2:-}" == "view" ]]; then
-  printf '{"nameWithOwner":"honeycomb-Technologies/Krusty","defaultBranchRef":{"name":"%s"}}\n' "${GITHUB_DEFAULT_BRANCH:-main}"
+  printf '{"nameWithOwner":"honeycomb-Technologies/Mitsuro","defaultBranchRef":{"name":"%s"}}\n' "${GITHUB_DEFAULT_BRANCH:-main}"
   exit 0
 fi
 
@@ -49,22 +49,22 @@ if [[ "${1:-}" == "api" ]]; then
   done
 
   case "$endpoint" in
-    repos/honeycomb-Technologies/Krusty/branches/*/protection)
+    repos/honeycomb-Technologies/Mitsuro/branches/*/protection)
       if [[ "${CLASSIC_PROTECTED:-0}" == "1" ]]; then
-        printf '{"url":"https://api.github.com/repos/honeycomb-Technologies/Krusty/branches/main/protection"}\n'
+        printf '{"url":"https://api.github.com/repos/honeycomb-Technologies/Mitsuro/branches/main/protection"}\n'
       else
         echo 'gh: Branch not protected (HTTP 404)' >&2
         exit 1
       fi
       ;;
-    repos/honeycomb-Technologies/Krusty/rulesets)
+    repos/honeycomb-Technologies/Mitsuro/rulesets)
       if [[ "${RULESET_PROTECTED:-0}" == "1" ]]; then
         printf '[{"id":12308175,"name":"Protect main","target":"branch","enforcement":"active"}]\n'
       else
         printf '[]\n'
       fi
       ;;
-    repos/honeycomb-Technologies/Krusty/rulesets/12308175)
+    repos/honeycomb-Technologies/Mitsuro/rulesets/12308175)
       printf '{"id":12308175,"name":"Protect main","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["refs/heads/main"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"required_status_checks"}]}\n'
       ;;
     *)
