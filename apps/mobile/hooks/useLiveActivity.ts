@@ -442,7 +442,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
       };
       activityRef.current = ChatStreamActivityFactory.start(
         initialContent,
-        `krusty://?sessionId=${encodeURIComponent(sessionId)}`,
+        `mitsuro://?sessionId=${encodeURIComponent(sessionId)}`,
       );
       recordLiveActivityDiagnostic('start');
       lastActivityStartAtRef.current = Date.now();

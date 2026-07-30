@@ -6,7 +6,10 @@
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
-    "scheme": "krusty",
+    "scheme": [
+      "mitsuro",
+      "krusty"
+    ],
     "splash": {
       "backgroundColor": "#0e0e11"
     },

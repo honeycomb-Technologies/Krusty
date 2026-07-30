@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "publisher": "Honeycomb Technologies",
-    "homepage": "https://github.com/honeycomb-Technologies/Krusty",
+    "homepage": "https://github.com/honeycomb-Technologies/Mitsuro",
     "category": "DeveloperTool",
     "shortDescription": "Mitsuro, a local-first AI coding assistant.",
     "longDescription": "Mitsuro packages Agent and Hive in a native desktop shell with an embedded local runtime for coding, chat, and project operations.",

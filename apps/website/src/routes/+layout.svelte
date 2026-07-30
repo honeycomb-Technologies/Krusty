@@ -17,7 +17,7 @@
         <a href="/#features">Features</a>
         <a href="/plugins">Plugins</a>
         <a href="/#install">Install</a>
-        <a class="button ghost" href="https://github.com/honeycomb-Technologies/Krusty">GitHub</a>
+        <a class="button ghost" href="https://github.com/honeycomb-Technologies/Mitsuro">GitHub</a>
       </nav>
     </div>
   </header>

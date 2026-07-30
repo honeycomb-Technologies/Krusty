@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 
 #[cfg(unix)]
-const UNIX_MANAGED_UPDATE_MESSAGE: &str = "Automatic updates are disabled on Unix because the krusty compatibility binary, krusty-mako Hive service, and their service units must be upgraded together. Upgrade the complete Mitsuro release with your package manager (Homebrew/AUR), or rerun the checksum-verifying installer from https://github.com/honeycomb-Technologies/Krusty/blob/main/install.sh.";
+const UNIX_MANAGED_UPDATE_MESSAGE: &str = "Automatic updates are disabled on Unix because the krusty compatibility binary, krusty-mako Hive service, and their service units must be upgraded together. Upgrade the complete Mitsuro release with your package manager (Homebrew/AUR), or rerun the checksum-verifying installer from https://github.com/honeycomb-Technologies/Mitsuro/blob/main/install.sh.";
 
 #[cfg(unix)]
 pub(super) fn require_safe_single_binary_update() -> Result<()> {

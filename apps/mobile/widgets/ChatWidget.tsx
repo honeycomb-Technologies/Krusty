@@ -38,7 +38,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
 
   if (family === "accessoryCircular") {
     return (
-      <AccessoryBackground modifiers={[widgetURL("krusty://chat")]}>
+      <AccessoryBackground modifiers={[widgetURL("mitsuro://chat")]}>
         <VStack alignment="center">
           <Image
             systemName={
@@ -56,7 +56,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
 
   if (family === "accessoryRectangular") {
     return (
-      <AccessoryBackground modifiers={[widgetURL("krusty://chat")]}>
+      <AccessoryBackground modifiers={[widgetURL("mitsuro://chat")]}>
         <VStack alignment="leading">
           <HStack>
             <Image
@@ -87,7 +87,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
           padding({ all: 14 }),
           background("#0e0e11"),
           foregroundStyle("#e8e5ea"),
-          widgetURL("krusty://chat"),
+          widgetURL("mitsuro://chat"),
         ]}
       >
         <HStack>
@@ -155,7 +155,7 @@ function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
         padding({ all: 14 }),
         background("#0e0e11"),
         foregroundStyle("#e8e5ea"),
-        widgetURL("krusty://chat"),
+        widgetURL("mitsuro://chat"),
       ]}
     >
       <HStack>

@@ -22,8 +22,8 @@ repo_root=$(cd -- "$script_dir/.." && pwd)
 pkgbuild="$script_dir/PKGBUILD"
 srcinfo="$script_dir/.SRCINFO"
 archive_name="krusty-$version.tar.gz"
-archive_url="https://github.com/honeycomb-Technologies/Krusty/archive/refs/tags/v$version.tar.gz"
-expected_prefix="Krusty-$version/"
+archive_url="https://github.com/honeycomb-Technologies/Mitsuro/archive/refs/tags/v$version.tar.gz"
+expected_prefix="Mitsuro-$version/"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/krusty-aur-release.XXXXXX")
 trap 'rm -rf -- "$temp_dir"' EXIT
 archive_listing="$temp_dir/archive-entries.txt"

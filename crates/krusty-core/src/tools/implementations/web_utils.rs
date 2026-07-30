@@ -15,7 +15,7 @@ use url::{Host, Url};
 
 use crate::tools::ToolResult;
 
-const DEFAULT_USER_AGENT: &str = "Mitsuro/1.0 (+https://github.com/honeycomb-Technologies/Krusty)";
+const DEFAULT_USER_AGENT: &str = "Mitsuro/1.0 (+https://github.com/honeycomb-Technologies/Mitsuro)";
 const DEFAULT_TIMEOUT_SECS: u64 = 20;
 
 static SCRIPT_STYLE_RE: Lazy<Regex> = Lazy::new(|| {

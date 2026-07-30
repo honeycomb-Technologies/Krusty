@@ -100,9 +100,12 @@ do
 done
 
 require_text "Expo display name is Mitsuro" '"name"[[:space:]]*:[[:space:]]*"Mitsuro"' apps/mobile/app.json
+require_text "Expo registers multiple deep-link schemes" '"scheme"[[:space:]]*:[[:space:]]*\[' apps/mobile/app.json
+require_text "Mitsuro is a registered deep-link scheme" '"mitsuro"' apps/mobile/app.json
 require_text "Expo notification icon is Mitsuro" 'mitsuro-notification\.png' apps/mobile/app.json
 require_text "desktop product name is Mitsuro" '"productName"[[:space:]]*:[[:space:]]*"Mitsuro"' apps/desktop/shell/src-tauri/tauri.conf.json
 require_text "desktop publisher is Honeycomb Technologies" '"publisher"[[:space:]]*:[[:space:]]*"Honeycomb Technologies"' apps/desktop/shell/src-tauri/tauri.conf.json
+require_text "canonical GitHub repository is Mitsuro" 'github\.com/honeycomb-Technologies/Mitsuro' README.md
 require_text "preferred autonomous CLI is Hive" 'name = "hive"' crates/krusty-cli/src/main.rs
 require_text "legacy autonomous CLI alias is retained" 'visible_alias = "mako"' crates/krusty-cli/src/main.rs
 require_text "shared accent is mineral violet" '#75617e' packages/ui/src/tokens.ts
@@ -133,9 +136,14 @@ reject_matches \
   apps/mobile apps/desktop apps/website packages README.md docs \
   crates/krusty-cli/src/main.rs crates/krusty-cli/src/serve.rs
 
+reject_matches \
+  "active sources contain no retired GitHub repository URL" \
+  'github\.com/honeycomb-Technologies/Krusty' \
+  .
+
 printf '\nCompatibility identifiers intentionally retained\n'
 printf '  binary/package: krusty, krusty-mako, @krusty/*\n'
-printf '  transport/state: /mako, session_type=mako, ~/.krusty, krusty://\n'
+printf '  transport/state: /mako, session_type=mako, ~/.krusty, legacy krusty:// alias\n'
 printf '  platform IDs: existing bundle IDs, Expo slug, native module symbols\n'
 printf '  source symbols: Mako* and Krusty* types until a separate migration\n'
 printf '  archive docs: historical names are preserved as historical evidence\n'

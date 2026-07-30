@@ -3,9 +3,10 @@ import * as Linking from '../platform/linking';
 import { useConnection } from './useConnection';
 
 /**
- * Handles krusty:// deep links for seamless server connection.
+ * Handles Mitsuro deep links for seamless server connection.
  *
  * Supported URLs:
+ *   mitsuro://connect?url=https://device.ts.net:8443&token=kr_remote_...
  *   krusty://connect?url=https://device.ts.net:8443&token=kr_remote_...
  *
  * Also handles HTTPS universal links:
@@ -34,8 +35,11 @@ export function useDeepLink() {
     if (handledRef.current === url) return;
     handledRef.current = url;
 
-    // krusty://connect?url=...&token=...
-    if (url.startsWith('krusty://connect')) {
+    // mitsuro:// is canonical; krusty:// remains a compatibility alias.
+    if (
+      url.startsWith('mitsuro://connect') ||
+      url.startsWith('krusty://connect')
+    ) {
       const params = parseQueryParams(url);
       const serverUrl = params.url;
       const token = params.token;
@@ -62,7 +66,7 @@ export function useDeepLink() {
       return;
     }
 
-    // exp+krusty://connect?url=...&token=... (Expo development scheme)
+    // Expo development schemes (for example exp+mitsuro://connect?...).
     if (url.includes('connect') && url.includes('url=') && url.includes('token=')) {
       const params = parseQueryParams(url);
       const serverUrl = params.url;

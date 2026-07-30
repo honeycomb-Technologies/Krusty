@@ -25,6 +25,8 @@ This is the release boundary for the Mitsuro rebrand. It distinguishes product p
 - Tauri product name, window title, publisher, package descriptions, launcher icons, and shell copy.
 - CLI and server public descriptions, startup copy, OAuth pages, recovery notices, notifications, user agents, Agent prompt identity, Hive command/help text, and default Hive session title.
 - Installer output, Homebrew/AUR descriptions, systemd descriptions, Cargo package descriptions, active documentation prose, and root README.
+- GitHub repository identity and active repository, installer, package-manager, website, native-module, and updater links.
+- App Store Connect product name, installed iOS product name, and canonical `mitsuro://` deep-link launch URLs.
 - A runnable rebrand audit that rejects retired mascot assets, slogans, colors, and accidental TUI edits.
 
 ## Intentionally deferred
@@ -42,13 +44,19 @@ These are not missed branding. They are stable contracts whose rename needs a se
 | Server routes and schemas | `/api/mako/*`, `session_type: "mako"`, `Mako*` wire/storage types |
 | Local state | `~/.krusty`, `krusty.db`, existing preference/storage keys |
 | Services and IPC | `krusty-mako.service`, `krusty-mako.socket`, `mako.sock` |
-| Links and platform IDs | `krusty://`, Expo slug, existing iOS/Android/Tauri bundle identifiers |
+| Links and platform IDs | legacy `krusty://` alias, Expo slug, existing iOS/Android/Tauri bundle identifiers |
 | Native/source symbols | `KrustyClient`, `KrustyDiagnostics`, `MakoWidget`, and other compiled symbols |
-| Repository and distribution | GitHub repository URL and existing package/formula names |
+| Distribution contracts | existing package, crate, executable, and formula names |
 | Historical evidence | `docs/archive/` and versioned migration names |
 
 User-facing labels around those contracts must say Mitsuro, Agent, or Hive. Documentation may show the compatibility spelling inside code formatting when that is the exact command, route, file, symbol, or stored value.
 
-## Separate future migration
+## Compatibility migration progress
 
-A later compatibility migration may introduce new executable, route, package, state-directory, deep-link, bundle, and native-module identifiers. It must preserve old aliases long enough for desktop, mobile, server, package managers, systemd, saved credentials, deep links, and existing databases to move together. That work is intentionally not coupled to the visual rebrand or the TUI rebuild.
+- The canonical repository is `honeycomb-Technologies/Mitsuro`; GitHub redirects the previous repository URL for compatibility.
+- `mitsuro://` is the canonical mobile deep-link scheme. `krusty://` remains registered and accepted so installed widgets, Live Activities, saved links, and older servers continue to work.
+- The App Store Connect product name and the shipped iOS display/product name are Mitsuro.
+
+The remaining compatibility migration may introduce new executable, route, package, state-directory, Expo-slug, and native-module identifiers. It must preserve old aliases long enough for desktop, mobile, server, package managers, systemd, saved credentials, deep links, and existing databases to move together.
+
+Existing Apple and Android application identifiers are installation identities rather than display branding. The current iOS app record cannot change its bundle ID after a build has been uploaded; replacing `io.krusty.mobile` would require a new app record and break the existing update/TestFlight lineage. It therefore remains an opaque compatibility key for the current product.

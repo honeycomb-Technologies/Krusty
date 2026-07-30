@@ -55,7 +55,12 @@ Deno.test("platform identity is Mitsuro without breaking compatibility IDs", asy
 
   assert(expo.name === "Mitsuro", "the installed app display name must be Mitsuro");
   assert(expo.slug === "krusty", "the existing Expo slug remains a compatibility ID");
-  assert(expo.scheme === "krusty", "the existing deep-link scheme remains compatible");
+  assert(
+    Array.isArray(expo.scheme) &&
+      expo.scheme[0] === "mitsuro" &&
+      expo.scheme.includes("krusty"),
+    "Mitsuro must be the canonical deep-link scheme while krusty remains compatible",
+  );
   assert(
     expo.splash?.backgroundColor === "#0e0e11",
     "native splash must use Graphite Brass foundation",

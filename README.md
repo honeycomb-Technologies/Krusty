@@ -41,8 +41,8 @@ Or from source:
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libudev-dev
-git clone https://github.com/honeycomb-Technologies/Krusty.git
-cd Krusty
+git clone https://github.com/honeycomb-Technologies/Mitsuro.git
+cd Mitsuro
 cargo build --release
 ./target/release/krusty
 ```

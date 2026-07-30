@@ -6,6 +6,8 @@ The final product mark is one exact rounded cell rotated point-up. Hive uses thr
 
 Source-of-truth artwork lives in `assets/branding/mitsuro/`. Launcher and native splash PNGs in `apps/mobile/assets/` are renders of those sources. The splash Lottie is vector-only and traces all six cell sides simultaneously.
 
-Compatibility identifiers such as crate names, database fields, API routes, URL schemes, and bundle IDs may continue to use `krusty` or `mako` until a separately planned migration. User-facing product copy should use Mitsuro, Agent, Hive, Hive Agent, and Pulse.
+Compatibility identifiers such as crate names, database fields, API routes, legacy URL schemes, and bundle IDs may continue to use `krusty` or `mako` while alias-based migrations are completed. User-facing product copy should use Mitsuro, Agent, Hive, Hive Agent, and Pulse.
+
+The canonical GitHub repository is `honeycomb-Technologies/Mitsuro`, the App Store Connect product name is Mitsuro, and new mobile launch URLs use `mitsuro://`. The previous `krusty://` scheme remains registered as a compatibility alias.
 
 See [`SURFACE_AUDIT.md`](SURFACE_AUDIT.md) for the completed surface inventory, the intentionally deferred TUI, and the exact compatibility boundary.

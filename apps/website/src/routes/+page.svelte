@@ -29,7 +29,7 @@
     }
   ];
 
-  const installCommand = 'cargo install --git https://github.com/honeycomb-Technologies/Krusty --package krusty';
+  const installCommand = 'cargo install --git https://github.com/honeycomb-Technologies/Mitsuro --package krusty';
 </script>
 
 <svelte:head>
@@ -49,7 +49,7 @@
       <div class="actions">
         <a class="button primary" href="/plugins">Browse plugins</a>
         <a class="button" href="#install">Install Mitsuro</a>
-        <a class="button ghost" href="https://github.com/honeycomb-Technologies/Krusty">View source</a>
+        <a class="button ghost" href="https://github.com/honeycomb-Technologies/Mitsuro">View source</a>
       </div>
     </div>
 

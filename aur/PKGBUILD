@@ -4,11 +4,11 @@ pkgver=0.7.3
 pkgrel=1
 pkgdesc="Mitsuro multi-platform AI coding product with Agent and Hive"
 arch=('x86_64' 'aarch64')
-url="https://github.com/honeycomb-Technologies/Krusty"
+url="https://github.com/honeycomb-Technologies/Mitsuro"
 license=('MIT')
 depends=('gcc-libs' 'openssl')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/honeycomb-Technologies/Krusty/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/honeycomb-Technologies/Mitsuro/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('7f21b43dab2607d8864de641e7f11c920e73fdaee378f9c1115dadf4760fcbfa')
 
 prepare() {

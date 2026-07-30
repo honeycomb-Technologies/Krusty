@@ -16,8 +16,8 @@ export const catalog = {
         "hot-reload",
         "tui"
       ],
-      "homepage": "https://github.com/honeycomb-Technologies/Krusty/tree/main/examples/plugins/native-rust",
-      "repository": "https://github.com/honeycomb-Technologies/Krusty",
+      "homepage": "https://github.com/honeycomb-Technologies/Mitsuro/tree/main/examples/plugins/native-rust",
+      "repository": "https://github.com/honeycomb-Technologies/Mitsuro",
       "official": true
     },
     {
@@ -35,8 +35,8 @@ export const catalog = {
         "libnode",
         "tui"
       ],
-      "homepage": "https://github.com/honeycomb-Technologies/Krusty/tree/main/examples/plugins/js-ts",
-      "repository": "https://github.com/honeycomb-Technologies/Krusty",
+      "homepage": "https://github.com/honeycomb-Technologies/Mitsuro/tree/main/examples/plugins/js-ts",
+      "repository": "https://github.com/honeycomb-Technologies/Mitsuro",
       "official": true
     }
   ]
