@@ -42,6 +42,14 @@ import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
 import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import {
+  COMPOSER_MAX_HEIGHT as SHARED_COMPOSER_MAX_HEIGHT,
+  INPUT_EXPANDED_VERTICAL_PADDING as SHARED_INPUT_EXPANDED_VERTICAL_PADDING,
+  INPUT_LINE_HEIGHT as SHARED_INPUT_LINE_HEIGHT,
+  estimateCompactInputHeight,
+  resolveComposerBarHeight,
+  shouldExpandComposerHeight,
+} from './composerGrowth';
 import { resolveComposerSendPayload } from './composerSend';
 import { Waveform } from './Waveform';
 import { MitsuroMark } from '../brand';
@@ -127,12 +135,10 @@ const PILL = 56;
 const RADIUS = 18;
 const GAP = 10;
 const ROOT_HORIZONTAL_PADDING = 10;
-const COMPOSER_MAX_HEIGHT = 112;
+const COMPOSER_MAX_HEIGHT = SHARED_COMPOSER_MAX_HEIGHT;
 const INPUT_SIDE_PADDING = 10;
-const INPUT_GROWTH_CHROME = 8;
-const INPUT_LINE_HEIGHT = 22;
-const INPUT_COLLAPSED_MAX_HEIGHT = PILL - 18;
-const INPUT_EXPANDED_VERTICAL_PADDING = 8;
+const INPUT_LINE_HEIGHT = SHARED_INPUT_LINE_HEIGHT;
+const INPUT_EXPANDED_VERTICAL_PADDING = SHARED_INPUT_EXPANDED_VERTICAL_PADDING;
 const CLOSED_COMPOSER_BOTTOM_GAP = 16;
 /** Extra lift on desktop so the bar doesn't hug the window chrome. */
 const CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP = 28;
@@ -140,7 +146,6 @@ const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
-const COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH = 8;
 /**
  * The accordion responder spans the full composer width so its provider dock
  * can extend left of the FAB column. Keep the model list above that responder:
@@ -160,23 +165,6 @@ const WEB_INPUT_STYLE = Platform.OS === 'web'
       resize: 'none',
     } as any)
   : null;
-
-function estimateCompactInputHeight(value: string, inputWidth: number): number {
-  if (!value) return 0;
-  const charactersPerLine = Math.max(
-    12,
-    Math.floor(inputWidth / COMPACT_INPUT_AVERAGE_CHARACTER_WIDTH),
-  );
-  const visualLineCount = value.split('\n').reduce(
-    (total, line) =>
-      total + Math.max(1, Math.ceil(line.length / charactersPerLine)),
-    0,
-  );
-  return Math.min(
-    COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME,
-    visualLineCount * INPUT_LINE_HEIGHT,
-  );
-}
 
 interface ProviderFilter {
   id: string;
@@ -1098,13 +1086,11 @@ function ChatBarComponent(props: ChatBarProps) {
   const gaugeRadius = (GAUGE_SIZE - gaugeStroke) / 2;
   const gaugeCircumference = 2 * Math.PI * gaugeRadius;
   const gaugeOffset = gaugeCircumference - (gaugePct / 100) * gaugeCircumference;
-  const shouldGrowComposer = inputContentHeight > PILL;
-  const composerBarHeight = isRecording || !shouldGrowComposer
-    ? PILL
-    : Math.min(COMPOSER_MAX_HEIGHT, inputContentHeight + INPUT_GROWTH_CHROME);
-  const collapsedInputHeight = Math.max(
-    INPUT_LINE_HEIGHT,
-    Math.min(inputContentHeight || INPUT_LINE_HEIGHT, INPUT_COLLAPSED_MAX_HEIGHT),
+  const shouldGrowComposer = shouldExpandComposerHeight(inputContentHeight);
+  const composerBarHeight = resolveComposerBarHeight(
+    inputContentHeight,
+    isRecording,
+    PILL,
   );
   const metaReserveHeight = showComposerChrome
     ? META_ROW_HEIGHT + GAUGE_TOP_GAP
@@ -1189,8 +1175,14 @@ function ChatBarComponent(props: ChatBarProps) {
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
+  // Keep height in sync from text on every platform. Native contentSize can
+  // lag or report a view-capped height while the bar is still compacted, which
+  // previously left multi-line drafts stuck at the single-row pill size.
   useEffect(() => {
-    if (Platform.OS !== 'web') return;
+    if (!text) {
+      setInputContentHeight(0);
+      return;
+    }
     const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
     setInputContentHeight((current) =>
       current === nextHeight ? current : nextHeight,
@@ -1353,7 +1345,7 @@ function ChatBarComponent(props: ChatBarProps) {
                     styles.input,
                     shouldGrowComposer
                       ? styles.inputExpanded
-                      : [styles.inputCollapsed, { height: collapsedInputHeight }],
+                      : styles.inputCollapsed,
                     WEB_INPUT_STYLE,
                     { color: t.foreground },
                   ]}
@@ -1364,7 +1356,17 @@ function ChatBarComponent(props: ChatBarProps) {
                       setInputContentHeight(0);
                       return;
                     }
-                    const nextHeight = Math.ceil(event.nativeEvent.contentSize.height);
+                    // Prefer the larger of estimate vs measured so real font
+                    // metrics can expand further without fighting deletions
+                    // (estimate effect re-syncs when text shrinks).
+                    const measured = Math.ceil(
+                      event.nativeEvent.contentSize.height,
+                    );
+                    const estimated = estimateCompactInputHeight(
+                      textRef.current,
+                      compactInputWidth,
+                    );
+                    const nextHeight = Math.max(measured, estimated);
                     setInputContentHeight((current) =>
                       current === nextHeight ? current : nextHeight,
                     );
@@ -1598,6 +1600,9 @@ const styles = StyleSheet.create({
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   input: {
     flex: 1,
+    // Fill the bar so single-line text stays vertically centered inside the
+    // pill, and multi-line text can use the full grown height.
+    height: '100%',
     fontSize: 16,
     lineHeight: INPUT_LINE_HEIGHT,
     maxHeight: COMPOSER_MAX_HEIGHT,
@@ -1605,11 +1610,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   inputCollapsed: {
+    // Do not clamp to content height — that regressed multi-line growth by
+    // locking the field to ~one visual row while the bar stayed at PILL.
     minHeight: INPUT_LINE_HEIGHT,
     textAlignVertical: 'center',
   },
   inputExpanded: {
-    height: '100%',
     paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
     paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
     textAlignVertical: 'top',
