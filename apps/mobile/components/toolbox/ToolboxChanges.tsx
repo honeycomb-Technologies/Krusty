@@ -7,10 +7,16 @@ import {
   Text,
   View,
 } from "react-native";
-import type { GitStatusResponse } from "@krusty/api";
+import { ChevronDown, ChevronRight, FileCode2, RefreshCw } from "lucide-react-native";
+import type {
+  GitChangedFile,
+  GitFileDiffResponse,
+  GitStatusResponse,
+} from "@krusty/api";
 
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import { ToolDiffViewer } from "../chat/ToolDiffViewer";
 
 interface ToolboxChangesProps {
   visible: boolean;
@@ -25,8 +31,13 @@ export function ToolboxChanges({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
+  const [files, setFiles] = useState<GitChangedFile[]>([]);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [diffs, setDiffs] = useState<Record<string, GitFileDiffResponse>>({});
+  const [diffLoadingPath, setDiffLoadingPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!client || !visible) {
@@ -35,7 +46,14 @@ export function ToolboxChanges({
     setLoading(true);
     setError(null);
     try {
-      setStatus(await client.getGitStatus(projectDirectory ?? undefined));
+      const [nextStatus, nextChanges] = await Promise.all([
+        client.getGitStatus(projectDirectory ?? undefined),
+        client.getGitChanges(projectDirectory ?? undefined),
+      ]);
+      setStatus(nextStatus);
+      setFiles(nextChanges.files);
+      setDiffs({});
+      setExpandedPath(null);
     } catch (nextError) {
       setError(
         nextError instanceof Error
@@ -50,6 +68,38 @@ export function ToolboxChanges({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const toggleFile = useCallback(
+    async (file: GitChangedFile) => {
+      if (expandedPath === file.path) {
+        setExpandedPath(null);
+        return;
+      }
+      setExpandedPath(file.path);
+      setDiffError(null);
+      if (!client || diffs[file.path]) {
+        return;
+      }
+      setDiffLoadingPath(file.path);
+      try {
+        const diff = await client.getGitFileDiff(
+          file.path,
+          projectDirectory ?? undefined,
+        );
+        setDiffs((current) => ({ ...current, [file.path]: diff }));
+      } catch (nextError) {
+        setDiffError(
+          nextError instanceof Error ? nextError.message : "Unable to load this diff.",
+        );
+      } finally {
+        setDiffLoadingPath(null);
+      }
+    },
+    [client, diffs, expandedPath, projectDirectory],
+  );
+
+  const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
+  const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
 
   return (
     <ScrollView
@@ -69,65 +119,122 @@ export function ToolboxChanges({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Refresh changes"
+          disabled={loading}
           onPress={() => void refresh()}
           style={[styles.refreshButton, { borderColor: t.border }]}
         >
-          <Text style={[styles.refreshText, { color: t.foreground }]}>
-            Refresh
-          </Text>
+          {loading ? (
+            <ActivityIndicator size="small" color={t.mutedForeground} />
+          ) : (
+            <RefreshCw size={16} color={t.foreground} strokeWidth={1.9} />
+          )}
         </Pressable>
       </View>
 
-      {loading && !status ? (
-        <ActivityIndicator color={t.mutedForeground} />
-      ) : null}
       {error ? <Text style={[styles.error, { color: t.error }]}>{error}</Text> : null}
       {status && !status.in_repo ? (
         <Text style={[styles.empty, { color: t.mutedForeground }]}>
           The active directory is not a Git repository.
         </Text>
       ) : null}
+
       {status?.in_repo ? (
         <>
-          <View
-            style={[
-              styles.branchCard,
-              { borderColor: t.border, backgroundColor: t.card },
-            ]}
-          >
-            <Text style={[styles.branch, { color: t.foreground }]}>
-              {status.branch ?? "Detached HEAD"}
-            </Text>
-            <Text style={[styles.detail, { color: t.mutedForeground }]}>
-              {status.ahead} ahead · {status.behind} behind
+          <View style={[styles.branchRow, { borderColor: t.border }]}>
+            <View style={styles.branchCopy}>
+              <Text numberOfLines={1} style={[styles.branch, { color: t.foreground }]}>
+                {status.branch ?? "Detached HEAD"}
+              </Text>
+              <Text style={[styles.detail, { color: t.mutedForeground }]}>
+                {files.length} file{files.length === 1 ? "" : "s"}
+              </Text>
+            </View>
+            <Text style={styles.diffTotals}>
+              <Text style={{ color: t.success }}>+{totalAdditions}</Text>
+              <Text style={{ color: t.mutedForeground }}>  </Text>
+              <Text style={{ color: t.error }}>−{totalDeletions}</Text>
             </Text>
           </View>
 
-          <View style={styles.grid}>
-            {[
-              ["Modified", status.modified],
-              ["Staged", status.staged],
-              ["Untracked", status.untracked],
-              ["Conflicts", status.conflicted],
-              ["Additions", status.branch_additions],
-              ["Deletions", status.branch_deletions],
-            ].map(([label, value]) => (
-              <View
-                key={label}
-                style={[
-                  styles.metric,
-                  { borderColor: t.border, backgroundColor: t.card },
-                ]}
-              >
-                <Text style={[styles.metricValue, { color: t.foreground }]}>
-                  {value}
-                </Text>
-                <Text style={[styles.metricLabel, { color: t.mutedForeground }]}>
-                  {label}
-                </Text>
-              </View>
-            ))}
-          </View>
+          {files.length === 0 && !loading ? (
+            <Text style={[styles.empty, { color: t.mutedForeground }]}>
+              No changes from this branch&apos;s base.
+            </Text>
+          ) : (
+            <View style={[styles.fileList, { borderColor: t.border }]}>
+              {files.map((file, index) => {
+                const expanded = expandedPath === file.path;
+                const diff = diffs[file.path];
+                return (
+                  <View
+                    key={file.path}
+                    style={[
+                      styles.fileItem,
+                      index > 0 && { borderTopColor: t.border, borderTopWidth: StyleSheet.hairlineWidth },
+                    ]}
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${file.path}`}
+                      onPress={() => void toggleFile(file)}
+                      style={styles.fileRow}
+                    >
+                      {expanded ? (
+                        <ChevronDown size={16} color={t.mutedForeground} />
+                      ) : (
+                        <ChevronRight size={16} color={t.mutedForeground} />
+                      )}
+                      <FileCode2 size={16} color={t.mutedForeground} strokeWidth={1.7} />
+                      <View style={styles.fileCopy}>
+                        <Text numberOfLines={1} style={[styles.filePath, { color: t.foreground }]}>
+                          {file.path}
+                        </Text>
+                        <Text style={[styles.fileStatus, { color: t.mutedForeground }]}>
+                          {file.status}
+                        </Text>
+                      </View>
+                      <Text style={styles.fileTotals}>
+                        <Text style={{ color: t.success }}>+{file.additions}</Text>
+                        <Text style={{ color: t.mutedForeground }}> </Text>
+                        <Text style={{ color: t.error }}>−{file.deletions}</Text>
+                      </Text>
+                    </Pressable>
+
+                    {expanded ? (
+                      <View style={styles.diffBody}>
+                        {diffLoadingPath === file.path ? (
+                          <ActivityIndicator size="small" color={t.mutedForeground} />
+                        ) : diffError && !diff ? (
+                          <Text style={[styles.error, { color: t.error }]}>{diffError}</Text>
+                        ) : diff?.binary ? (
+                          <Text style={[styles.empty, { color: t.mutedForeground }]}>
+                            Binary file preview is unavailable.
+                          </Text>
+                        ) : diff?.patch ? (
+                          <>
+                            <ToolDiffViewer
+                              presentation={{
+                                kind: "patch",
+                                patch: diff.patch,
+                                filePath: file.path,
+                                additions: file.additions,
+                                deletions: file.deletions,
+                              }}
+                            />
+                            {diff.truncated ? (
+                              <Text style={[styles.note, { color: t.mutedForeground }]}>
+                                Large diff truncated for this preview.
+                              </Text>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          )}
         </>
       ) : null}
     </ScrollView>
@@ -138,7 +245,7 @@ const styles = StyleSheet.create({
   content: {
     padding: 18,
     paddingBottom: 32,
-    gap: 16,
+    gap: 14,
   },
   headingRow: {
     flexDirection: "row",
@@ -158,54 +265,82 @@ const styles = StyleSheet.create({
     lineHeight: 17,
   },
   refreshButton: {
-    minHeight: 36,
-    paddingHorizontal: 12,
+    width: 38,
+    height: 38,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
   },
-  refreshText: {
-    fontSize: 12,
-    fontWeight: "600",
+  branchRow: {
+    minHeight: 54,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingBottom: 12,
   },
-  branchCard: {
-    padding: 14,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
+  branchCopy: {
+    flex: 1,
   },
   branch: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "700",
   },
   detail: {
-    marginTop: 4,
+    marginTop: 3,
     fontSize: 12,
   },
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-  },
-  metric: {
-    width: "47%",
-    minHeight: 88,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: 14,
-    justifyContent: "space-between",
-  },
-  metricValue: {
-    fontSize: 23,
+  diffTotals: {
+    fontSize: 12,
     fontWeight: "700",
+    fontVariant: ["tabular-nums"],
   },
-  metricLabel: {
+  fileList: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+  fileItem: {
+    minWidth: 0,
+  },
+  fileRow: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  fileCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  filePath: {
     fontSize: 12,
     fontWeight: "600",
   },
+  fileStatus: {
+    marginTop: 3,
+    fontSize: 11,
+    textTransform: "capitalize",
+  },
+  fileTotals: {
+    fontSize: 11,
+    fontWeight: "700",
+    fontVariant: ["tabular-nums"],
+  },
+  diffBody: {
+    paddingHorizontal: 8,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  note: {
+    fontSize: 11,
+  },
   empty: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 19,
   },
   error: {
     fontSize: 13,

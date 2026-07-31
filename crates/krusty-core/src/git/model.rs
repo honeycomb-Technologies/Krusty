@@ -51,6 +51,32 @@ pub struct GitWorktreeSummary {
     pub is_current: bool,
 }
 
+/// A changed file relative to the branch base used by the Changes surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitChangedFileSummary {
+    pub path: String,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+/// Repository changes available for file-by-file inspection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitChangesSummary {
+    pub repo_root: PathBuf,
+    pub files: Vec<GitChangedFileSummary>,
+}
+
+/// A bounded patch for a single changed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitFileDiff {
+    pub path: String,
+    pub patch: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct BranchDiffSummary {
     pub(super) files: usize,
