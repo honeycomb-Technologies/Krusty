@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+use crate::agent::hooks::shell_policy::{
+    classify_bash_command, is_proven_read_only_bash_command, semantic_bash_signature,
+    BashFileOperationKind,
+};
 use crate::tools::registry::{
     agent_call_execution_profile, agent_call_starts_run, effective_tool_call, tool_policy_for_call,
     ToolCategory,
@@ -21,8 +25,50 @@ pub const REPEATED_READ_ONLY_SEQUENCE_THRESHOLD: usize = 3;
 /// validation-only turns.
 pub const REPEATED_VALIDATION_SEQUENCE_THRESHOLD: usize = 3;
 
+/// True when a tool call is pure exploration (native read tools or observational bash).
+///
+/// `bash` is categorized as write-capable for permissioning, but many agent
+/// death-spirals are repeated `git show` / `rg` / `sed` pipelines. Count those
+/// as exploration so the loop guard can stop them.
+pub(crate) fn is_exploration_probe(call: &AiToolCall) -> bool {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    if tool_policy_for_call(name, arguments).category == ToolCategory::ReadOnly {
+        return true;
+    }
+    if !matches!(name, "bash" | "shell" | "execute") {
+        return false;
+    }
+    let Some(command) = bash_command_text(arguments) else {
+        return false;
+    };
+    if is_proven_read_only_bash_command(command) {
+        return true;
+    }
+    let class = classify_bash_command(command);
+    if class.safety_violation.is_some() {
+        return false;
+    }
+    matches!(
+        class.file_operation.as_ref().map(|op| op.kind),
+        Some(BashFileOperationKind::Read | BashFileOperationKind::Search)
+    )
+}
+
+fn bash_command_text(arguments: &serde_json::Value) -> Option<&str> {
+    arguments
+        .get("command")
+        .and_then(|value| value.as_str())
+        .or_else(|| arguments.get("cmd").and_then(|value| value.as_str()))
+}
+
 fn exploration_signature(call: &AiToolCall) -> String {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    if matches!(name, "bash" | "shell" | "execute") {
+        if let Some(command) = bash_command_text(arguments) {
+            return format!("bash:{}", semantic_bash_signature(command));
+        }
+    }
+
     let mut arguments = arguments.clone();
 
     // Increasing only an output cap is not a new exploration strategy. Treat
@@ -120,16 +166,14 @@ pub fn detect_repeated_failures(
 /// Detect repeated identical read-only tool sequences across turns.
 ///
 /// This guards against agent loops that keep reissuing the same exploration
-/// pattern without taking action on the gathered evidence.
+/// pattern without taking action on the gathered evidence. Native read tools
+/// and observational bash (including git show/log pipelines flagged as
+/// file-read/search misuse) all count as exploration probes.
 pub fn detect_repeated_read_only_sequence(
     counters: &mut HashMap<String, usize>,
     tool_calls: &[AiToolCall],
 ) -> Option<String> {
-    if tool_calls.is_empty()
-        || !tool_calls.iter().all(|call| {
-            tool_policy_for_call(&call.name, &call.arguments).category == ToolCategory::ReadOnly
-        })
-    {
+    if tool_calls.is_empty() || !tool_calls.iter().all(is_exploration_probe) {
         counters.clear();
         return None;
     }
@@ -371,10 +415,9 @@ pub fn detect_post_explore_manual_fallback(
         return None;
     }
 
-    let read_only_probe = tool_calls
-        .iter()
-        .all(|call| matches!(call.name.as_str(), "read" | "glob" | "grep" | "list"));
-    if !read_only_probe {
+    // Include observational bash probes; permissioning treats bash as writeable
+    // but the death-spiral we care about is post-explore manual archaeology.
+    if !tool_calls.iter().all(is_exploration_probe) {
         return None;
     }
 
@@ -787,6 +830,43 @@ mod tests {
 
         assert!(detect_repeated_read_only_sequence(&mut counters, &write).is_none());
         assert!(counters.is_empty());
+    }
+
+    #[test]
+    fn repeated_observational_bash_sequence_trips_threshold() {
+        let calls = vec![AiToolCall {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({
+                "command": "git show abc123:apps/mobile/components/chat/ChatBar.tsx | rg -n 'shouldGrow' | head -40"
+            }),
+        }];
+
+        let mut counters = HashMap::new();
+        for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
+            assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+        }
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_some());
+    }
+
+    #[test]
+    fn observational_bash_and_native_reads_count_as_exploration_batch() {
+        let calls = vec![
+            AiToolCall {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                arguments: json!({"command": "git log --oneline -5 -- apps/mobile"}),
+            },
+            AiToolCall {
+                id: "call_2".to_string(),
+                name: "read".to_string(),
+                arguments: json!({"path": "apps/mobile/components/chat/ChatBar.tsx"}),
+            },
+        ];
+        assert!(calls.iter().all(is_exploration_probe));
+        let mut counters = HashMap::new();
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+        assert!(!counters.is_empty());
     }
 
     #[test]

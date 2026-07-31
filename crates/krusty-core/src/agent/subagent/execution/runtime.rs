@@ -886,11 +886,17 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         let guard = loop_guard.evaluate(&progress_calls, &tool_results);
         let progress_telemetry = guard.progress;
         let validation_completion = guard.repeated_validation;
-        let guard_diagnostic = guard.repeated_failure.or_else(|| {
-            progress_telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.diagnostic())
-        });
+        let post_explore_diagnostic =
+            crate::agent::failure::detect_post_explore_manual_fallback(&messages, &progress_calls);
+        let guard_diagnostic = guard
+            .repeated_failure
+            .or(guard.repeated_read_only)
+            .or(post_explore_diagnostic)
+            .or_else(|| {
+                progress_telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.diagnostic())
+            });
 
         messages.push(ModelMessage {
             role: Role::User,

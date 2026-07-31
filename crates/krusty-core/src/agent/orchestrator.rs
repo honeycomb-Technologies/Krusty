@@ -1738,6 +1738,9 @@ impl AgenticOrchestrator {
             let fail_diagnostic = guard.repeated_failure;
             let explore_diagnostic =
                 failure::detect_terminal_explore_failure(&result.tool_calls, &tool_results);
+            let read_only_loop_diagnostic = guard.repeated_read_only;
+            let post_explore_diagnostic =
+                failure::detect_post_explore_manual_fallback(&conversation, &result.tool_calls);
             let validation_diagnostic = guard.repeated_validation;
             let progress_telemetry = guard.progress;
             let progress_diagnostic = progress_telemetry
@@ -1750,6 +1753,8 @@ impl AgenticOrchestrator {
             let blocker_fingerprint = fail_diagnostic
                 .as_ref()
                 .or(explore_diagnostic.as_ref())
+                .or(read_only_loop_diagnostic.as_ref())
+                .or(post_explore_diagnostic.as_ref())
                 .or(progress_diagnostic.as_ref())
                 .cloned();
             let goal_runtime_stop = goal_token_stop.or_else(|| {
@@ -1955,16 +1960,19 @@ impl AgenticOrchestrator {
                 return;
             }
 
-            // Check fail-fast
+            // Check fail-fast (errors, failed explore, repeated pure exploration,
+            // post-explore manual probing, and semantic no-progress).
             if let Some(diagnostic) = fail_diagnostic
                 .or(explore_diagnostic)
+                .or(read_only_loop_diagnostic)
+                .or(post_explore_diagnostic)
                 .or(progress_diagnostic)
             {
                 tracing::warn!(
                     iteration,
                     session_id = %session_id,
                     diagnostic = %diagnostic,
-                    "Fail-fast: stopping repeated tool failure loop"
+                    "Fail-fast: stopping repeated tool failure or exploration loop"
                 );
                 block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
                 clear_recovery_state(&db_path, &session_id);
