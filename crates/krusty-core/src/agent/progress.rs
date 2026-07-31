@@ -280,16 +280,16 @@ impl ProgressLedger {
         }
 
         let mut accepted_evidence = Vec::new();
-        for (intent, evidence, bound_cross_intent_churn) in evidence_candidates {
+        for (intent, evidence, bound_cross_intent_churn) in &evidence_candidates {
             let evidence_identity = format!("{intent}:{evidence}");
             if self.seen_evidence.contains(&evidence_identity) {
                 continue;
             }
-            let variants = self.outcome_variants.entry(intent).or_default();
+            let variants = self.outcome_variants.entry(intent.clone()).or_default();
             if variants.len() >= MAX_OUTCOME_VARIANTS_PER_INTENT {
                 continue;
             }
-            if bound_cross_intent_churn {
+            if *bound_cross_intent_churn {
                 let intents = self.outcome_intents.entry(evidence.clone()).or_default();
                 if intents.len() >= MAX_INTENTS_PER_IDENTICAL_OUTCOME {
                     continue;
@@ -326,7 +326,25 @@ impl ProgressLedger {
         action_classes.sort_by_key(|class| action_class_order(*class));
         action_classes.dedup();
 
-        Some(self.telemetry(action_classes, &accepted_evidence.join("|")))
+        // When nothing new was accepted, fingerprint the rejected candidates
+        // and action classes so telemetry is diagnostic instead of the empty
+        // SHA-256 that previously made every no-progress stop look identical.
+        let diagnostic = if accepted_evidence.is_empty() {
+            let mut parts = action_classes
+                .iter()
+                .map(|class| format!("{class:?}"))
+                .collect::<Vec<_>>();
+            for (intent, evidence, _) in &evidence_candidates {
+                parts.push(format!("{intent}:{evidence}"));
+            }
+            parts.sort();
+            parts.dedup();
+            parts.join("|")
+        } else {
+            accepted_evidence.join("|")
+        };
+
+        Some(self.telemetry(action_classes, &diagnostic))
     }
 
     fn telemetry(
@@ -416,15 +434,31 @@ fn extract_output_text(value: &Value) -> Option<String> {
             .ok()
             .and_then(|decoded| extract_output_text(&decoded))
             .or_else(|| Some(text.clone())),
-        Value::Object(object) => object
-            .get("output")
-            .and_then(extract_output_text)
-            .or_else(|| {
-                ["data", "result", "summary"]
-                    .into_iter()
-                    .filter_map(|key| object.get(key))
-                    .find_map(extract_output_text)
-            }),
+        Value::Object(object) => {
+            // History packaging for bash stores stdout under `output_preview`
+            // (see history_policy/summaries). Prefer that over the constant
+            // success summary so status polls with changing stdout remain
+            // distinct evidence instead of collapsing to empty/no-progress.
+            const PREFERRED_KEYS: &[&str] = &[
+                "output",
+                "output_preview",
+                "data",
+                "result",
+                "stdout",
+                "summary",
+            ];
+            PREFERRED_KEYS
+                .iter()
+                .filter_map(|key| object.get(*key))
+                .find_map(|nested| {
+                    // Prefer nested string/preview leaves over recursing into
+                    // objects that only re-export a constant summary.
+                    match nested {
+                        Value::String(text) if !text.is_empty() => Some(text.clone()),
+                        other => extract_output_text(other),
+                    }
+                })
+        }
         Value::Array(values) => {
             let parts = values
                 .iter()
@@ -643,10 +677,100 @@ mod tests {
 
     #[test]
     fn read_only_and_noop_bash_are_observations_not_mutations() {
-        for command in ["pwd", "git status --short", "rg needle src", "true"] {
+        for command in [
+            "pwd",
+            "git status --short",
+            "rg needle src",
+            "true",
+            "gh run view 123",
+            "gh pr view 45 --json status",
+        ] {
             let fingerprint =
                 action_fingerprint(&call("bash-1", "bash", json!({ "command": command })));
             assert_eq!(fingerprint.class, ActionClass::Observe, "{command}");
+        }
+    }
+
+    #[test]
+    fn history_envelope_output_preview_counts_as_bash_evidence() {
+        let mut ledger = ProgressLedger::new();
+        let first = call("b1", "bash", json!({ "command": "git status --short" }));
+        let second = call("b2", "bash", json!({ "command": "git status --short" }));
+
+        let envelope_a = json!({
+            "summary": "bash completed successfully (exit 0)",
+            "result": {
+                "exit_code": 0,
+                "output_preview": " M file_a.rs\n"
+            }
+        });
+        let envelope_b = json!({
+            "summary": "bash completed successfully (exit 0)",
+            "result": {
+                "exit_code": 0,
+                "output_preview": " M file_b.rs\n?? new.rs\n"
+            }
+        });
+
+        assert!(ledger
+            .record_turn(
+                &[first.clone()],
+                &[Content::ToolResult {
+                    tool_use_id: "b1".into(),
+                    output: envelope_a,
+                    is_error: None,
+                }],
+            )
+            .is_none());
+
+        // Different porcelain content must count as new evidence, not no-progress.
+        assert!(ledger
+            .record_turn(
+                &[second],
+                &[Content::ToolResult {
+                    tool_use_id: "b2".into(),
+                    output: envelope_b,
+                    is_error: None,
+                }],
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn no_progress_telemetry_is_not_empty_hash_when_candidates_exist() {
+        let mut ledger = ProgressLedger::new();
+        let call_a = call("b1", "bash", json!({ "command": "git status --short" }));
+        let envelope = json!({
+            "summary": "bash completed successfully (exit 0)",
+            "result": { "exit_code": 0, "output_preview": "clean\n" }
+        });
+        assert!(ledger
+            .record_turn(
+                &[call_a.clone()],
+                &[Content::ToolResult {
+                    tool_use_id: "b1".into(),
+                    output: envelope.clone(),
+                    is_error: None,
+                }],
+            )
+            .is_none());
+
+        // Same evidence again → no-progress, but signature must not be empty SHA.
+        let empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        for index in 1..=NO_PROGRESS_TURN_THRESHOLD {
+            let id = format!("b{index}");
+            let telemetry = ledger
+                .record_turn(
+                    &[call(&id, "bash", json!({ "command": "git status --short" }))],
+                    &[Content::ToolResult {
+                        tool_use_id: id,
+                        output: envelope.clone(),
+                        is_error: None,
+                    }],
+                )
+                .expect("repeated identical status is no-progress");
+            assert_ne!(telemetry.evidence_signature, empty_sha);
+            assert_eq!(telemetry.no_progress_turns, index);
         }
     }
 

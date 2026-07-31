@@ -53,6 +53,7 @@ type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
 mod ai_bootstrap;
+mod process_wake;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
     HashMap<String, tokio::sync::mpsc::UnboundedSender<krusty_core::agent::LoopInput>>;
@@ -364,6 +365,7 @@ pub(crate) async fn build_app_state(
 
     let process_registry = Arc::new(ProcessRegistry::new());
     let cancellation = AgentCancellation::new();
+    // Completion wake is installed after AppState is fully built (see below).
 
     let plugin_manager = routes::plugins::plugin_manager();
     let installed_plugins = if isolated_evaluation {
@@ -588,7 +590,7 @@ pub(crate) async fn build_app_state(
         working_dir: Arc::new(config.working_dir.clone()),
         ai_client,
         tool_registry,
-        process_registry,
+        process_registry: Arc::clone(&process_registry),
         model_registry,
         credential_store,
         mcp_manager,
@@ -608,6 +610,10 @@ pub(crate) async fn build_app_state(
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
         mako_runtime,
     };
+
+    // Detached bash jobs wake their parent session on terminal status so the
+    // agent does not thrash on gh/process status polls.
+    process_wake::install_process_completion_wake(process_registry, state.clone()).await;
 
     spawn_model_catalog_refresh(
         state.model_registry.clone(),

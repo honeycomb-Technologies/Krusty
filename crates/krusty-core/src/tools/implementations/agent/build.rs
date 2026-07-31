@@ -741,6 +741,7 @@ mod tests {
                 "exit 0".to_string(),
                 temp.path().to_path_buf(),
                 None,
+                None,
             )
             .await
             .expect("spawn short process");
@@ -774,6 +775,7 @@ mod tests {
                 "sleep 5".to_string(),
                 temp.path().to_path_buf(),
                 None,
+                None,
             )
             .await
             .expect("spawn sleep process");
@@ -805,6 +807,7 @@ mod tests {
                 owner_id,
                 "sleep 5".to_string(),
                 temp.path().to_path_buf(),
+                None,
                 None,
             )
             .await

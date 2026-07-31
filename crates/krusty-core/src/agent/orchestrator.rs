@@ -799,6 +799,35 @@ impl AgenticOrchestrator {
                 });
                 return;
             }
+            // Soft pressure for unlimited interactive runs only. Goal/project
+            // budgets already hard-stop; this keeps long thrash visible without
+            // killing legitimate multi-turn builds.
+            if matches!(
+                run_budget.source,
+                super::state::RunBudgetSource::UnlimitedDefault
+            ) && run_budget.budget.max_turns.is_none()
+            {
+                use super::state::{INTERACTIVE_SOFT_TURN_REPLAN, INTERACTIVE_SOFT_TURN_WARN};
+                let soft_message = if iteration + 1 == INTERACTIVE_SOFT_TURN_REPLAN {
+                    Some(format!(
+                        "[SOFT TURN BUDGET]\nYou are on turn {}. Long interactive runs should synthesize, act, or ask the user — not re-poll the same status. Prefer background jobs with completion wake over repeated status checks.",
+                        iteration + 1
+                    ))
+                } else if iteration + 1 == INTERACTIVE_SOFT_TURN_WARN {
+                    Some(format!(
+                        "[SOFT TURN BUDGET]\nTurn {} of an unlimited interactive run. If you are waiting on CI/builds, detach and continue; do not burn turns on identical status polls.",
+                        iteration + 1
+                    ))
+                } else {
+                    None
+                };
+                if let Some(text) = soft_message {
+                    conversation.push(ModelMessage {
+                        role: Role::System,
+                        content: vec![Content::Text { text }],
+                    });
+                }
+            }
             iteration += 1;
             let provider_call_trace = super::observability::ProviderCallTraceContext::for_run(
                 provider_call_tx.clone(),

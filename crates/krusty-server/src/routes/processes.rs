@@ -192,6 +192,8 @@ mod tests {
                 duration_ms: 12,
             },
             _working_dir: PathBuf::from("/workspace/project"),
+            session_id: None,
+            completion_notified: false,
         });
 
         assert_eq!(response.status_code, "failed");
@@ -213,6 +215,8 @@ mod tests {
                 duration_ms: 2_500,
             },
             _working_dir: PathBuf::from("/workspace/project"),
+            session_id: None,
+            completion_notified: false,
         });
 
         assert_eq!(response.status_code, "done");

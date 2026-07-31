@@ -9,7 +9,8 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
 use super::model::{
-    elapsed_millis_u64, ProcessEntry, ProcessId, ProcessInfo, ProcessOutputBuffer, ProcessStatus,
+    elapsed_millis_u64, ProcessCompletionEvent, ProcessEntry, ProcessId, ProcessInfo,
+    ProcessOutputBuffer, ProcessStatus,
 };
 use super::signals::{resume_process_tree, suspend_process_tree, terminate_process_tree};
 
@@ -47,6 +48,8 @@ pub struct ProcessRegistry {
     /// Per-owner launch gates make check-and-spawn decisions atomic across all
     /// clones without serializing launches belonging to unrelated owners.
     launch_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Optional completion sink for session wake (server/TUI wires this).
+    completion_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ProcessCompletionEvent>>>>,
 }
 
 impl std::fmt::Debug for ProcessRegistry {
@@ -68,7 +71,17 @@ impl ProcessRegistry {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
             launch_gates: Arc::new(Mutex::new(HashMap::new())),
+            completion_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Register a completion listener used to wake parent sessions when a
+    /// background process reaches a terminal state. Replaces any prior sink.
+    pub async fn set_completion_sender(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<ProcessCompletionEvent>,
+    ) {
+        *self.completion_tx.write().await = Some(sender);
     }
 
     fn ensure_user_map<'a>(
@@ -110,7 +123,7 @@ impl ProcessRegistry {
         working_dir: PathBuf,
         description: Option<String>,
     ) -> Result<ProcessId> {
-        self.spawn_for_user(DEFAULT_USER, command, working_dir, description)
+        self.spawn_for_user(DEFAULT_USER, command, working_dir, description, None)
             .await
     }
 
@@ -120,11 +133,18 @@ impl ProcessRegistry {
         command: String,
         working_dir: PathBuf,
         description: Option<String>,
+        session_id: Option<String>,
     ) -> Result<ProcessId> {
         let launch_gate = self.launch_gate_for_user(user_id).await;
         let _launch_guard = launch_gate.lock().await;
-        self.spawn_for_user_with_launch_guard(user_id, command, working_dir, description)
-            .await
+        self.spawn_for_user_with_launch_guard(
+            user_id,
+            command,
+            working_dir,
+            description,
+            session_id,
+        )
+        .await
     }
 
     /// Atomically reuse an equivalent active process or launch a new one for
@@ -135,6 +155,7 @@ impl ProcessRegistry {
         command: String,
         working_dir: PathBuf,
         description: Option<String>,
+        session_id: Option<String>,
         is_equivalent: F,
     ) -> Result<(ProcessInfo, bool)>
     where
@@ -145,6 +166,7 @@ impl ProcessRegistry {
             command,
             working_dir,
             description,
+            session_id,
             is_equivalent,
         )
         .await
@@ -159,6 +181,7 @@ impl ProcessRegistry {
         command: String,
         working_dir: PathBuf,
         description: Option<String>,
+        session_id: Option<String>,
         is_equivalent: F,
     ) -> Result<(ProcessInfo, bool)>
     where
@@ -189,7 +212,13 @@ impl ProcessRegistry {
         }
 
         let process_id = self
-            .spawn_for_user_with_launch_guard(user_id, command, working_dir, description)
+            .spawn_for_user_with_launch_guard(
+                user_id,
+                command,
+                working_dir,
+                description,
+                session_id,
+            )
             .await?;
         let process = self
             .processes
@@ -213,6 +242,7 @@ impl ProcessRegistry {
         command: String,
         working_dir: PathBuf,
         description: Option<String>,
+        session_id: Option<String>,
     ) -> Result<ProcessId> {
         let active_count = self
             .processes
@@ -302,9 +332,18 @@ impl ProcessRegistry {
             started_at: Instant::now(),
             status: ProcessStatus::Running,
             _working_dir: working_dir,
+            session_id,
+            completion_notified: false,
         };
 
-        tracing::info!(id = %id, user_id = %user_id, pid = ?pid, command = %command, "Process spawned");
+        tracing::info!(
+            id = %id,
+            user_id = %user_id,
+            pid = ?pid,
+            command = %command,
+            session_id = ?info.session_id,
+            "Process spawned"
+        );
 
         // Insert before the monitor starts. Fast startup failures (for example,
         // a preview server binding an occupied port) must not race their status
@@ -414,10 +453,27 @@ impl ProcessRegistry {
 
         let duration_ms = elapsed_millis_u64(entry.info.started_at);
         entry.info.status = ProcessStatus::Killed { duration_ms };
+        let should_notify = !entry.info.completion_notified;
+        if should_notify {
+            entry.info.completion_notified = true;
+        }
+        let completion_event = should_notify.then(|| ProcessCompletionEvent {
+            user_id: user_id.to_string(),
+            process_id: entry.info.id.clone(),
+            session_id: entry.info.session_id.clone(),
+            command: entry.info.command.clone(),
+            description: entry.info.description.clone(),
+            status: entry.info.status.clone(),
+            output_preview: None,
+        });
 
         Self::prune_terminal_history(user_map);
 
         tracing::info!(id = %id, user_id = %user_id, pid, "Process killed");
+        drop(processes);
+        if let Some(event) = completion_event {
+            self.emit_completion(event).await;
+        }
         Ok(())
     }
 
@@ -572,13 +628,31 @@ impl ProcessRegistry {
     }
 
     pub async fn update_status_for_user(&self, user_id: &str, id: &str, status: ProcessStatus) {
-        let mut processes = self.processes.write().await;
-        if let Some(user_map) = processes.get_mut(user_id) {
-            if let Some(entry) = user_map.get_mut(id) {
-                tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated");
-                entry.info.status = status;
+        let mut completion_event = None;
+        {
+            let mut processes = self.processes.write().await;
+            if let Some(user_map) = processes.get_mut(user_id) {
+                if let Some(entry) = user_map.get_mut(id) {
+                    tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated");
+                    entry.info.status = status;
+                    if !entry.info.is_active() && !entry.info.completion_notified {
+                        entry.info.completion_notified = true;
+                        completion_event = Some(ProcessCompletionEvent {
+                            user_id: user_id.to_string(),
+                            process_id: entry.info.id.clone(),
+                            session_id: entry.info.session_id.clone(),
+                            command: entry.info.command.clone(),
+                            description: entry.info.description.clone(),
+                            status: entry.info.status.clone(),
+                            output_preview: None,
+                        });
+                    }
+                }
+                Self::prune_terminal_history(user_map);
             }
-            Self::prune_terminal_history(user_map);
+        }
+        if let Some(event) = completion_event {
+            self.emit_completion(event).await;
         }
     }
 
@@ -588,22 +662,64 @@ impl ProcessRegistry {
         id: &str,
         status: ProcessStatus,
     ) {
-        let mut processes = self.processes.write().await;
-        if let Some(user_map) = processes.get_mut(user_id) {
-            if let Some(entry) = user_map.get_mut(id) {
-                if matches!(entry.info.status, ProcessStatus::Killed { .. }) {
-                    tracing::debug!(
-                        id = %id,
-                        user_id = %user_id,
-                        observed_status = ?status,
-                        "Ignoring process monitor status after intentional kill"
-                    );
-                    return;
+        let mut completion_event = None;
+        {
+            let mut processes = self.processes.write().await;
+            if let Some(user_map) = processes.get_mut(user_id) {
+                if let Some(entry) = user_map.get_mut(id) {
+                    if matches!(entry.info.status, ProcessStatus::Killed { .. }) {
+                        tracing::debug!(
+                            id = %id,
+                            user_id = %user_id,
+                            observed_status = ?status,
+                            "Ignoring process monitor status after intentional kill"
+                        );
+                        return;
+                    }
+                    tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated by monitor");
+                    entry.info.status = status;
+                    if !entry.info.is_active() && !entry.info.completion_notified {
+                        entry.info.completion_notified = true;
+                        let output_preview = entry
+                            .output
+                            .try_lock()
+                            .ok()
+                            .map(|output| {
+                                let text = String::from_utf8_lossy(&output.bytes);
+                                let trimmed = text.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    let preview: String = trimmed.chars().take(2_000).collect();
+                                    Some(preview)
+                                }
+                            })
+                            .flatten();
+                        completion_event = Some(ProcessCompletionEvent {
+                            user_id: user_id.to_string(),
+                            process_id: entry.info.id.clone(),
+                            session_id: entry.info.session_id.clone(),
+                            command: entry.info.command.clone(),
+                            description: entry.info.description.clone(),
+                            status: entry.info.status.clone(),
+                            output_preview,
+                        });
+                    }
                 }
-                tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated by monitor");
-                entry.info.status = status;
+                Self::prune_terminal_history(user_map);
             }
-            Self::prune_terminal_history(user_map);
+        }
+        if let Some(event) = completion_event {
+            self.emit_completion(event).await;
+        }
+    }
+
+    async fn emit_completion(&self, event: ProcessCompletionEvent) {
+        let sender = self.completion_tx.read().await.clone();
+        if let Some(sender) = sender {
+            if sender.send(event).is_err() {
+                tracing::debug!("Process completion sink dropped; no session wake delivered");
+            }
         }
     }
 
@@ -694,6 +810,8 @@ impl ProcessRegistry {
             started_at: Instant::now(),
             status: ProcessStatus::Running,
             _working_dir: working_dir,
+            session_id: None,
+            completion_notified: false,
         };
         let entry = ProcessEntry {
             info,
@@ -849,6 +967,7 @@ mod tests {
                 command.to_string(),
                 directory.path().to_path_buf(),
                 Some("captured output".to_string()),
+                Some("session-alice".to_string()),
             )
             .await
             .expect("process should spawn");
@@ -960,6 +1079,7 @@ mod tests {
                 "echo should-not-launch".to_string(),
                 directory.path().to_path_buf(),
                 None,
+                None,
             )
             .await
             .expect_err("the seventeenth active process must be rejected");
@@ -987,6 +1107,7 @@ mod tests {
                 "bob",
                 "echo independent-owner".to_string(),
                 directory.path().to_path_buf(),
+                None,
                 None,
             )
             .await;

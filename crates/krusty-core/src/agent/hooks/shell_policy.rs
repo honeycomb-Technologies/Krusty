@@ -158,6 +158,36 @@ fn normalize_progress_segment(segment: &str) -> Option<String> {
             continue;
         }
 
+        // CI/status poll cosmetics: jq filters, json field lists, and watch
+        // intervals must not mint a new intent for every presentation tweak.
+        if command == "gh" {
+            if matches!(token, "--jq" | "-q") {
+                index = (index + 2).min(tokens.len());
+                continue;
+            }
+            if token.starts_with("--jq=") {
+                index += 1;
+                continue;
+            }
+            if token == "--json" {
+                // Keep that a json projection was requested, drop field list.
+                normalized.push("--json".to_string());
+                index = (index + 2).min(tokens.len());
+                continue;
+            }
+            if matches!(token, "--interval" | "-i") {
+                index = (index + 2).min(tokens.len());
+                continue;
+            }
+            if matches!(
+                token,
+                "--exit-status" | "--compact" | "--paginate" | "--no-paginate"
+            ) {
+                index += 1;
+                continue;
+            }
+        }
+
         normalized.push(normalize_progress_token(token));
         index += 1;
     }
@@ -245,6 +275,7 @@ fn is_plan_mode_read_only_segment(segment: &str) -> bool {
 
     match command.as_str() {
         "git" => is_plan_mode_read_only_git(tokens),
+        "gh" => is_plan_mode_read_only_gh(tokens),
         "tree" => is_plan_mode_read_only_tree(tokens),
         "sort" => is_plan_mode_read_only_sort(tokens),
         "rg" => is_plan_mode_read_only_rg(tokens),
@@ -280,9 +311,75 @@ fn is_plan_mode_read_only_git(tokens: &[String]) -> bool {
             "status" | "diff" | "show" | "log" | "grep" | "rev-parse" | "ls-files" | "describe"
             | "shortlog" | "name-rev" | "blame",
         ) => true,
+        // `git fetch` is network + ref updates; treat as observational only when
+        // dry-run / no-op flags make it non-mutating. Bare fetch remains effectful.
+        Some("fetch") => tokens.iter().skip(2).any(|token| {
+            matches!(
+                token.as_str(),
+                "--dry-run" | "-n" | "--no-write-fetch-head"
+            )
+        }),
         Some("branch") => tokens.len() == 2 || tokens[2..] == ["--show-current"],
         _ => false,
     }
+}
+
+/// Audited GitHub CLI read surface used for CI/TestFlight status polls.
+/// Mutating subcommands (pr create, run cancel, release create, …) stay
+/// effectful so the progress ledger still requires real work after them.
+fn is_plan_mode_read_only_gh(tokens: &[String]) -> bool {
+    let Some(resource) = tokens.get(1).map(String::as_str) else {
+        return false;
+    };
+    let Some(action) = tokens.get(2).map(String::as_str) else {
+        return false;
+    };
+
+    let observational = matches!(
+        (resource, action),
+        ("run", "view" | "list" | "watch")
+            | ("pr", "view" | "list" | "status" | "checks" | "diff")
+            | ("issue", "view" | "list" | "status")
+            | ("api", _) // api is often GET; write methods still use this path so
+            // treat carefully below
+            | ("release", "view" | "list")
+            | ("workflow", "view" | "list")
+            | ("repo", "view")
+            | ("status", _)
+            | ("auth", "status")
+    );
+    if !observational {
+        return false;
+    }
+
+    // `gh api` can mutate; only allow explicit GET methods or no method (default GET).
+    if resource == "api" {
+        let method = tokens
+            .iter()
+            .position(|t| t == "-X" || t == "--method")
+            .and_then(|i| tokens.get(i + 1))
+            .map(String::as_str);
+        if let Some(method) = method {
+            if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
+                return false;
+            }
+        }
+    }
+
+    // Disallow flags that write or open interactive UIs.
+    !tokens.iter().skip(1).any(|token| {
+        matches!(
+            token.as_str(),
+            "--web"
+                | "-w"
+                | "--delete"
+                | "--cancel"
+                | "--rerun"
+                | "--approve"
+                | "--merge"
+                | "--create"
+        )
+    })
 }
 
 fn is_plan_mode_read_only_rg(tokens: &[String]) -> bool {
@@ -936,6 +1033,33 @@ mod tests {
         assert_eq!(classify("ls -la | head -100"), None);
         assert_eq!(classify("cargo test | tail -n 20"), None);
         assert_eq!(classify("printf 'one\\ntwo\\n' | head -n 1"), None);
+    }
+
+    #[test]
+    fn gh_status_polls_are_proven_read_only() {
+        assert!(is_proven_read_only_bash_command("gh run view 123"));
+        assert!(is_proven_read_only_bash_command(
+            "gh run view 123 --json status,conclusion"
+        ));
+        assert!(is_proven_read_only_bash_command("gh pr view 9 --json state"));
+        assert!(is_proven_read_only_bash_command("gh auth status"));
+        // Mutating gh surfaces stay effectful.
+        assert!(!is_proven_read_only_bash_command("gh pr create --title x"));
+        assert!(!is_proven_read_only_bash_command(
+            "gh api -X POST /repos/o/r/dispatches"
+        ));
+    }
+
+    #[test]
+    fn gh_poll_presentation_flags_collapse_to_same_intent() {
+        assert_eq!(
+            semantic_bash_signature("gh run view 99 --json status,conclusion --jq .status"),
+            semantic_bash_signature("gh run view 99 --json status --exit-status")
+        );
+        assert_eq!(
+            semantic_bash_signature("gh run view 99 --json status,conclusion | head -20"),
+            semantic_bash_signature("gh run view 99 --json status")
+        );
     }
 
     #[test]

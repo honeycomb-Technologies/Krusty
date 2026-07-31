@@ -168,7 +168,7 @@ pub(super) async fn steer(
     })))
 }
 
-pub(super) async fn deliver_steering_with_rollover(
+pub(crate) async fn deliver_steering_with_rollover(
     state: &AppState,
     session_id: &str,
     initial_sender: tokio::sync::mpsc::UnboundedSender<LoopInput>,

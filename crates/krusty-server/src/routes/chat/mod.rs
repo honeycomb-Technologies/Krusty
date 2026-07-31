@@ -23,8 +23,7 @@ use krusty_core::SessionManager;
 use tokio_stream::wrappers::ReceiverStream;
 
 use self::content::{build_user_content, content_blocks_include_images, validate_content_blocks};
-#[cfg(test)]
-use self::interactions::deliver_steering_with_rollover;
+pub(crate) use self::interactions::deliver_steering_with_rollover;
 pub(crate) use self::interactions::submit_tool_approval;
 use self::interactions::{
     mako_control_error, mako_response_sse, steer, tool_approval, tool_result,

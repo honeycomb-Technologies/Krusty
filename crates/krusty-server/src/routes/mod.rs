@@ -5,7 +5,7 @@ use axum::{middleware, Router};
 use crate::{auth, AppState};
 
 mod apns;
-mod chat;
+pub(crate) mod chat;
 mod credentials;
 mod extensions;
 mod files;

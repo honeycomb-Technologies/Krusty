@@ -451,6 +451,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
 
             if let Some(ref registry) = ctx.process_registry {
                 let endpoint_hints = background_endpoint_hints(&clean_command);
+                let session_id = ctx.session_id.clone();
                 let spawn_result = match ctx.user_id.as_deref() {
                     Some(uid) => {
                         registry
@@ -459,6 +460,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                                 clean_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
+                                session_id,
                                 |process| {
                                     same_background_launch(
                                         process,
@@ -475,6 +477,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                                 clean_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
+                                session_id,
                                 |process| {
                                     same_background_launch(
                                         process,

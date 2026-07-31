@@ -17,6 +17,24 @@ pub struct ProcessInfo {
     pub status: ProcessStatus,
     /// Stored for potential future use (e.g., restart)
     pub _working_dir: PathBuf,
+    /// Optional parent chat/code session that started this background job.
+    /// Used to wake the session when the process reaches a terminal state.
+    pub session_id: Option<String>,
+    /// True after a completion wake has been emitted for a terminal status.
+    /// Prevents duplicate steering on status re-writes.
+    pub completion_notified: bool,
+}
+
+/// Terminal-process completion payload for session wake hooks.
+#[derive(Debug, Clone)]
+pub struct ProcessCompletionEvent {
+    pub user_id: String,
+    pub process_id: ProcessId,
+    pub session_id: Option<String>,
+    pub command: String,
+    pub description: Option<String>,
+    pub status: ProcessStatus,
+    pub output_preview: Option<String>,
 }
 
 /// Status of a tracked process

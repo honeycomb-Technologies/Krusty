@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants;
 
+/// Soft pressure for unlimited interactive runs. Not a hard stop — injects a
+/// strategy reminder so long poll/research thrash surfaces before the user
+/// has to abort. Hard ceilings remain explicit/project/goal budgets only.
+pub const INTERACTIVE_SOFT_TURN_WARN: usize = 40;
+pub const INTERACTIVE_SOFT_TURN_REPLAN: usize = 80;
+
 /// Optional resource limits for one parent agent run.
 ///
 /// A missing value is deliberately unlimited. Behavioral loop protection is
