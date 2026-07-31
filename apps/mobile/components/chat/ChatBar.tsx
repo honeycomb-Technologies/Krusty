@@ -1103,10 +1103,10 @@ function ChatBarComponent(props: ChatBarProps) {
     inputContentHeight,
     composerExpanded,
   );
-  const composerInputHeight = resolveComposerInputHeight(
-    inputContentHeight,
-    shouldGrowComposer,
-  );
+  // Input height always follows content. Forcing a one-line height while
+  // collapsed made iOS contentSize stick at ~22px on soft wrap, so only
+  // hard-newline pastes (estimate via `\n`) could open the field.
+  const composerInputHeight = resolveComposerInputHeight(inputContentHeight);
   const composerBarHeight = resolveComposerBarHeight(
     inputContentHeight,
     isRecording,
@@ -1200,9 +1200,9 @@ function ChatBarComponent(props: ChatBarProps) {
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
-  // Bootstrap height from text only until native contentSize has spoken.
-  // After measurement, keep estimates out of the write path so proportional
-  // font wrapping cannot fight UITextView and thrash the bar height.
+  // Soft wrap never inserts `\n`. Keep the character-wrap estimate live so it
+  // can open the field when iOS contentSize is still capped to the one-line
+  // view height. Estimates may grow after measurement; they must not shrink.
   useEffect(() => {
     if (!text) {
       hasMeasuredContentHeightRef.current = false;
@@ -1210,14 +1210,13 @@ function ChatBarComponent(props: ChatBarProps) {
       setInputContentHeight(0);
       return;
     }
-    if (hasMeasuredContentHeightRef.current) return;
     const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
     setInputContentHeight((current) =>
       resolveNextInputContentHeight({
         current,
         next: nextHeight,
         source: 'estimate',
-        hasMeasured: false,
+        hasMeasured: hasMeasuredContentHeightRef.current,
       }),
     );
   }, [compactInputWidth, text]);
@@ -1416,17 +1415,23 @@ function ChatBarComponent(props: ChatBarProps) {
                       setInputContentHeight(0);
                       return;
                     }
-                    // Trust measured contentSize alone once available. Mixing
-                    // estimate + measured max() caused expand/collapse thrash
-                    // and vertical jitter around wrap boundaries.
+                    // Prefer the larger of measured vs estimate. Soft wrap often
+                    // reports a view-capped contentSize (~one line) until the
+                    // field is already tall enough; estimate opens that path.
+                    // Measured can still grow past the estimate for real fonts.
                     const measured = Math.ceil(
                       event.nativeEvent.contentSize.height,
                     );
+                    const estimated = estimateCompactInputHeight(
+                      textRef.current,
+                      compactInputWidth,
+                    );
+                    const nextHeight = Math.max(measured, estimated);
                     hasMeasuredContentHeightRef.current = true;
                     setInputContentHeight((current) =>
                       resolveNextInputContentHeight({
                         current,
-                        next: measured,
+                        next: nextHeight,
                         source: 'measured',
                         hasMeasured: true,
                       }),

@@ -33,6 +33,10 @@ Deno.test('single-line drafts stay at one visual row height', () => {
       COMPOSER_PILL_HEIGHT,
     'single-line bar should remain pill height',
   );
+  assert(
+    resolveComposerInputHeight(height) === INPUT_LINE_HEIGHT,
+    'single-line input height should be one row',
+  );
 });
 
 Deno.test('hard newlines grow the composer estimate and bar', () => {
@@ -42,7 +46,7 @@ Deno.test('hard newlines grow the composer estimate and bar', () => {
     `expected three visual rows, got ${height}`,
   );
   assert(shouldExpandComposerHeight(height, false), 'multi-line should expand');
-  const inputHeight = resolveComposerInputHeight(height, true);
+  const inputHeight = resolveComposerInputHeight(height);
   const barHeight = resolveComposerBarHeight(
     height,
     false,
@@ -59,16 +63,27 @@ Deno.test('hard newlines grow the composer estimate and bar', () => {
   );
 });
 
-Deno.test('wrapped text grows beyond a single row', () => {
+Deno.test('soft-wrapped typing grows without hard newlines', () => {
+  // No `\n` — this is the path that failed on device (paste worked, typing didn't).
   const longLine =
     'this is a long draft that should wrap across multiple visual lines inside the compact composer';
   const height = estimateCompactInputHeight(longLine, 160);
   assert(height > INPUT_LINE_HEIGHT, `expected wrap growth, got ${height}`);
   assert(
-    height <= COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME,
+    height <=
+      COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME - INPUT_EXPANDED_VERTICAL_PADDING * 2,
     `expected cap at max content height, got ${height}`,
   );
   assert(shouldExpandComposerHeight(height, false), 'wrapped text should expand');
+  assert(
+    resolveComposerInputHeight(height) === height,
+    'input height must track soft-wrap content, not stay clamped to one line',
+  );
+  assert(
+    resolveComposerBarHeight(height, false, COMPOSER_PILL_HEIGHT, true) >
+      COMPOSER_PILL_HEIGHT,
+    'bar must grow for soft wrap',
+  );
 });
 
 Deno.test('empty drafts report zero content height and stay compacted', () => {
@@ -111,7 +126,39 @@ Deno.test('expand/collapse thresholds use hysteresis around wrap boundaries', ()
   );
 });
 
-Deno.test('measured content height wins over later estimate samples', () => {
+Deno.test('estimate may grow after measurement but must not shrink', () => {
+  // Soft wrap: first measured sample is often still ~one line while the view
+  // is clamped. Estimate must still be allowed to open the field.
+  const grown = resolveNextInputContentHeight({
+    current: 22,
+    next: 44,
+    source: 'estimate',
+    hasMeasured: true,
+  });
+  assert(grown === 44, `estimate must grow after measurement, got ${grown}`);
+
+  const blockedShrink = resolveNextInputContentHeight({
+    current: 66,
+    next: 22,
+    source: 'estimate',
+    hasMeasured: true,
+  });
+  assert(
+    blockedShrink === 66,
+    `estimate must not shrink after measurement, got ${blockedShrink}`,
+  );
+
+  const bootstrapShrink = resolveNextInputContentHeight({
+    current: 44,
+    next: 22,
+    source: 'estimate',
+    hasMeasured: false,
+  });
+  assert(
+    bootstrapShrink === 22,
+    `estimate may shrink before measurement, got ${bootstrapShrink}`,
+  );
+
   const measured = resolveNextInputContentHeight({
     current: 44,
     next: 66,
@@ -119,17 +166,6 @@ Deno.test('measured content height wins over later estimate samples', () => {
     hasMeasured: false,
   });
   assert(measured === 66, `expected measured growth, got ${measured}`);
-
-  const blockedEstimate = resolveNextInputContentHeight({
-    current: 66,
-    next: 22,
-    source: 'estimate',
-    hasMeasured: true,
-  });
-  assert(
-    blockedEstimate === 66,
-    `estimate must not shrink after measurement, got ${blockedEstimate}`,
-  );
 
   const noisyMeasured = resolveNextInputContentHeight({
     current: 66,
@@ -141,15 +177,13 @@ Deno.test('measured content height wins over later estimate samples', () => {
     noisyMeasured === 66,
     `sub-pixel measured noise should be ignored, got ${noisyMeasured}`,
   );
+});
 
-  const bootstrapEstimate = resolveNextInputContentHeight({
-    current: 0,
-    next: 44,
-    source: 'estimate',
-    hasMeasured: false,
-  });
+Deno.test('input height always tracks content so soft wrap can remeasure', () => {
+  // Regression: clamping input to one line while collapsed made contentSize
+  // stick and hid typed wrap. Input height must follow content always.
   assert(
-    bootstrapEstimate === 44,
-    `bootstrap estimates should apply before measurement, got ${bootstrapEstimate}`,
+    resolveComposerInputHeight(INPUT_LINE_HEIGHT * 2) === INPUT_LINE_HEIGHT * 2,
+    'two-line content must size the input to two lines even if bar not expanded yet',
   );
 });
