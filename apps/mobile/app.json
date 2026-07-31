@@ -34,7 +34,7 @@
       "config": {
         "usesNonExemptEncryption": false
       },
-      "buildNumber": "270"
+      "buildNumber": "271"
     },
     "android": {
       "package": "io.krusty.mobile",
