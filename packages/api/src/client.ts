@@ -8,6 +8,8 @@ import type {
 	SessionPresenceResponse,
 	ModelsResponse,
 	GitStatusResponse,
+	GitChangesResponse,
+	GitFileDiffResponse,
 	GitBranchesResponse,
 	GitWorktreesResponse,
 	ProviderStatus,
@@ -546,6 +548,20 @@ export class KrustyClient {
 		return this.request(`/git/status${q}`);
 	}
 
+	async getGitChanges(path?: string): Promise<GitChangesResponse> {
+		const q = path ? `?path=${encodeURIComponent(path)}` : "";
+		return this.request(`/git/changes${q}`);
+	}
+
+	async getGitFileDiff(
+		file: string,
+		path?: string,
+	): Promise<GitFileDiffResponse> {
+		const params = new URLSearchParams({ file });
+		if (path) params.set("path", path);
+		return this.request(`/git/diff?${params}`);
+	}
+
 	async getGitBranches(path?: string): Promise<GitBranchesResponse> {
 		const q = path ? `?path=${encodeURIComponent(path)}` : "";
 		return this.request(`/git/branches${q}`);
@@ -710,6 +726,16 @@ export class KrustyClient {
 	async getSkills(scope: "all" | "global" = "all"): Promise<SkillInfo[]> {
 		const query = scope === "global" ? "?scope=global" : "";
 		return this.request(`/skills${query}`);
+	}
+
+	async updateSkillPolicy(
+		name: string,
+		update: { enabled?: boolean; permission?: SkillInfo["permission"] },
+	): Promise<SkillInfo> {
+		return this.request(`/skills/${encodeURIComponent(name)}/policy`, {
+			method: "POST",
+			body: JSON.stringify(update),
+		});
 	}
 
 	// Tools

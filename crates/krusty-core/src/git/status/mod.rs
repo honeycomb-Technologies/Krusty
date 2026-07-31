@@ -7,7 +7,7 @@ use super::command::{resolve_repo_root, run_git, should_suppress_display};
 use super::model::{GitBranchSummary, GitStatusSummary, GitWorktreeSummary};
 use super::pr::resolve_pr_number;
 
-mod diff;
+pub(super) mod diff;
 mod parse;
 
 use diff::{compute_branch_diff_summary, compute_worktree_diff_summary};

@@ -31,6 +31,37 @@ pub struct GitStatusResponse {
 }
 
 #[derive(Serialize)]
+pub struct GitChangedFileResponse {
+    pub path: String,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Serialize)]
+pub struct GitChangesResponse {
+    pub in_repo: bool,
+    pub repo_root: Option<String>,
+    pub files: Vec<GitChangedFileResponse>,
+}
+
+#[derive(Deserialize)]
+pub struct GitDiffQuery {
+    /// Optional repository path. If omitted, defaults to the current workspace.
+    pub path: Option<String>,
+    /// Repository-relative file path selected from `/git/changes`.
+    pub file: String,
+}
+
+#[derive(Serialize)]
+pub struct GitFileDiffResponse {
+    pub path: String,
+    pub patch: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+#[derive(Serialize)]
 pub struct GitBranchResponse {
     pub name: String,
     pub is_current: bool,

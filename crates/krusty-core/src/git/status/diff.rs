@@ -29,7 +29,7 @@ pub(super) fn compute_worktree_diff_summary(repo_root: &Path) -> Option<BranchDi
     Some(parse_numstat(&stdout))
 }
 
-fn resolve_base_ref(repo_root: &Path, upstream: Option<&str>) -> Option<String> {
+pub(crate) fn resolve_base_ref(repo_root: &Path, upstream: Option<&str>) -> Option<String> {
     if let Some(upstream) = upstream.filter(|u| !u.trim().is_empty()) {
         if ref_exists(repo_root, upstream) {
             return Some(upstream.to_string());

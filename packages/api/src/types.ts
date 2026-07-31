@@ -1444,6 +1444,27 @@ export interface GitStatusResponse {
 	total_changes: number;
 }
 
+export interface GitChangedFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface GitChangesResponse {
+  in_repo: boolean;
+  repo_root: string | null;
+  files: GitChangedFile[];
+}
+
+export interface GitFileDiffResponse {
+  path: string;
+  patch: string;
+  truncated: boolean;
+  binary: boolean;
+}
+
+
 export interface GitBranch {
 	name: string;
 	is_current: boolean;
@@ -1688,15 +1709,20 @@ export interface McpServerResponse {
 	error?: string | null;
 }
 
-export type SkillSource = "global" | "project";
+export type SkillSource = "global" | "project" | "package";
 
 export interface SkillInfo {
-	name: string;
-	description: string;
-	version?: string | null;
-	author?: string | null;
-	tags: string[];
-	source: SkillSource;
+  name: string;
+  description: string;
+  version?: string | null;
+  author?: string | null;
+  tags: string[];
+  source: SkillSource;
+  origin: string;
+  path: string;
+  enabled: boolean;
+  permission: "allow" | "ask" | "deny";
+  model_invocable: boolean;
 }
 
 // ============================================================================

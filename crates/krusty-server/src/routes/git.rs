@@ -12,7 +12,8 @@ use super::session_access::request_workspace_scope;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::{
-    GitBranchResponse, GitBranchesResponse, GitCheckoutRequest, GitQuery, GitStatusResponse,
+    GitBranchResponse, GitBranchesResponse, GitChangedFileResponse, GitChangesResponse,
+    GitCheckoutRequest, GitDiffQuery, GitFileDiffResponse, GitQuery, GitStatusResponse,
     GitWorktreeResponse, GitWorktreesResponse,
 };
 use crate::utils::workspace::resolve_scoped_workspace_path;
@@ -22,10 +23,61 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(get_status))
+        .route("/changes", get(list_changes))
+        .route("/diff", get(get_file_diff))
         .route("/branches", get(list_branches))
         .route("/worktrees", get(list_worktrees))
         .route("/checkout", post(checkout_branch))
 }
+
+async fn list_changes(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Query(query): Query<GitQuery>,
+) -> Result<Json<GitChangesResponse>, AppError> {
+    let path = resolve_git_path(&state, user.as_ref(), query.path.as_deref())?;
+    let changes = krusty_core::git::changes(&path).map_err(to_bad_request)?;
+    let Some(changes) = changes else {
+        return Ok(Json(GitChangesResponse {
+            in_repo: false,
+            repo_root: None,
+            files: Vec::new(),
+        }));
+    };
+
+    Ok(Json(GitChangesResponse {
+        in_repo: true,
+        repo_root: Some(changes.repo_root.display().to_string()),
+        files: changes
+            .files
+            .into_iter()
+            .map(|file| GitChangedFileResponse {
+                path: file.path,
+                status: file.status,
+                additions: file.additions,
+                deletions: file.deletions,
+            })
+            .collect(),
+    }))
+}
+
+async fn get_file_diff(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Query(query): Query<GitDiffQuery>,
+) -> Result<Json<GitFileDiffResponse>, AppError> {
+    let path = resolve_git_path(&state, user.as_ref(), query.path.as_deref())?;
+    let diff = krusty_core::git::file_diff(&path, &query.file)
+        .map_err(to_bad_request)?
+        .ok_or_else(|| AppError::BadRequest("Path is not inside a git repository".to_string()))?;
+    Ok(Json(GitFileDiffResponse {
+        path: diff.path,
+        patch: diff.patch,
+        truncated: diff.truncated,
+        binary: diff.binary,
+    }))
+}
+
 
 async fn get_status(
     State(state): State<AppState>,
