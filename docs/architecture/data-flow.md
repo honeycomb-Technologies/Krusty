@@ -133,9 +133,15 @@ After all tool calls in a batch are executed, the orchestrator collects the resu
 
 The orchestrator then performs two safety checks before looping:
 
-**Failure detection.** `failure::detect_repeated_failures` tracks tool error signatures across iterations. If the same tool keeps failing with the same error (a stuck loop), it triggers a `LoopGuardTriggered` stop. Similarly, `detect_repeated_read_only_sequence` catches the AI reading the same files in a cycle without making progress.
+**Failure and exploration detection (`LoopGuard`).** After each tool batch the orchestrator evaluates:
 
-**Exploration budget.** The orchestrator counts consecutive read-only tool calls (read, glob, grep). If the AI spends too many turns exploring without taking action, a soft warning is logged at 15 calls and a hard threshold triggers at 30. This prevents the AI from endlessly reading files without doing anything.
+- `detect_repeated_failures` — same tool + same error signature ≥ 2 times → stop
+- `detect_repeated_validation_sequence` — same successful test/lint/build pattern ≥ 3 times → clean complete
+- `detect_repeated_read_only_sequence` — same pure-exploration batch ≥ 3 times (native read tools **and** observational bash such as `git show` / `rg` pipelines) → stop
+- `detect_post_explore_manual_fallback` — after a usable delegated explore result, further pure manual probes → stop
+- semantic no-progress ledger — replan then stop when work produces no verified state change
+
+These guards are shared with subagent runtimes via the same `LoopGuard` type.
 
 If both checks pass, the orchestrator emits a `LoopEvent::TurnComplete { has_more: true }`, sets the agent state to "streaming", and loops back to step 3 -- context injection, AI call, stream processing, tool execution. This is the agentic loop: the AI keeps working, calling tools and receiving results, until it produces a response with no tool calls.
 

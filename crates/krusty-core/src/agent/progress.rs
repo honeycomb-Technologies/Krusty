@@ -98,6 +98,8 @@ impl ProgressGuardTelemetry {
 pub struct LoopGuardOutcome {
     pub repeated_failure: Option<String>,
     pub repeated_validation: Option<String>,
+    /// Same pure-exploration tool batch repeated without mutation.
+    pub repeated_read_only: Option<String>,
     pub progress: Option<ProgressGuardTelemetry>,
 }
 
@@ -106,6 +108,7 @@ pub struct LoopGuard {
     progress: ProgressLedger,
     failure_signatures: HashMap<String, usize>,
     validation_signatures: HashMap<String, usize>,
+    read_only_signatures: HashMap<String, usize>,
 }
 
 impl LoopGuard {
@@ -117,6 +120,7 @@ impl LoopGuard {
         self.progress.reset_for_steering();
         self.failure_signatures.clear();
         self.validation_signatures.clear();
+        self.read_only_signatures.clear();
     }
 
     pub fn evaluate(
@@ -134,6 +138,10 @@ impl LoopGuard {
                 &mut self.validation_signatures,
                 tool_calls,
                 tool_results,
+            ),
+            repeated_read_only: failure::detect_repeated_read_only_sequence(
+                &mut self.read_only_signatures,
+                tool_calls,
             ),
             progress: self.progress.record_turn(tool_calls, tool_results),
         }
