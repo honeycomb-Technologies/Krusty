@@ -1103,10 +1103,13 @@ function ChatBarComponent(props: ChatBarProps) {
     inputContentHeight,
     composerExpanded,
   );
-  // Input height always follows content. Forcing a one-line height while
-  // collapsed made iOS contentSize stick at ~22px on soft wrap, so only
-  // hard-newline pastes (estimate via `\n`) could open the field.
-  const composerInputHeight = resolveComposerInputHeight(inputContentHeight);
+  // Input height follows content + expanded padding. RN counts paddingVertical
+  // inside the explicit height box, so expanded rows must add pad here or the
+  // first multi-line heights clip until more lines force the field taller.
+  const composerInputHeight = resolveComposerInputHeight(
+    inputContentHeight,
+    composerExpanded,
+  );
   const composerBarHeight = resolveComposerBarHeight(
     inputContentHeight,
     isRecording,

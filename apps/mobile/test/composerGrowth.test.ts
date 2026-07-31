@@ -9,6 +9,7 @@ import {
   countVisualLinesForSegment,
   estimateCompactInputHeight,
   resolveComposerBarHeight,
+  resolveComposerContentHeight,
   resolveComposerInputHeight,
   resolveNextInputContentHeight,
   shouldExpandComposerHeight,
@@ -47,20 +48,24 @@ Deno.test('hard newlines grow the composer estimate and bar', () => {
     `expected three visual rows, got ${height}`,
   );
   assert(shouldExpandComposerHeight(height, false), 'multi-line should expand');
-  const inputHeight = resolveComposerInputHeight(height);
+  const contentBox = resolveComposerContentHeight(height);
+  const inputHeight = resolveComposerInputHeight(height, true);
   const barHeight = resolveComposerBarHeight(
     height,
     false,
     COMPOSER_PILL_HEIGHT,
     true,
   );
-  assert(inputHeight === height, `expected input height ${height}, got ${inputHeight}`);
+  assert(contentBox === height, `expected content box ${height}, got ${contentBox}`);
+  assert(
+    inputHeight === height + INPUT_EXPANDED_VERTICAL_PADDING * 2,
+    `expected input height to include padding, got ${inputHeight}`,
+  );
   assert(barHeight > COMPOSER_PILL_HEIGHT, `expected expanded bar, got ${barHeight}`);
   assert(barHeight <= COMPOSER_MAX_HEIGHT, `bar exceeded max height: ${barHeight}`);
   assert(
-    barHeight ===
-      height + INPUT_EXPANDED_VERTICAL_PADDING * 2 + INPUT_GROWTH_CHROME,
-    `expected text + padding + chrome, got ${barHeight}`,
+    barHeight === inputHeight + INPUT_GROWTH_CHROME,
+    `expected input view + chrome, got ${barHeight}`,
   );
 });
 
@@ -77,8 +82,13 @@ Deno.test('soft-wrapped typing grows without hard newlines', () => {
   );
   assert(shouldExpandComposerHeight(height, false), 'wrapped text should expand');
   assert(
-    resolveComposerInputHeight(height) === height,
-    'input height must track soft-wrap content, not stay clamped to one line',
+    resolveComposerContentHeight(height) === height,
+    'content box must track soft-wrap content, not stay clamped to one line',
+  );
+  assert(
+    resolveComposerInputHeight(height, true) ===
+      height + INPUT_EXPANDED_VERTICAL_PADDING * 2,
+    'expanded input height must include padding inside RN height box',
   );
   assert(
     resolveComposerBarHeight(height, false, COMPOSER_PILL_HEIGHT, true) >
@@ -217,9 +227,20 @@ Deno.test('estimate may grow after measurement but must not shrink', () => {
 
 Deno.test('input height always tracks content so soft wrap can remeasure', () => {
   // Regression: clamping input to one line while collapsed made contentSize
-  // stick and hid typed wrap. Input height must follow content always.
+  // stick and hid typed wrap. Content box must follow content always.
   assert(
-    resolveComposerInputHeight(INPUT_LINE_HEIGHT * 2) === INPUT_LINE_HEIGHT * 2,
-    'two-line content must size the input to two lines even if bar not expanded yet',
+    resolveComposerContentHeight(INPUT_LINE_HEIGHT * 2) === INPUT_LINE_HEIGHT * 2,
+    'two-line content must size the content box to two lines even if bar not expanded yet',
+  );
+  // RN includes paddingVertical inside explicit height, so the first expanded
+  // multi-line heights must add pad or only ~28px of a 44px field is usable.
+  assert(
+    resolveComposerInputHeight(INPUT_LINE_HEIGHT * 2, true) ===
+      INPUT_LINE_HEIGHT * 2 + INPUT_EXPANDED_VERTICAL_PADDING * 2,
+    'expanded two-line input must reserve padding inside the height box',
+  );
+  assert(
+    resolveComposerInputHeight(INPUT_LINE_HEIGHT, false) === INPUT_LINE_HEIGHT,
+    'collapsed single-line input stays one row without expanded padding',
   );
 });

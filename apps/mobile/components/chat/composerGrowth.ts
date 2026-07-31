@@ -155,11 +155,10 @@ export function resolveNextInputContentHeight(options: {
 }
 
 /**
- * Height of the multiline TextInput text box (padding applied in style).
- * Always tracks content — never force a one-line clamp while text is taller.
- * Clamping here is what made soft-wrap contentSize stick and hide text.
+ * Content-box height of the draft (line stack only, no vertical padding).
+ * Used for expansion thresholds and as the basis for the TextInput height.
  */
-export function resolveComposerInputHeight(contentHeight: number): number {
+export function resolveComposerContentHeight(contentHeight: number): number {
   if (contentHeight <= 0) return INPUT_LINE_HEIGHT;
   return Math.min(
     COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME - INPUT_EXPANDED_VERTICAL_PADDING * 2,
@@ -167,6 +166,35 @@ export function resolveComposerInputHeight(contentHeight: number): number {
   );
 }
 
+/**
+ * Height applied to the TextInput view.
+ *
+ * React Native includes `paddingVertical` inside the explicit `height` box.
+ * When the field is expanded we therefore add the vertical padding here so the
+ * content-box still fits the measured line stack. Without that, soft wrap
+ * opens a 44px-tall field with 8px pad top+bottom and only ~28px of usable
+ * text — which looks and feels wrong until a few more lines force it taller.
+ *
+ * Always follows measured/estimated content so soft-wrapped text can report a
+ * true contentSize (and open the composer) instead of being capped at one line
+ * while the bar is still collapsed.
+ */
+export function resolveComposerInputHeight(
+  contentHeight: number,
+  currentlyExpanded = false,
+): number {
+  const contentBox = resolveComposerContentHeight(contentHeight);
+  const expanded = shouldExpandComposerHeight(contentHeight, currentlyExpanded);
+  return contentBox + (expanded ? INPUT_EXPANDED_VERTICAL_PADDING * 2 : 0);
+}
+
+/**
+ * Resolve the outer chat-bar height from measured input content.
+ * Collapsed drafts stay at the pill height. Expanded drafts grow with content.
+ * Recording always uses the fixed pill size.
+ *
+ * Expanded bar = input view height (content + padding) + chrome.
+ */
 export function resolveComposerBarHeight(
   contentHeight: number,
   isRecording: boolean,
@@ -177,12 +205,11 @@ export function resolveComposerBarHeight(
     return pillHeight;
   }
 
-  const inputHeight = resolveComposerInputHeight(contentHeight);
   return Math.min(
     COMPOSER_MAX_HEIGHT,
     Math.max(
       pillHeight,
-      inputHeight + INPUT_EXPANDED_VERTICAL_PADDING * 2 + INPUT_GROWTH_CHROME,
+      resolveComposerInputHeight(contentHeight, true) + INPUT_GROWTH_CHROME,
     ),
   );
 }
