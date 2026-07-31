@@ -48,6 +48,8 @@ import {
   INPUT_LINE_HEIGHT as SHARED_INPUT_LINE_HEIGHT,
   estimateCompactInputHeight,
   resolveComposerBarHeight,
+  resolveComposerInputHeight,
+  resolveNextInputContentHeight,
   shouldExpandComposerHeight,
 } from './composerGrowth';
 import { resolveComposerSendPayload } from './composerSend';
@@ -513,6 +515,7 @@ function ChatBarComponent(props: ChatBarProps) {
   const [expandedEditorOpen, setExpandedEditorOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [inputContentHeight, setInputContentHeight] = useState(0);
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const modelPopoverScale = useSharedValue(0);
   const modelPopoverOpacity = useSharedValue(0);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -522,6 +525,10 @@ function ChatBarComponent(props: ChatBarProps) {
   const accordionOpenRef = useRef(false);
   const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
+  /** True after native contentSize has reported for the current draft. */
+  const hasMeasuredContentHeightRef = useRef(false);
+  /** Actual laid-out text-field width (preferred over estimate width). */
+  const [measuredInputWidth, setMeasuredInputWidth] = useState(0);
   /** Actual laid-out band width (after parent maxWidth / split). */
   const [measuredRootWidth, setMeasuredRootWidth] = useState(0);
   const modelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -562,6 +569,8 @@ function ChatBarComponent(props: ChatBarProps) {
     setText(nextDraft.text);
     setAttachments(nextDraft.attachments);
     setPreviewAttachment(null);
+    hasMeasuredContentHeightRef.current = false;
+    setComposerExpanded(false);
     setInputContentHeight(0);
     setExpandedEditorOpen(false);
   }, [draftKey]);
@@ -866,6 +875,8 @@ function ChatBarComponent(props: ChatBarProps) {
     draftRef.current = { text: '', attachments: [] };
     setDraftCache(activeDraftKeyRef.current, draftRef.current);
     setText('');
+    hasMeasuredContentHeightRef.current = false;
+    setComposerExpanded(false);
     setInputContentHeight(0);
     setAttachments([]);
     setPreviewAttachment(null);
@@ -956,6 +967,8 @@ function ChatBarComponent(props: ChatBarProps) {
     textRef.current = value;
     setText(value);
     if (!value) {
+      hasMeasuredContentHeightRef.current = false;
+      setComposerExpanded(false);
       setInputContentHeight(0);
     }
   }, []);
@@ -1086,11 +1099,19 @@ function ChatBarComponent(props: ChatBarProps) {
   const gaugeRadius = (GAUGE_SIZE - gaugeStroke) / 2;
   const gaugeCircumference = 2 * Math.PI * gaugeRadius;
   const gaugeOffset = gaugeCircumference - (gaugePct / 100) * gaugeCircumference;
-  const shouldGrowComposer = shouldExpandComposerHeight(inputContentHeight);
+  const shouldGrowComposer = shouldExpandComposerHeight(
+    inputContentHeight,
+    composerExpanded,
+  );
+  const composerInputHeight = resolveComposerInputHeight(
+    inputContentHeight,
+    shouldGrowComposer,
+  );
   const composerBarHeight = resolveComposerBarHeight(
     inputContentHeight,
     isRecording,
     PILL,
+    composerExpanded,
   );
   const metaReserveHeight = showComposerChrome
     ? META_ROW_HEIGHT + GAUGE_TOP_GAP
@@ -1112,7 +1133,7 @@ function ChatBarComponent(props: ChatBarProps) {
       : contentMaxWidth != null && contentMaxWidth > 0
         ? contentMaxWidth
         : viewportWidth;
-  const compactInputWidth = Math.max(
+  const estimatedInputWidth = Math.max(
     120,
     bandWidth -
       ROOT_HORIZONTAL_PADDING * 2 -
@@ -1122,6 +1143,10 @@ function ChatBarComponent(props: ChatBarProps) {
       36 -
       INPUT_SIDE_PADDING * 2,
   );
+  // Prefer the real TextInput width once laid out so wrap estimates match
+  // proportional fonts instead of thrashing around a synthetic band width.
+  const compactInputWidth =
+    measuredInputWidth > 0 ? measuredInputWidth : estimatedInputWidth;
   const controlsLayerWidth = Math.max(
     PILL,
     bandWidth - ROOT_HORIZONTAL_PADDING * 2,
@@ -1175,19 +1200,39 @@ function ChatBarComponent(props: ChatBarProps) {
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
-  // Keep height in sync from text on every platform. Native contentSize can
-  // lag or report a view-capped height while the bar is still compacted, which
-  // previously left multi-line drafts stuck at the single-row pill size.
+  // Bootstrap height from text only until native contentSize has spoken.
+  // After measurement, keep estimates out of the write path so proportional
+  // font wrapping cannot fight UITextView and thrash the bar height.
   useEffect(() => {
     if (!text) {
+      hasMeasuredContentHeightRef.current = false;
+      setComposerExpanded(false);
       setInputContentHeight(0);
       return;
     }
+    if (hasMeasuredContentHeightRef.current) return;
     const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
     setInputContentHeight((current) =>
-      current === nextHeight ? current : nextHeight,
+      resolveNextInputContentHeight({
+        current,
+        next: nextHeight,
+        source: 'estimate',
+        hasMeasured: false,
+      }),
     );
   }, [compactInputWidth, text]);
+
+  // Hysteresis: expand and collapse at different thresholds so wrap-boundary
+  // characters cannot flip expanded/collapsed every keystroke.
+  useEffect(() => {
+    const nextExpanded = shouldExpandComposerHeight(
+      inputContentHeight,
+      composerExpanded,
+    );
+    if (nextExpanded !== composerExpanded) {
+      setComposerExpanded(nextExpanded);
+    }
+  }, [composerExpanded, inputContentHeight]);
 
   useEffect(() => {
     const measuredRootHeight = measuredRootHeightRef.current;
@@ -1347,28 +1392,44 @@ function ChatBarComponent(props: ChatBarProps) {
                       ? styles.inputExpanded
                       : styles.inputCollapsed,
                     WEB_INPUT_STYLE,
-                    { color: t.foreground },
+                    {
+                      color: t.foreground,
+                      // Explicit height from measured text — never stretch to
+                      // fill the bar. Filling the bar made contentSize track
+                      // the view and thrash bar height (the jitter loop).
+                      height: composerInputHeight,
+                    },
                   ]}
                   value={text}
                   onChangeText={handleTextChange}
+                  onLayout={(event) => {
+                    const width = Math.ceil(event.nativeEvent.layout.width);
+                    if (width <= 0) return;
+                    setMeasuredInputWidth((current) =>
+                      current === width ? current : width,
+                    );
+                  }}
                   onContentSizeChange={(event) => {
                     if (!textRef.current) {
+                      hasMeasuredContentHeightRef.current = false;
+                      setComposerExpanded(false);
                       setInputContentHeight(0);
                       return;
                     }
-                    // Prefer the larger of estimate vs measured so real font
-                    // metrics can expand further without fighting deletions
-                    // (estimate effect re-syncs when text shrinks).
+                    // Trust measured contentSize alone once available. Mixing
+                    // estimate + measured max() caused expand/collapse thrash
+                    // and vertical jitter around wrap boundaries.
                     const measured = Math.ceil(
                       event.nativeEvent.contentSize.height,
                     );
-                    const estimated = estimateCompactInputHeight(
-                      textRef.current,
-                      compactInputWidth,
-                    );
-                    const nextHeight = Math.max(measured, estimated);
+                    hasMeasuredContentHeightRef.current = true;
                     setInputContentHeight((current) =>
-                      current === nextHeight ? current : nextHeight,
+                      resolveNextInputContentHeight({
+                        current,
+                        next: measured,
+                        source: 'measured',
+                        hasMeasured: true,
+                      }),
                     );
                   }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
@@ -1600,22 +1661,19 @@ const styles = StyleSheet.create({
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   input: {
     flex: 1,
-    // Fill the bar so single-line text stays vertically centered inside the
-    // pill, and multi-line text can use the full grown height.
-    height: '100%',
+    // Height is set inline from measured content (composerInputHeight).
+    // Never use height: '100%' — that creates a contentSize feedback loop.
     fontSize: 16,
     lineHeight: INPUT_LINE_HEIGHT,
-    maxHeight: COMPOSER_MAX_HEIGHT,
     paddingVertical: 0,
     paddingHorizontal: 6,
   },
   inputCollapsed: {
-    // Do not clamp to content height — that regressed multi-line growth by
-    // locking the field to ~one visual row while the bar stayed at PILL.
-    minHeight: INPUT_LINE_HEIGHT,
+    // Single centered row inside the pill. barInner alignItems centers it.
     textAlignVertical: 'center',
   },
   inputExpanded: {
+    // Padding is outside the measured text box; bar height accounts for it.
     paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
     paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
     textAlignVertical: 'top',
