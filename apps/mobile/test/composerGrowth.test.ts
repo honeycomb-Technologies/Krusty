@@ -6,6 +6,7 @@ import {
   INPUT_EXPANDED_VERTICAL_PADDING,
   INPUT_GROWTH_CHROME,
   INPUT_LINE_HEIGHT,
+  countVisualLinesForSegment,
   estimateCompactInputHeight,
   resolveComposerBarHeight,
   resolveComposerInputHeight,
@@ -84,6 +85,41 @@ Deno.test('soft-wrapped typing grows without hard newlines', () => {
       COMPOSER_PILL_HEIGHT,
     'bar must grow for soft wrap',
   );
+});
+
+Deno.test('soft-wrap expands by visual line 2 at typical composer widths', () => {
+  // Regression: lag-until-line-4 on device. Word-aware estimate must open the
+  // bar once the second visual row is needed, not after four lines of typing.
+  const widths = [160, 200, 240, 280];
+  for (const width of widths) {
+    // Build text that is just over one visual row of average words.
+    let text = 'typing';
+    let height = estimateCompactInputHeight(text, width);
+    let guard = 0;
+    while (height <= INPUT_LINE_HEIGHT && guard < 80) {
+      text += ' word';
+      height = estimateCompactInputHeight(text, width);
+      guard += 1;
+    }
+    assert(
+      shouldExpandComposerHeight(height, false),
+      `width=${width}: should expand once second visual row is needed (text len=${text.length}, h=${height})`,
+    );
+    // Must not require absurd length (~4+ pure character rows at optimistic width).
+    assert(
+      text.length < 120,
+      `width=${width}: expanded too late (len=${text.length})`,
+    );
+  }
+});
+
+Deno.test('word-aware wrap breaks earlier than pure character packing for long words', () => {
+  // A long token near the line capacity should force mid-token wraps.
+  const lines = countVisualLinesForSegment(
+    'hello supercalifragilisticexpialidocious world',
+    12,
+  );
+  assert(lines >= 3, `expected multi-line wrap for long token, got ${lines}`);
 });
 
 Deno.test('empty drafts report zero content height and stay compacted', () => {
