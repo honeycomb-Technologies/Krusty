@@ -8,6 +8,8 @@ import {
 } from "react-native";
 import {
   Bell,
+  ChevronDown,
+  ChevronRight,
   Cpu,
   ExternalLink,
   Link,
@@ -46,7 +48,6 @@ import {
   PreviewDraftState,
   ProviderFormState,
   SchemeOption,
-  SectionTitle,
   previewStatusText,
 } from "./shared";
 import { styles } from "./styles";
@@ -119,11 +120,7 @@ export function DiagnosticsSection({
 
   return (
     <>
-      <SectionTitle
-        title="Internal diagnostics"
-        subtitle="Content-free performance capture uploaded securely to Honey"
-      />
-      <GlassCard>
+      <GlassCard compact>
         <View style={styles.stack}>
           <View style={styles.subsectionHeader}>
             <View style={styles.rowContent}>
@@ -232,12 +229,8 @@ export function ConnectionSection({
 
   return (
     <>
-      <SectionTitle
-        title="Connection"
-        subtitle="Server URL and remote session bootstrap"
-      />
       {isConfigured ? (
-        <GlassCard>
+        <GlassCard compact>
           <View style={styles.row}>
             {isConnected ? (
               <Wifi size={20} color={t.success} strokeWidth={1.8} />
@@ -284,7 +277,7 @@ export function ConnectionSection({
           </View>
         </GlassCard>
       ) : (
-        <GlassCard>
+        <GlassCard compact>
           <View style={styles.connectForm}>
             <View style={styles.row}>
               <Link size={20} color={t.mutedForeground} strokeWidth={1.8} />
@@ -392,14 +385,13 @@ export function ProvidersSection({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const g = theme.colors.glass;
+  const [expandedProviderId, setExpandedProviderId] = useState<string | null>(
+    null,
+  );
 
   return (
     <>
-      <SectionTitle
-        title="Providers & Auth"
-        subtitle="API keys, OAuth, and provider status"
-      />
-      <GlassCard>
+      <GlassCard compact>
         {!isConnected ? (
           <Text style={[styles.emptyText, { color: t.mutedForeground }]}> 
             Connect to a server to manage provider credentials.
@@ -423,27 +415,40 @@ export function ProvidersSection({
             />
             {providers.map((provider) => {
               const draft = providerForms[provider.id] ?? "";
+              const expanded = expandedProviderId === provider.id;
+              const ready = provider.configured || provider.has_oauth;
               return (
                 <View key={provider.id} style={[styles.subsection, { borderColor: t.border }]}> 
-                  <View style={styles.subsectionHeader}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ expanded }}
+                    onPress={() =>
+                      setExpandedProviderId((current) =>
+                        current === provider.id ? null : provider.id,
+                      )
+                    }
+                    style={styles.subsectionHeader}
+                  >
                     <View style={styles.rowContent}>
                       <Text style={[styles.rowTitle, { color: t.foreground }]}>{provider.name}</Text>
-                      <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>id: {provider.id}</Text>
                     </View>
-                    <View style={styles.pillRow}>
-                      <Pill
-                        label={provider.configured ? "API key" : "No key"}
-                        tone={provider.configured ? "success" : "neutral"}
-                      />
-                      {provider.supports_oauth ? (
-                        <Pill
-                          label={provider.has_oauth ? "OAuth" : "OAuth available"}
-                          tone={provider.has_oauth ? "info" : "warning"}
-                        />
-                      ) : null}
-                    </View>
-                  </View>
+                    <Text
+                      style={[
+                        styles.rowSubtitle,
+                        { color: ready ? t.success : t.mutedForeground },
+                      ]}
+                    >
+                      {ready ? "Ready" : "Not configured"}
+                    </Text>
+                    {expanded ? (
+                      <ChevronDown size={16} color={t.mutedForeground} />
+                    ) : (
+                      <ChevronRight size={16} color={t.mutedForeground} />
+                    )}
+                  </Pressable>
 
+                  {expanded ? (
+                    <>
                   <View
                     style={[
                       styles.inputWrap,
@@ -506,6 +511,8 @@ export function ProvidersSection({
                       </Pressable>
                     ) : null}
                   </View>
+                    </>
+                  ) : null}
                 </View>
               );
             })}
@@ -598,11 +605,7 @@ export function McpSection({
 
   return (
     <>
-      <SectionTitle
-        title="MCP"
-        subtitle="Connected model-context servers and tool exposure"
-      />
-      <GlassCard>
+      <GlassCard compact>
         {!isConnected ? (
           <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Connect to a server to inspect MCP servers.</Text>
         ) : loading ? (
@@ -707,11 +710,7 @@ export function SkillsSection({
 
   return (
     <>
-      <SectionTitle
-        title="Skills"
-        subtitle="Available global and project skills loaded by the server"
-      />
-      <GlassCard>
+      <GlassCard compact>
         {!isConnected ? (
           <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Connect to a server to inspect loaded skills.</Text>
         ) : loading ? (
@@ -847,11 +846,7 @@ export function PreviewSection({
 
   return (
     <>
-      <SectionTitle
-        title="Preview & Ports"
-        subtitle="Port forwarding behavior for web and desktop preview"
-      />
-      <GlassCard>
+      <GlassCard compact>
         {!isConnected ? (
           <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Connect to a server to manage preview settings.</Text>
         ) : loading ? (
@@ -1072,8 +1067,7 @@ export function AppearanceSection({
 
   return (
     <>
-      <SectionTitle title="Appearance" />
-      <GlassCard>
+      <GlassCard compact>
         <View style={styles.schemeRow}>
           {schemeOptions.map((opt) => {
             const Icon = opt.icon;
@@ -1135,8 +1129,7 @@ export function NotificationsSection({
 
   return (
     <>
-      <SectionTitle title="Notifications" />
-      <GlassCard>
+      <GlassCard compact>
         <View style={styles.row}>
           <Bell size={20} color={t.mutedForeground} strokeWidth={1.8} />
           <View style={styles.rowContent}>
@@ -1202,8 +1195,7 @@ export function AboutSection() {
 
   return (
     <>
-      <SectionTitle title="About" />
-      <GlassCard>
+      <GlassCard compact>
         <View style={styles.row}>
           <Cpu size={20} color={t.mutedForeground} strokeWidth={1.8} />
           <View style={styles.rowContent}>

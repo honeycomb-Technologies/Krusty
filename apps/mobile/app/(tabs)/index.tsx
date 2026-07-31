@@ -1072,7 +1072,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           style={[
             styles.renameCard,
             {
-              backgroundColor: t.card,
+              backgroundColor: t.background,
               borderColor: t.border,
             },
           ]}

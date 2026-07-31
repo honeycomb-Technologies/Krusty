@@ -38,30 +38,39 @@ export const RUN_LINE_CORNER_CLIMB = 35;
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 const SvgDefs = Defs as unknown as ComponentType<PropsWithChildren>;
 const normalizedPathLength = { pathLength: 1 };
+// Violet motion spectrum (no brass). Web adds a hue-rotate filter below so the
+// fallback SVG path matches the native violet beam.
 const RUN_LINE_TONAL_STOPS = {
   dark: [
-    ['0', '#75617e', 0.64],
-    ['0.14', '#9a82a5', 0.72],
-    ['0.28', '#9f9da1', 0.68],
-    ['0.42', '#b89a61', 0.74],
-    ['0.5', '#d4bd89', 0.78],
-    ['0.58', '#b89a61', 0.74],
-    ['0.72', '#9f9da1', 0.68],
-    ['0.86', '#9a82a5', 0.72],
-    ['1', '#75617e', 0.64],
+    ['0', '#4e3578', 0.64],
+    ['0.14', '#754ea8', 0.72],
+    ['0.28', '#885cc0', 0.70],
+    ['0.42', '#9d73ff', 0.76],
+    ['0.5', '#b79bff', 0.80],
+    ['0.58', '#9d73ff', 0.76],
+    ['0.72', '#885cc0', 0.70],
+    ['0.86', '#754ea8', 0.72],
+    ['1', '#4e3578', 0.64],
   ],
   light: [
-    ['0', '#66536f', 0.58],
-    ['0.14', '#75617e', 0.66],
-    ['0.28', '#6b6f77', 0.62],
-    ['0.42', '#806430', 0.68],
-    ['0.5', '#97773f', 0.72],
-    ['0.58', '#806430', 0.68],
-    ['0.72', '#6b6f77', 0.62],
-    ['0.86', '#75617e', 0.66],
-    ['1', '#66536f', 0.58],
+    ['0', '#5a3d86', 0.58],
+    ['0.14', '#6d4a9c', 0.66],
+    ['0.28', '#7b58b0', 0.64],
+    ['0.42', '#8b67c8', 0.70],
+    ['0.5', '#9d73ff', 0.74],
+    ['0.58', '#8b67c8', 0.70],
+    ['0.72', '#7b58b0', 0.64],
+    ['0.86', '#6d4a9c', 0.66],
+    ['1', '#5a3d86', 0.58],
   ],
 } as const;
+
+const WEB_RUN_LINE_FILTER =
+  Platform.OS === 'web'
+    ? ({
+        filter: 'sepia(1) saturate(5) hue-rotate(210deg) brightness(0.84)',
+      } as const)
+    : null;
 
 export interface ChatBarRunningLineProps {
   active: boolean;
@@ -214,12 +223,17 @@ function ChatBarRunningLineComponent({
   return (
     <View
       pointerEvents="none"
-      style={[styles.runLineTrack, { height: pathHeight }, style]}
+      style={[
+        styles.runLineTrack,
+        { height: pathHeight },
+        WEB_RUN_LINE_FILTER,
+        style,
+      ]}
     >
       <Svg width={safeWidth} height={pathHeight}>
         <SvgDefs>
           <SvgLinearGradient
-            id="mitsuroGraphiteBrassBeam"
+            id="mitsuroVioletBeam"
             x1={0}
             y1={0}
             x2={safeWidth}
@@ -252,7 +266,7 @@ function ChatBarRunningLineComponent({
           d={edgePath}
           {...dashPathLengthProps}
           fill="none"
-          stroke="url(#mitsuroGraphiteBrassBeam)"
+          stroke="url(#mitsuroVioletBeam)"
           filter="url(#mitsuroBeamSoftness)"
           strokeOpacity={0.78}
           strokeWidth={RUN_LINE_STROKE_WIDTH}

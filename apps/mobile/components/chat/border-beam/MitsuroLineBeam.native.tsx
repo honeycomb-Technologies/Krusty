@@ -61,7 +61,7 @@ export interface MitsuroLineBeamProps {
 }
 
 /**
- * The border-beam line renderer, trimmed to Mitsuro's graphite-brass palette.
+ * The border-beam line renderer, trimmed to Mitsuro's violet palette.
  * The rounded rectangle begins above the canvas so only the phone's lower edge
  * and corners are visible; the top edge can never flash through the composer.
  */
@@ -104,9 +104,9 @@ export function MitsuroLineBeam({
       }));
 
     return {
-      strokeBlobs: parsePalette(lineSpec.palettes.line.graphiteBrass[theme]),
-      innerBlobs: parsePalette(lineSpec.palettes.lineInner.graphiteBrass),
-      bloom: lineSpec.line.bloomGradients.graphiteBrass[
+      strokeBlobs: parsePalette(lineSpec.palettes.line.violet[theme]),
+      innerBlobs: parsePalette(lineSpec.palettes.lineInner.violet),
+      bloom: lineSpec.line.bloomGradients.violet[
         theme
       ] as BloomGradientDefinition[],
       whiteHighlight: lineSpec.line.whiteHighlight[theme],
@@ -145,7 +145,6 @@ export function MitsuroLineBeam({
     const beamX = values.x * width;
     const blobs: number[] = [];
     const highlight = staticData.whiteHighlight;
-    const highlightColor = 'onBlack' in highlight && highlight.onBlack ? 0 : 1;
 
     blobs.push(
       ...stopsBlob(
@@ -154,9 +153,9 @@ export function MitsuroLineBeam({
         beamX,
         height + highlight.yOffset,
         highlight.stops.map(([position, alpha]) => ({
-          r: highlightColor * 255,
-          g: highlightColor * 255,
-          b: highlightColor * 255,
+          r: highlight.color[0],
+          g: highlight.color[1],
+          b: highlight.color[2],
           a: alpha,
           pos: position / 100,
         })),

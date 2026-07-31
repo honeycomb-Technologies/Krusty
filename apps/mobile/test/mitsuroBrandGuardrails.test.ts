@@ -73,6 +73,9 @@ Deno.test("splash is a vector six-side simultaneous trace", async () => {
   const traceLayer = shapeLayers.find(
     (layer: { nm?: string }) => layer.nm === "Six sides trace together",
   );
+  const cellWell = shapeLayers.find(
+    (layer: { nm?: string }) => layer.nm === "Cell well",
+  );
   const sideGroups = traceLayer?.shapes ?? [];
   const paths = sideGroups.flatMap(
     (group: { it?: Array<{ ty: string }> }) =>
@@ -90,6 +93,19 @@ Deno.test("splash is a vector six-side simultaneous trace", async () => {
     trims.every((trim: { e?: { a?: number } }) => trim.e?.a === 1),
     "every cell side must animate its trim path",
   );
+  const sourceText = JSON.stringify(animation);
+  assert(
+    !sourceText.includes("0.7216,0.6039,0.3804"),
+    "splash trace must not retain the old brass color",
+  );
+  assert(
+    sourceText.includes("0.6157,0.451,1"),
+    "native splash trace must retain the approved violet fallback",
+  );
+  assert(
+    cellWell?.ks?.o?.a === 0 && cellWell.ks.o.k === 0,
+    "splash center must stay transparent instead of brightening after the trace",
+  );
 });
 
 Deno.test("legacy mascot components are no longer app entry points", async () => {
@@ -106,7 +122,7 @@ Deno.test("legacy mascot components are no longer app entry points", async () =>
   assert(!joined.includes("KrustyLogo"), "empty states must use the Mitsuro logo");
 });
 
-Deno.test("shared product accents use Graphite Brass", async () => {
+Deno.test("shared product accents keep graphite foundation with violet motion", async () => {
   const tokens = await source("../../../packages/ui/src/tokens.ts");
   const beam = await source("../components/chat/border-beam/line-spec.json");
   const webLine = await source("../components/chat/ChatBarRunningLine.tsx");
@@ -117,11 +133,13 @@ Deno.test("shared product accents use Graphite Brass", async () => {
   assert(tokens.includes("#9a82a5"), "Pulse violet must remain the thinking accent");
   assert(!tokens.includes("#ff6b35"), "legacy orange must not return to shared tokens");
   assert(!tokens.includes("#7f8fa3"), "blue-gray must not return as shared app chrome");
-  assert(beam.includes("184, 154, 97"), "running beam must lead with restrained brass");
+  assert(beam.includes('"violet"'), "running beam must use the violet palette");
+  assert(beam.includes("117, 78, 168"), "running beam must retain its deep violet lead");
+  assert(!beam.includes("184, 154, 97"), "running beam must not retain the old brass lead");
   assert(!beam.includes("255, 107, 53"), "running beam must not retain Krusty orange");
   assert(!beam.includes("127, 143, 163"), "running beam must not retain steel-blue chrome");
-  assert(webLine.includes("#75617e"), "web running line must include mineral violet");
-  assert(webLine.includes("#b89a61"), "web running line must include restrained brass");
+  assert(webLine.includes("hue-rotate(210deg)"), "web running line must retain its violet hue");
+  assert(!webLine.includes("#b89a61"), "web running line must not reintroduce brass");
   assert(!webLine.includes("#e17a30"), "web running line must not retain rust orange");
 });
 

@@ -18,11 +18,55 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-Deno.test('Mitsuro line palette keeps brass as its lead color', () => {
-  const lead = parseCssColor(lineSpec.palettes.line.graphiteBrass.dark[0].color);
-  assert(Math.round(lead.r * 255) === 184, 'lead red channel should be brass 184');
-  assert(Math.round(lead.g * 255) === 154, 'lead green channel should be brass 154');
-  assert(Math.round(lead.b * 255) === 97, 'lead blue channel should be brass 97');
+Deno.test('Mitsuro line palette stays within the violet spectrum', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    for (const entry of lineSpec.palettes.line.violet[theme]) {
+      const color = parseCssColor(entry.color);
+      assert(
+        color.b > color.g && color.r > color.g,
+        `${theme} beam color ${entry.color} should remain violet`,
+      );
+    }
+
+    for (const gradient of lineSpec.line.bloomGradients.violet[theme]) {
+      for (const stop of gradient.stops) {
+        if (stop.r === stop.g && stop.g === stop.b) continue;
+        assert(
+          stop.b > stop.g && stop.r > stop.g,
+          `${theme} bloom color rgb(${stop.r}, ${stop.g}, ${stop.b}) should remain violet`,
+        );
+      }
+    }
+  }
+
+  const highlight = lineSpec.line.whiteHighlight.dark.color;
+  assert(
+    highlight[2] > highlight[1] && highlight[0] > highlight[1],
+    'dark beam highlight should be explicitly violet rather than white',
+  );
+});
+
+Deno.test('web beam uses the violet SVG fallback path', async () => {
+  const source = await Deno.readTextFile(
+    new URL('../components/chat/ChatBarRunningLine.tsx', import.meta.url),
+  );
+
+  assert(
+    source.includes('mitsuroVioletBeam'),
+    'web beam should use the violet gradient id',
+  );
+  assert(
+    source.includes('hue-rotate(210deg)'),
+    'web beam should retain the violet hue-rotate filter',
+  );
+  assert(
+    !source.includes('#b89a61') && !source.toLowerCase().includes('gold'),
+    'web beam should not reintroduce brass/gold stops',
+  );
+  assert(
+    !source.includes("import { BorderBeam } from 'border-beam'"),
+    'web beam should stay on the in-tree SVG path without border-beam',
+  );
 });
 
 Deno.test('line beam is fully visible and centered at the midpoint', () => {

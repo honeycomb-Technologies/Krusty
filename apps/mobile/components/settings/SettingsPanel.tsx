@@ -1,22 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, ScrollView } from "react-native";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import {
 	Bell,
 	BellOff,
 	BellRing,
+	ChevronDown,
+	ChevronRight,
 	Monitor,
 	Moon,
 	Sun,
 } from "lucide-react-native";
 
 import type {
-	McpServerResponse,
-	OAuthStartResponse,
 	PortEntry,
 	PreviewSettings,
 	PreviewSettingsPatch,
 	ProviderStatus,
-	SkillInfo,
 } from "@krusty/api";
 import type { ColorScheme } from "@krusty/ui";
 
@@ -30,12 +29,10 @@ import {
 	AppearanceSection,
 	ConnectionSection,
 	DiagnosticsSection,
-	McpSection,
 	NotificationsSection,
 	PreviewSection,
 	ProvidersSection,
 	SettingsHeader,
-	SkillsSection,
 } from "./sections";
 import {
 	type ActiveOAuthFlow,
@@ -53,6 +50,55 @@ interface SettingsPanelProps {
 	active?: boolean;
 	onClose?: () => void;
 	showHeader?: boolean;
+}
+
+function SettingsDisclosure({
+	title,
+	summary,
+	expanded,
+	onPress,
+	children,
+}: {
+	title: string;
+	summary?: string;
+	expanded: boolean;
+	onPress: () => void;
+	children: ReactNode;
+}) {
+	const { theme } = useThemeContext();
+	const t = theme.colors;
+	return (
+		<View style={[styles.disclosure, { borderColor: t.border }]}>
+			<Pressable
+				accessibilityRole="button"
+				accessibilityState={{ expanded }}
+				onPress={onPress}
+				style={styles.disclosureHeader}
+			>
+				<Text style={[styles.disclosureTitle, { color: t.foreground }]}>
+					{title}
+				</Text>
+				{summary ? (
+					<Text
+						numberOfLines={1}
+						style={[styles.disclosureSummary, { color: t.mutedForeground }]}
+					>
+						{summary}
+					</Text>
+				) : null}
+				{expanded ? (
+					<ChevronDown size={17} color={t.mutedForeground} />
+				) : (
+					<ChevronRight size={17} color={t.mutedForeground} />
+				)}
+			</Pressable>
+			{expanded ? (
+				<View style={[styles.disclosureBody, { borderTopColor: t.border }]}>
+					{children}
+				</View>
+			) : null}
+		</View>
+	);
 }
 
 export function SettingsPanel({
@@ -94,16 +140,6 @@ export function SettingsPanel({
 		useState<ActiveOAuthFlow | null>(null);
 	const [oauthCode, setOauthCode] = useState("");
 
-	const [mcpServers, setMcpServers] = useState<McpServerResponse[]>([]);
-	const [mcpLoading, setMcpLoading] = useState(false);
-	const [mcpBusyKey, setMcpBusyKey] = useState<string | null>(null);
-	const [mcpMessage, setMcpMessage] = useState<string | null>(null);
-
-	const [skills, setSkills] = useState<SkillInfo[]>([]);
-	const [skillsLoading, setSkillsLoading] = useState(false);
-	const [skillsMessage, setSkillsMessage] = useState<string | null>(null);
-	const [skillPageStart, setSkillPageStart] = useState(0);
-
 	const [previewSettings, setPreviewSettings] =
 		useState<PreviewSettings | null>(null);
 	const [previewPorts, setPreviewPorts] = useState<PortEntry[]>([]);
@@ -114,6 +150,7 @@ export function SettingsPanel({
 	const [previewLoading, setPreviewLoading] = useState(false);
 	const [previewBusyKey, setPreviewBusyKey] = useState<string | null>(null);
 	const [previewMessage, setPreviewMessage] = useState<string | null>(null);
+	const [openSection, setOpenSection] = useState<string | null>("connection");
 
 	const schemeOptions: SchemeOption[] = useMemo(
 		() => [
@@ -153,42 +190,6 @@ export function SettingsPanel({
 		}
 	}, [client]);
 
-	const loadMcpServers = useCallback(async () => {
-		if (!client) {
-			setMcpServers([]);
-			return;
-		}
-
-		setMcpLoading(true);
-		try {
-			const nextServers = await client.getMcpServers();
-			setMcpServers(nextServers);
-			setMcpMessage(null);
-		} catch (err) {
-			setMcpMessage(toErrorMessage(err, "Failed to load MCP servers."));
-		} finally {
-			setMcpLoading(false);
-		}
-	}, [client]);
-
-	const loadSkills = useCallback(async () => {
-		if (!client) {
-			setSkills([]);
-			return;
-		}
-
-		setSkillsLoading(true);
-		try {
-			const nextSkills = await client.getSkills();
-			setSkills(nextSkills);
-			setSkillsMessage(null);
-		} catch (err) {
-			setSkillsMessage(toErrorMessage(err, "Failed to load skills."));
-		} finally {
-			setSkillsLoading(false);
-		}
-	}, [client]);
-
 	const loadPreview = useCallback(async () => {
 		if (!client) {
 			setPreviewSettings(null);
@@ -219,17 +220,13 @@ export function SettingsPanel({
 		if (!client || !isConnected) return;
 		await Promise.all([
 			loadProviders(),
-			loadMcpServers(),
-			loadSkills(),
 			loadPreview(),
 		]);
 	}, [
 		client,
 		isConnected,
-		loadMcpServers,
 		loadPreview,
 		loadProviders,
-		loadSkills,
 	]);
 
 	useEffect(() => {
@@ -417,46 +414,6 @@ export function SettingsPanel({
 		[activeOAuthFlow?.provider, client, loadProviders],
 	);
 
-	const handleReloadMcp = useCallback(async () => {
-		if (!client) return;
-
-		setMcpBusyKey("reload");
-		try {
-			const nextServers = await client.reloadMcpConfig();
-			setMcpServers(nextServers);
-			setMcpMessage(null);
-		} catch (err) {
-			setMcpMessage(toErrorMessage(err, "Failed to reload MCP configuration."));
-		} finally {
-			setMcpBusyKey(null);
-		}
-	}, [client]);
-
-	const handleToggleMcp = useCallback(
-		async (server: McpServerResponse) => {
-			if (!client) return;
-
-			setMcpBusyKey(server.name);
-			try {
-				const updated = server.connected
-					? await client.disconnectMcpServer(server.name)
-					: await client.connectMcpServer(server.name);
-				setMcpServers((current) =>
-					current.map((entry) =>
-						entry.name === updated.name ? updated : entry,
-					),
-				);
-			} catch (err) {
-				setMcpMessage(
-					toErrorMessage(err, `Failed to update MCP server ${server.name}.`),
-				);
-			} finally {
-				setMcpBusyKey(null);
-			}
-		},
-		[client],
-	);
-
 	const handleUpdatePreviewToggle = useCallback(
 		async (patch: PreviewSettingsPatch) => {
 			if (!client || !previewSettings) return;
@@ -554,6 +511,14 @@ export function SettingsPanel({
 		[client, loadPreview],
 	);
 
+	const providersReady = providers.filter(
+		(provider) => provider.configured || provider.has_oauth,
+	).length;
+	const toggleDisclosure = (section: string) => {
+		void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+		setOpenSection((current) => (current === section ? null : section));
+	};
+
 	return (
 		<ScrollView
 			contentContainerStyle={styles.content}
@@ -562,107 +527,136 @@ export function SettingsPanel({
 		>
 			{showHeader ? <SettingsHeader onClose={onClose} /> : null}
 
-			<ConnectionSection
-				isConfigured={isConfigured}
-				isConnected={isConnected}
-				status={status}
-				serverUrl={serverUrl}
-				connectError={connectError}
-				inputUrl={inputUrl}
-				inputToken={inputToken}
-				isConnecting={isConnecting}
-				onInputUrlChange={setInputUrl}
-				onInputTokenChange={setInputToken}
-				onConnect={() => void handleConnect()}
-				onReconnect={() => void reconnect()}
-				onDisconnect={handleDisconnect}
-			/>
+			<SettingsDisclosure
+				title="Connection"
+				summary={isConnected ? "Connected" : "Disconnected"}
+				expanded={openSection === "connection"}
+				onPress={() => toggleDisclosure("connection")}
+			>
+				<ConnectionSection
+					isConfigured={isConfigured}
+					isConnected={isConnected}
+					status={status}
+					serverUrl={serverUrl}
+					connectError={connectError}
+					inputUrl={inputUrl}
+					inputToken={inputToken}
+					isConnecting={isConnecting}
+					onInputUrlChange={setInputUrl}
+					onInputTokenChange={setInputToken}
+					onConnect={() => void handleConnect()}
+					onReconnect={() => void reconnect()}
+					onDisconnect={handleDisconnect}
+				/>
+			</SettingsDisclosure>
 
-			<ProvidersSection
-				isConnected={isConnected}
-				providersLoading={providersLoading}
-				providers={providers}
-				providerForms={providerForms}
-				providerBusyKey={providerBusyKey}
-				providerMessage={providerMessage}
-				activeOAuthFlow={activeOAuthFlow}
-				oauthCode={oauthCode}
-				onProviderFormChange={updateProviderForm}
-				onSaveCredential={(providerId) => void handleSaveCredential(providerId)}
-				onDeleteCredential={(providerId) =>
-					void handleDeleteCredential(providerId)
-				}
-				onStartOAuth={(providerId) => void handleStartOAuth(providerId)}
-				onExchangeOAuthCode={() => void handleExchangeOAuthCode()}
-				onRevokeOAuth={(providerId) => void handleRevokeOAuth(providerId)}
-				onOauthCodeChange={setOauthCode}
-			/>
+			<SettingsDisclosure
+				title="Providers"
+				summary={`${providersReady} ready`}
+				expanded={openSection === "providers"}
+				onPress={() => toggleDisclosure("providers")}
+			>
+				<ProvidersSection
+					isConnected={isConnected}
+					providersLoading={providersLoading}
+					providers={providers}
+					providerForms={providerForms}
+					providerBusyKey={providerBusyKey}
+					providerMessage={providerMessage}
+					activeOAuthFlow={activeOAuthFlow}
+					oauthCode={oauthCode}
+					onProviderFormChange={updateProviderForm}
+					onSaveCredential={(providerId) => void handleSaveCredential(providerId)}
+					onDeleteCredential={(providerId) =>
+						void handleDeleteCredential(providerId)
+					}
+					onStartOAuth={(providerId) => void handleStartOAuth(providerId)}
+					onExchangeOAuthCode={() => void handleExchangeOAuthCode()}
+					onRevokeOAuth={(providerId) => void handleRevokeOAuth(providerId)}
+					onOauthCodeChange={setOauthCode}
+				/>
+			</SettingsDisclosure>
 
-			<McpSection
-				isConnected={isConnected}
-				loading={mcpLoading}
-				mcpServers={mcpServers}
-				busyKey={mcpBusyKey}
-				message={mcpMessage}
-				onReload={() => void handleReloadMcp()}
-				onToggle={(server) => void handleToggleMcp(server)}
-			/>
+			<SettingsDisclosure
+				title="Preview & ports"
+				summary={previewSettings?.enabled ? "On" : "Off"}
+				expanded={openSection === "preview"}
+				onPress={() => toggleDisclosure("preview")}
+			>
+				<PreviewSection
+					isConnected={isConnected}
+					loading={previewLoading}
+					previewSettings={previewSettings}
+					previewPorts={previewPorts}
+					previewDraft={previewDraft}
+					busyKey={previewBusyKey}
+					message={previewMessage}
+					onToggle={(patch) => void handleUpdatePreviewToggle(patch)}
+					onSaveNumbers={() => void handleSavePreviewNumbers()}
+					onDraftChange={setPreviewDraft}
+					onRefresh={() => void loadPreview()}
+					onTogglePinnedPort={(port) => void handleTogglePinnedPort(port)}
+					onHidePort={(port) => void handleHidePort(port)}
+				/>
+			</SettingsDisclosure>
 
-			<SkillsSection
-				isConnected={isConnected}
-				loading={skillsLoading}
-				skills={skills}
-				message={skillsMessage}
-				pageStart={skillPageStart}
-				onPageStartChange={setSkillPageStart}
-			/>
+			<SettingsDisclosure
+				title="Appearance"
+				summary={colorScheme}
+				expanded={openSection === "appearance"}
+				onPress={() => toggleDisclosure("appearance")}
+			>
+				<AppearanceSection
+					colorScheme={colorScheme as ColorScheme}
+					schemeOptions={schemeOptions}
+					onSelect={setColorScheme}
+				/>
+			</SettingsDisclosure>
 
-			<PreviewSection
-				isConnected={isConnected}
-				loading={previewLoading}
-				previewSettings={previewSettings}
-				previewPorts={previewPorts}
-				previewDraft={previewDraft}
-				busyKey={previewBusyKey}
-				message={previewMessage}
-				onToggle={(patch) => void handleUpdatePreviewToggle(patch)}
-				onSaveNumbers={() => void handleSavePreviewNumbers()}
-				onDraftChange={setPreviewDraft}
-				onRefresh={() => void loadPreview()}
-				onTogglePinnedPort={(port) => void handleTogglePinnedPort(port)}
-				onHidePort={(port) => void handleHidePort(port)}
-			/>
+			<SettingsDisclosure
+				title="Notifications"
+				summary={notificationLevel}
+				expanded={openSection === "notifications"}
+				onPress={() => toggleDisclosure("notifications")}
+			>
+				<NotificationsSection
+					notificationLevel={notificationLevel}
+					registrationState={registrationState}
+					lastRegistrationError={lastRegistrationError}
+					pendingActionCount={pendingActionCount}
+					notifOptions={notifOptions}
+					onSelect={(level) => void changeNotificationLevel(level)}
+				/>
+			</SettingsDisclosure>
 
-			<AppearanceSection
-				colorScheme={colorScheme as ColorScheme}
-				schemeOptions={schemeOptions}
-				onSelect={setColorScheme}
-			/>
+			<SettingsDisclosure
+				title="Diagnostics"
+				summary={diagnostics.mode === "stress" ? "Recording" : "Idle"}
+				expanded={openSection === "diagnostics"}
+				onPress={() => toggleDisclosure("diagnostics")}
+			>
+				<DiagnosticsSection
+					mode={diagnostics.mode}
+					runId={diagnostics.runId}
+					eventCount={diagnostics.eventCount}
+					nativePayloadCount={diagnostics.nativePayloadCount}
+					approximateBytes={diagnostics.approximateBytes}
+					uploadState={diagnostics.uploadState}
+					completionPending={diagnostics.completionPending}
+					isConnected={isConnected}
+					onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
+					onStopAndUpload={() => void diagnostics.stopStressRun()}
+					onUpload={() => void diagnostics.flush(false)}
+				/>
+			</SettingsDisclosure>
 
-			<DiagnosticsSection
-				mode={diagnostics.mode}
-				runId={diagnostics.runId}
-				eventCount={diagnostics.eventCount}
-				nativePayloadCount={diagnostics.nativePayloadCount}
-				approximateBytes={diagnostics.approximateBytes}
-				uploadState={diagnostics.uploadState}
-				completionPending={diagnostics.completionPending}
-				isConnected={isConnected}
-				onStart={() => diagnostics.startStressRun(10 * 60 * 1000)}
-				onStopAndUpload={() => void diagnostics.stopStressRun()}
-				onUpload={() => void diagnostics.flush(false)}
-			/>
-
-			<NotificationsSection
-				notificationLevel={notificationLevel}
-				registrationState={registrationState}
-				lastRegistrationError={lastRegistrationError}
-				pendingActionCount={pendingActionCount}
-				notifOptions={notifOptions}
-				onSelect={(level) => void changeNotificationLevel(level)}
-			/>
-
-			<AboutSection />
+			<SettingsDisclosure
+				title="About"
+				expanded={openSection === "about"}
+				onPress={() => toggleDisclosure("about")}
+			>
+				<AboutSection />
+			</SettingsDisclosure>
 		</ScrollView>
 	);
 }

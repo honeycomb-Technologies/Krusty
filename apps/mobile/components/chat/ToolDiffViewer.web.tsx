@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
-import { parsePatchFiles, registerCustomTheme } from "@pierre/diffs";
+import {
+  parsePatchFiles,
+  registerCustomLanguage,
+  registerCustomTheme,
+} from "@pierre/diffs";
+import rustLanguage from "@shikijs/langs/rust";
 import { useThemeContext } from "../../hooks/useTheme";
 import {
   KRUSTY_DIFF_THEME_NAMES,
@@ -38,6 +43,10 @@ const KRUSTY_DIFF_CSS = `
 
 registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.dark, async () => krustyDarkDiffTheme);
 registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.light, async () => krustyLightDiffTheme);
+// Metro cannot safely bundle Pierre's runtime-generated absolute Rust grammar
+// import when node_modules is shared by a worktree. Registering the grammar as
+// a static module keeps the web diff viewer deterministic.
+registerCustomLanguage("rust", async () => ({ default: rustLanguage }), ["rs"]);
 
 export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
   // rows/showHeader/maxLines are accepted for API parity with native peek mode.

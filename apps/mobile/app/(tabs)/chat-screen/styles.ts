@@ -273,7 +273,7 @@ export const styles = StyleSheet.create({
   },
   renameBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: "rgba(0,0,0,0.74)",
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 24,

@@ -1050,6 +1050,12 @@ function ChatBarComponent(props: ChatBarProps) {
   }, [accordionOpen]);
 
   const canSend = !disabled && (isStreaming || text.trim().length > 0 || attachments.length > 0);
+  const beamActive =
+    isStreaming ||
+    inputFocused ||
+    expandedEditorOpen ||
+    text.trim().length > 0 ||
+    attachments.length > 0;
   const kActive = accordionOpen || accordionVisible;
   const kColor = kActive ? t.thinking : t.mutedForeground;
   const kBorder = kActive ? t.thinking + '40' : borderColor;
@@ -1378,9 +1384,8 @@ function ChatBarComponent(props: ChatBarProps) {
               isStreaming={isStreaming}
               isRecording={isRecording}
               canSend={canSend}
+              foreground={t.foreground}
               mutedForeground={t.mutedForeground}
-              userMessage={t.userMessage}
-              error={t.error}
               onPress={handleActionBtn}
               onLongPress={toggleRecording}
             />
@@ -1501,7 +1506,7 @@ function ChatBarComponent(props: ChatBarProps) {
         thinkingLabel={thinkingLabel}
       />
       <ChatBarRunningLine
-        active={isStreaming}
+        active={beamActive}
         width={bandWidth}
         cornerClimb={isDesktop ? 0 : RUN_LINE_CORNER_CLIMB}
         theme={theme.scheme}

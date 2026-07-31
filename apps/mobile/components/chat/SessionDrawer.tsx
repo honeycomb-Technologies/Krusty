@@ -491,15 +491,6 @@ export function SessionDrawer({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Close threads"
-        onPress={onClose}
-        style={styles.iconButton}
-      >
-        <ChevronDown size={22} color={t.mutedForeground} strokeWidth={1.8} />
-      </Pressable>
-
-      <Pressable
-        accessibilityRole="button"
         accessibilityLabel={`New ${activeMode} thread`}
         onPress={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -542,17 +533,6 @@ export function SessionDrawer({
       retainContent={false}
     >
       <View style={styles.content}>
-        <View style={styles.heading}>
-          <Text style={[styles.headingTitle, { color: t.foreground }]}>
-            {modeTitle(activeMode)}
-          </Text>
-          <Text style={[styles.headingDetail, { color: t.mutedForeground }]}>
-            {activeMode === "code"
-              ? "Projects ordered by recent work"
-              : "Most recent first"}
-          </Text>
-        </View>
-
         {activeMode === "chat" ? (
           chatSessions.length > 0 ? (
             <FlatList
@@ -767,21 +747,6 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     minHeight: 0,
-  },
-  heading: {
-    paddingHorizontal: 18,
-    paddingTop: 4,
-    paddingBottom: 12,
-  },
-  headingTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    letterSpacing: -0.25,
-  },
-  headingDetail: {
-    marginTop: 3,
-    fontSize: 12,
-    fontWeight: "500",
   },
   list: {
     flex: 1,
