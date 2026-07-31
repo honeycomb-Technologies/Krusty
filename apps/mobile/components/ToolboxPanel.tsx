@@ -11,9 +11,7 @@ import {
   Cable,
   FileCode2,
   Globe2,
-  MemoryStick,
   TerminalSquare,
-  Workflow,
   X,
   type LucideIcon,
 } from "lucide-react-native";
@@ -29,10 +27,7 @@ import { ToolboxChanges } from "./toolbox/ToolboxChanges";
 import { ToolboxConnections } from "./toolbox/ToolboxConnections";
 import { ReportsContent } from "./ReportsViewer";
 import { MakoScheduleView } from "./mako/MakoScheduleView";
-import { MakoRunsView } from "./mako/MakoRunsView";
-import { MakoMemoryView } from "./mako/MakoMemoryView";
 import { useMakoCurrent } from "./mako/hooks/useMakoCurrent";
-import { useMakoMemories } from "./mako/hooks/useMakoMemories";
 
 interface ToolTab {
   label: string;
@@ -51,8 +46,6 @@ const TOOL_TABS: Record<SessionType, ToolTab[]> = {
   ],
   mako: [
     { label: "Schedule", icon: CalendarClock },
-    { label: "Runs", icon: Workflow },
-    { label: "Memory", icon: MemoryStick },
   ],
 };
 
@@ -73,47 +66,25 @@ interface ToolboxPanelProps {
 }
 
 function MakoToolboxBody({
-  activeTab,
   visible,
-  workspaceDirectory,
   onOpenMakoRun,
   onOpenProject,
 }: {
-  activeTab: number;
   visible: boolean;
-  workspaceDirectory?: string | null;
   onOpenMakoRun?: (sessionId: string) => void;
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
 }) {
-  // Only fetch for the active toolbox tab. Hidden tabs should be lazy.
-  const current = useMakoCurrent(visible && (activeTab === 0 || activeTab === 1));
-  const memories = useMakoMemories(
-    visible && activeTab === 2,
-    workspaceDirectory,
-  );
+  const current = useMakoCurrent(visible);
   const openRun = (sessionId: string) => onOpenMakoRun?.(sessionId);
 
   return (
     <View style={styles.body}>
-      {visible && activeTab === 0 ? (
+      {visible ? (
         <View style={styles.tabContent}>
           <MakoScheduleView
             state={current}
             onSelectRun={openRun}
             onOpenProject={onOpenProject}
-          />
-        </View>
-      ) : null}
-      {visible && activeTab === 1 ? (
-        <View style={styles.tabContent}>
-          <MakoRunsView state={current} onSelectRun={openRun} />
-        </View>
-      ) : null}
-      {visible && activeTab === 2 ? (
-        <View style={styles.tabContent}>
-          <MakoMemoryView
-            workspaceDirectory={workspaceDirectory}
-            state={memories}
           />
         </View>
       ) : null}
@@ -139,6 +110,7 @@ export function ToolboxPanel({
   const mode = variant ?? (isDesktop ? "dock" : "overlay");
   const isDock = mode === "dock";
   const tabs = TOOL_TABS[sessionType];
+  const showTabRail = sessionType !== "mako";
 
   useEffect(() => {
     if (activeTab >= tabs.length) {
@@ -163,7 +135,7 @@ export function ToolboxPanel({
     return null;
   }
 
-  const tabRail = (
+  const tabRail = showTabRail ? (
     <View
       accessibilityRole="tablist"
       style={[
@@ -198,7 +170,7 @@ export function ToolboxPanel({
         );
       })}
     </View>
-  );
+  ) : null;
 
   const header = (
     <View style={[styles.header, { borderBottomColor: t.border }]}>
@@ -257,9 +229,7 @@ export function ToolboxPanel({
   } else {
     body = (
       <MakoToolboxBody
-        activeTab={activeTab}
         visible={visible}
-        workspaceDirectory={projectDirectory}
         onOpenMakoRun={onOpenMakoRun}
         onOpenProject={onOpenProject}
       />
@@ -290,7 +260,7 @@ export function ToolboxPanel({
     <AppBottomSheet
       visible={visible}
       onClose={handleClose}
-      footer={drawerDock}
+      footer={showTabRail ? drawerDock : undefined}
       accessibilityLabel={`${sessionType} toolbox`}
       testID="mobile-toolbox-sheet"
       // Code toolbox hosts browser/terminal: mount once, then keep warm.

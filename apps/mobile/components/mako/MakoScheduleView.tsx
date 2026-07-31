@@ -13,8 +13,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
-import { ListRowsSkeleton } from "../ui/Skeleton";
-import type { MakoCurrentRunSummary, MakoGlobalSchedule } from "@krusty/api";
+import type { MakoCurrentRunSummary } from "@krusty/api";
 import type { MakoCurrentState } from "./types";
 import {
   formatScheduleInputValue,
@@ -28,7 +27,7 @@ interface MakoScheduleViewProps {
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => Promise<void> | void;
 }
 
-type ScheduleMode = "month_day" | "week" | "month";
+type ScheduleMode = "month_day" | "week";
 
 interface ScheduledRunItem {
   run: MakoCurrentRunSummary;
@@ -78,34 +77,6 @@ function timeValue(value: string): string {
 
 function timeLabel(value: string): string {
   return new Date(value).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function recurrenceLabel(schedule: MakoGlobalSchedule): string {
-  const recurrence = schedule.recurrence;
-  switch (recurrence.kind) {
-    case "once":
-      return "One time";
-    case "daily":
-      return `Daily at ${recurrence.time}`;
-    case "weekdays":
-      return `Weekdays at ${recurrence.time}`;
-    case "weekly":
-      return `${recurrence.weekdays.join(", ")} at ${recurrence.time}`;
-    case "monthly":
-      return `Monthly on day ${recurrence.day} at ${recurrence.time}`;
-  }
-}
-
-function nextFireLabel(schedule: MakoGlobalSchedule): string {
-  if (!schedule.next_fire_at) {
-    return schedule.status === "paused" ? "Paused" : "No next wake";
-  }
-  return new Date(schedule.next_fire_at).toLocaleString([], {
-    month: "short",
-    day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
@@ -341,7 +312,6 @@ function ScheduleModeToggle({
   const items: Array<{ id: ScheduleMode; label: string }> = [
     { id: "month_day", label: "Month + day" },
     { id: "week", label: "Week" },
-    { id: "month", label: "Month" },
   ];
 
   return (
@@ -640,66 +610,6 @@ export function MakoScheduleView({
   const [detailWakeInput, setDetailWakeInput] = useState("");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [isSavingDetail, setIsSavingDetail] = useState(false);
-  const [commitments, setCommitments] = useState<MakoGlobalSchedule[]>([]);
-  const [commitmentsError, setCommitmentsError] = useState<string | null>(null);
-  const [isLoadingCommitments, setIsLoadingCommitments] = useState(true);
-  const [mutatingScheduleId, setMutatingScheduleId] = useState<string | null>(null);
-
-  const refreshCommitments = useCallback(async () => {
-    if (!client) {
-      setCommitments([]);
-      setIsLoadingCommitments(false);
-      return;
-    }
-    setCommitmentsError(null);
-    try {
-      setCommitments(await client.listMakoSchedules({ limit: 200 }));
-    } catch (error) {
-      setCommitmentsError(
-        error instanceof Error ? error.message : "Failed to load Hive schedules.",
-      );
-    } finally {
-      setIsLoadingCommitments(false);
-    }
-  }, [client]);
-
-  useEffect(() => {
-    void refreshCommitments();
-  }, [refreshCommitments]);
-
-  const handleScheduleStatusToggle = useCallback(
-    async (schedule: MakoGlobalSchedule) => {
-      if (!client || !["enabled", "paused"].includes(schedule.status)) {
-        return;
-      }
-      setMutatingScheduleId(schedule.id);
-      setCommitmentsError(null);
-      try {
-        if (schedule.status === "enabled") {
-          await client.pauseMakoSchedule(
-            schedule.controller_session_id,
-            schedule.id,
-            schedule.revision,
-          );
-        } else {
-          await client.resumeMakoSchedule(
-            schedule.controller_session_id,
-            schedule.id,
-            schedule.revision,
-          );
-        }
-        await refreshCommitments();
-      } catch (error) {
-        setCommitmentsError(
-          error instanceof Error ? error.message : "Failed to update this schedule.",
-        );
-      } finally {
-        setMutatingScheduleId(null);
-      }
-    },
-    [client, refreshCommitments],
-  );
-
   useEffect(() => {
     if (!detailTarget) {
       setDetailTitle("");
@@ -737,12 +647,6 @@ export function MakoScheduleView({
     () => packWeekLanes(buildWeekLanes(scheduledItems, weekStartDate)),
     [scheduledItems, weekStartDate],
   );
-
-  const selectedDayCount = selectedItems.length;
-  const nextWake =
-    commitments.find(
-      (schedule) => schedule.status === "enabled" && schedule.next_fire_at,
-    )?.next_fire_at ?? null;
 
   const openItemDetail = (item: ScheduledRunItem, dayCount = 1) => {
     const patternDays = seriesDayMap.get(item.seriesKey) ?? [item.scheduledAt.getDay()];
@@ -820,142 +724,17 @@ export function MakoScheduleView({
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={state.isRefreshing || isLoadingCommitments}
+            refreshing={state.isRefreshing}
             onRefresh={() => {
-              void Promise.all([state.refresh(), refreshCommitments()]);
+              void state.refresh();
             }}
             tintColor={t.userMessage}
           />
         }
       >
-        <Text style={[styles.description, { color: t.mutedForeground }]}>
-          What Hive is committed to, when it will wake, and whether each
-          commitment is active.
-        </Text>
-
-        <View
-          style={[
-            styles.sectionBlock,
-            { borderColor: t.border, backgroundColor: t.card },
-          ]}
-        >
-          <View style={styles.agendaHeader}>
-            <View>
-              <Text style={[styles.agendaTitle, { color: t.foreground }]}>
-                What&apos;s set
-              </Text>
-              <Text style={[styles.agendaSubtitle, { color: t.mutedForeground }]}>
-                Durable one-time and recurring commitments
-              </Text>
-            </View>
-          </View>
-
-          {commitmentsError ? (
-            <Text style={[styles.errorText, { color: t.error }]}>
-              {commitmentsError}
-            </Text>
-          ) : null}
-
-          {isLoadingCommitments && commitments.length === 0 ? (
-            <ListRowsSkeleton rows={4} />
-          ) : commitments.length === 0 ? (
-            <Text style={[styles.empty, { color: t.mutedForeground }]}>
-              Nothing is scheduled yet.
-            </Text>
-          ) : (
-            <View style={styles.agendaList}>
-              {commitments.map((schedule) => (
-                <View
-                  key={schedule.id}
-                  style={[styles.row, { borderColor: t.border }]}
-                >
-                  <View style={styles.rowCopy}>
-                    <Text
-                      style={[styles.rowTitle, { color: t.foreground }]}
-                      numberOfLines={1}
-                    >
-                      {schedule.title}
-                    </Text>
-                    <Text
-                      style={[styles.rowDetail, { color: t.mutedForeground }]}
-                      numberOfLines={2}
-                    >
-                      {schedule.summary || schedule.objective}
-                    </Text>
-                    <View style={styles.metaRow}>
-                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
-                        {recurrenceLabel(schedule)}
-                      </Text>
-                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
-                        {nextFireLabel(schedule)}
-                      </Text>
-                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
-                        {schedule.status}
-                      </Text>
-                    </View>
-                  </View>
-                  {schedule.status === "enabled" || schedule.status === "paused" ? (
-                    <Pressable
-                      disabled={mutatingScheduleId === schedule.id}
-                      onPress={() => {
-                        void handleScheduleStatusToggle(schedule);
-                      }}
-                    >
-                      <Text style={[styles.rowAction, { color: t.userMessage }]}>
-                        {mutatingScheduleId === schedule.id
-                          ? "Saving..."
-                          : schedule.status === "enabled"
-                            ? "Pause"
-                            : "Resume"}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              ))}
-            </View>
-          )}
-        </View>
-
-        <Text style={[styles.agendaSubtitle, { color: t.mutedForeground }]}>
-          Run wake timeline
-        </Text>
         <ScheduleModeToggle mode={mode} onChange={setMode} />
 
-        <View
-          style={[
-            styles.summaryStrip,
-            {
-              borderColor: t.border,
-            },
-          ]}
-        >
-          <View style={styles.summaryCell}>
-            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
-              Upcoming
-            </Text>
-            <Text style={[styles.summaryValue, { color: t.foreground }]}>
-              {commitments.length}
-            </Text>
-          </View>
-          <View style={[styles.summaryCell, styles.summaryDivider, { borderColor: t.border }]}>
-            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
-              Day plan
-            </Text>
-            <Text style={[styles.summaryValue, { color: t.foreground }]}>
-              {selectedDayCount}
-            </Text>
-          </View>
-          <View style={[styles.summaryCell, styles.summaryDivider, { borderColor: t.border }]}>
-            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
-              Next wake
-            </Text>
-            <Text style={[styles.summaryValue, { color: t.foreground }]}>
-              {nextWake ? timeLabel(nextWake) : "None"}
-            </Text>
-          </View>
-        </View>
-
-        <View style={[styles.sectionBlock, { borderColor: t.border, backgroundColor: t.card }]}>
+        <View style={styles.calendarSurface}>
           <View style={styles.monthHeader}>
             <Pressable
               onPress={() => {
@@ -1118,32 +897,8 @@ export function MakoScheduleView({
               </View>
             </View>
           )}
-        </View>
-
-        {mode === "month" ? (
-          <View style={[styles.monthFooter, { borderColor: t.border }]}>
-            <View style={styles.monthFooterCopy}>
-              <Text style={[styles.monthFooterTitle, { color: t.foreground }]}>
-                {dayLabel(selectedDate)}
-              </Text>
-              <Text style={[styles.monthFooterDetail, { color: t.mutedForeground }]}>
-                {selectedDayCount === 0
-                  ? "No scheduled work"
-                  : `${selectedDayCount} item${selectedDayCount === 1 ? "" : "s"} planned`}
-              </Text>
-            </View>
-            <Pressable
-              onPress={() => {
-                setMode("month_day");
-              }}
-            >
-              <Text style={[styles.monthFooterLink, { color: t.userMessage }]}>
-                View day
-              </Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={[styles.sectionBlock, { borderColor: t.border, backgroundColor: t.card }]}>
+          {mode === "month_day" ? (
+          <View style={styles.inlineAgenda}>
             <View style={styles.agendaHeader}>
               <View>
                 <Text style={[styles.agendaTitle, { color: t.foreground }]}>
@@ -1153,15 +908,6 @@ export function MakoScheduleView({
                   Daily agenda
                 </Text>
               </View>
-              <Pressable
-                onPress={() => {
-                  setMode("month");
-                }}
-              >
-                <Text style={[styles.monthFooterLink, { color: t.userMessage }]}>
-                  Full month
-                </Text>
-              </Pressable>
             </View>
 
             {selectedItems.length === 0 ? (
@@ -1183,7 +929,8 @@ export function MakoScheduleView({
               </View>
             )}
           </View>
-        )}
+        ) : null}
+        </View>
       </ScrollView>
 
       <ScheduleDetailSheet
@@ -1234,10 +981,6 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     gap: 14,
   },
-  description: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
   toggleRow: {
     flexDirection: "row",
     borderWidth: StyleSheet.hairlineWidth,
@@ -1256,33 +999,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
-  summaryStrip: {
-    flexDirection: "row",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    overflow: "hidden",
+  calendarSurface: {
+    paddingHorizontal: 2,
+    gap: 10,
   },
-  summaryCell: {
-    flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-  },
-  summaryDivider: {
-    borderLeftWidth: StyleSheet.hairlineWidth,
-  },
-  summaryLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  summaryValue: {
-    marginTop: 4,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  sectionBlock: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    padding: 10,
+  inlineAgenda: {
+    paddingTop: 8,
     gap: 10,
   },
   monthHeader: {
@@ -1335,31 +1057,6 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 3,
-  },
-  monthFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  monthFooterCopy: {
-    flex: 1,
-  },
-  monthFooterTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  monthFooterDetail: {
-    marginTop: 2,
-    fontSize: 12,
-  },
-  monthFooterLink: {
-    fontSize: 12,
-    fontWeight: "600",
   },
   weekBlock: {
     gap: 10,

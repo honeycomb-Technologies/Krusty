@@ -6,6 +6,7 @@ import { MitsuroWordmark } from "./mitsuro-wordmark";
 
 interface MitsuroLogoProps {
   color?: string;
+  markColor?: string;
   markFill?: string;
   markSize?: number;
   wordmarkWidth?: number;
@@ -15,7 +16,8 @@ interface MitsuroLogoProps {
 
 export function MitsuroLogo({
   color = "#e8e5ea",
-  markFill = "rgba(232, 229, 234, 0.055)",
+  markColor = "#9d73ff",
+  markFill = "rgba(157, 115, 255, 0.09)",
   markSize = 84,
   wordmarkWidth = 216,
   playKey,
@@ -32,7 +34,7 @@ export function MitsuroLogo({
     >
       <MitsuroTraceMark
         size={markSize}
-        color={color}
+        color={markColor}
         fill={markFill}
         playKey={playKey}
       />

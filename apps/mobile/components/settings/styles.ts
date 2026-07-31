@@ -2,9 +2,9 @@ import { StyleSheet } from "react-native";
 
 export const styles = StyleSheet.create({
   content: {
-    padding: 20,
-    paddingBottom: 48,
-    gap: 14,
+    paddingHorizontal: 14,
+    paddingBottom: 32,
+    gap: 8,
   },
   header: {
     flexDirection: "row",
@@ -16,7 +16,7 @@ export const styles = StyleSheet.create({
     marginBottom: 4,
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "700",
     letterSpacing: -0.5,
   },
@@ -29,6 +29,32 @@ export const styles = StyleSheet.create({
   sectionHeader: {
     gap: 2,
     marginTop: 4,
+  },
+  disclosure: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  disclosureHeader: {
+    minHeight: 54,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+  },
+  disclosureTitle: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  disclosureSummary: {
+    maxWidth: "42%",
+    fontSize: 12,
+    textTransform: "capitalize",
+  },
+  disclosureBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    padding: 10,
   },
   sectionTitle: {
     fontSize: 14,
@@ -48,12 +74,12 @@ export const styles = StyleSheet.create({
     gap: 2,
   },
   rowTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "600",
   },
   rowSubtitle: {
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 11,
+    lineHeight: 16,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
@@ -79,7 +105,7 @@ export const styles = StyleSheet.create({
   inputWrap: {
     borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 12,
+    padding: 10,
   },
   inputLabel: {
     fontSize: 11,
@@ -87,7 +113,7 @@ export const styles = StyleSheet.create({
     marginBottom: 6,
   },
   input: {
-    fontSize: 16,
+    fontSize: 14,
     padding: 0,
   },
   inlineInput: {
@@ -149,13 +175,15 @@ export const styles = StyleSheet.create({
     fontSize: 14,
   },
   stack: {
-    gap: 12,
+    gap: 0,
   },
   subsection: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 10,
-    padding: 12,
-    gap: 10,
+    borderWidth: 0,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderRadius: 0,
+    paddingHorizontal: 4,
+    paddingVertical: 12,
+    gap: 8,
   },
   subsectionHeader: {
     flexDirection: "row",
@@ -173,8 +201,8 @@ export const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   pill: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderRadius: 8,
   },
   pillText: {
@@ -187,11 +215,11 @@ export const styles = StyleSheet.create({
     gap: 8,
   },
   smallActionBtn: {
-    minHeight: 36,
+    minHeight: 32,
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,

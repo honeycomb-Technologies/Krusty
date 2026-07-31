@@ -63,10 +63,10 @@ function ActiveLineBeam({
       borderRadius={borderRadius}
       theme={theme}
       duration={RUN_LINE_DURATION_SECONDS}
-      strength={theme === 'dark' ? 0.92 : 0.78}
-      brightness={theme === 'dark' ? 1.18 : 1.04}
-      saturation={theme === 'dark' ? 1.26 : 1.45}
-      hueRange={8}
+      strength={theme === 'dark' ? 0.78 : 0.66}
+      brightness={theme === 'dark' ? 1.08 : 1}
+      saturation={theme === 'dark' ? 1.18 : 1.28}
+      hueRange={5}
       clock={reduceMotion ? frozenClock : clock}
       fade={fade}
     />
