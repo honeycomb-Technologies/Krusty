@@ -17,7 +17,7 @@ use crate::ai::client::AiClient;
 use crate::tools::registry::{DelegationPolicy, ToolRegistry};
 
 use self::config::BuilderConfig;
-pub(crate) use self::config::{AgentConfig, SingleChildConfig, SingleExplorerConfig};
+pub(crate) use self::config::{AgentConfig, SingleChildConfig};
 pub(crate) use self::runtime::execute_agent_loop;
 
 use super::build_context::SharedBuildContext;

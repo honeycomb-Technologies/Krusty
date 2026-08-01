@@ -286,9 +286,6 @@ End with a short structured summary: what you did, key paths, outcome, and block
     }
 }
 
-/// Compatibility name for callers in the legacy explorer pool.
-pub(crate) type SingleExplorerConfig = SingleChildConfig;
-
 /// Generate write-capable child system prompt with context injection.
 fn builder_system_prompt(working_dir: &std::path::Path) -> String {
     format!(
