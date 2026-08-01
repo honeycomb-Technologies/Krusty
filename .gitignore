@@ -58,6 +58,7 @@ apps/**/legacy-*/
 *.xcresult/
 *.memgraph
 *.trace
+/docs/plans/_orch-verify-matrix.txt
 
 # Secrets, credentials, and keys — never commit these
 .env
