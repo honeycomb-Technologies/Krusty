@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::agent::agent_types::{PlanConfig, VerifyConfig};
 use crate::agent::context::build_subagent_project_context;
-use crate::agent::subagent::{execute_single_agent, execute_single_explorer, SubAgentTask};
+use crate::agent::subagent::{
+    execute_single_agent, execute_single_child, AgentCapability, SubAgentTask,
+};
 use crate::agent::DelegatedRunStage;
 use crate::storage::{DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput};
 use crate::tools::registry::DelegationPolicy;
@@ -14,20 +16,20 @@ use crate::tools::{ToolContext, ToolResult};
 use super::{
     background_started_result, build_parent_context_brief, build_resume_seed,
     build_single_agent_artifact, build_single_agent_warnings, concise_target_label,
-    delegated_scope, emit_single_agent_completion, open_delegated_run_store,
-    persist_single_agent_artifact, persist_single_agent_artifact_from_db_path,
-    resolve_explore_target, AgentTool, Params,
+    delegated_scope, emit_single_agent_completion, notify_child_completion,
+    open_delegated_run_store, persist_single_agent_artifact,
+    persist_single_agent_artifact_from_db_path, resolve_explore_target, AgentTool, Params,
 };
 
 impl AgentTool {
     // -----------------------------------------------------------------------
-    // Explore
+    // Unified parent-directed child
     // -----------------------------------------------------------------------
 
-    pub(super) async fn execute_explore(&self, params: Params, ctx: &ToolContext) -> ToolResult {
+    pub(super) async fn execute_child(&self, params: Params, ctx: &ToolContext) -> ToolResult {
         let Some(project_dir) = ctx.project_dir.clone() else {
             return ToolResult::error(
-                "No project directory is selected for this session. Stay in neutral mode for general inspection, or select/create a project directory before using explore.",
+                "No project directory is selected for this session. Select or create a project directory before spawning a child Agent.",
             );
         };
 
@@ -35,7 +37,7 @@ impl AgentTool {
             Some(r) => r.clone(),
             None => {
                 return ToolResult::error(
-                    "Tool registry not available in context. Cannot delegate exploration.",
+                    "Tool registry not available in context. Cannot delegate child work.",
                 );
             }
         };
@@ -62,9 +64,23 @@ impl AgentTool {
         };
 
         let delegated_run_id = Uuid::new_v4().to_string();
-        let delegation_policy =
-            DelegationPolicy::for_subagent_explore(ctx.permission_mode, params.max_turns)
-                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
+        let capabilities = params
+            .capabilities
+            .iter()
+            .map(|capability| AgentCapability::parse(capability))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .expect("AgentSpec validated child capabilities");
+        let wants_read = capabilities.contains(&AgentCapability::Read);
+        let wants_write = params.capabilities.iter().any(|c| c == "write");
+        let wants_execute = params.capabilities.iter().any(|c| c == "execute");
+        let delegation_policy = DelegationPolicy::for_subagent_child(
+            ctx.permission_mode,
+            params.max_turns,
+            wants_read,
+            wants_write,
+            wants_execute,
+        )
+        .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![delegated_scope(
             &scope_label,
@@ -73,33 +89,46 @@ impl AgentTool {
             &project_dir,
         )];
 
-        // Persist delegated run record
+        let role = if wants_write {
+            DelegatedRunRole::Build
+        } else {
+            DelegatedRunRole::Explore
+        };
+        let child_name = params.name.clone().unwrap_or_else(|| scope_label.clone());
+
+        // Persist the name and exact capability contract before execution so
+        // a crash-safe resume cannot widen execute-only into read access.
         let delegated_store = open_delegated_run_store(ctx);
         let resume_candidate = match (delegated_store.as_ref(), ctx.session_id.as_ref()) {
             (Some(store), Some(session_id)) => store
-                .find_related_run(session_id, DelegatedRunRole::Explore, &target_scope)
+                .find_related_run(session_id, role.clone(), &target_scope)
                 .ok()
-                .flatten(),
+                .flatten()
+                .filter(|record| record.effective_capabilities() == capabilities),
             _ => None,
         };
 
         if let (Some(store), Some(session_id)) = (delegated_store.as_ref(), ctx.session_id.as_ref())
         {
-            if let Err(err) = store.create_run(&DelegatedRunStartInput {
-                delegated_run_id: delegated_run_id.clone(),
-                parent_session_id: session_id.clone(),
-                parent_tool_call_id: ctx.tool_use_id.clone(),
-                role: DelegatedRunRole::Explore,
-                stage: DelegatedRunStage::Created,
-                provider: Some(client.provider_id().to_string()),
-                model: Some(client.config().model.clone()),
-                resumable: true,
-                resumed_from_run_id: resume_candidate
-                    .as_ref()
-                    .map(|record| record.delegated_run_id.clone()),
-                target_scope: target_scope.clone(),
-            }) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated explore run start");
+            if let Err(err) = store.create_run_with_child_contract(
+                &DelegatedRunStartInput {
+                    delegated_run_id: delegated_run_id.clone(),
+                    parent_session_id: session_id.clone(),
+                    parent_tool_call_id: ctx.tool_use_id.clone(),
+                    role,
+                    stage: DelegatedRunStage::Created,
+                    provider: Some(client.provider_id().to_string()),
+                    model: Some(client.config().model.clone()),
+                    resumable: true,
+                    resumed_from_run_id: resume_candidate
+                        .as_ref()
+                        .map(|record| record.delegated_run_id.clone()),
+                    target_scope: target_scope.clone(),
+                },
+                Some(&child_name),
+                &capabilities,
+            ) {
+                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated child run start");
             }
         }
 
@@ -115,8 +144,8 @@ impl AgentTool {
             .sandbox_root
             .clone()
             .unwrap_or_else(|| working_dir.clone());
-        let mut task = SubAgentTask::new("explorer-0", &task_prompt)
-            .with_name(scope_label.clone())
+        let mut task = SubAgentTask::new("child-0", &task_prompt)
+            .with_name(child_name.clone())
             .with_working_dir(working_dir)
             .with_sandbox_root(inherited_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
@@ -131,9 +160,9 @@ impl AgentTool {
             task = task.with_max_turns(max_turns);
         }
 
-        // Explore uses a fast/cheap model when available (e.g., Haiku on Anthropic).
-        // Other providers inherit the parent model unchanged.
-        let model = self.resolve_fast_model(ctx, &client);
+        // Every capability class follows this same execution path and inherits
+        // the parent's resolved model unless the run explicitly overrides it.
+        let model = self.resolve_model(ctx, &client);
 
         // Build project context for the subagent, with optional parent conversation brief
         let mut project_context =
@@ -152,10 +181,11 @@ impl AgentTool {
 
         info!(
             delegated_run_id = %delegated_run_id,
+            name = %child_name,
             model = %model,
             scope = %scope_label,
             background = params.run_in_background.unwrap_or(false),
-            "Agent tool (explore): starting single-agent exploration"
+            "Agent tool: starting agnostic child"
         );
 
         // ── Background mode ──────────────────────────────────────────
@@ -163,16 +193,20 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
+            let bg_session_id = ctx.session_id.clone();
+            let bg_user_id = ctx.user_id.clone();
+            let bg_workspace_root = ctx.filesystem_access_root();
+            let bg_child_name = child_name.clone();
             let bg_runtime = self.runtime.clone();
             let mailbox = bg_runtime.register(
                 bg_delegated_run_id.clone(),
-                params.name.as_deref().unwrap_or("explore"),
+                bg_child_name.clone(),
                 cancellation_token.clone(),
             );
             task = task.with_mailbox(mailbox);
 
             tokio::spawn(async move {
-                let result = execute_single_explorer(
+                let result = execute_single_child(
                     client,
                     task,
                     registry,
@@ -196,25 +230,46 @@ impl AgentTool {
                         &bg_delegated_run_id,
                         &artifact,
                         true,
-                        "explore",
+                        &bg_child_name,
                     );
                 }
 
                 emit_single_agent_completion(
                     &progress_tx,
                     &bg_delegated_run_id,
-                    "explore",
+                    &bg_child_name,
                     &result,
                     &artifact.review_summary,
                 );
+                if let Err(error) = notify_child_completion(
+                    &bg_runtime,
+                    bg_db_path.as_deref(),
+                    bg_session_id.as_deref(),
+                    bg_user_id.as_deref(),
+                    bg_workspace_root.as_deref(),
+                    &bg_delegated_run_id,
+                    &bg_child_name,
+                    result.success,
+                    &artifact.review_summary,
+                ) {
+                    warn!(
+                        delegated_run_id = %bg_delegated_run_id,
+                        %error,
+                        "Failed to queue background child completion"
+                    );
+                }
                 bg_runtime.finish(&bg_delegated_run_id, result.success);
             });
 
-            return background_started_result(&delegated_run_id, "explore", params.name.as_deref());
+            return background_started_result(
+                &delegated_run_id,
+                &child_name,
+                Some(child_name.as_str()),
+            );
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
-        let result = execute_single_explorer(
+        let result = execute_single_child(
             client,
             task,
             registry,
@@ -235,19 +290,20 @@ impl AgentTool {
                 &delegated_run_id,
                 &artifact,
                 true,
-                "Failed to persist delegated explore run final artifact",
+                "Failed to persist delegated child run final artifact",
             );
         }
 
-        let warnings = build_single_agent_warnings(&result, "Exploration");
+        let warnings = build_single_agent_warnings(&result, "Child Agent");
 
         ToolResult::success_data_with(artifact.payload, warnings, None, None)
     }
 
     // -----------------------------------------------------------------------
-    // Plan
+    // Plan (legacy path retained for resume of planner-role runs)
     // -----------------------------------------------------------------------
 
+    #[allow(dead_code)]
     pub(super) async fn execute_plan(&self, params: Params, ctx: &ToolContext) -> ToolResult {
         if ctx.project_dir.is_none() {
             return ToolResult::error(
@@ -420,9 +476,10 @@ impl AgentTool {
     }
 
     // -----------------------------------------------------------------------
-    // Verify
+    // Verify (legacy path retained for resume of verifier-role runs)
     // -----------------------------------------------------------------------
 
+    #[allow(dead_code)]
     pub(super) async fn execute_verify(&self, params: Params, ctx: &ToolContext) -> ToolResult {
         if ctx.project_dir.is_none() {
             return ToolResult::error(

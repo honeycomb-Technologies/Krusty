@@ -3,6 +3,7 @@ use rusqlite::params;
 use tempfile::TempDir;
 
 use super::*;
+use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 use crate::storage::Database;
 use crate::tools::registry::{DelegationPolicy, PermissionMode};
@@ -101,6 +102,73 @@ fn round_trip_persisted_delegated_run() {
     assert_eq!(
         record.human_review.as_deref(),
         Some("Storage owns session persistence and runtime traces.")
+    );
+}
+
+#[test]
+fn round_trip_preserves_name_and_execute_only_contract() {
+    let (store, _tmp) = create_store();
+    let capabilities = [AgentCapability::Execute].into_iter().collect();
+    store
+        .create_run_with_child_contract(
+            &DelegatedRunStartInput {
+                delegated_run_id: "run-execute-only".to_string(),
+                parent_session_id: "session-1".to_string(),
+                parent_tool_call_id: Some("tool-execute".to_string()),
+                role: DelegatedRunRole::Explore,
+                stage: DelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![scope("project", ".", "project")],
+            },
+            Some("focused validation"),
+            &capabilities,
+        )
+        .expect("create contracted run");
+
+    let record = store
+        .get_run("run-execute-only")
+        .expect("get run")
+        .expect("record exists");
+    assert_eq!(record.child_name.as_deref(), Some("focused validation"));
+    assert_eq!(record.capabilities, capabilities);
+    assert_eq!(record.effective_capabilities(), capabilities);
+}
+
+#[test]
+fn empty_contract_uses_legacy_role_fallback_only() {
+    let (store, _tmp) = create_store();
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "legacy-build".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: None,
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Complete,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("project", ".", "project")],
+        })
+        .expect("create legacy row");
+
+    let record = store
+        .get_run("legacy-build")
+        .expect("get run")
+        .expect("record exists");
+    assert!(record.capabilities.is_empty());
+    assert_eq!(
+        record.effective_capabilities(),
+        [
+            AgentCapability::Read,
+            AgentCapability::Write,
+            AgentCapability::Execute,
+        ]
+        .into_iter()
+        .collect()
     );
 }
 

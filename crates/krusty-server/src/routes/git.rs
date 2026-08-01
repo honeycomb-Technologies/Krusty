@@ -78,7 +78,6 @@ async fn get_file_diff(
     }))
 }
 
-
 async fn get_status(
     State(state): State<AppState>,
     user: Option<CurrentUser>,

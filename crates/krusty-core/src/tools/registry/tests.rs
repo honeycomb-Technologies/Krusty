@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -461,6 +461,60 @@ fn delegated_exact_scope_checks_both_tool_search_wrapper_and_effective_target() 
         audit["execution_tool_allowlist"],
         json!(["agent", "read", "tool_search"])
     );
+}
+
+#[test]
+fn execute_only_child_keeps_an_exact_capability_surface() {
+    let policy = DelegationPolicy::for_subagent_child(
+        PermissionMode::Autonomous,
+        Some(6),
+        false,
+        false,
+        true,
+    );
+
+    assert!(policy.authorize_tool("bash", false).is_ok());
+    for forbidden in ["read", "grep", "write", "edit", "apply_patch"] {
+        assert!(
+            policy.authorize_tool(forbidden, false).is_err(),
+            "execute-only child unexpectedly allowed {forbidden}"
+        );
+    }
+    assert_eq!(
+        policy.execution_tool_allowlist,
+        Some(BTreeSet::from(["bash".to_string()]))
+    );
+}
+
+#[test]
+fn explicit_child_capabilities_intersect_the_parent_tool_ceiling() {
+    let parent_scope = HashSet::from(["read".to_string(), "bash".to_string()]);
+    let policy =
+        DelegationPolicy::for_subagent_child(PermissionMode::Autonomous, None, true, true, false)
+            .with_execution_tool_allowlist(Some(&parent_scope));
+
+    assert!(policy.authorize_tool("read", false).is_ok());
+    assert!(policy.authorize_tool("bash", false).is_err());
+    assert!(policy.authorize_tool("write", false).is_err());
+    assert_eq!(
+        policy.execution_tool_allowlist,
+        Some(BTreeSet::from(["read".to_string()]))
+    );
+}
+
+#[test]
+fn research_accounting_prefers_capabilities_with_legacy_fallback() {
+    assert!(agent_call_is_research(&json!({
+        "name": "audit",
+        "instructions": "inspect",
+        "capabilities": ["read", "execute"]
+    })));
+    assert!(!agent_call_is_research(&json!({
+        "name": "repair",
+        "instructions": "edit",
+        "capabilities": ["read", "write"]
+    })));
+    assert!(agent_call_is_research(&json!({"agent_type": "verify"})));
 }
 
 #[test]

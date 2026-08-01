@@ -42,7 +42,9 @@ use crate::storage::{
     Database, MakoProfileSnapshot, PartialAssistantState, PendingInteractionSnapshot,
     ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
-use crate::tools::registry::{agent_call_requests_write, effective_tool_call};
+use crate::tools::registry::{
+    agent_call_is_research, agent_call_requests_write, effective_tool_call,
+};
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
@@ -64,7 +66,7 @@ use super::context_ledger::ContextLedger;
 use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopInputInbox, LoopStopReason};
-use super::progress::LoopGuard;
+use super::progress::{DelegationNudgeTracker, LoopGuard};
 use super::state::{RunBudget, RunBudgetResolution};
 use super::stream;
 use super::DelegatedProgressEvent;
@@ -86,6 +88,34 @@ const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
     "Unable to safely pause for user input because the continuation policy could not be persisted.";
 const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
 const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
+const LOOP_GUARD_LANDING_FALLBACK: &str = "I stopped this run after the loop guard detected repeated work without enough new evidence. The evidence gathered so far remains available; a new instruction can steer a different approach.";
+
+#[derive(Debug, Clone)]
+struct LoopGuardLanding {
+    diagnostic: String,
+    block_goal: bool,
+}
+
+fn provider_options_for_turn(options: &CallOptions, landing: bool) -> CallOptions {
+    let mut request_options = options.clone();
+    if landing {
+        // A loop-guard landing is exactly one synthesis request. Disable both
+        // advertised function tools and provider-hosted tools so it cannot
+        // extend the loop through another observation or side effect.
+        request_options.tools = None;
+        request_options.web_search = None;
+        request_options.web_fetch = None;
+        request_options.codex_parallel_tool_calls = false;
+    }
+    request_options
+}
+
+fn loop_guard_landing_instruction(landing: &LoopGuardLanding) -> String {
+    format!(
+        "[LOOP GUARD LANDING]\n{}\n\nThis is the one bounded synthesis turn. No tools are available. Give the user a concise evidence-based answer, identify any unresolved blocker, and state what new direction would be needed to continue. Do not request or describe another tool call.",
+        landing.diagnostic
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmptyCompletionAction {
@@ -353,14 +383,7 @@ fn is_research_action(call: &AiToolCall) -> bool {
     matches!(
         call.name.as_str(),
         "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch"
-    ) || (call.name == "agent"
-        && matches!(
-            call.arguments
-                .get("profile")
-                .or_else(|| call.arguments.get("agent_type"))
-                .and_then(serde_json::Value::as_str),
-            Some("explore" | "plan" | "verify")
-        ))
+    ) || (call.name == "agent" && agent_call_is_research(&call.arguments))
 }
 
 fn tool_batch_made_material_progress(tool_results: &[Content]) -> bool {
@@ -693,10 +716,12 @@ impl AgenticOrchestrator {
         let mut last_usage_prompt_tokens = None::<usize>;
         let mut messages_at_last_usage = 0usize;
         let mut loop_guard = LoopGuard::new();
+        let mut delegation_nudge_tracker = DelegationNudgeTracker::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
         let mut goal_tool_call_count = 0usize;
         let mut goal_research_action_count = 0usize;
+        let mut loop_guard_landing = None::<LoopGuardLanding>;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
             ai_client.resolved_model().capabilities.context_window,
@@ -770,6 +795,8 @@ impl AgenticOrchestrator {
             );
             if !injected_steering.is_empty() {
                 emit_steering_events(&event_tx, injected_steering);
+                loop_guard_landing = None;
+                delegation_nudge_tracker.reset_for_steering();
                 empty_stream_retry_attempted = false;
                 empty_completion_retry_attempted = false;
                 empty_completion_recovery_pending = false;
@@ -780,7 +807,7 @@ impl AgenticOrchestrator {
                 }
             }
 
-            if run_budget.budget.is_exhausted(iteration) {
+            if loop_guard_landing.is_none() && run_budget.budget.is_exhausted(iteration) {
                 let message = run_budget
                     .budget
                     .max_turns
@@ -908,10 +935,11 @@ impl AgenticOrchestrator {
                     }],
                 });
             }
+            let request_options = provider_options_for_turn(&options, loop_guard_landing.is_some());
             let request_estimate = super::estimate_rendered_request_tokens(
                 ai_client.as_ref(),
                 &conversation_with_context,
-                &options,
+                &request_options,
             );
             let usage_calibrated_estimate = super::estimate_tokens_with_usage(
                 &conversation,
@@ -1031,7 +1059,7 @@ impl AgenticOrchestrator {
             let provider_call_id = uuid::Uuid::new_v4().to_string();
             let provider_call_started = Instant::now();
             let request_diagnostics =
-                ai_client.request_diagnostics(&conversation_with_context, &options);
+                ai_client.request_diagnostics(&conversation_with_context, &request_options);
             let _ = event_tx.send(LoopEvent::ProviderRequestPrepared {
                 turn: iteration,
                 diagnostics: Box::new(request_diagnostics.into()),
@@ -1040,7 +1068,8 @@ impl AgenticOrchestrator {
             // borrow of `options` ends as soon as setup resolves. Later mode
             // transitions must be able to replace the governed schemas.
             let setup_result = {
-                let streaming_setup = ai_client.call_streaming(conversation_with_context, &options);
+                let streaming_setup =
+                    ai_client.call_streaming(conversation_with_context, &request_options);
                 tokio::pin!(streaming_setup);
                 let mut setup_input_closed = false;
                 loop {
@@ -1267,7 +1296,8 @@ impl AgenticOrchestrator {
             let goal_token_stop =
                 record_active_goal_tokens(&db_path, &session_id, result.total_tokens);
 
-            if goal_token_stop.is_none()
+            if loop_guard_landing.is_none()
+                && goal_token_stop.is_none()
                 && should_retry_empty_stream_interruption(
                     result.stop_reason.as_ref(),
                     result.last_error.as_deref(),
@@ -1285,7 +1315,11 @@ impl AgenticOrchestrator {
                 continue;
             }
 
-            if let Some(stop_reason) = result.stop_reason.clone() {
+            if let Some(stop_reason) = loop_guard_landing
+                .is_none()
+                .then(|| result.stop_reason.clone())
+                .flatten()
+            {
                 if !overflow_compact_retry_attempted
                     && stop_reason == LoopStopReason::ProviderError
                     && result
@@ -1380,16 +1414,17 @@ impl AgenticOrchestrator {
             // assistant turn. Recover semantically once without replaying any
             // completed tool call or polluting canonical conversation history.
             empty_completion_recovery_pending = false;
-            let empty_completion = if session_type == SessionType::Mako {
-                EmptyCompletionAction::None
-            } else {
-                empty_completion_action(
-                    &result.text,
-                    &result.tool_calls,
-                    empty_completion_retry_attempted,
-                    provider_tool_activity_seen,
-                )
-            };
+            let empty_completion =
+                if loop_guard_landing.is_some() || session_type == SessionType::Mako {
+                    EmptyCompletionAction::None
+                } else {
+                    empty_completion_action(
+                        &result.text,
+                        &result.tool_calls,
+                        empty_completion_retry_attempted,
+                        provider_tool_activity_seen,
+                    )
+                };
             match empty_completion {
                 EmptyCompletionAction::Retry => {
                     empty_completion_retry_attempted = true;
@@ -1441,9 +1476,19 @@ impl AgenticOrchestrator {
                 EmptyCompletionAction::None => {}
             }
 
-            // Build and save assistant message
-            let assistant_msg =
-                build_assistant_message(&result.text, &result.thinking_blocks, &result.tool_calls);
+            // The provider has no tool schemas during a loop-guard landing.
+            // If a transport nevertheless reports a tool call, discard it
+            // rather than persisting an unfulfilled tool-use block.
+            let assistant_tool_calls = if loop_guard_landing.is_some() {
+                &[][..]
+            } else {
+                result.tool_calls.as_slice()
+            };
+            let assistant_msg = build_assistant_message(
+                &result.text,
+                &result.thinking_blocks,
+                assistant_tool_calls,
+            );
             if !assistant_msg.content.is_empty() {
                 conversation.push(assistant_msg.clone());
                 context_ledger.update_from_conversation(&conversation);
@@ -1468,6 +1513,87 @@ impl AgenticOrchestrator {
                 maybe_generate_title(&conversation, &event_tx, &session_id, &db_path);
             }
 
+            if loop_guard_landing.is_some() {
+                let injected_steering = inject_pending_steering(
+                    &mut input_inbox,
+                    &mut conversation,
+                    &mut context_ledger,
+                    &db_path,
+                    &session_id,
+                );
+                if !injected_steering.is_empty() {
+                    loop_guard_landing = None;
+                    delegation_nudge_tracker.reset_for_steering();
+                    empty_stream_retry_attempted = false;
+                    empty_completion_retry_attempted = false;
+                    empty_completion_recovery_pending = false;
+                    provider_tool_activity_seen = false;
+                    overflow_compact_retry_attempted = false;
+                    if !active_goal_at_start {
+                        loop_guard.reset_for_steering();
+                    }
+                    clear_recovery_state(&db_path, &session_id);
+                    set_agent_state(&db_path, &session_id, "streaming");
+                    let _ = event_tx.send(LoopEvent::TurnComplete {
+                        turn: iteration,
+                        has_more: true,
+                    });
+                    emit_steering_events(&event_tx, injected_steering);
+                    continue;
+                }
+
+                let landing = loop_guard_landing
+                    .take()
+                    .expect("landing state checked immediately before completion");
+                if result.text.trim().is_empty() {
+                    let fallback = LOOP_GUARD_LANDING_FALLBACK.to_string();
+                    let _ = event_tx.send(LoopEvent::TextDelta {
+                        delta: fallback.clone(),
+                    });
+                    let fallback_msg = ModelMessage {
+                        role: Role::Assistant,
+                        content: vec![Content::Text { text: fallback }],
+                    };
+                    conversation.push(fallback_msg.clone());
+                    context_ledger.update_from_conversation(&conversation);
+                    persist_context_state(&db_path, &session_id, &context_ledger);
+                    save_message(&db_path, &session_id, &fallback_msg);
+                    if !title_generated {
+                        maybe_generate_title(&conversation, &event_tx, &session_id, &db_path);
+                    }
+                }
+                if last_token_count > 0 {
+                    update_token_count(&db_path, &session_id, last_token_count);
+                }
+                if landing.block_goal {
+                    block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
+                }
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    if landing.block_goal {
+                        "loop_guard_landing_completed_before_goal_verification"
+                    } else {
+                        "validation_converged_before_goal_verification"
+                    },
+                );
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: if landing.block_goal {
+                        LoopStopReason::LoopGuardTriggered
+                    } else {
+                        LoopStopReason::Completed
+                    },
+                });
+                return;
+            }
+
             // A tool-free completion is also a safe boundary for live steering.
             if result.tool_calls.is_empty() {
                 let injected_steering = inject_pending_steering(
@@ -1478,6 +1604,8 @@ impl AgenticOrchestrator {
                     &session_id,
                 );
                 if no_tool_completion_should_continue(&injected_steering) {
+                    loop_guard_landing = None;
+                    delegation_nudge_tracker.reset_for_steering();
                     empty_stream_retry_attempted = false;
                     empty_completion_retry_attempted = false;
                     empty_completion_recovery_pending = false;
@@ -1779,13 +1907,32 @@ impl AgenticOrchestrator {
                 .as_ref()
                 .and_then(|telemetry| telemetry.replan_instruction())
                 .map(ToString::to_string);
-            let blocker_fingerprint = fail_diagnostic
+            let terminal_loop_landing = fail_diagnostic
                 .as_ref()
                 .or(explore_diagnostic.as_ref())
                 .or(read_only_loop_diagnostic.as_ref())
                 .or(post_explore_diagnostic.as_ref())
                 .or(progress_diagnostic.as_ref())
-                .cloned();
+                .map(|diagnostic| LoopGuardLanding {
+                    diagnostic: diagnostic.clone(),
+                    block_goal: true,
+                })
+                .or_else(|| {
+                    validation_diagnostic
+                        .as_ref()
+                        .map(|diagnostic| LoopGuardLanding {
+                            diagnostic: diagnostic.clone(),
+                            block_goal: false,
+                        })
+                });
+            let delegation_nudge_instruction = delegation_nudge_tracker
+                .record_turn(&result.tool_calls, &tool_results)
+                .filter(|_| terminal_loop_landing.is_none());
+            let blocker_fingerprint = terminal_loop_landing
+                .as_ref()
+                .filter(|landing| landing.block_goal)
+                .map(|landing| landing.diagnostic.clone());
+            let token_budget_stopped = goal_token_stop.is_some();
             let goal_runtime_stop = goal_token_stop.or_else(|| {
                 record_active_attempt_progress(
                     &db_path,
@@ -1839,6 +1986,12 @@ impl AgenticOrchestrator {
                     content: vec![Content::Text { text: instruction }],
                 });
             }
+            if let Some(instruction) = delegation_nudge_instruction {
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text { text: instruction }],
+                });
+            }
             if !mutation_needs_validation {
                 remove_validation_reminders(&mut conversation);
             }
@@ -1887,25 +2040,34 @@ impl AgenticOrchestrator {
                 return;
             }
 
-            if let Some((status, reason)) = goal_runtime_stop {
-                let reason = reason.unwrap_or_else(|| "goal_attempt_stopped".to_string());
-                let _ = event_tx.send(LoopEvent::Error {
-                    error: format!("Goal attempt stopped: {reason}"),
-                });
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: false,
-                });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: if status == GoalStatus::Blocked {
-                        LoopStopReason::LoopGuardTriggered
-                    } else {
-                        LoopStopReason::BudgetExhausted
-                    },
-                });
-                return;
+            let loop_guard_owns_blocked_stop = !token_budget_stopped
+                && terminal_loop_landing
+                    .as_ref()
+                    .is_some_and(|landing| landing.block_goal)
+                && goal_runtime_stop
+                    .as_ref()
+                    .is_some_and(|(status, _)| *status == GoalStatus::Blocked);
+            if !loop_guard_owns_blocked_stop {
+                if let Some((status, reason)) = goal_runtime_stop {
+                    let reason = reason.unwrap_or_else(|| "goal_attempt_stopped".to_string());
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!("Goal attempt stopped: {reason}"),
+                    });
+                    set_agent_state(&db_path, &session_id, "idle");
+                    let _ = event_tx.send(LoopEvent::TurnComplete {
+                        turn: iteration,
+                        has_more: false,
+                    });
+                    let _ = event_tx.send(LoopEvent::Finished {
+                        session_id: session_id.clone(),
+                        stop_reason: if status == GoalStatus::Blocked {
+                            LoopStopReason::LoopGuardTriggered
+                        } else {
+                            LoopStopReason::BudgetExhausted
+                        },
+                    });
+                    return;
+                }
             }
 
             input_inbox.collect_ready();
@@ -1925,6 +2087,8 @@ impl AgenticOrchestrator {
                 &session_id,
             );
             if !injected_steering.is_empty() {
+                loop_guard_landing = None;
+                delegation_nudge_tracker.reset_for_steering();
                 empty_stream_retry_attempted = false;
                 empty_completion_retry_attempted = false;
                 empty_completion_recovery_pending = false;
@@ -1942,85 +2106,29 @@ impl AgenticOrchestrator {
                 continue;
             }
 
-            // Repeating an already-successful validation pattern is positive
-            // convergence, not a runtime error. Complete deterministically
-            // here so the model cannot issue the same validation call again.
-            if let Some(completion) = validation_diagnostic {
-                tracing::info!(
-                    iteration,
-                    session_id = %session_id,
-                    completion = %completion,
-                    "Completing after repeated successful validation"
-                );
-                let _ = event_tx.send(LoopEvent::TextDelta {
-                    delta: completion.clone(),
-                });
-
-                let assistant_msg = ModelMessage {
-                    role: Role::Assistant,
-                    content: vec![Content::Text { text: completion }],
-                };
-                conversation.push(assistant_msg.clone());
-                context_ledger.update_from_conversation(&conversation);
-                persist_context_state(&db_path, &session_id, &context_ledger);
-                save_message(&db_path, &session_id, &assistant_msg);
-
-                if !title_generated {
-                    maybe_generate_title(&conversation, &event_tx, &session_id, &db_path);
-                }
-                if last_token_count > 0 {
-                    update_token_count(&db_path, &session_id, last_token_count);
-                }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: false,
-                });
-                finish_active_attempt_for_stop(
-                    &db_path,
-                    &session_id,
-                    "validation_converged_before_goal_verification",
-                );
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
-                return;
-            }
-
-            // Check fail-fast (errors, failed explore, repeated pure exploration,
-            // post-explore manual probing, and semantic no-progress).
-            if let Some(diagnostic) = fail_diagnostic
-                .or(explore_diagnostic)
-                .or(read_only_loop_diagnostic)
-                .or(post_explore_diagnostic)
-                .or(progress_diagnostic)
-            {
+            if let Some(landing) = terminal_loop_landing {
                 tracing::warn!(
                     iteration,
                     session_id = %session_id,
-                    diagnostic = %diagnostic,
-                    "Fail-fast: stopping repeated tool failure or exploration loop"
+                    diagnostic = %landing.diagnostic,
+                    blocks_goal = landing.block_goal,
+                    "Loop guard entered one bounded synthesis landing turn"
                 );
-                block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
+                let instruction = loop_guard_landing_instruction(&landing);
+                loop_guard_landing = Some(landing);
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text { text: instruction }],
+                });
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
                 clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Error { error: diagnostic });
+                set_agent_state(&db_path, &session_id, "streaming");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
-                    has_more: false,
+                    has_more: true,
                 });
-                finish_active_attempt_for_stop(
-                    &db_path,
-                    &session_id,
-                    "exploration_completed_before_goal_verification",
-                );
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::LoopGuardTriggered,
-                });
-                return;
+                continue;
             }
 
             if let Some(explore_summary) =
@@ -2396,6 +2504,7 @@ mod tests {
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
     use super::no_tool_completion_should_continue;
+    use super::provider_options_for_turn;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
@@ -2404,12 +2513,14 @@ mod tests {
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::EmptyCompletionAction;
+    use super::LoopGuardLanding;
     use super::VALIDATION_REMINDER;
     use super::{
         is_stale_compaction_snapshot_error, mpsc, reload_persisted_conversation, ContextLedger,
     };
     use crate::agent::loop_events::{LoopInput, LoopInputInbox, LoopStopReason};
-    use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+    use crate::ai::client::CallOptions;
+    use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{Database, ProjectSettings, SessionManager, SessionType, WorkMode};
     use crate::tools::registry::PermissionMode;
@@ -2947,6 +3058,38 @@ mod tests {
             empty_completion_action("", &[tool_call], false, false),
             EmptyCompletionAction::None
         );
+    }
+
+    #[test]
+    fn loop_guard_landing_request_has_no_tool_surface() {
+        let options = CallOptions {
+            tools: Some(vec![AiTool {
+                name: "read".to_string(),
+                description: "read a file".to_string(),
+                input_schema: json!({"type": "object"}),
+                prompt: None,
+            }]),
+            codex_parallel_tool_calls: true,
+            ..CallOptions::default()
+        };
+
+        let normal = provider_options_for_turn(&options, false);
+        assert_eq!(normal.tools.as_ref().map(Vec::len), Some(1));
+        assert!(normal.codex_parallel_tool_calls);
+
+        let landing = provider_options_for_turn(&options, true);
+        assert!(landing.tools.is_none());
+        assert!(landing.web_search.is_none());
+        assert!(landing.web_fetch.is_none());
+        assert!(!landing.codex_parallel_tool_calls);
+        assert_eq!(options.tools.as_ref().map(Vec::len), Some(1));
+
+        let instruction = super::loop_guard_landing_instruction(&LoopGuardLanding {
+            diagnostic: "same observation repeated".to_string(),
+            block_goal: true,
+        });
+        assert!(instruction.contains("one bounded synthesis turn"));
+        assert!(instruction.contains("No tools are available"));
     }
 
     #[test]

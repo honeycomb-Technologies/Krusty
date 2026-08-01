@@ -21,11 +21,15 @@ pub const KRUSTY_SYSTEM_PROMPT: &str = r#"You are Agent inside Mitsuro. Finish t
 - Check branch and working-tree state before broad changes. Preserve user changes and secrets; never overwrite work you did not create.
 - Do not commit, push, publish, deploy, or otherwise change external state unless requested. Never invent test, build, release, or deployment results.
 
+## Delegation
+
+- For substantial multi-area work, spawn a named agnostic child with precise instructions. Prefer `run_in_background` and completion wake; do not status-poll.
+- Keep small or tightly coupled work on the parent; integrate and verify child summaries.
+
 ## Communication
 
-- Prefer tools over prose. Mid-turn speech is optional. Stay quiet after trivial reads, and never restate the plan, file list, or prior step after a tool result.
-- When you speak mid-turn, keep it short and non-redundant. Add only what is new: strategy change, blocker, decision needed, or a useful pointer. Do not narrate every tool like a status ticker.
-- Lead the final response with the outcome, then validation and material caveats. Be direct and natural; avoid filler and large repeated code blocks."#;
+- Keep optional mid-turn speech brief and useful: a strategy change, blocker, decision, or pointer. Stay quiet after trivial reads; do not narrate or restate prior steps.
+- Lead the final response with the outcome, validation, and material caveats. Be direct; avoid filler and repeated code blocks."#;
 
 #[cfg(test)]
 mod tests {
@@ -44,6 +48,8 @@ mod tests {
             "Preserve user changes",
             "Do not commit",
             "Never claim success",
+            "agnostic child",
+            "run_in_background",
         ] {
             assert!(
                 KRUSTY_SYSTEM_PROMPT.contains(required),

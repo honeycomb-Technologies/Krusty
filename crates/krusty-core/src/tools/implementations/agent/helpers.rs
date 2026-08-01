@@ -7,7 +7,9 @@ use tracing::{debug, warn};
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus, SubAgentResult};
 use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
-use crate::storage::{Database, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore};
+use crate::storage::{
+    Database, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore, SessionManager,
+};
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
 
@@ -17,23 +19,90 @@ pub(super) fn background_started_result(
     agent_type: &str,
     name: Option<&str>,
 ) -> ToolResult {
+    let display = name.unwrap_or(agent_type);
     let mut result = json!({
         "status": "background_started",
         "delegated_run_id": delegated_run_id,
+        "name": display,
         "agent_type": agent_type,
         "message": format!(
-            "{} agent started in background. Continue other work; after it completes, its result will appear in delegated context on a later turn. delegated_run_id: '{}'.",
-            agent_type, delegated_run_id
+            "Child agent '{}' started in background. Continue other work; you will be notified when it completes. Do not thrash-poll status. delegated_run_id: '{}'.",
+            display, delegated_run_id
         ),
     });
     if let Some(name) = name {
         result["name"] = json!(name);
-        result["message"] = json!(format!(
-            "Named agent '{}' ({}) started in background. Continue other work; after it completes, its result will appear in delegated context on a later turn. delegated_run_id: '{}'.",
-            name, agent_type, delegated_run_id
-        ));
     }
     ToolResult::success_data(result)
+}
+
+/// Queue durable completion steering and notify the server completion bus so
+/// the parent can wake like a background process completion.
+pub(super) fn notify_child_completion(
+    runtime: &crate::agent::subagent::AgentRuntimeManager,
+    db_path: Option<&Path>,
+    session_id: Option<&str>,
+    user_id: Option<&str>,
+    workspace_root: Option<&Path>,
+    delegated_run_id: &str,
+    name: &str,
+    success: bool,
+    summary: &str,
+) -> anyhow::Result<bool> {
+    let Some(db_path) = db_path else {
+        anyhow::bail!("background child completion has no database path");
+    };
+    let Some(session_id) = session_id else {
+        anyhow::bail!("background child completion has no parent session");
+    };
+    let pending_id = format!("child-wake-{delegated_run_id}");
+    let content = child_completion_content(name, delegated_run_id, success, summary);
+    let content_json = serde_json::to_string(&content)?;
+    let queued = SessionManager::new(Database::new(db_path)?).queue_pending_steering_once(
+        session_id,
+        &pending_id,
+        &content_json,
+    )?;
+    if !queued {
+        debug!(
+            session_id,
+            delegated_run_id, pending_id, "Ignored duplicate child completion notification"
+        );
+        return Ok(false);
+    }
+
+    let event = crate::agent::subagent::ChildCompletionEvent {
+        session_id: Some(session_id.to_string()),
+        user_id: user_id.map(ToOwned::to_owned),
+        workspace_root: workspace_root.map(Path::to_path_buf),
+        pending_id,
+        content,
+        delegated_run_id: delegated_run_id.to_string(),
+        task_name: name.to_string(),
+        success,
+        summary: summary.to_string(),
+    };
+    if let Err(event) = runtime.notify_completion(event) {
+        warn!(
+            session_id,
+            delegated_run_id = %event.delegated_run_id,
+            pending_id = %event.pending_id,
+            "Child completion is durable but no live completion listener accepted it"
+        );
+    }
+    Ok(true)
+}
+
+fn child_completion_content(
+    name: &str,
+    delegated_run_id: &str,
+    success: bool,
+    summary: &str,
+) -> Vec<Content> {
+    let body = format!(
+        "[CHILD AGENT COMPLETE]\nname: {name}\ndelegated_run_id: {delegated_run_id}\nsuccess: {success}\nsummary:\n{summary}\n\nContinue from this result. Do not re-poll status for this delegated_run_id unless you need more detail.\n"
+    );
+    vec![Content::Text { text: body }]
 }
 // ---------------------------------------------------------------------------
 // Helper functions (ported from explore.rs and build.rs)

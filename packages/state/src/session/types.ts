@@ -44,6 +44,8 @@ export interface DelegatedAgentState {
 
 export interface DelegatedArtifactState {
   kind: DelegatedToolKind;
+  name?: string;
+  capabilities?: Array<'read' | 'write' | 'execute'>;
   delegatedRunId?: string;
   stage?: DelegatedRunStage;
   thinking?: string;

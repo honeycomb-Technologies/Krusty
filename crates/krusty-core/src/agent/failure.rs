@@ -7,11 +7,11 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::agent::hooks::shell_policy::{
     classify_bash_command, is_proven_read_only_bash_command, semantic_bash_signature,
     BashFileOperationKind,
 };
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::registry::{
     agent_call_execution_profile, agent_call_starts_run, effective_tool_call, tool_policy_for_call,
     ToolCategory,
@@ -172,15 +172,45 @@ pub fn detect_repeated_failures(
 pub fn detect_repeated_read_only_sequence(
     counters: &mut HashMap<String, usize>,
     tool_calls: &[AiToolCall],
+    tool_results: &[Content],
 ) -> Option<String> {
     if tool_calls.is_empty() || !tool_calls.iter().all(is_exploration_probe) {
         counters.clear();
         return None;
     }
 
+    let results = tool_results
+        .iter()
+        .filter_map(|result| match result {
+            Content::ToolResult {
+                tool_use_id,
+                output,
+                is_error,
+            } => Some((tool_use_id.as_str(), (output, is_error.unwrap_or(false)))),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+
+    // Intent alone cannot prove a loop: repeated CI/status observations may
+    // use the exact same call while returning materially changing evidence.
+    // Failed or incomplete batches are handled by the failure guard instead.
+    if tool_calls.iter().any(|call| {
+        results
+            .get(call.id.as_str())
+            .is_none_or(|(_, is_error)| *is_error)
+    }) {
+        counters.clear();
+        return None;
+    }
+
     let signature = tool_calls
         .iter()
-        .map(exploration_signature)
+        .map(|call| {
+            let (output, _) = results
+                .get(call.id.as_str())
+                .expect("completed read-only call has a result");
+            format!("{}:{}", exploration_signature(call), hash_arguments(output))
+        })
         .collect::<Vec<_>>()
         .join("|");
 
@@ -421,35 +451,59 @@ pub fn detect_post_explore_manual_fallback(
         return None;
     }
 
-    let last_explore_result = conversation.iter().rev().find_map(|message| {
-        if message.role != Role::User {
-            return None;
-        }
-
-        message.content.iter().find_map(|content| {
-            let Content::ToolResult { output, .. } = content else {
-                return None;
-            };
-
-            let parsed = match output {
-                serde_json::Value::String(text) => {
-                    serde_json::from_str::<serde_json::Value>(text).ok()
+    let last_explore_result =
+        conversation
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(message_index, message)| {
+                if message.role != Role::User {
+                    return None;
                 }
-                other => Some(other.clone()),
-            }?;
 
-            let result_payload = parsed.get("result").unwrap_or(&parsed);
-            let tool_name = parsed
-                .get("tool")
-                .and_then(|value| value.as_str())
-                .or_else(|| result_payload.get("tool").and_then(|value| value.as_str()));
-            if tool_name != Some("explore") {
-                return None;
-            }
+                message.content.iter().find_map(|content| {
+                    let Content::ToolResult {
+                        tool_use_id,
+                        output,
+                        ..
+                    } = content
+                    else {
+                        return None;
+                    };
 
-            Some(result_payload.clone())
-        })
-    })?;
+                    let parsed = match output {
+                        serde_json::Value::String(text) => {
+                            serde_json::from_str::<serde_json::Value>(text).ok()
+                        }
+                        other => Some(other.clone()),
+                    }?;
+
+                    let result_payload = parsed.get("result").unwrap_or(&parsed);
+                    let tool_name = parsed
+                        .get("tool")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| result_payload.get("tool").and_then(|value| value.as_str()));
+                    let unified_explore_call =
+                        conversation[..message_index].iter().rev().any(|prior| {
+                            prior.role == Role::Assistant
+                                && prior.content.iter().any(|content| {
+                                    matches!(
+                                        content,
+                                        Content::ToolUse { id, name, input }
+                                            if id == tool_use_id
+                                                && name == "agent"
+                                                && agent_call_starts_run(input)
+                                                && agent_call_execution_profile(input) == "explore"
+                                    )
+                                })
+                        });
+                    if tool_name != Some("explore") && !unified_explore_call {
+                        return None;
+                    }
+
+                    Some(result_payload.clone())
+                })
+            })?;
 
     let outcome = last_explore_result
         .get("outcome")
@@ -607,6 +661,17 @@ fn normalize_error_fingerprint(message: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn successful_results(tool_calls: &[AiToolCall], output: serde_json::Value) -> Vec<Content> {
+        tool_calls
+            .iter()
+            .map(|call| Content::ToolResult {
+                tool_use_id: call.id.clone(),
+                output: output.clone(),
+                is_error: None,
+            })
+            .collect()
+    }
 
     #[test]
     fn trips_at_threshold() {
@@ -802,13 +867,32 @@ mod tests {
                 arguments: json!({"pattern":"TODO"}),
             },
         ];
+        let results = successful_results(&calls, json!({"status": "unchanged"}));
 
         let mut counters = HashMap::new();
         for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
-            assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+            assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
         }
 
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_some());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some());
+    }
+
+    #[test]
+    fn repeated_read_only_intent_allows_changing_status_output() {
+        let calls = vec![AiToolCall {
+            id: "status-1".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command": "gh run view 123 --json status,conclusion"}),
+        }];
+        let mut counters = HashMap::new();
+
+        for status in ["queued", "in_progress", "completed", "success"] {
+            let results = successful_results(&calls, json!({"status": status}));
+            assert!(
+                detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none(),
+                "changed status output must remain observable"
+            );
+        }
     }
 
     #[test]
@@ -825,10 +909,11 @@ mod tests {
         }];
 
         let mut counters = HashMap::new();
-        detect_repeated_read_only_sequence(&mut counters, &readonly);
+        let readonly_results = successful_results(&readonly, json!({"ok": true}));
+        detect_repeated_read_only_sequence(&mut counters, &readonly, &readonly_results);
         assert!(!counters.is_empty());
 
-        assert!(detect_repeated_read_only_sequence(&mut counters, &write).is_none());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &write, &[]).is_none());
         assert!(counters.is_empty());
     }
 
@@ -841,12 +926,13 @@ mod tests {
                 "command": "git show abc123:apps/mobile/components/chat/ChatBar.tsx | rg -n 'shouldGrow' | head -40"
             }),
         }];
+        let results = successful_results(&calls, json!({"output": "unchanged"}));
 
         let mut counters = HashMap::new();
         for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
-            assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+            assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
         }
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_some());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some());
     }
 
     #[test]
@@ -865,7 +951,8 @@ mod tests {
         ];
         assert!(calls.iter().all(is_exploration_probe));
         let mut counters = HashMap::new();
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+        let results = successful_results(&calls, json!({"ok": true}));
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
         assert!(!counters.is_empty());
     }
 
@@ -960,9 +1047,14 @@ mod tests {
         };
 
         let mut counters = HashMap::new();
-        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("1", 100)]).is_none());
-        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("2", 200)]).is_none());
-        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("3", 300)]).is_some());
+        for (id, limit, should_stop) in [("1", 100, false), ("2", 200, false), ("3", 300, true)] {
+            let calls = [wrapped(id, limit)];
+            let results = successful_results(&calls, json!({"ok": true}));
+            assert_eq!(
+                detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some(),
+                should_stop
+            );
+        }
     }
 
     #[test]
@@ -978,7 +1070,7 @@ mod tests {
         };
 
         let mut counters = HashMap::new();
-        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped_write]).is_none());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped_write], &[]).is_none());
         assert!(counters.is_empty());
     }
 
@@ -1163,6 +1255,50 @@ mod tests {
 
         let diagnostic = detect_post_explore_manual_fallback(&conversation, &tool_calls)
             .expect("manual fallback should stop");
+        assert!(diagnostic.contains("usable delegated coverage already exists"));
+    }
+
+    #[test]
+    fn post_explore_manual_fallback_understands_unified_agent_history() {
+        let conversation = vec![
+            ModelMessage {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "agent-1".to_string(),
+                    name: "agent".to_string(),
+                    input: json!({
+                        "action": "spawn",
+                        "profile": "explore",
+                        "task_name": "map_runtime",
+                        "prompt": "Map the runtime boundaries"
+                    }),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "agent-1".to_string(),
+                    output: json!({
+                        "tool": "agent",
+                        "result": {
+                            "outcome": "success",
+                            "usable_agents": 1,
+                            "files_examined_count": 8,
+                            "next_action_hint": "Synthesize the delegated evidence."
+                        }
+                    }),
+                    is_error: Some(false),
+                }],
+            },
+        ];
+        let tool_calls = vec![AiToolCall {
+            id: "read-1".to_string(),
+            name: "read".to_string(),
+            arguments: json!({"file_path":"crates/krusty-core/src/agent/orchestrator.rs"}),
+        }];
+
+        let diagnostic = detect_post_explore_manual_fallback(&conversation, &tool_calls)
+            .expect("unified explore result should prevent broad manual fallback");
         assert!(diagnostic.contains("usable delegated coverage already exists"));
     }
 

@@ -17,13 +17,28 @@ use crate::ai::client::AiClient;
 use crate::tools::registry::{DelegationPolicy, ToolRegistry};
 
 use self::config::BuilderConfig;
-pub(crate) use self::config::{AgentConfig, SingleExplorerConfig};
+pub(crate) use self::config::{AgentConfig, SingleChildConfig, SingleExplorerConfig};
 pub(crate) use self::runtime::execute_agent_loop;
 
 use super::build_context::SharedBuildContext;
 use super::types::{AgentProgress, SubAgentResult, SubAgentTask};
 
-/// Execute a single explorer agent using the real tool registry.
+/// Execute one parent-directed child through the shared governed loop.
+pub async fn execute_single_child(
+    client: Arc<AiClient>,
+    task: SubAgentTask,
+    registry: Arc<ToolRegistry>,
+    policy: DelegationPolicy,
+    project_context: String,
+    model: String,
+    cancellation: CancellationToken,
+    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
+) -> SubAgentResult {
+    let config = SingleChildConfig::new(registry, policy, project_context).await;
+    execute_agent_loop(&client, &task, &model, cancellation, &config, progress_tx).await
+}
+
+/// Legacy explorer-pool compatibility wrapper.
 pub async fn execute_single_explorer(
     client: Arc<AiClient>,
     task: SubAgentTask,
@@ -34,8 +49,17 @@ pub async fn execute_single_explorer(
     cancellation: CancellationToken,
     progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
-    let config = SingleExplorerConfig::new(registry, policy, project_context).await;
-    execute_agent_loop(&client, &task, &model, cancellation, &config, progress_tx).await
+    execute_single_child(
+        client,
+        task,
+        registry,
+        policy,
+        project_context,
+        model,
+        cancellation,
+        progress_tx,
+    )
+    .await
 }
 
 /// Execute any agent type via the standard agent loop.

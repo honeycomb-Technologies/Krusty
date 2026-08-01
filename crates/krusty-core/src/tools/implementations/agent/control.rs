@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 use crate::storage::{DelegatedRunRecord, DelegatedRunRole};
 use crate::tools::{ToolContext, ToolResult};
@@ -82,6 +83,53 @@ fn should_resume_terminal_followup(action: AgentAction, record: &DelegatedRunRec
     action == AgentAction::Followup && is_terminal(record.stage)
 }
 
+fn apply_persisted_child_contract(
+    params: &mut Params,
+    record: &DelegatedRunRecord,
+    delegated_run_id: &str,
+) {
+    let has_explicit_contract = !record.capabilities.is_empty();
+    params.profile = Some(if has_explicit_contract {
+        "child".to_string()
+    } else {
+        role_profile(&record.role).to_string()
+    });
+    params.agent_type = None;
+    params.capabilities = record
+        .effective_capabilities()
+        .into_iter()
+        .map(|capability| match capability {
+            AgentCapability::Read => "read".to_string(),
+            AgentCapability::Write => "write".to_string(),
+            AgentCapability::Execute => "execute".to_string(),
+        })
+        .collect();
+
+    if params.name.is_none() {
+        params.name = record.child_name.clone().or_else(|| {
+            Some(format!(
+                "resume-{}",
+                &delegated_run_id[..delegated_run_id.len().min(8)]
+            ))
+        });
+    }
+
+    let explicit_parallel_components = record.target_scope.len() > 1
+        && record
+            .target_scope
+            .iter()
+            .all(|scope| scope.kind == "component");
+    if explicit_parallel_components && params.components.is_none() {
+        params.components = Some(
+            record
+                .target_scope
+                .iter()
+                .map(|scope| scope.path.clone())
+                .collect(),
+        );
+    }
+}
+
 impl AgentTool {
     async fn execute_resume_from_record(
         &self,
@@ -114,25 +162,8 @@ impl AgentTool {
         };
         params.action = AgentAction::Spawn;
         params.delegated_run_id = None;
-        params.profile = Some(role_profile(&record.role).to_string());
-        params.agent_type = None;
         params.run_in_background = Some(params.run_in_background.unwrap_or(true));
-        params.name.get_or_insert_with(|| {
-            format!(
-                "resume-{}",
-                &delegated_run_id[..delegated_run_id.len().min(8)]
-            )
-        });
-        if record.role == DelegatedRunRole::Build && params.components.is_none() {
-            let components = record
-                .target_scope
-                .iter()
-                .map(|scope| scope.path.clone())
-                .collect::<Vec<_>>();
-            if !components.is_empty() {
-                params.components = Some(components);
-            }
-        }
+        apply_persisted_child_contract(&mut params, &record, &delegated_run_id);
         self.execute_spawn(params, ctx).await
     }
 
@@ -401,5 +432,47 @@ mod tests {
             AgentAction::Message,
             &completed
         ));
+    }
+
+    #[test]
+    fn resume_restores_execute_only_contract_name_and_not_fake_components() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let db_path = owner.db_path.as_ref().expect("db path");
+        let store = DelegatedRunStore::new(Database::new(db_path).expect("db"));
+        let capabilities = [AgentCapability::Execute].into_iter().collect();
+        store
+            .create_run_with_child_contract(
+                &DelegatedRunStartInput {
+                    delegated_run_id: "run-exec".to_string(),
+                    parent_session_id: "parent-a".to_string(),
+                    parent_tool_call_id: Some("tool-exec".to_string()),
+                    role: DelegatedRunRole::Explore,
+                    stage: DelegatedRunStage::Complete,
+                    provider: None,
+                    model: None,
+                    resumable: true,
+                    resumed_from_run_id: None,
+                    target_scope: vec![DelegatedRunScope {
+                        label: "project".to_string(),
+                        path: ".".to_string(),
+                        kind: "project".to_string(),
+                    }],
+                },
+                Some("focused validator"),
+                &capabilities,
+            )
+            .expect("seed contracted run");
+        let record = store
+            .get_run("run-exec")
+            .expect("read run")
+            .expect("run exists");
+        let mut params = Params::default();
+
+        apply_persisted_child_contract(&mut params, &record, "run-exec");
+
+        assert_eq!(params.profile.as_deref(), Some("child"));
+        assert_eq!(params.name.as_deref(), Some("focused validator"));
+        assert_eq!(params.capabilities, vec!["execute"]);
+        assert!(params.components.is_none());
     }
 }

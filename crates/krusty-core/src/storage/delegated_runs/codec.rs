@@ -3,6 +3,7 @@ use rusqlite::types::Type;
 use serde_json::Value;
 
 use super::model::{DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot};
+use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 
 pub(super) fn delegated_stage_str(stage: DelegatedRunStage) -> &'static str {
@@ -60,6 +61,10 @@ pub(super) fn row_to_delegated_run(
         .map(|value| serde_json::from_str::<Value>(&value))
         .transpose()
         .map_err(|err| rusqlite::Error::FromSqlConversionFailure(12, Type::Text, err.into()))?;
+    let capabilities_json: String = row.get(18)?;
+    let capabilities =
+        serde_json::from_str::<std::collections::BTreeSet<AgentCapability>>(&capabilities_json)
+            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(18, Type::Text, err.into()))?;
 
     Ok(DelegatedRunRecord {
         delegated_run_id: row.get(0)?,
@@ -82,5 +87,7 @@ pub(super) fn row_to_delegated_run(
             .get::<_, Option<String>>(16)?
             .map(parse_datetime)
             .transpose()?,
+        child_name: row.get(17)?,
+        capabilities,
     })
 }

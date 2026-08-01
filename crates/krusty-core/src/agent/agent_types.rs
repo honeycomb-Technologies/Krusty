@@ -17,10 +17,8 @@ use super::subagent::{AgentConfig, AgentProgress};
 // PlanConfig
 // ---------------------------------------------------------------------------
 
-/// Agent configuration for the Plan agent.
-///
-/// The Plan agent is a read-only software architect that investigates the
-/// codebase and produces a structured implementation plan.
+/// Legacy plan-agent config retained for resume of planner-role delegated runs.
+#[allow(dead_code)]
 pub(crate) struct PlanConfig {
     policy: DelegationPolicy,
     registry: Arc<ToolRegistry>,
@@ -128,10 +126,8 @@ impl AgentConfig for PlanConfig {
 // VerifyConfig
 // ---------------------------------------------------------------------------
 
-/// Agent configuration for the Verify agent.
-///
-/// The Verify agent validates that changes are correct by running tests,
-/// builds, and linters, then produces a verdict (PASS / FAIL / PARTIAL).
+/// Legacy verify-agent config retained for resume of verifier-role delegated runs.
+#[allow(dead_code)]
 pub(crate) struct VerifyConfig {
     policy: DelegationPolicy,
     registry: Arc<ToolRegistry>,

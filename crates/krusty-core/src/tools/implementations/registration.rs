@@ -146,7 +146,16 @@ mod tests {
             .find(|tool| tool.name == "agent")
             .expect("agent tool should be registered");
         assert!(agent.description.contains("parallel"));
-        assert!(agent.description.contains("avoid simple lookups"));
+        assert!(agent.description.contains("not simple lookups"));
+        for field in ["name", "instructions", "capabilities"] {
+            assert!(
+                agent.input_schema["properties"].get(field).is_some(),
+                "current Agent contract must expose {field}"
+            );
+        }
+        assert!(agent.input_schema["properties"]["run_in_background"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("parent is notified")));
         assert_eq!(
             agent.input_schema["properties"]["action"]["enum"][7],
             "resume"

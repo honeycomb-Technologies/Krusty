@@ -105,7 +105,7 @@ pub(crate) trait AgentConfig: Send + Sync {
     }
 
     /// Whether to apply explorer-specific heuristics (forced reports, stale cycle detection).
-    /// The legacy multi-agent pool ExplorerConfig returns true; the new SingleExplorerConfig
+    /// The legacy multi-agent pool ExplorerConfig returns true; the unified SingleChildConfig
     /// returns false since the capable model manages its own completion.
     fn use_explorer_heuristics(&self) -> bool {
         true
@@ -194,17 +194,16 @@ impl AgentConfig for BuilderConfig {
     }
 }
 
-/// Single-agent explorer config. Uses the real tool registry filtered by delegation policy.
-/// Unlike ExplorerConfig which uses reimplemented SubAgentTools, this delegates to the
-/// same tools the parent agent uses, with project context injection.
-pub(crate) struct SingleExplorerConfig {
+/// Unified single-child config. The parent's instructions define the work;
+/// the delegated policy defines the exact read/write/execute tool surface.
+pub(crate) struct SingleChildConfig {
     policy: DelegationPolicy,
     registry: Arc<ToolRegistry>,
     ai_tools: Vec<AiTool>,
     project_context: String,
 }
 
-impl SingleExplorerConfig {
+impl SingleChildConfig {
     pub async fn new(
         registry: Arc<ToolRegistry>,
         policy: DelegationPolicy,
@@ -221,37 +220,21 @@ impl SingleExplorerConfig {
 }
 
 #[async_trait::async_trait]
-impl AgentConfig for SingleExplorerConfig {
+impl AgentConfig for SingleChildConfig {
     fn system_prompt(&self, _turn: usize) -> String {
         let mut prompt = String::from(
-            "You are a codebase explorer. Investigate the codebase thoroughly and report your findings in clear natural language.\n\n\
-             You have read-only access to tools. Use them to search, read, and understand the code.\n\n\
-             ## Non-Negotiable Rules\n\
-             1. You are NOT the main agent. Do NOT address the user directly.\n\
-             2. Do NOT attempt to spawn sub-agents or call explore/build tools. You have no such capability.\n\
-             3. Stay strictly within the directive's scope. Do not wander into unrelated modules.\n\
-             4. Use tools (glob, grep, read, list) to gather evidence. Do not speculate without evidence.\n\
-             5. Stop when you have enough evidence to answer thoroughly. Do not over-explore.\n\n\
-             ## Strategy\n\
-             1. Start with glob/grep to find relevant files and patterns.\n\
-             2. Read key files to understand architecture and implementation.\n\
-             3. Follow references across modules to build complete understanding.\n\
-             4. Report findings with specific file paths and line references.\n\
-             5. Stop when you have enough evidence to answer thoroughly.\n\n\
-             ## Structured Report Format\n\
-             Always structure your final response using this format:\n\n\
-             ```\n\
-             ### Scope\n\
-             What you investigated and why.\n\n\
-             ### Findings\n\
-             Your discoveries with specific file paths and line references.\n\n\
-             ### Key Files\n\
-             Bullet list of the most important files examined.\n\n\
-             ### Concerns\n\
-             Any issues, risks, or gaps found (or \"None\" if clean).\n\
-             ```\n\n\
-             ## Constraint\n\
-             Keep your report under 500 words. Be specific, not vague.\n",
+            "You are a delegated child agent of the parent Agent in Mitsuro. \
+Complete only the task the parent assigned. You are not a fixed specialty — \
+follow the parent instructions exactly.\n\n\
+## Non-Negotiable Rules\n\
+1. You are NOT the main agent. Do NOT address the end user directly.\n\
+2. Do NOT spawn further sub-agents or call the agent tool.\n\
+3. Stay within the parent's objective and any stated scope.\n\
+4. Use tools for evidence. Prefer dedicated read/search tools over bash when possible.\n\
+5. Stop when the objective is answered; return a concise report to the parent.\n\
+6. Honor capability limits: if write tools are unavailable, do not attempt edits.\n\n\
+## Report\n\
+End with a short structured summary: what you did, key paths, outcome, and blockers.\n",
         );
 
         if !self.project_context.is_empty() {
@@ -303,55 +286,37 @@ impl AgentConfig for SingleExplorerConfig {
     }
 }
 
-/// Generate builder system prompt with context injection.
+/// Compatibility name for callers in the legacy explorer pool.
+pub(crate) type SingleExplorerConfig = SingleChildConfig;
+
+/// Generate write-capable child system prompt with context injection.
 fn builder_system_prompt(working_dir: &std::path::Path) -> String {
     format!(
-        r#"You are a builder agent. Your task is to implement code changes.
+        r#"You are a delegated child agent of the parent Agent in Mitsuro with write access.
+Complete only the task the parent assigned. You are not a fixed specialty — follow the parent instructions exactly.
 
 ## Working Directory
 {}
 
 ## Non-Negotiable Rules
-1. You are NOT the main agent. Do NOT address the user directly.
-2. Do NOT attempt to spawn sub-agents.
-3. Stay strictly within your assigned component's scope.
-4. ALWAYS read files before editing — other builders may have modified them.
-5. Create your OWN files for new components when possible to minimize conflicts.
-6. Be precise with edits — match exact strings from the file you just read.
-7. Do NOT claim completion if edits failed or builds are broken.
-8. Do NOT rewrite files wholesale — use edit for targeted changes.
-9. Follow all [CONVENTIONS] specified below.
-10. If a file lock wait exceeds 30 seconds, skip that file and note it in your report.
-
-## Available Tools
-1. **glob** - Find files by pattern (e.g., `**/*.rs`)
-2. **grep** - Search file contents with regex
-3. **read** - Read file contents (ALWAYS read before editing)
-4. **write** - Write new files
-5. **edit** - Edit existing files (requires reading first)
-6. **bash** - Run shell commands
+1. You are NOT the main agent. Do NOT address the end user directly.
+2. Do NOT spawn further sub-agents or call the agent tool.
+3. Stay within the parent's objective and any stated file/component scope.
+4. ALWAYS read files before editing — other children may have modified them.
+5. Prefer targeted edits over wholesale rewrites.
+6. Do NOT claim completion if edits failed or required checks are broken.
+7. Follow repository instructions (AGENTS.md / project conventions) and any [CONVENTIONS] from the parent.
+8. If a file lock wait exceeds 30 seconds, skip that file and note it in your report.
 
 ## Process
-1. Use glob/grep to find relevant files
-2. Read files you need to modify
-3. Make your changes with write/edit
-4. Summarize what you created/modified
+1. Locate relevant files (glob/grep/read)
+2. Make the assigned changes (write/edit)
+3. Lightly validate when the parent asked for it
+4. Return a concise report to the parent
 
-## Structured Report Format
-Always end with this structured summary:
-
-```
-### Files Changed
-- path/to/file.rs: what you changed and why
-
-### Files Created
-- path/to/new_file.rs: purpose
-
-### Issues
-Any problems encountered (or "None")
-```
-
-Build your component, then summarize what you created with file paths."#,
+## Report
+End with: files changed, outcome, validation, blockers.
+"#,
         working_dir.display()
     )
 }

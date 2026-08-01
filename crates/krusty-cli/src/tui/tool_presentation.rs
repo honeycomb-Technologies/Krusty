@@ -42,8 +42,17 @@ pub fn presentation_for_tool(name: &str, input: &Value) -> ToolPresentation {
         "web_search" => ToolPresentation::WebSearch,
         "explore" | "Task" => ToolPresentation::ExploreAgent,
         "build" => ToolPresentation::BuildAgent,
+        "agent" if agent_has_capability(input, "write") => ToolPresentation::BuildAgent,
+        "agent"
+            if input.get("name").is_some()
+                || input.get("instructions").is_some()
+                || input.get("capabilities").is_some() =>
+        {
+            ToolPresentation::ExploreAgent
+        }
         "agent" => match input
             .get("agent_type")
+            .or_else(|| input.get("profile"))
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
@@ -157,15 +166,22 @@ pub fn tool_pattern(name: &str, input: &Value) -> String {
         }
         "skill" => first_string(input, &["skill"]).unwrap_or_default(),
         "search_compaction_segments" => first_string(input, &["query"]).unwrap_or_default(),
-        "agent" => first_string(input, &["agent_type"]).unwrap_or_default(),
+        "agent" => first_string(input, &["name"])
+            .or_else(|| agent_capability_label(input))
+            .or_else(|| first_string(input, &["agent_type", "profile"]))
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
 
 pub fn display_tool_name(name: &str, input: &Value) -> String {
     match name {
+        "agent" if first_string(input, &["name"]).is_some() => {
+            first_string(input, &["name"]).unwrap_or_else(|| "agent".to_string())
+        }
         "agent" => match input
             .get("agent_type")
+            .or_else(|| input.get("profile"))
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
@@ -182,6 +198,28 @@ pub fn display_tool_name(name: &str, input: &Value) -> String {
         "apply_patch" => "patch".to_string(),
         other => other.replace('_', " "),
     }
+}
+
+fn agent_has_capability(input: &Value, expected: &str) -> bool {
+    input
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|capability| capability == expected)
+        })
+}
+
+fn agent_capability_label(input: &Value) -> Option<String> {
+    let capabilities = input.get("capabilities")?.as_array()?;
+    let values = capabilities
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(" + "))
 }
 
 fn extract_summary(parsed: &Value) -> Option<String> {
@@ -272,6 +310,29 @@ mod tests {
         assert_eq!(
             presentation_for_tool("agent", &json!({"agent_type":"verify"})),
             ToolPresentation::GenericStatus
+        );
+    }
+
+    #[test]
+    fn current_agent_contract_uses_name_and_exact_capabilities() {
+        let input = json!({
+            "name": "focused validator",
+            "instructions": "run focused checks",
+            "capabilities": ["execute"]
+        });
+        assert_eq!(
+            presentation_for_tool("agent", &input),
+            ToolPresentation::ExploreAgent
+        );
+        assert_eq!(display_tool_name("agent", &input), "focused validator");
+        assert_eq!(tool_pattern("agent", &input), "focused validator");
+
+        let unnamed = json!({"capabilities": ["read", "execute"]});
+        assert_eq!(tool_pattern("agent", &unnamed), "read + execute");
+        let writer = json!({"name": "repair", "capabilities": ["write"]});
+        assert_eq!(
+            presentation_for_tool("agent", &writer),
+            ToolPresentation::BuildAgent
         );
     }
 

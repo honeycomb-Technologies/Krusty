@@ -53,6 +53,7 @@ type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
 mod ai_bootstrap;
+mod child_wake;
 mod process_wake;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
@@ -207,23 +208,30 @@ pub struct AppState {
 }
 
 impl AppState {
+    async fn session_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.session_locks.write().await;
+        if locks.len() > SESSION_LOCK_MAX_ENTRIES {
+            locks.retain(|_, (lock, created_at)| {
+                created_at.elapsed() < SESSION_LOCK_MAX_AGE || Arc::strong_count(lock) > 1
+            });
+        }
+        let (lock, _) = locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| (Arc::new(Mutex::new(())), Instant::now()));
+        Arc::clone(lock)
+    }
+
     /// Acquire the canonical per-session mutation lock without waiting.
     /// Chat, autonomous runs, and manual compaction all share this guard.
     pub(crate) async fn try_lock_session(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
-        let lock = {
-            let mut locks = self.session_locks.write().await;
-            if locks.len() > SESSION_LOCK_MAX_ENTRIES {
-                locks.retain(|_, (lock, created_at)| {
-                    created_at.elapsed() < SESSION_LOCK_MAX_AGE || Arc::strong_count(lock) > 1
-                });
-            }
-            let (lock, _) = locks
-                .entry(session_id.to_string())
-                .or_insert_with(|| (Arc::new(Mutex::new(())), Instant::now()));
-            Arc::clone(lock)
-        };
+        self.session_lock(session_id).await.try_lock_owned().ok()
+    }
 
-        lock.try_lock_owned().ok()
+    /// Wait for the canonical session mutation lock. Internal wake/recovery
+    /// paths use this only after a live input handoff is unavailable, then
+    /// re-check their durable work while holding the guard.
+    pub(crate) async fn lock_session(&self, session_id: &str) -> OwnedMutexGuard<()> {
+        self.session_lock(session_id).await.lock_owned().await
     }
 
     /// Resolve a fresh AI client using the current credential store and requested model.
@@ -614,6 +622,12 @@ pub(crate) async fn build_app_state(
     // Detached bash jobs wake their parent session on terminal status so the
     // agent does not thrash on gh/process status polls.
     process_wake::install_process_completion_wake(process_registry, state.clone()).await;
+    // Background child agents wake the parent the same way (no status thrash).
+    child_wake::install_child_completion_wake(
+        state.tool_registry.agent_runtime_manager(),
+        state.clone(),
+    )
+    .await;
 
     spawn_model_catalog_refresh(
         state.model_registry.clone(),

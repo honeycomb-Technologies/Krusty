@@ -570,6 +570,8 @@ export interface DelegatedAgentState {
 
 export interface DelegatedArtifactState {
 	kind: DelegatedToolKind;
+	name?: string;
+	capabilities?: Array<"read" | "write" | "execute">;
 	delegatedRunId?: string;
 	stage?: DelegatedRunStage;
 	thinking?: string;
@@ -641,6 +643,8 @@ export interface DelegatedRunResponse {
 	model?: string | null;
 	resumable: boolean;
 	resumed_from_run_id?: string | null;
+	child_name?: string | null;
+	capabilities?: Array<"read" | "write" | "execute">;
 	target_scope: DelegatedRunScopeResponse[];
 	human_review?: string | null;
 	artifact?: Record<string, unknown> | null;

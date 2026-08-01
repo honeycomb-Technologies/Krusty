@@ -425,6 +425,59 @@ impl DelegationPolicy {
         }
     }
 
+    /// Agnostic child policy from parent-requested capabilities.
+    ///
+    /// Write → build surface. Execute without write → read tools + bash.
+    /// Otherwise → read-only explore surface.
+    pub fn for_subagent_child(
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+        wants_read: bool,
+        wants_write: bool,
+        wants_execute: bool,
+    ) -> Self {
+        let mut policy = if wants_write {
+            Self::for_subagent_build(inherited_permission_mode, max_turns)
+        } else if wants_execute {
+            Self::for_subagent_verify(inherited_permission_mode, max_turns)
+        } else {
+            Self::for_subagent_explore(inherited_permission_mode, max_turns)
+        };
+
+        // Capability requests are an exact child-side ceiling. In particular,
+        // execute-only must not silently acquire read access, and write does
+        // not imply shell execution. The immutable parent ceiling is
+        // intersected below.
+        let mut allowlist = BTreeSet::new();
+        if wants_read {
+            allowlist.extend(
+                [
+                    "glob",
+                    "grep",
+                    "list",
+                    "read",
+                    "tool_search",
+                    "web_fetch",
+                    "web_search",
+                ]
+                .into_iter()
+                .map(ToString::to_string),
+            );
+        }
+        if wants_write {
+            allowlist.extend(
+                ["apply_patch", "edit", "multiedit", "write"]
+                    .into_iter()
+                    .map(ToString::to_string),
+            );
+        }
+        if wants_execute {
+            allowlist.insert("bash".to_string());
+        }
+        policy.execution_tool_allowlist = Some(allowlist);
+        policy
+    }
+
     /// Intersect delegated execution with the parent's exact per-turn tool
     /// scope. The parent scope is already the narrowest run-level capability,
     /// so a child may retain only names present in it; it must never reconstruct
@@ -433,8 +486,15 @@ impl DelegationPolicy {
         mut self,
         execution_tool_allowlist: Option<&HashSet<String>>,
     ) -> Self {
-        self.execution_tool_allowlist = execution_tool_allowlist
-            .map(|allowlist| allowlist.iter().cloned().collect::<BTreeSet<String>>());
+        if let Some(parent_allowlist) = execution_tool_allowlist {
+            self.execution_tool_allowlist = Some(match self.execution_tool_allowlist.take() {
+                Some(child_allowlist) => child_allowlist
+                    .into_iter()
+                    .filter(|name| parent_allowlist.contains(name))
+                    .collect(),
+                None => parent_allowlist.iter().cloned().collect(),
+            });
+        }
         self
     }
 
@@ -673,6 +733,34 @@ pub fn agent_call_execution_profile(params: &Value) -> &'static str {
         _ if agent_call_has_capability(params, "execute") => "verify",
         _ => "explore",
     }
+}
+
+/// Whether a delegated Agent spawn is research work for loop accounting.
+///
+/// Explicit capabilities are authoritative: read/read+execute count, while
+/// any write-capable child does not. Legacy profile labels remain a fallback
+/// for older clients that do not send capabilities.
+pub fn agent_call_is_research(params: &Value) -> bool {
+    if !agent_call_starts_run(params) {
+        return false;
+    }
+
+    if params
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some()
+    {
+        return agent_call_has_capability(params, "read")
+            && !agent_call_has_capability(params, "write");
+    }
+
+    matches!(
+        params
+            .get("profile")
+            .and_then(Value::as_str)
+            .or_else(|| params.get("agent_type").and_then(Value::as_str)),
+        Some("explore" | "plan" | "verify")
+    )
 }
 
 fn agent_call_has_capability(params: &Value, expected: &str) -> bool {

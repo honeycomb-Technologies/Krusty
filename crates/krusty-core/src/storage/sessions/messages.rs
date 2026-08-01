@@ -26,6 +26,33 @@ impl SessionManager {
         )
     }
 
+    pub fn queue_pending_steering_once(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        content_json: &str,
+    ) -> Result<bool> {
+        super::super::messages::MessageStore::new(&self.db).queue_pending_steering_once(
+            session_id,
+            pending_id,
+            content_json,
+        )
+    }
+
+    pub fn has_pending_steering(&self, session_id: &str, pending_id: &str) -> Result<bool> {
+        super::super::messages::MessageStore::new(&self.db)
+            .has_pending_steering(session_id, pending_id)
+    }
+
+    pub fn load_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+    ) -> Result<Option<String>> {
+        super::super::messages::MessageStore::new(&self.db)
+            .load_pending_steering(session_id, pending_id)
+    }
+
     pub fn promote_pending_steering(
         &self,
         session_id: &str,

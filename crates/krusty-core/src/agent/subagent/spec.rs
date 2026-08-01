@@ -47,11 +47,13 @@ impl AgentContextMode {
     }
 }
 
+/// Runtime engine for a delegated child. Product surface is an agnostic child
+/// directed by parent instructions; this enum only selects tool capability class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentExecutionProfile {
+    /// Read-focused worker (optional execute when capability requests it).
     Explore,
-    Plan,
-    Verify,
+    /// Write-capable worker.
     Build,
 }
 
@@ -59,8 +61,6 @@ impl AgentExecutionProfile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Explore => "explore",
-            Self::Plan => "plan",
-            Self::Verify => "verify",
             Self::Build => "build",
         }
     }
@@ -68,7 +68,9 @@ impl AgentExecutionProfile {
 
 /// Provider-neutral task specification proposed by the primary model.
 ///
-/// Profiles are optional behavior presets. Capabilities are requests that are
+/// Children are agnostic workers. `profile` is an optional label (legacy
+/// explore/plan/verify/build names map to capability defaults only). Behavior
+/// comes from parent `objective` / instructions. Capabilities are requests
 /// still clamped by the parent's immutable DelegationPolicy at execution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
@@ -109,7 +111,7 @@ impl AgentSpec {
             }
             (Some(profile), _) if !profile.is_empty() => profile.to_ascii_lowercase(),
             (_, Some(legacy)) if !legacy.is_empty() => legacy.to_ascii_lowercase(),
-            _ => "general".to_string(),
+            _ => "child".to_string(),
         };
         if profile.len() > 64 {
             return Err("Agent profile must be 64 characters or fewer".to_string());
@@ -130,13 +132,22 @@ impl AgentSpec {
                 "Profile '{profile}' is read-only and cannot request write or execute"
             ));
         }
-        requested_capabilities.insert(AgentCapability::Read);
-
+        // Name is the parent-chosen identity for status/completion. Prefer
+        // explicit name over legacy profile labels.
         let task_name = task_name
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .unwrap_or(&profile)
-            .to_string();
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                if matches!(
+                    profile.as_str(),
+                    "child" | "general" | "explore" | "plan" | "verify" | "build" | "default"
+                ) {
+                    "child".to_string()
+                } else {
+                    profile.clone()
+                }
+            });
         if task_name.len() > 96 {
             return Err("Agent task_name must be 96 characters or fewer".to_string());
         }
@@ -153,20 +164,17 @@ impl AgentSpec {
         })
     }
 
+    /// Capability class for tool policy only — not a product persona.
     pub fn execution_profile(&self) -> AgentExecutionProfile {
-        match self.profile.as_str() {
-            "explore" => AgentExecutionProfile::Explore,
-            "plan" => AgentExecutionProfile::Plan,
-            "verify" => AgentExecutionProfile::Verify,
-            "build" => AgentExecutionProfile::Build,
-            _ if self.capabilities.contains(&AgentCapability::Write) => {
-                AgentExecutionProfile::Build
-            }
-            _ if self.capabilities.contains(&AgentCapability::Execute) => {
-                AgentExecutionProfile::Verify
-            }
-            _ => AgentExecutionProfile::Explore,
+        if self.capabilities.contains(&AgentCapability::Write) {
+            AgentExecutionProfile::Build
+        } else {
+            AgentExecutionProfile::Explore
         }
+    }
+
+    pub fn allows_execute(&self) -> bool {
+        self.capabilities.contains(&AgentCapability::Execute)
     }
 
     pub fn parent_context_turns(&self) -> Option<usize> {
@@ -185,9 +193,6 @@ impl AgentSpec {
 
     pub fn rendered_objective(&self) -> String {
         let mut sections = vec![self.objective.clone()];
-        if self.profile != self.execution_profile().as_str() && self.profile != "general" {
-            sections.push(format!("Requested specialist profile: {}", self.profile));
-        }
         if let Some(reason) = self.delegation_reason.as_deref() {
             sections.push(format!("Delegation reason: {reason}"));
         }
@@ -200,8 +205,15 @@ impl AgentSpec {
 
 fn preset_capabilities(profile: &str) -> BTreeSet<AgentCapability> {
     match profile {
-        "build" => BTreeSet::from([AgentCapability::Read, AgentCapability::Write]),
+        // Legacy build/worker implied the old builder surface, including
+        // command execution. Explicit capability requests remain exact.
+        "build" | "worker" => BTreeSet::from([
+            AgentCapability::Read,
+            AgentCapability::Write,
+            AgentCapability::Execute,
+        ]),
         "verify" => BTreeSet::from([AgentCapability::Read, AgentCapability::Execute]),
+        // explore, plan, child, general, custom labels → read by default
         _ => BTreeSet::from([AgentCapability::Read]),
     }
 }
@@ -227,21 +239,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn general_profile_is_dynamic_and_read_only_by_default() {
+    fn default_child_is_agnostic_and_read_only() {
         let spec = AgentSpec::resolve(None, None, None, "audit", None, None, &[], None, None, None)
             .unwrap();
-        assert_eq!(spec.profile, "general");
+        assert_eq!(spec.profile, "child");
+        assert_eq!(spec.task_name, "child");
         assert_eq!(spec.execution_profile(), AgentExecutionProfile::Explore);
         assert_eq!(spec.parent_context_turns(), Some(10));
     }
 
     #[test]
-    fn custom_write_profile_routes_to_governed_build_execution() {
+    fn parent_name_and_write_capability_define_child_not_profile_kind() {
         let spec = AgentSpec::resolve(
             Some("api-specialist"),
             None,
-            Some("api"),
-            "implement",
+            Some("map ChatBar height"),
+            "implement the padding fix",
             None,
             None,
             &["write".to_string()],
@@ -250,9 +263,48 @@ mod tests {
             Some(30),
         )
         .unwrap();
+        assert_eq!(spec.task_name, "map ChatBar height");
         assert_eq!(spec.execution_profile(), AgentExecutionProfile::Build);
         assert_eq!(spec.max_turns, Some(30));
         assert_eq!(spec.parent_context_turns(), None);
+        assert!(spec
+            .rendered_objective()
+            .contains("implement the padding fix"));
+        assert!(!spec.rendered_objective().contains("specialist profile"));
+    }
+
+    #[test]
+    fn legacy_plan_and_verify_labels_are_not_separate_engines() {
+        let plan = AgentSpec::resolve(
+            Some("plan"),
+            None,
+            Some("draft approach"),
+            "produce a plan",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.execution_profile(), AgentExecutionProfile::Explore);
+
+        let verify = AgentSpec::resolve(
+            Some("verify"),
+            None,
+            Some("check tests"),
+            "run focused checks",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(verify.execution_profile(), AgentExecutionProfile::Explore);
+        assert!(verify.allows_execute());
     }
 
     #[test]
@@ -271,6 +323,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("read-only"));
+    }
+
+    #[test]
+    fn explicit_execute_only_capability_remains_exact() {
+        let spec = AgentSpec::resolve(
+            None,
+            None,
+            Some("focused command"),
+            "run one focused validation",
+            None,
+            None,
+            &["execute".to_string()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.capabilities,
+            BTreeSet::from([AgentCapability::Execute])
+        );
+        assert!(spec.allows_execute());
+        assert_eq!(spec.execution_profile(), AgentExecutionProfile::Explore);
     }
 
     #[test]

@@ -171,7 +171,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 49);
+    assert_eq!(db.get_schema_version(), 51);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -206,7 +206,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 49);
+    assert_eq!(db.get_schema_version(), 51);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(

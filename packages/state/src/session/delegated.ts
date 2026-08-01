@@ -96,12 +96,29 @@ export function resolveDelegatedKind(
     if (isDelegatedKind(agentType)) {
       return agentType;
     }
+    const profile = args?.profile;
+    if (isDelegatedKind(profile)) {
+      return profile;
+    }
+    const action = typeof args?.action === 'string' ? args.action : 'spawn';
+    if (action === 'spawn') {
+      const capabilities = Array.isArray(args?.capabilities)
+        ? args.capabilities.filter((value): value is string => typeof value === 'string')
+        : [];
+      return capabilities.includes('write') ? 'build' : 'explore';
+    }
   }
 
   return fallbackKind ?? undefined;
 }
 
-function defaultAgentName(kind: DelegatedToolKind): string {
+function defaultAgentName(
+  kind: DelegatedToolKind,
+  args?: Record<string, unknown>,
+): string {
+  if (typeof args?.name === 'string' && args.name.trim()) {
+    return args.name.trim();
+  }
   switch (kind) {
     case 'build':
       return 'builder';
@@ -146,7 +163,7 @@ function buildSeedDelegatedAgents(
   args?: Record<string, unknown>,
 ): DelegatedAgentState[] {
   const sources = buildDelegatedTargets(kind, args);
-  const fallbackName = defaultAgentName(kind);
+  const fallbackName = defaultAgentName(kind, args);
 
   if (sources.length === 0) {
     return [
@@ -164,12 +181,19 @@ function buildSeedDelegatedAgents(
 
   return sources.map((source, index) => ({
     taskId: kind === 'explore' ? `dir-${index}` : `${kind}-${index}`,
-    name: delegatedDisplayName(source, fallbackName),
+    name:
+      typeof args?.name === 'string' && args.name.trim()
+        ? `${args.name.trim()} / ${delegatedDisplayName(source, fallbackName)}`
+        : delegatedDisplayName(source, fallbackName),
     status: 'pending' as const,
     toolCount: 0,
     tokens: 0,
     currentAction:
-      typeof args?.prompt === 'string' ? args.prompt.slice(0, 80) : undefined,
+      typeof args?.instructions === 'string'
+        ? args.instructions.slice(0, 80)
+        : typeof args?.prompt === 'string'
+          ? args.prompt.slice(0, 80)
+          : undefined,
     linesAdded: 0,
     linesRemoved: 0,
   }));
@@ -277,6 +301,16 @@ export function createDelegatedArtifactState(
 ): DelegatedArtifactState {
   return {
     kind,
+    name:
+      typeof args?.name === 'string' && args.name.trim()
+        ? args.name.trim()
+        : undefined,
+    capabilities: Array.isArray(args?.capabilities)
+      ? args.capabilities.filter(
+          (value): value is 'read' | 'write' | 'execute' =>
+            value === 'read' || value === 'write' || value === 'execute',
+        )
+      : undefined,
     delegatedRunId: undefined,
     stage: 'created',
     thinking: undefined,
@@ -370,6 +404,16 @@ export function parseDelegatedArtifactState(
     const listKey = kind === 'build' ? 'builders' : 'agents';
     const artifact: DelegatedArtifactState = {
       kind,
+      name:
+        typeof args?.name === 'string' && args.name.trim()
+          ? args.name.trim()
+          : undefined,
+      capabilities: Array.isArray(args?.capabilities)
+        ? args.capabilities.filter(
+            (value): value is 'read' | 'write' | 'execute' =>
+              value === 'read' || value === 'write' || value === 'execute',
+          )
+        : undefined,
       delegatedRunId:
         typeof payload.delegated_run_id === 'string'
           ? payload.delegated_run_id
@@ -529,7 +573,7 @@ export function parseDelegatedArtifactState(
         return [
           {
             taskId,
-            name: delegatedDisplayName(taskId, defaultAgentName(kind)),
+            name: delegatedDisplayName(taskId, defaultAgentName(kind, args)),
             status: error ? ('failed' as const) : ('complete' as const),
             outcomeReason:
               typeof record.outcome_reason === 'string'
@@ -671,6 +715,13 @@ export function applyDelegatedSessionState(
         if (recentRun?.stage) {
           delegated.stage = recentRun.stage;
         }
+        if (recentRun?.child_name) {
+          delegated.name = recentRun.child_name;
+          if (delegated.agents[0]) delegated.agents[0].name = recentRun.child_name;
+        }
+        if (recentRun?.capabilities) {
+          delegated.capabilities = recentRun.capabilities;
+        }
         return {
           ...toolCall,
           delegatedRunId:
@@ -681,6 +732,9 @@ export function applyDelegatedSessionState(
 
       const delegated: DelegatedArtifactState = {
         kind: snapshot.kind,
+        name: recentRun?.child_name || toolCall.delegated?.name,
+        capabilities:
+          recentRun?.capabilities || toolCall.delegated?.capabilities,
         delegatedRunId:
           snapshot.delegated_run_id
           || recentRun?.delegated_run_id

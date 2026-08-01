@@ -2,7 +2,9 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
+use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 use crate::storage::database::Database;
 
@@ -22,9 +24,19 @@ impl DelegatedRunStore {
     }
 
     pub fn create_run(&self, input: &DelegatedRunStartInput) -> Result<()> {
+        self.create_run_with_child_contract(input, None, &BTreeSet::new())
+    }
+
+    pub fn create_run_with_child_contract(
+        &self,
+        input: &DelegatedRunStartInput,
+        child_name: Option<&str>,
+        capabilities: &BTreeSet<AgentCapability>,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let scope_key = normalize_scope_key(&input.target_scope);
         let scope_json = serde_json::to_string(&input.target_scope)?;
+        let capabilities_json = serde_json::to_string(capabilities)?;
 
         self.db.conn().execute(
             "INSERT OR REPLACE INTO delegated_runs (
@@ -39,9 +51,11 @@ impl DelegatedRunStore {
                 resumed_from_run_id,
                 target_scope_key,
                 target_scope_json,
+                child_name,
+                capabilities_json,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 input.delegated_run_id,
                 input.parent_session_id,
@@ -54,6 +68,8 @@ impl DelegatedRunStore {
                 input.resumed_from_run_id,
                 scope_key,
                 scope_json,
+                child_name,
+                capabilities_json,
                 now,
                 now,
             ],
@@ -160,6 +176,8 @@ impl DelegatedRunStore {
                 created_at,
                 updated_at,
                 completed_at
+                ,child_name
+                ,capabilities_json
              FROM delegated_runs
              WHERE delegated_run_id = ?1",
         )?;
@@ -194,6 +212,8 @@ impl DelegatedRunStore {
                 created_at,
                 updated_at,
                 completed_at
+                ,child_name
+                ,capabilities_json
              FROM delegated_runs
              WHERE parent_session_id = ?1
              ORDER BY updated_at DESC
@@ -234,6 +254,8 @@ impl DelegatedRunStore {
                 created_at,
                 updated_at,
                 completed_at
+                ,child_name
+                ,capabilities_json
              FROM delegated_runs
              WHERE parent_session_id = ?1
                AND role = ?2

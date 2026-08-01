@@ -5,6 +5,7 @@
 //! cosmetically different calls cannot keep an agent alive indefinitely.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +38,10 @@ pub const MAX_INTENTS_PER_IDENTICAL_OUTCOME: usize = 8;
 /// short sequence of distinct build steps, then require independent evidence
 /// before more unverified effects can keep the run alive.
 pub const MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS: usize = 6;
+/// Broad parent-side observation should either converge or be split into a
+/// named child task. Keep this above quick one- or two-turn inspection.
+pub const DELEGATION_NUDGE_TURN_THRESHOLD: usize = 3;
+pub const DELEGATION_NUDGE_AREA_THRESHOLD: usize = 3;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -142,10 +147,161 @@ impl LoopGuard {
             repeated_read_only: failure::detect_repeated_read_only_sequence(
                 &mut self.read_only_signatures,
                 tool_calls,
+                tool_results,
             ),
             progress: self.progress.record_turn(tool_calls, tool_results),
         }
     }
+}
+
+/// Parent-only pressure toward delegation after sustained, successful
+/// observation across multiple repository areas. This is deliberately a
+/// nudge, not a guard: small/local work never has to delegate, and the model
+/// can always synthesize when the evidence is already sufficient.
+#[derive(Debug, Default)]
+pub(crate) struct DelegationNudgeTracker {
+    consecutive_observation_turns: usize,
+    observed_areas: HashSet<String>,
+    nudged: bool,
+}
+
+impl DelegationNudgeTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn reset_for_steering(&mut self) {
+        self.reset_sequence();
+    }
+
+    pub(crate) fn record_turn(
+        &mut self,
+        tool_calls: &[AiToolCall],
+        tool_results: &[Content],
+    ) -> Option<String> {
+        if tool_calls.is_empty()
+            || !tool_calls
+                .iter()
+                .all(|call| action_fingerprint(call).class == ActionClass::Observe)
+        {
+            self.reset_sequence();
+            return None;
+        }
+
+        let results = results_by_call_id(tool_results);
+        if tool_calls.iter().any(|call| {
+            results
+                .get(call.id.as_str())
+                .is_none_or(|result| result.is_error)
+        }) {
+            self.reset_sequence();
+            return None;
+        }
+
+        self.consecutive_observation_turns = self.consecutive_observation_turns.saturating_add(1);
+        for call in tool_calls {
+            self.observed_areas.extend(observation_areas(call));
+        }
+
+        if self.nudged
+            || self.consecutive_observation_turns < DELEGATION_NUDGE_TURN_THRESHOLD
+            || self.observed_areas.len() < DELEGATION_NUDGE_AREA_THRESHOLD
+        {
+            return None;
+        }
+
+        self.nudged = true;
+        Some(format!(
+            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, start one named `agent` child with precise bounded instructions and `run_in_background=true`, then continue independent work. If the evidence is already sufficient or the remaining work is small, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
+            self.consecutive_observation_turns,
+            self.observed_areas.len(),
+        ))
+    }
+
+    fn reset_sequence(&mut self) {
+        self.consecutive_observation_turns = 0;
+        self.observed_areas.clear();
+        self.nudged = false;
+    }
+}
+
+fn observation_areas(call: &AiToolCall) -> HashSet<String> {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    let mut candidates = Vec::new();
+
+    if matches!(name, "bash" | "shell" | "execute") {
+        if let Some(command) = arguments.get("command").and_then(Value::as_str) {
+            candidates.extend(command.split_whitespace().map(ToString::to_string));
+        }
+    } else if let Some(object) = arguments.as_object() {
+        for (key, value) in object {
+            let path_like = matches!(
+                key.as_str(),
+                "path" | "file_path" | "directory" | "root" | "cwd" | "working_dir" | "include"
+            ) || (name == "glob" && key == "pattern");
+            if path_like {
+                collect_string_values(value, &mut candidates);
+            }
+        }
+    }
+
+    candidates
+        .iter()
+        .filter_map(|candidate| normalize_observation_area(candidate))
+        .collect()
+}
+
+fn collect_string_values(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::String(value) => values.push(value.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_string_values(item, values);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_observation_area(candidate: &str) -> Option<String> {
+    let candidate = candidate
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']'
+                )
+        })
+        .trim_start_matches("./")
+        .trim_end_matches(|character: char| matches!(character, ':' | ',' | ';'));
+    if candidate.is_empty()
+        || candidate.starts_with('-')
+        || candidate.contains("://")
+        || !candidate.contains('/')
+    {
+        return None;
+    }
+
+    let components = Path::new(candidate)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .filter(|component| !component.is_empty() && *component != "/")
+        .collect::<Vec<_>>();
+    const REPOSITORY_AREAS: &[&str] = &[
+        "apps", "crates", "packages", ".github", "docs", "scripts", "tests", "src",
+    ];
+    let (index, area) = components
+        .iter()
+        .enumerate()
+        .find(|(_, component)| REPOSITORY_AREAS.contains(component))?;
+
+    if matches!(*area, "apps" | "crates" | "packages") {
+        let child = components.get(index + 1).copied().unwrap_or_default();
+        if !child.is_empty() && !child.contains(['*', '?', '[', '{']) {
+            return Some(format!("{area}/{child}"));
+        }
+    }
+    Some((*area).to_string())
 }
 
 #[derive(Debug, Default)]
@@ -692,6 +848,72 @@ mod tests {
     }
 
     #[test]
+    fn broad_multi_area_observation_gets_one_delegation_nudge() {
+        let mut tracker = DelegationNudgeTracker::new();
+        let turns = [
+            ("read-1", "crates/krusty-core/src/agent/orchestrator.rs"),
+            ("read-2", "apps/mobile/src/app.tsx"),
+            ("read-3", ".github/workflows/ci.yml"),
+        ];
+
+        for (index, (id, path)) in turns.into_iter().enumerate() {
+            let calls = [call(id, "read", json!({"file_path": path}))];
+            let results = [result(id, "observed", false)];
+            let nudge = tracker.record_turn(&calls, &results);
+            if index + 1 < DELEGATION_NUDGE_TURN_THRESHOLD {
+                assert!(nudge.is_none());
+            } else {
+                let nudge = nudge.expect("broad sustained observation should nudge");
+                assert!(nudge.contains("named `agent` child"));
+                assert!(nudge.contains("run_in_background=true"));
+            }
+        }
+
+        let calls = [call(
+            "read-4",
+            "read",
+            json!({"file_path": "docs/architecture.md"}),
+        )];
+        assert!(tracker
+            .record_turn(&calls, &[result("read-4", "observed", false)])
+            .is_none());
+    }
+
+    #[test]
+    fn local_observation_does_not_force_delegation_and_mutation_resets_it() {
+        let mut tracker = DelegationNudgeTracker::new();
+        for index in 0..5 {
+            let id = format!("read-{index}");
+            let calls = [call(
+                &id,
+                "read",
+                json!({"file_path": format!("crates/krusty-core/src/agent/file_{index}.rs")}),
+            )];
+            assert!(tracker
+                .record_turn(&calls, &[result(&id, "observed", false)])
+                .is_none());
+        }
+
+        let edit = [call(
+            "edit-1",
+            "edit",
+            json!({"file_path": "crates/krusty-core/src/agent/file.rs"}),
+        )];
+        assert!(tracker
+            .record_turn(&edit, &[result("edit-1", "changed", false)])
+            .is_none());
+
+        let calls = [call(
+            "read-new",
+            "read",
+            json!({"file_path": "apps/mobile/src/app.tsx"}),
+        )];
+        assert!(tracker
+            .record_turn(&calls, &[result("read-new", "observed", false)])
+            .is_none());
+    }
+
+    #[test]
     fn history_envelope_output_preview_counts_as_bash_evidence() {
         let mut ledger = ProgressLedger::new();
         let first = call("b1", "bash", json!({ "command": "git status --short" }));
@@ -761,7 +983,11 @@ mod tests {
             let id = format!("b{index}");
             let telemetry = ledger
                 .record_turn(
-                    &[call(&id, "bash", json!({ "command": "git status --short" }))],
+                    &[call(
+                        &id,
+                        "bash",
+                        json!({ "command": "git status --short" }),
+                    )],
                     &[Content::ToolResult {
                         tool_use_id: id,
                         output: envelope.clone(),

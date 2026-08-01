@@ -4,8 +4,9 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
-    build_context::SharedBuildContext, AgentProgress, AgentProgressStatus,
+    build_context::SharedBuildContext, AgentCapability, AgentProgress, AgentProgressStatus,
     DelegatedProcessArtifact, SubAgentPool, SubAgentTask,
 };
 use crate::agent::{AgentCancellation, DelegatedRunStage};
@@ -18,8 +19,8 @@ use crate::tools::{ToolContext, ToolResult};
 
 use super::{
     background_started_result, build_confidence, build_coverage_gap_notice,
-    build_investigation_summary, classify_build_outcome, open_delegated_run_store, AgentTool,
-    Params,
+    build_investigation_summary, classify_build_outcome, notify_child_completion,
+    open_delegated_run_store, AgentTool, Params,
 };
 
 fn deduplicate_background_processes(processes: &mut Vec<DelegatedProcessArtifact>) {
@@ -180,11 +181,25 @@ impl AgentTool {
         // Build tasks - all use Opus for high-quality code generation
         let mut tasks: Vec<SubAgentTask> = Vec::new();
         let delegated_run_id = Uuid::new_v4().to_string();
-        let delegation_policy =
-            DelegationPolicy::for_subagent_build(ctx.permission_mode, params.max_turns)
-                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
+        let capabilities = params
+            .capabilities
+            .iter()
+            .map(|capability| AgentCapability::parse(capability))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .expect("AgentSpec validated parallel child capabilities");
+        let delegation_policy = DelegationPolicy::for_subagent_child(
+            ctx.permission_mode,
+            params.max_turns,
+            capabilities.contains(&AgentCapability::Read),
+            capabilities.contains(&AgentCapability::Write),
+            capabilities.contains(&AgentCapability::Execute),
+        )
+        .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
         let delegated_store = open_delegated_run_store(ctx);
         let mut target_scope = Vec::new();
+        let parent_name = params.name.as_deref().unwrap_or("child");
+        let project_context =
+            build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
 
         if let Some(ref components) = params.components {
             let total = components.len();
@@ -192,7 +207,8 @@ impl AgentTool {
 
             // One agent per component - each gets their own file for TRUE parallelism
             for (i, component) in components.iter().enumerate() {
-                let name = component.split_whitespace().next().unwrap_or("builder");
+                let component_name = component.split_whitespace().next().unwrap_or("component");
+                let name = format!("{parent_name} / {component_name}");
                 let others: Vec<_> = other_components
                     .iter()
                     .enumerate()
@@ -216,16 +232,18 @@ impl AgentTool {
                      - Check [SHARED TYPES] for interfaces other builders registered\n\
                      - Register YOUR public functions/classes so others can import them\n\
                      - File locks are automatic - but you shouldn't need them if using separate files\n\n\
+                     PROJECT CONTEXT:\n{}\n\n\
                      BUILD YOUR COMPONENT NOW. Create your file(s) and implement fully.",
                     i, total,
                     component,
                     params.prompt,
                     if others.is_empty() { "  (none - you're solo)".to_string() } else { others.join("\n") },
-                    name.to_lowercase().replace(' ', "_")
+                    component_name.to_lowercase().replace(' ', "_"),
+                    project_context,
                 );
 
                 let mut task = SubAgentTask::new(format!("builder-{}", i), task_prompt)
-                    .with_name(name)
+                    .with_name(name.clone())
                     .with_working_dir(ctx.working_dir.clone())
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(delegation_policy.clone())
@@ -250,7 +268,7 @@ impl AgentTool {
                 }
 
                 target_scope.push(DelegatedRunScope {
-                    label: name.to_string(),
+                    label: name,
                     path: component.clone(),
                     kind: "component".to_string(),
                 });
@@ -285,18 +303,22 @@ impl AgentTool {
 
         if let (Some(store), Some(session_id)) = (delegated_store.as_ref(), ctx.session_id.as_ref())
         {
-            if let Err(err) = store.create_run(&DelegatedRunStartInput {
-                delegated_run_id: delegated_run_id.clone(),
-                parent_session_id: session_id.clone(),
-                parent_tool_call_id: ctx.tool_use_id.clone(),
-                role: DelegatedRunRole::Build,
-                stage: DelegatedRunStage::Created,
-                provider: Some(client.provider_id().to_string()),
-                model: Some(client.config().model.clone()),
-                resumable: true,
-                resumed_from_run_id: None,
-                target_scope,
-            }) {
+            if let Err(err) = store.create_run_with_child_contract(
+                &DelegatedRunStartInput {
+                    delegated_run_id: delegated_run_id.clone(),
+                    parent_session_id: session_id.clone(),
+                    parent_tool_call_id: ctx.tool_use_id.clone(),
+                    role: DelegatedRunRole::Build,
+                    stage: DelegatedRunStage::Created,
+                    provider: Some(client.provider_id().to_string()),
+                    model: Some(client.config().model.clone()),
+                    resumable: true,
+                    resumed_from_run_id: None,
+                    target_scope,
+                },
+                Some(parent_name),
+                &capabilities,
+            ) {
                 warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated build run start");
             }
         }
@@ -346,6 +368,10 @@ impl AgentTool {
         if background {
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
+            let bg_session_id = ctx.session_id.clone();
+            let bg_user_id = ctx.user_id.clone();
+            let bg_workspace_root = ctx.filesystem_access_root();
+            let bg_child_name = params.name.clone().unwrap_or_else(|| "child".to_string());
             let bg_delegation_policy = delegation_policy.clone();
             let bg_process_registry = ctx.process_registry.clone();
             let bg_process_owner_id = ctx.user_id.clone();
@@ -494,8 +520,8 @@ impl AgentTool {
                 }
 
                 // Emit completion event so the parent sees the result
+                let build_success = outcome == "success";
                 if let Some(ref tx) = completion_tx {
-                    let build_success = outcome == "success";
                     let status = if build_success {
                         AgentProgressStatus::Complete
                     } else {
@@ -504,14 +530,14 @@ impl AgentTool {
                     if tx
                         .send(AgentProgress {
                             delegated_run_id: Some(bg_delegated_run_id.clone()),
-                            task_id: "build".to_string(),
-                            name: "build".to_string(),
+                            task_id: bg_child_name.clone(),
+                            name: bg_child_name.clone(),
                             identity: None,
                             status,
                             tool_count: 0,
                             tokens: 0,
                             current_action: None,
-                            completion_summary: Some(investigation_summary),
+                            completion_summary: Some(investigation_summary.clone()),
                             lines_added: stats.lines_added,
                             lines_removed: stats.lines_removed,
                             completed_plan_task: None,
@@ -521,10 +547,31 @@ impl AgentTool {
                         debug!("Background build progress channel disconnected (parent returned)");
                     }
                 }
-                bg_runtime.finish(&bg_delegated_run_id, outcome == "success");
+                if let Err(error) = notify_child_completion(
+                    &bg_runtime,
+                    bg_db_path.as_deref(),
+                    bg_session_id.as_deref(),
+                    bg_user_id.as_deref(),
+                    bg_workspace_root.as_deref(),
+                    &bg_delegated_run_id,
+                    &bg_child_name,
+                    build_success,
+                    &investigation_summary,
+                ) {
+                    warn!(
+                        delegated_run_id = %bg_delegated_run_id,
+                        %error,
+                        "Failed to queue background child completion"
+                    );
+                }
+                bg_runtime.finish(&bg_delegated_run_id, build_success);
             });
 
-            return background_started_result(&delegated_run_id, "build", params.name.as_deref());
+            return background_started_result(
+                &delegated_run_id,
+                params.name.as_deref().unwrap_or("child"),
+                params.name.as_deref(),
+            );
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────

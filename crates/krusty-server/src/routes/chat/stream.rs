@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, OwnedMutexGuard, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::{LoopEvent, OrchestratorServices, RunProvenance, RunSpecBuilder};
+use krusty_core::agent::{
+    LoopEvent, LoopInput, OrchestratorServices, RunProvenance, RunSpecBuilder,
+};
 use krusty_core::ai::transport_policy::StreamTransportPolicy;
 use krusty_core::storage::{Database, SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
@@ -117,13 +119,51 @@ pub(super) async fn start_orchestrator_sse(
     permission_mode: PermissionMode,
     generate_title: bool,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
+    let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
+    let run = start_chat_run(state, ctx, work_mode, permission_mode, generate_title)?;
+    launch_chat_run_bridge(state, run, sse_tx).await;
+
+    let stream = ReceiverStream::new(sse_rx);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL)))
+}
+
+/// Resume an idle Chat/Code session without an attached SSE client while
+/// retaining the normal run registration, notification, trace, cleanup, and
+/// session-lock lifecycle.
+pub(super) async fn start_orchestrator_detached(
+    state: &AppState,
+    ctx: ChatSessionContext,
+    work_mode: WorkMode,
+    permission_mode: PermissionMode,
+) -> Result<(), AppError> {
+    let run = start_chat_run(state, ctx, work_mode, permission_mode, false)?;
+    let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(1);
+    drop(sse_rx);
+    launch_chat_run_bridge(state, run, sse_tx).await;
+    Ok(())
+}
+
+struct StartedChatRun {
+    event_rx: mpsc::UnboundedReceiver<LoopEvent>,
+    input_tx: mpsc::UnboundedSender<LoopInput>,
+    session_id: String,
+    user_id: Option<String>,
+    guard: OwnedMutexGuard<()>,
+}
+
+fn start_chat_run(
+    state: &AppState,
+    ctx: ChatSessionContext,
+    work_mode: WorkMode,
+    permission_mode: PermissionMode,
+    generate_title: bool,
+) -> Result<StartedChatRun, AppError> {
     if ctx.session_type == SessionType::Mako {
         return Err(AppError::BadGateway(
             "Hive execution is owned by its background service".to_string(),
         ));
     }
 
-    let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let stream_idle_timeout = model_stream_idle_timeout(&ctx.ai_client);
     let mode_aware_code_tools =
         ctx.session_type == SessionType::Code && ctx.options.tools.is_some();
@@ -156,7 +196,27 @@ pub(super) async fn start_orchestrator_sse(
 
     let (event_rx, input_tx) = run_spec.start(services, ctx.conversation);
 
-    let session_id = ctx.session_id;
+    Ok(StartedChatRun {
+        event_rx,
+        input_tx,
+        session_id: ctx.session_id,
+        user_id: ctx.user_id,
+        guard: ctx.guard,
+    })
+}
+
+async fn launch_chat_run_bridge(
+    state: &AppState,
+    run: StartedChatRun,
+    sse_tx: mpsc::Sender<Result<Event, Infallible>>,
+) {
+    let StartedChatRun {
+        event_rx,
+        input_tx,
+        session_id,
+        user_id,
+        guard,
+    } = run;
     {
         let mut inputs = state.session_inputs.write().await;
         inputs.insert(session_id.clone(), input_tx);
@@ -166,9 +226,7 @@ pub(super) async fn start_orchestrator_sse(
     let active_agent_streams = Arc::clone(&state.active_agent_streams);
     let push_service = state.push_service.clone();
     let apns_service = state.apns_service.clone();
-    let user_id = ctx.user_id;
     let db_path = Arc::clone(&state.db_path);
-    let guard = ctx.guard;
 
     tokio::spawn(async move {
         active_agent_streams.fetch_add(1, Ordering::Relaxed);
@@ -186,9 +244,6 @@ pub(super) async fn start_orchestrator_sse(
         .await;
         active_agent_streams.fetch_sub(1, Ordering::Relaxed);
     });
-
-    let stream = ReceiverStream::new(sse_rx);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL)))
 }
 
 fn model_stream_idle_timeout(ai_client: &Arc<krusty_core::ai::client::AiClient>) -> Duration {

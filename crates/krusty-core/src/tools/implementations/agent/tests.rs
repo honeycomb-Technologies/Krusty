@@ -1,15 +1,19 @@
 use super::{
     build_parent_context_brief, build_single_agent_artifact, build_single_agent_warnings,
-    concise_target_label, emit_single_agent_completion, open_delegated_run_store,
-    resolve_explore_target, truncate_utf8,
+    concise_target_label, emit_single_agent_completion, notify_child_completion,
+    open_delegated_run_store, resolve_explore_target, should_use_parallel_component_pool,
+    truncate_utf8,
 };
-use crate::agent::subagent::{AgentProgressStatus, SubAgentResult};
+use crate::agent::subagent::{
+    AgentExecutionProfile, AgentProgressStatus, AgentRuntimeManager, SubAgentResult,
+};
 use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::WorkspaceMode;
 use crate::tools::registry::{DelegationPolicy, PermissionMode};
 use crate::tools::ToolContext;
 use crate::Database;
+use crate::SessionManager;
 use std::fs;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -38,6 +42,29 @@ fn concise_target_label_uses_stable_readable_segments() {
     );
     assert_eq!(concise_target_label("README.md", 1), "README.md");
     assert_eq!(concise_target_label("", 2), "target-3");
+}
+
+#[test]
+fn only_multiple_explicit_write_components_use_the_legacy_pool() {
+    let single = vec!["one component".to_string()];
+    let parallel = vec!["component a".to_string(), "component b".to_string()];
+
+    assert!(!should_use_parallel_component_pool(
+        AgentExecutionProfile::Build,
+        None,
+    ));
+    assert!(!should_use_parallel_component_pool(
+        AgentExecutionProfile::Build,
+        Some(&single),
+    ));
+    assert!(should_use_parallel_component_pool(
+        AgentExecutionProfile::Build,
+        Some(&parallel),
+    ));
+    assert!(!should_use_parallel_component_pool(
+        AgentExecutionProfile::Explore,
+        Some(&parallel),
+    ));
 }
 
 #[test]
@@ -147,6 +174,84 @@ fn open_delegated_run_store_returns_none_for_unopenable_database() {
     };
 
     assert!(open_delegated_run_store(&ctx).is_none());
+}
+
+#[tokio::test]
+async fn child_completion_queues_and_notifies_once_with_one_stable_id() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let db_path = temp_dir.path().join("completion.db");
+    let manager = SessionManager::new(Database::new(&db_path).expect("database"));
+    let session_id = manager
+        .create_session(
+            "parent",
+            None,
+            Some(temp_dir.path().to_string_lossy().as_ref()),
+        )
+        .expect("session should create");
+    let runtime = AgentRuntimeManager::default();
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    runtime.set_completion_sender(completion_tx);
+
+    assert!(notify_child_completion(
+        &runtime,
+        Some(&db_path),
+        Some(&session_id),
+        None,
+        Some(temp_dir.path()),
+        "run-stable",
+        "research",
+        true,
+        "done",
+    )
+    .expect("first completion should queue"));
+    let event = completion_rx.recv().await.expect("completion event");
+    assert_eq!(event.pending_id, "child-wake-run-stable");
+    assert_eq!(event.session_id.as_deref(), Some(session_id.as_str()));
+    assert!(manager
+        .has_pending_steering(&session_id, &event.pending_id)
+        .expect("pending completion should exist"));
+
+    assert!(!notify_child_completion(
+        &runtime,
+        Some(&db_path),
+        Some(&session_id),
+        None,
+        Some(temp_dir.path()),
+        "run-stable",
+        "research",
+        true,
+        "done",
+    )
+    .expect("duplicate completion should be idempotent"));
+    assert!(matches!(
+        completion_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn child_completion_queue_failure_is_returned_before_live_notification() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let db_path = temp_dir.path().join("completion.db");
+    Database::new(&db_path).expect("database");
+    let runtime = AgentRuntimeManager::default();
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    runtime.set_completion_sender(completion_tx);
+
+    let error = notify_child_completion(
+        &runtime,
+        Some(&db_path),
+        Some("missing-session"),
+        None,
+        Some(temp_dir.path()),
+        "run-missing-parent",
+        "research",
+        false,
+        "failed",
+    )
+    .expect_err("foreign-key queue failure must reach the caller");
+    assert!(!error.to_string().is_empty());
+    assert!(completion_rx.try_recv().is_err());
 }
 
 #[test]

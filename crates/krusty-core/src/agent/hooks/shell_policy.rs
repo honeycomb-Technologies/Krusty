@@ -242,7 +242,7 @@ pub(crate) fn is_proven_read_only_bash_command(command: &str) -> bool {
 }
 
 fn is_plan_mode_read_only_segment(segment: &str) -> bool {
-    if has_unquoted_redirect(segment) {
+    if has_unquoted_file_output_redirect(segment) {
         return false;
     }
 
@@ -311,14 +311,9 @@ fn is_plan_mode_read_only_git(tokens: &[String]) -> bool {
             "status" | "diff" | "show" | "log" | "grep" | "rev-parse" | "ls-files" | "describe"
             | "shortlog" | "name-rev" | "blame",
         ) => true,
-        // `git fetch` is network + ref updates; treat as observational only when
-        // dry-run / no-op flags make it non-mutating. Bare fetch remains effectful.
-        Some("fetch") => tokens.iter().skip(2).any(|token| {
-            matches!(
-                token.as_str(),
-                "--dry-run" | "-n" | "--no-write-fetch-head"
-            )
-        }),
+        // `-n` means `--no-tags`, and `--no-write-fetch-head` may still update
+        // remote-tracking refs. Only a real dry run is observational.
+        Some("fetch") => tokens.iter().skip(2).any(|token| token == "--dry-run"),
         Some("branch") => tokens.len() == 2 || tokens[2..] == ["--show-current"],
         _ => false,
     }
@@ -331,6 +326,9 @@ fn is_plan_mode_read_only_gh(tokens: &[String]) -> bool {
     let Some(resource) = tokens.get(1).map(String::as_str) else {
         return false;
     };
+    if resource == "status" {
+        return !has_mutating_gh_flag(tokens);
+    }
     let Some(action) = tokens.get(2).map(String::as_str) else {
         return false;
     };
@@ -345,29 +343,47 @@ fn is_plan_mode_read_only_gh(tokens: &[String]) -> bool {
             | ("release", "view" | "list")
             | ("workflow", "view" | "list")
             | ("repo", "view")
-            | ("status", _)
             | ("auth", "status")
     );
     if !observational {
         return false;
     }
 
-    // `gh api` can mutate; only allow explicit GET methods or no method (default GET).
+    // `gh api` switches its default method from GET to POST when fields or an
+    // input body are supplied. Explicit GET/HEAD remains observational.
     if resource == "api" {
-        let method = tokens
-            .iter()
-            .position(|t| t == "-X" || t == "--method")
-            .and_then(|i| tokens.get(i + 1))
-            .map(String::as_str);
+        let method = tokens.iter().enumerate().find_map(|(index, token)| {
+            if token == "-X" || token == "--method" {
+                return tokens.get(index + 1).map(String::as_str);
+            }
+            token
+                .strip_prefix("--method=")
+                .or_else(|| token.strip_prefix("-X").filter(|value| !value.is_empty()))
+        });
         if let Some(method) = method {
             if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
                 return false;
             }
+        } else if tokens.iter().skip(2).any(|token| {
+            matches!(
+                token.as_str(),
+                "-f" | "--raw-field" | "-F" | "--field" | "--input"
+            ) || token.starts_with("--raw-field=")
+                || token.starts_with("--field=")
+                || token.starts_with("--input=")
+                || (token.starts_with("-f") && token.len() > 2)
+                || (token.starts_with("-F") && token.len() > 2)
+        }) {
+            return false;
         }
     }
 
     // Disallow flags that write or open interactive UIs.
-    !tokens.iter().skip(1).any(|token| {
+    !has_mutating_gh_flag(tokens)
+}
+
+fn has_mutating_gh_flag(tokens: &[String]) -> bool {
+    tokens.iter().skip(1).any(|token| {
         matches!(
             token.as_str(),
             "--web"
@@ -655,16 +671,18 @@ fn classify_file_operation_segment(segment: &str) -> Option<BashFileOperation> {
 
     let (kind, recommended_tool) = match command.as_str() {
         "head" | "tail" if !head_or_tail_has_file_operand(tokens) => return None,
-        "cat" if has_unquoted_redirect(segment) => (BashFileOperationKind::Edit, "write"),
+        "cat" if has_unquoted_file_output_redirect(segment) => {
+            (BashFileOperationKind::Edit, "write")
+        }
         "cat" | "head" | "tail" | "less" | "more" => (BashFileOperationKind::Read, "read"),
         "grep" if !grep_has_file_operand(tokens) => return None,
         "grep" | "rg" => (BashFileOperationKind::Search, "grep"),
         "find" => (BashFileOperationKind::Search, "glob/list"),
-        "sed" if sed_in_place(tokens) || has_unquoted_redirect(segment) => {
+        "sed" if sed_in_place(tokens) || has_unquoted_file_output_redirect(segment) => {
             (BashFileOperationKind::Edit, "edit")
         }
         "sed" if sed_has_file_operand(tokens) => (BashFileOperationKind::Read, "read"),
-        "awk" if awk_in_place(tokens) || has_unquoted_redirect(segment) => {
+        "awk" if awk_in_place(tokens) || has_unquoted_file_output_redirect(segment) => {
             (BashFileOperationKind::Edit, "edit")
         }
         "awk" if awk_has_file_operand(tokens) => (BashFileOperationKind::Read, "read"),
@@ -722,6 +740,14 @@ pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
                 }
                 current.clear();
             }
+            '&' if !in_single
+                && !in_double
+                && (current.trim_end().ends_with('>') || chars.peek() == Some(&'>')) =>
+            {
+                // File-descriptor redirects (`2>&1`, `&>file`) are part of the
+                // current command, not background-command separators.
+                current.push(ch);
+            }
             '|' | '&' if !in_single && !in_double => {
                 if matches!(chars.peek(), Some(next) if *next == ch) {
                     let _ = chars.next();
@@ -768,14 +794,18 @@ fn strip_env_prefix(tokens: &[String]) -> &[String] {
     &tokens[idx..]
 }
 
-fn has_unquoted_redirect(segment: &str) -> bool {
+fn has_unquoted_file_output_redirect(segment: &str) -> bool {
+    let chars = segment.chars().collect::<Vec<_>>();
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
+    let mut index = 0usize;
 
-    for ch in segment.chars() {
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
 
@@ -783,9 +813,65 @@ fn has_unquoted_redirect(segment: &str) -> bool {
             '\\' if !in_single => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
-            '>' if !in_single && !in_double => return true,
+            '>' if !in_single && !in_double => {
+                let mut cursor = index + 1;
+                if chars
+                    .get(cursor)
+                    .is_some_and(|next| matches!(*next, '>' | '|'))
+                {
+                    cursor += 1;
+                }
+                while chars.get(cursor).is_some_and(|next| next.is_whitespace()) {
+                    cursor += 1;
+                }
+
+                let duplicates_descriptor = chars.get(cursor) == Some(&'&');
+                if duplicates_descriptor {
+                    cursor += 1;
+                    while chars.get(cursor).is_some_and(|next| next.is_whitespace()) {
+                        cursor += 1;
+                    }
+                }
+
+                let target_start = cursor;
+                let mut target_in_single = false;
+                let mut target_in_double = false;
+                while let Some(target_char) = chars.get(cursor).copied() {
+                    match target_char {
+                        '\'' if !target_in_double => target_in_single = !target_in_single,
+                        '"' if !target_in_single => target_in_double = !target_in_double,
+                        character
+                            if !target_in_single
+                                && !target_in_double
+                                && (character.is_whitespace()
+                                    || matches!(character, ';' | '|' | '&')) =>
+                        {
+                            break;
+                        }
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+
+                let target = chars[target_start..cursor]
+                    .iter()
+                    .collect::<String>()
+                    .trim_matches(['\'', '"'])
+                    .to_string();
+                let descriptor_only = duplicates_descriptor
+                    && (target == "-"
+                        || target.chars().all(|character| character.is_ascii_digit()));
+                let harmless_sink =
+                    matches!(target.as_str(), "/dev/null" | "/dev/stdout" | "/dev/stderr");
+                if target.is_empty() || (!descriptor_only && !harmless_sink) {
+                    return true;
+                }
+                index = cursor;
+                continue;
+            }
             _ => {}
         }
+        index += 1;
     }
 
     false
@@ -1029,6 +1115,32 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_descriptor_sinks_from_file_output_redirects() {
+        assert_eq!(
+            classify("cat src/lib.rs 2>/dev/null"),
+            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("cat src/lib.rs 2>&1"),
+            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("cat src/lib.rs > generated.txt"),
+            Some((BashFileOperationKind::Edit, "cat".to_string(), "write"))
+        );
+        assert!(is_proven_read_only_bash_command(
+            "cat src/lib.rs 2>/dev/null"
+        ));
+        assert!(!is_proven_read_only_bash_command(
+            "cat src/lib.rs > generated.txt"
+        ));
+        assert_eq!(
+            split_shell_segments("cat src/lib.rs 2>&1 | head -1"),
+            vec!["cat src/lib.rs 2>&1", "head -1"]
+        );
+    }
+
+    #[test]
     fn allows_head_and_tail_when_they_only_bound_piped_output() {
         assert_eq!(classify("ls -la | head -100"), None);
         assert_eq!(classify("cargo test | tail -n 20"), None);
@@ -1041,13 +1153,40 @@ mod tests {
         assert!(is_proven_read_only_bash_command(
             "gh run view 123 --json status,conclusion"
         ));
-        assert!(is_proven_read_only_bash_command("gh pr view 9 --json state"));
+        assert!(is_proven_read_only_bash_command(
+            "gh pr view 9 --json state"
+        ));
         assert!(is_proven_read_only_bash_command("gh auth status"));
+        assert!(is_proven_read_only_bash_command("gh status"));
+        assert!(is_proven_read_only_bash_command(
+            "gh api /repos/o/r/actions/runs/123"
+        ));
+        assert!(is_proven_read_only_bash_command(
+            "gh api --method GET /search/issues -f q=repo:o/r"
+        ));
         // Mutating gh surfaces stay effectful.
         assert!(!is_proven_read_only_bash_command("gh pr create --title x"));
         assert!(!is_proven_read_only_bash_command(
             "gh api -X POST /repos/o/r/dispatches"
         ));
+        assert!(!is_proven_read_only_bash_command(
+            "gh api /repos/o/r/dispatches -f event_type=deploy"
+        ));
+        assert!(!is_proven_read_only_bash_command(
+            "gh api /repos/o/r/dispatches --input payload.json"
+        ));
+    }
+
+    #[test]
+    fn only_dry_run_git_fetch_is_observational() {
+        assert!(is_proven_read_only_bash_command(
+            "git fetch --dry-run origin"
+        ));
+        assert!(!is_proven_read_only_bash_command("git fetch -n origin"));
+        assert!(!is_proven_read_only_bash_command(
+            "git fetch --no-write-fetch-head origin"
+        ));
+        assert!(!is_proven_read_only_bash_command("git fetch origin"));
     }
 
     #[test]

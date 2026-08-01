@@ -1,7 +1,8 @@
-//! Unified agent tool — dispatches explore, plan, verify, and build agents.
+//! Unified agent tool — spawns agnostic parent-directed child agents.
 //!
-//! Replaces separate rigid agent tools with one dynamic profile and capability
-//! contract. Legacy agent_type input remains internal compatibility only.
+//! Children are malleable workers: the parent supplies a name and instructions.
+//! Capabilities select tool access (read vs write vs execute). Legacy
+//! profile/agent_type labels map to capability defaults only.
 
 mod build;
 mod control;
@@ -25,7 +26,7 @@ use crate::tools::{parse_params, ToolContext, ToolResult};
 
 use helpers::*;
 
-/// Unified agent tool — dispatches explore, plan, verify, and build sub-agents.
+/// Unified agent tool — spawns and supervises agnostic child agents.
 pub struct AgentTool {
     client: Arc<AiClient>,
     cancellation: AgentCancellation,
@@ -90,7 +91,11 @@ struct Params {
     #[serde(default)]
     profile: Option<String>,
 
-    /// The main objective for the sub-agent.
+    /// Parent instructions for the child (preferred product field).
+    #[serde(default)]
+    instructions: Option<String>,
+
+    /// The main objective for the sub-agent (alias of instructions).
     #[serde(default)]
     prompt: String,
 
@@ -158,12 +163,12 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn and supervise independent agents. Delegate parallel, deep multi-file, or background work; avoid simple lookups, one-file edits, and tightly coupled work. Profiles: explore, plan, verify, build, or custom. Actions: spawn, list, status, wait, message, followup, interrupt, resume. Followup delivers to a live child or resumes a completed resumable child from durable evidence. The parent verifies results."
+        "Spawn and supervise agnostic child agents directed by the parent. Use for parallel, deep multi-file, or background work — not simple lookups or one-file edits. Required product fields: name (from your plan) and instructions (or prompt). Optional capabilities: read, write, execute (parent policy is the ceiling). Set run_in_background=true so the parent continues and wakes on completion. Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates results."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Use action=spawn for substantial independent work. Set run_in_background=true when the parent can continue concurrently. Use list/status/wait to observe, message to steer a live child, followup for another child turn (automatically resumed from durable evidence after completion), interrupt to cancel, and resume for an explicit new run from durable prior evidence. The parent remains responsible for integration and verification.",
+            "Spawn a named child with clear instructions for substantial independent work. Prefer run_in_background=true and continue other work; the parent is notified when the child completes — do not thrash-poll status. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence. Keep multi-scope digs on children so the parent transcript stays thin.",
         )
     }
 
@@ -174,7 +179,7 @@ impl Tool for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["spawn", "list", "status", "wait", "message", "followup", "interrupt", "resume"],
-                    "description": "Spawn or supervise a delegated run; defaults to spawn"
+                    "description": "Spawn or supervise a delegated child; defaults to spawn"
                 },
                 "delegated_run_id": {
                     "type": "string",
@@ -196,13 +201,29 @@ impl Tool for AgentTool {
                     "maximum": 100,
                     "description": "Maximum runs returned by list"
                 },
-                "profile": {
+                "name": {
                     "type": "string",
-                    "description": "Optional built-in or custom agent profile"
+                    "description": "Parent-chosen task name for status and completion (from your plan)"
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Full parent instructions that shape this child (preferred over prompt)"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Objective for the sub-agent"
+                    "description": "Alias of instructions — objective for the child"
+                },
+                "capabilities": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["read", "write", "execute"]
+                    },
+                    "description": "Requested capabilities; parent governance is the ceiling. write enables edits; execute enables bash when write is not set"
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Optional legacy label (explore/build/plan/verify/custom). Prefer name + instructions + capabilities"
                 },
                 "expected_output": {
                     "type": "string",
@@ -211,14 +232,6 @@ impl Tool for AgentTool {
                 "delegation_reason": {
                     "type": "string",
                     "description": "Why delegation improves this task"
-                },
-                "capabilities": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["read", "write", "execute"]
-                    },
-                    "description": "Requested capabilities; parent governance is the ceiling"
                 },
                 "context": {
                     "type": "string",
@@ -232,35 +245,31 @@ impl Tool for AgentTool {
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Optional exploration path"
+                    "description": "Optional path scope for the child"
                 },
                 "components": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Parallel build components"
+                    "description": "Optional parallel write components (one child per component)"
                 },
                 "conventions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Shared build conventions"
+                    "description": "Shared conventions for parallel writers"
                 },
                 "max_concurrency": {
                     "type": "integer",
-                    "description": "Optional parallel builder ceiling",
+                    "description": "Optional parallel writer ceiling",
                     "minimum": 1
                 },
                 "task_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional plan task IDs corresponding to build components"
+                    "description": "Optional plan task IDs corresponding to components"
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Return immediately and run in background"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Background run label"
+                    "description": "Return immediately; parent is notified when the child completes"
                 },
                 "description": {
                     "type": "string",
@@ -274,13 +283,15 @@ impl Tool for AgentTool {
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
         info!("Agent tool execute called with params: {:?}", params);
 
-        let params = match parse_params::<Params>(params) {
+        let mut params = match parse_params::<Params>(params) {
             Ok(p) => p,
             Err(e) => {
                 warn!("Agent tool parameter validation failed: {}", e.output);
                 return e;
             }
         };
+
+        params.normalize_instructions();
 
         if params.action == AgentAction::Spawn {
             self.execute_spawn(params, ctx).await
@@ -310,9 +321,10 @@ impl AgentTool {
         let execution_profile = spec.execution_profile();
         params.prompt = spec.rendered_objective();
         params.profile = Some(spec.profile.clone());
+        // agent_type retained for internal compatibility as capability class only.
         params.agent_type = Some(execution_profile.as_str().to_string());
         params.max_turns = spec.max_turns;
-        params.name.get_or_insert_with(|| spec.task_name.clone());
+        params.name = Some(spec.task_name.clone());
         if let Some(turns) = spec.parent_context_turns() {
             if let Some(parent_conversation) = ctx.parent_conversation.as_ref() {
                 let brief = build_parent_context_brief(parent_conversation, turns);
@@ -322,11 +334,38 @@ impl AgentTool {
             }
         }
         params.parent_context_applied = true;
-        if execution_profile == AgentExecutionProfile::Build
-            && params.components.as_ref().is_none_or(Vec::is_empty)
-        {
-            params.components = Some(vec![spec.objective.clone()]);
+        if let Some(components) = params.components.as_mut() {
+            components.retain(|component| !component.trim().is_empty());
         }
+        let parallel_components = should_use_parallel_component_pool(
+            execution_profile,
+            params.components.as_deref(),
+        );
+        if !parallel_components {
+            if let Some(component) = params
+                .components
+                .as_ref()
+                .and_then(|components| components.first())
+            {
+                params.prompt = format!(
+                    "{}\n\nAssigned component: {}",
+                    params.prompt,
+                    component.trim()
+                );
+            }
+            params.components = None;
+        }
+
+        // Stash capability hints for child policy selection in execute paths.
+        params.capabilities = spec
+            .capabilities
+            .iter()
+            .map(|cap| match cap {
+                crate::agent::subagent::AgentCapability::Read => "read".to_string(),
+                crate::agent::subagent::AgentCapability::Write => "write".to_string(),
+                crate::agent::subagent::AgentCapability::Execute => "execute".to_string(),
+            })
+            .collect();
 
         info!(
             name = %spec.task_name,
@@ -336,14 +375,37 @@ impl AgentTool {
             capabilities = ?spec.capabilities,
             max_turns = ?spec.max_turns,
             background = params.run_in_background.unwrap_or(false),
-            "Resolved delegated AgentSpec"
+            "Resolved delegated AgentSpec (agnostic child)"
         );
 
-        match execution_profile {
-            AgentExecutionProfile::Explore => self.execute_explore(params, ctx).await,
-            AgentExecutionProfile::Plan => self.execute_plan(params, ctx).await,
-            AgentExecutionProfile::Verify => self.execute_verify(params, ctx).await,
-            AgentExecutionProfile::Build => self.execute_build(params, ctx).await,
+        if parallel_components {
+            self.execute_build(params, ctx).await
+        } else {
+            self.execute_child(params, ctx).await
+        }
+    }
+}
+
+fn should_use_parallel_component_pool(
+    execution_profile: AgentExecutionProfile,
+    components: Option<&[String]>,
+) -> bool {
+    execution_profile == AgentExecutionProfile::Build
+        && components.is_some_and(|components| components.len() > 1)
+}
+
+impl Params {
+    /// Normalize the preferred product field before either spawn or durable
+    /// resume control paths inspect the objective.
+    fn normalize_instructions(&mut self) {
+        if self.prompt.trim().is_empty() {
+            if let Some(instructions) = self.instructions.as_deref() {
+                self.prompt = instructions.trim().to_string();
+            }
+        } else if let Some(instructions) = self.instructions.as_deref() {
+            if !instructions.trim().is_empty() && instructions.trim() != self.prompt.trim() {
+                self.prompt = format!("{}\n\n{}", instructions.trim(), self.prompt.trim());
+            }
         }
     }
 }
@@ -378,12 +440,4 @@ impl AgentTool {
         client.resolved_model().wire_model_id.clone()
     }
 
-    /// Resolve a model for lightweight delegated work.
-    ///
-    /// A different fast model requires its own exact catalog resolution,
-    /// credentials, transport, and `AiClient`. Until that typed boundary is
-    /// supplied, inherit the parent runtime instead of changing only a slug.
-    fn resolve_fast_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
-        self.resolve_model(ctx, client)
-    }
 }

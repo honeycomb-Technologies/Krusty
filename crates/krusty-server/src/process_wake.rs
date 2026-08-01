@@ -51,8 +51,11 @@ async fn handle_process_completion(
     let pending_id = format!("proc-wake-{}", Uuid::new_v4());
     let content_json = serde_json::to_string(&content)?;
 
-    SessionManager::new(Database::new(&state.db_path)?)
-        .queue_pending_steering(session_id, &pending_id, &content_json)?;
+    SessionManager::new(Database::new(&state.db_path)?).queue_pending_steering(
+        session_id,
+        &pending_id,
+        &content_json,
+    )?;
 
     let sender = state.session_inputs.read().await.get(session_id).cloned();
     if let Some(sender) = sender {

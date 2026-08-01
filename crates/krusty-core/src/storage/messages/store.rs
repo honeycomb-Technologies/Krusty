@@ -64,6 +64,72 @@ impl<'a> MessageStore<'a> {
         )
     }
 
+    /// Atomically queue one durable steering input and retain a compact
+    /// receipt after promotion. Returns `false` when this session has already
+    /// accepted the same pending ID, including after the pending row became a
+    /// canonical user message.
+    pub fn queue_pending_steering_once(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        content_json: &str,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO steering_idempotency (session_id, pending_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, pending_id, now],
+        )?;
+        if inserted == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        tx.execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session_id,
+                format!("pending_user:{pending_id}"),
+                content_json,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        tx.commit()?;
+
+        Ok(true)
+    }
+
+    pub fn has_pending_steering(&self, session_id: &str, pending_id: &str) -> Result<bool> {
+        Ok(self
+            .load_pending_steering(session_id, pending_id)?
+            .is_some())
+    }
+
+    pub fn load_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+    ) -> Result<Option<String>> {
+        let role = format!("pending_user:{pending_id}");
+        self.db
+            .conn()
+            .query_row(
+                "SELECT content FROM messages
+                 WHERE session_id = ?1 AND role = ?2
+                 LIMIT 1",
+                params![session_id, role],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Atomically move a durable steering message to the end of canonical
     /// user history. Returning `None` makes duplicate delivery idempotent.
     pub fn promote_pending_steering(

@@ -76,7 +76,6 @@ pub struct GitFileDiff {
     pub binary: bool,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct BranchDiffSummary {
     pub(super) files: usize,

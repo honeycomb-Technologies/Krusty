@@ -1,9 +1,26 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+
+use crate::ai::types::Content;
+
+/// Terminal completion of a background child, used to wake the parent session.
+#[derive(Debug, Clone)]
+pub struct ChildCompletionEvent {
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub workspace_root: Option<PathBuf>,
+    pub pending_id: String,
+    pub content: Vec<Content>,
+    pub delegated_run_id: String,
+    pub task_name: String,
+    pub success: bool,
+    pub summary: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,9 +80,32 @@ struct AgentRuntimeEntry {
 #[derive(Clone, Default)]
 pub struct AgentRuntimeManager {
     entries: Arc<Mutex<HashMap<String, AgentRuntimeEntry>>>,
+    completion_tx: Arc<Mutex<Option<mpsc::UnboundedSender<ChildCompletionEvent>>>>,
 }
 
 impl AgentRuntimeManager {
+    /// Register a completion listener for session wake (server wires this).
+    pub fn set_completion_sender(&self, tx: mpsc::UnboundedSender<ChildCompletionEvent>) {
+        *self.completion_tx.lock().expect("agent completion mutex") = Some(tx);
+    }
+
+    /// Notify parent session listeners that a background child finished.
+    pub fn notify_completion(
+        &self,
+        event: ChildCompletionEvent,
+    ) -> Result<(), ChildCompletionEvent> {
+        let sender = self
+            .completion_tx
+            .lock()
+            .expect("agent completion mutex")
+            .as_ref()
+            .cloned();
+        let Some(sender) = sender else {
+            return Err(event);
+        };
+        sender.send(event).map_err(|error| error.0)
+    }
+
     pub fn register(
         &self,
         delegated_run_id: impl Into<String>,

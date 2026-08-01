@@ -40,7 +40,10 @@ use self::build_context::SharedBuildContext;
 
 // Re-export public types
 pub use identity::AgentIdentity;
-pub use lifecycle::{AgentMailbox, AgentRuntimeManager, AgentRuntimeSnapshot, AgentRuntimeStatus};
+pub use lifecycle::{
+    AgentMailbox, AgentRuntimeManager, AgentRuntimeSnapshot, AgentRuntimeStatus,
+    ChildCompletionEvent,
+};
 pub use scheduler::{
     AdaptiveConcurrencyPolicy, AgentScheduler, BackpressureSignal, ScheduleRequest,
     SchedulerSnapshot, SchedulingClass,
@@ -53,8 +56,8 @@ pub use types::{
 };
 
 // Re-export single agent entry points
-pub use execution::execute_single_explorer;
 pub(crate) use execution::{execute_single_agent, AgentConfig};
+pub use execution::{execute_single_child, execute_single_explorer};
 
 // Internal execution functions
 use execution::execute_builder_with_progress;

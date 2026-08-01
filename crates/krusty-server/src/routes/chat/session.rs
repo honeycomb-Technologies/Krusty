@@ -622,6 +622,29 @@ pub(super) async fn setup_chat_session(
     fast_mode: bool,
     requires_vision: bool,
 ) -> Result<ChatSessionContext, AppError> {
+    setup_chat_session_with_guard(
+        state,
+        user,
+        session_id,
+        requested_model,
+        thinking_level,
+        fast_mode,
+        requires_vision,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn setup_chat_session_with_guard(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    session_id: &str,
+    requested_model: RequestedModel<'_>,
+    thinking_level: ThinkingLevel,
+    fast_mode: bool,
+    requires_vision: bool,
+    preacquired_guard: Option<OwnedMutexGuard<()>>,
+) -> Result<ChatSessionContext, AppError> {
     let user_id = current_user_id(user).map(ToOwned::to_owned);
     let workspace_scope = request_workspace_scope(state, user);
 
@@ -721,10 +744,13 @@ pub(super) async fn setup_chat_session(
         .and_then(|manager| manager.get_active_plan(session_id).ok())
         .flatten()
         .is_some();
-    let guard = state
-        .try_lock_session(session_id)
-        .await
-        .ok_or_else(|| AppError::Conflict(format!("Session {} is busy", session_id)))?;
+    let guard = match preacquired_guard {
+        Some(guard) => guard,
+        None => state
+            .try_lock_session(session_id)
+            .await
+            .ok_or_else(|| AppError::Conflict(format!("Session {} is busy", session_id)))?,
+    };
 
     let recovered_steering = session_manager.promote_orphaned_pending_steering(session_id)?;
     if recovered_steering > 0 {

@@ -8,6 +8,7 @@ mod stream_notify;
 mod tools;
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 use axum::{
     extract::State,
@@ -32,15 +33,15 @@ use self::interactions::{
 use self::session::{prepare_chat_contract_for_test, select_model_for_chat_request};
 use self::session::{
     prepare_chat_route_session, refresh_chat_code_tool_surface, setup_chat_session,
-    ChatSessionContext, RequestedModel,
+    setup_chat_session_with_guard, ChatSessionContext, RequestedModel,
 };
-use self::stream::start_orchestrator_sse;
 #[cfg(test)]
 use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
+use self::stream::{start_orchestrator_detached, start_orchestrator_sse};
 use self::tools::{restrict_tools_to_allowlist, should_suppress_code_tools};
 use super::session_access::{current_user_id, load_owned_session};
 use crate::ai_bootstrap::{persist_current_model_key_selection, persist_current_model_selection};
-use crate::auth::CurrentUser;
+use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
 use crate::types::ChatRequest;
 use crate::AppState;
@@ -52,6 +53,40 @@ pub fn router() -> Router<AppState> {
         .route("/steer", post(steer))
         .route("/tool-result", post(tool_result))
         .route("/tool-approval", post(tool_approval))
+}
+
+/// Start the explicit headless continuation contract for a durable child
+/// completion. The completion event is trusted only after child_wake validates
+/// its delegated-run/session ownership and captured workspace boundary.
+pub(crate) async fn resume_child_completion_session(
+    state: &AppState,
+    session_id: &str,
+    user_id: Option<String>,
+    workspace_root: PathBuf,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), AppError> {
+    let user = CurrentUser(AuthenticatedUser {
+        user_id,
+        home_dir: Some(workspace_root),
+    });
+    // Thinking effort and fast mode are request-scoped rather than durable.
+    // A completion wake therefore resumes with their explicit safe defaults,
+    // while model identity, permission, work mode, and workspace come from the
+    // persisted session through the normal setup path.
+    let ctx = setup_chat_session_with_guard(
+        state,
+        Some(&user),
+        session_id,
+        RequestedModel::Unspecified,
+        crate::types::ThinkingLevel::Off,
+        false,
+        false,
+        Some(guard),
+    )
+    .await?;
+    let work_mode = ctx.work_mode;
+    let permission_mode = ctx.permission_mode;
+    start_orchestrator_detached(state, ctx, work_mode, permission_mode).await
 }
 // ── Handlers ─────────────────────────────────────────────────────────
 

@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
+use crate::agent::subagent::AgentCapability;
 use crate::agent::{DelegatedRunStage, DelegatedToolKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +94,35 @@ pub struct DelegatedRunRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Parent-chosen product identity for this child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_name: Option<String>,
+    /// Exact durable capability contract. Empty means a pre-contract row and
+    /// is resolved through the role fallback in `effective_capabilities`.
+    #[serde(default)]
+    pub capabilities: BTreeSet<AgentCapability>,
+}
+
+impl DelegatedRunRecord {
+    pub fn effective_capabilities(&self) -> BTreeSet<AgentCapability> {
+        if !self.capabilities.is_empty() {
+            return self.capabilities.clone();
+        }
+
+        match self.role {
+            DelegatedRunRole::Build => BTreeSet::from([
+                AgentCapability::Read,
+                AgentCapability::Write,
+                AgentCapability::Execute,
+            ]),
+            DelegatedRunRole::Verifier => {
+                BTreeSet::from([AgentCapability::Read, AgentCapability::Execute])
+            }
+            DelegatedRunRole::Explore | DelegatedRunRole::Planner => {
+                BTreeSet::from([AgentCapability::Read])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

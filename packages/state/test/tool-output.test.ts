@@ -1,4 +1,8 @@
-import { formatToolOutputForDisplay } from "../src/session/delegated.ts";
+import {
+	createDelegatedArtifactState,
+	formatToolOutputForDisplay,
+	resolveDelegatedKind,
+} from "../src/session/delegated.ts";
 
 declare const Deno: {
 	test(name: string, fn: () => void | Promise<void>): void;
@@ -38,5 +42,30 @@ Deno.test("plain command output remains unchanged", () => {
 		formatToolOutputForDisplay("bash", "tests passed\n"),
 		"tests passed\n",
 		"plain terminal output should remain byte-for-byte visible",
+	);
+});
+
+Deno.test("new Agent contract uses capabilities and parent name", () => {
+	const args = {
+		name: "focused validator",
+		instructions: "Run focused checks",
+		capabilities: ["execute"],
+	};
+	assertEquals(
+		resolveDelegatedKind("agent", args),
+		"explore",
+		"non-writing child should use the single-child delegated state family",
+	);
+	const artifact = createDelegatedArtifactState("explore", args);
+	assertEquals(artifact.name, "focused validator", "name must survive presentation seeding");
+	assertEquals(artifact.agents[0]?.name, "focused validator", "seed row must use parent name");
+	assertEquals(artifact.capabilities?.join(","), "execute", "execute-only must stay exact");
+});
+
+Deno.test("legacy agent_type remains a delegated-kind fallback", () => {
+	assertEquals(
+		resolveDelegatedKind("agent", { agent_type: "verify" }),
+		"verify",
+		"legacy verifier calls must still replay",
 	);
 });

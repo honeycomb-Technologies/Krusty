@@ -250,6 +250,8 @@ pub struct DelegatedRunResponse {
     pub model: Option<String>,
     pub resumable: bool,
     pub resumed_from_run_id: Option<String>,
+    pub child_name: Option<String>,
+    pub capabilities: Vec<String>,
     pub target_scope: Vec<DelegatedRunScopeResponse>,
     pub human_review: Option<String>,
     pub artifact: Option<Value>,
@@ -258,6 +260,15 @@ pub struct DelegatedRunResponse {
 
 impl From<DelegatedRunRecord> for DelegatedRunResponse {
     fn from(value: DelegatedRunRecord) -> Self {
+        let capabilities = value
+            .effective_capabilities()
+            .into_iter()
+            .map(|capability| match capability {
+                krusty_core::agent::subagent::AgentCapability::Read => "read".to_string(),
+                krusty_core::agent::subagent::AgentCapability::Write => "write".to_string(),
+                krusty_core::agent::subagent::AgentCapability::Execute => "execute".to_string(),
+            })
+            .collect();
         Self {
             delegated_run_id: value.delegated_run_id,
             parent_tool_call_id: value.parent_tool_call_id,
@@ -282,6 +293,8 @@ impl From<DelegatedRunRecord> for DelegatedRunResponse {
             model: value.model,
             resumable: value.resumable,
             resumed_from_run_id: value.resumed_from_run_id,
+            child_name: value.child_name,
+            capabilities,
             target_scope: value.target_scope.into_iter().map(Into::into).collect(),
             human_review: value.human_review,
             artifact: value.artifact,

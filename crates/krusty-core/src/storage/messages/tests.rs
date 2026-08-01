@@ -250,6 +250,48 @@ fn pending_steering_is_hidden_survives_replacement_and_promotes_once_at_end() {
 }
 
 #[test]
+fn enqueue_once_rejects_duplicate_completion_before_and_after_promotion() {
+    let (db, _temp) = create_test_db();
+    let store = MessageStore::new(&db);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, "Test", now, now],
+        )
+        .expect("Failed to create session");
+    let content = r#"[{"type":"text","text":"child finished"}]"#;
+
+    assert!(store
+        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
+        .expect("first completion should enqueue"));
+    assert!(!store
+        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
+        .expect("duplicate pending completion should be idempotent"));
+    assert!(store
+        .promote_pending_steering(&session_id, "child-wake-run-1")
+        .expect("completion should promote")
+        .is_some());
+    assert!(!store
+        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
+        .expect("duplicate promoted completion should remain idempotent"));
+
+    let canonical = store
+        .load_session_messages(&session_id)
+        .expect("canonical history should load");
+    assert_eq!(
+        canonical
+            .iter()
+            .filter(|(_, message)| message.contains("child finished"))
+            .count(),
+        1,
+        "one completion event must produce exactly one canonical user message"
+    );
+}
+
+#[test]
 fn orphaned_steering_recovers_after_the_interrupted_runs_final_assistant() {
     let (db, _temp) = create_test_db();
     let store = MessageStore::new(&db);

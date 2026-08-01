@@ -2635,6 +2635,63 @@ impl Database {
             diagnostics_tx.commit()?;
         }
 
+        // Migration 50: durable steering idempotency receipts.
+        //
+        // Pending steering rows are deleted when promoted into canonical
+        // history, so the messages table alone cannot reject a repeated
+        // completion event after promotion. Keep a compact session-scoped
+        // receipt for enqueue-once callers; ordinary interactive and process
+        // steering retain their existing queue semantics.
+        if current_version < 50 {
+            info!("Running migration 50: durable steering idempotency receipts");
+            let steering_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring steering idempotency migration lock")?;
+            steering_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS steering_idempotency (
+                    session_id TEXT NOT NULL,
+                    pending_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (session_id, pending_id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_steering_idempotency_created
+                    ON steering_idempotency(created_at);
+                "#,
+            )?;
+            steering_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (50)",
+                [],
+            )?;
+            steering_tx.commit()?;
+        }
+
+        // Migration 51: persist the parent-chosen identity and exact child
+        // capability contract so durable resume does not reconstruct access
+        // from a presentation-oriented legacy role.
+        if current_version < 51 {
+            info!("Running migration 51: delegated child contracts");
+            let delegated_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegated child contract migration lock")?;
+            if !Self::column_exists(&delegated_tx, "delegated_runs", "child_name") {
+                delegated_tx
+                    .execute("ALTER TABLE delegated_runs ADD COLUMN child_name TEXT", [])?;
+            }
+            if !Self::column_exists(&delegated_tx, "delegated_runs", "capabilities_json") {
+                delegated_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(capabilities_json))",
+                    [],
+                )?;
+            }
+            delegated_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (51)",
+                [],
+            )?;
+            delegated_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
