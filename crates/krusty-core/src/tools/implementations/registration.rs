@@ -153,9 +153,11 @@ mod tests {
                 "current Agent contract must expose {field}"
             );
         }
-        assert!(agent.input_schema["properties"]["run_in_background"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("parent is notified")));
+        assert!(
+            agent.input_schema["properties"]["run_in_background"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("parent is notified"))
+        );
         assert_eq!(
             agent.input_schema["properties"]["action"]["enum"][7],
             "resume"

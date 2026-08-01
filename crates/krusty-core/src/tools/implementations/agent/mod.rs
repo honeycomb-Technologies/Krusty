@@ -337,10 +337,8 @@ impl AgentTool {
         if let Some(components) = params.components.as_mut() {
             components.retain(|component| !component.trim().is_empty());
         }
-        let parallel_components = should_use_parallel_component_pool(
-            execution_profile,
-            params.components.as_deref(),
-        );
+        let parallel_components =
+            should_use_parallel_component_pool(execution_profile, params.components.as_deref());
         if !parallel_components {
             if let Some(component) = params
                 .components
@@ -439,5 +437,4 @@ impl AgentTool {
     fn resolve_model(&self, _ctx: &ToolContext, client: &AiClient) -> String {
         client.resolved_model().wire_model_id.clone()
     }
-
 }

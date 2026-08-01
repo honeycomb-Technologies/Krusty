@@ -1315,11 +1315,12 @@ impl AgenticOrchestrator {
                 continue;
             }
 
-            if let Some(stop_reason) = loop_guard_landing
-                .is_none()
-                .then(|| result.stop_reason.clone())
-                .flatten()
-            {
+            let effective_stop_reason = if loop_guard_landing.is_none() {
+                result.stop_reason.clone()
+            } else {
+                None
+            };
+            if let Some(stop_reason) = effective_stop_reason {
                 if !overflow_compact_retry_attempted
                     && stop_reason == LoopStopReason::ProviderError
                     && result
