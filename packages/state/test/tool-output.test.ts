@@ -10,7 +10,7 @@ import type {
 	DelegatedProgressEvent,
 	DelegatedRunResponse,
 	DelegatedRunSummaryResponse,
-} from "@krusty/api";
+} from "@mitsuro/api";
 import type { ChatMessage, ToolCall } from "../src/session/types.ts";
 
 declare const Deno: {

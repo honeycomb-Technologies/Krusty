@@ -522,6 +522,7 @@ content	crates/mitsuro-server/src/routes/sessions/tests.rs	302	        .expect("
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	342	        "Daemon Mako"
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	1196	                    "question": "Which environment should Krusty continue against?",
 content	crates/mitsuro-server/src/types/sessions.rs	100	        assert_eq!(serde_json::to_value(legacy).expect("legacy wire"), "mako");
+content	deploy/systemd/mitsuro-hive.service	33	ReadWritePaths=-%t/mitsuro -%h/.mitsuro -%h/.krusty -%h/Work -%h/.cargo -%h/.bun -%h/.cache -%h/.npm -%h/.local/share
 content	docs/interfaces/hive.md	53	The deprecated `krusty hive` spelling remains a tested alias for existing
 content	docs/interfaces/server-api.md	115	`/api/hive` is the canonical autonomous API namespace. `/api/mako` remains the
 content	docs/migration/RELEASE-0.9.21-TONIGHT.md	9	1. **Apple pipeline stays `io.krusty.mobile`** (APNS, TestFlight continuity).
@@ -697,21 +698,21 @@ content	packages/api/test/client.test.ts	210	describe("KrustyClient provider-awa
 content	packages/api/test/client.test.ts	211		it("sends the exact key and legacy model mirror when dispatching Mako", async () => {
 content	packages/api/test/client.test.ts	214			const client = new KrustyClient({
 content	packages/api/test/client.test.ts	215				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	219					return Response.json({ session_id: "mako-1", status: "started" });
-content	packages/api/test/client.test.ts	223			await client.dispatchMako("Audit this project", {
-content	packages/api/test/client.test.ts	229			expect(requestUrl).toBe("http://krusty.test/api/mako/dispatch");
-content	packages/api/test/client.test.ts	239		it("keeps legacy Mako dispatches compatible by omitting model_key", async () => {
-content	packages/api/test/client.test.ts	241			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	242				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	245					return Response.json({ session_id: "mako-legacy", status: "started" });
-content	packages/api/test/client.test.ts	249			await client.dispatchMako("Continue", { model: "grok-4.5" });
-content	packages/api/test/client.test.ts	261			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	262				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	278				url: "http://krusty.test/api/models/current",
-content	packages/api/test/client.test.ts	297	describe("KrustyClient Mako schedules", () => {
-content	packages/api/test/client.test.ts	300			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	301				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	312			await client.pauseMakoSchedule("session-1", "schedule-1", 7);
+content	packages/api/test/client.test.ts	223					return Response.json({ session_id: "mako-1", status: "started" });
+content	packages/api/test/client.test.ts	227			await client.dispatchMako("Audit this project", {
+content	packages/api/test/client.test.ts	233			expect(requestUrl).toBe("http://krusty.test/api/hive/dispatch");
+content	packages/api/test/client.test.ts	243		it("keeps legacy Mako dispatches compatible by omitting model_key", async () => {
+content	packages/api/test/client.test.ts	245			const client = new KrustyClient({
+content	packages/api/test/client.test.ts	246				baseUrl: "http://krusty.test",
+content	packages/api/test/client.test.ts	253					return Response.json({ session_id: "mako-legacy", status: "started" });
+content	packages/api/test/client.test.ts	257			await client.dispatchMako("Continue", { model: "grok-4.5" });
+content	packages/api/test/client.test.ts	269			const client = new KrustyClient({
+content	packages/api/test/client.test.ts	270				baseUrl: "http://krusty.test",
+content	packages/api/test/client.test.ts	286				url: "http://krusty.test/api/models/current",
+content	packages/api/test/client.test.ts	305	describe("KrustyClient Mako schedules", () => {
+content	packages/api/test/client.test.ts	308			const client = new KrustyClient({
+content	packages/api/test/client.test.ts	309				baseUrl: "http://krusty.test",
+content	packages/api/test/client.test.ts	320			await client.pauseMakoSchedule("session-1", "schedule-1", 7);
 content	packages/api/test/identity-compatibility.test.ts	4	import { KrustyClient } from "../src/compatibility.ts";
 content	packages/api/test/identity-compatibility.test.ts	25	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
 content	packages/api/test/identity-compatibility.test.ts	27	      return json([{ id: "old", session_type: "mako" }]);
@@ -731,8 +732,6 @@ content	packages/api/test/identity-compatibility.test.ts	178	    opaqueInput?.se
 content	packages/api/test/identity-compatibility.test.ts	187	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
 content	packages/api/test/identity-compatibility.test.ts	190	  const client = new KrustyClient({ baseUrl: "https://example.test", fetchImpl });
 content	packages/api/test/identity-compatibility.test.ts	191	  assert((await client.getMakoMain()).session_id === "main", "old method should forward through the safe transport bridge");
-content	packages/state/src/session/delegated.ts	8	} from '@krusty/api';
-content	packages/state/test/tool-output.test.ts	13	} from "@krusty/api";
 content	scripts/identity-env.sh	11	      KRUSTY_MAKO_*)
 content	scripts/identity-env.sh	12	        suffix=${legacy_name#KRUSTY_MAKO_}
 content	scripts/identity-env.sh	15	      KRUSTY_*)
@@ -742,4 +741,3 @@ content	scripts/identity-env.sh	34	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	40	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	46	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	52	    KRUSTY_MAKO_TEST_SOCKET=previous-hive
-content	deploy/systemd/mitsuro-hive.service	33	ReadWritePaths=-%t/mitsuro -%h/.mitsuro -%h/.krusty -%h/Work -%h/.cargo -%h/.bun -%h/.cache -%h/.npm -%h/.local/share

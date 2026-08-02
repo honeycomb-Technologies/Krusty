@@ -5,7 +5,7 @@ import type {
   DelegatedRunStage,
   DelegatedToolKind,
   DelegatedToolStateResponse,
-} from '@krusty/api';
+} from '@mitsuro/api';
 
 import type {
   ChatMessage,

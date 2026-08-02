@@ -214,7 +214,11 @@ describe("KrustyClient provider-aware model identity", () => {
 		const client = new KrustyClient({
 			baseUrl: "http://krusty.test",
 			fetchImpl: (async (input, init) => {
-				requestUrl = String(input);
+				const url = String(input);
+				if (url.includes("/capabilities") || url.endsWith("/sessions")) {
+					return Response.json({ ok: true });
+				}
+				requestUrl = url;
 				requestInit = init;
 				return Response.json({ session_id: "mako-1", status: "started" });
 			}) as typeof fetch,
@@ -226,7 +230,7 @@ describe("KrustyClient provider-aware model identity", () => {
 			projectDir: "/work/project",
 		});
 
-		expect(requestUrl).toBe("http://krusty.test/api/mako/dispatch");
+		expect(requestUrl).toBe("http://krusty.test/api/hive/dispatch");
 		expect(requestInit?.method).toBe("POST");
 		expect(JSON.parse(String(requestInit?.body))).toEqual({
 			task: "Audit this project",
@@ -240,7 +244,11 @@ describe("KrustyClient provider-aware model identity", () => {
 		let body: unknown;
 		const client = new KrustyClient({
 			baseUrl: "http://krusty.test",
-			fetchImpl: (async (_input, init) => {
+			fetchImpl: (async (input, init) => {
+				const url = String(input);
+				if (url.includes("/capabilities") || url.endsWith("/sessions")) {
+					return Response.json({ ok: true });
+				}
 				body = JSON.parse(String(init?.body));
 				return Response.json({ session_id: "mako-legacy", status: "started" });
 			}) as typeof fetch,
