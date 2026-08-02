@@ -739,3 +739,4 @@ content	scripts/identity-env.sh	52	    KRUSTY_MAKO_TEST_SOCKET=previous-hive
 content	apps/mobile/EAS-PROJECT.md	4	- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store identity freeze).
 content	apps/mobile/EAS-PROJECT.md	10	Slug for project identified by "extra.eas.projectId" (krusty) does not match the "slug" field (mitsuro)
 content	apps/mobile/EAS-PROJECT.md	13	the Expo project is still named `krusty`. Rename it in the Expo dashboard (or with EAS CLI) to `mitsuro`, **or** create a new Expo project with slug `mitsuro` and update `projectId`. Do not change the iOS bundle id as part of that rename.
+content	crates/mitsuro-cli/src/tui_v2/services.rs	2031	        assert_eq!(parse_theme_kind("krusty"), None);

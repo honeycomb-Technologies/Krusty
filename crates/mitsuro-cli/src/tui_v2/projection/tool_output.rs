@@ -73,7 +73,7 @@ pub fn parse_tool_output(name: &str, output: &str, historical: bool) -> Artifact
     }
 }
 
-/// Unwrap Krusty history + tool envelopes into panel-ready artifact content.
+/// Unwrap Mitsuro history + tool envelopes into panel-ready artifact content.
 pub fn artifact_from_tool_value(
     name: &str,
     value: &Value,

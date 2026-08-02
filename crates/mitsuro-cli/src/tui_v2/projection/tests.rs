@@ -177,7 +177,7 @@ fn tool_events_do_not_split_a_streaming_word_across_agent_parts() {
     assert_eq!(parts.len(), 2);
     assert!(matches!(
         &parts[0],
-        TimelinePart::AgentText(part) if part.text == "Checking Hive/Mako next."
+        TimelinePart::AgentText(part) if part.text == "Checking Hive next."
     ));
     assert!(matches!(&parts[1], TimelinePart::Tool(_)));
 }
