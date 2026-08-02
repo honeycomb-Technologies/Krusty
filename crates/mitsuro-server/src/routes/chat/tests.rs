@@ -157,7 +157,7 @@ fn create_test_delegated_run(
 }
 
 #[tokio::test]
-async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
+async fn pending_hive_resolution_uses_durable_run_ids_not_trace_run_ids() {
     let (state, _temp_dir) = create_test_state();
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
