@@ -591,23 +591,6 @@ fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
         "capabilities": ["execute"]
     });
     assert_eq!(agent_call_execution_profile(&execute_only), "explore");
-    assert!(agent_call_requests_write(&execute_only));
-}
-
-#[test]
-fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
-    let write_child = json!({
-        "profile": "verify",
-        "capabilities": ["read", "write"]
-    });
-    assert_eq!(agent_call_execution_profile(&write_child), "build");
-    assert!(agent_call_requests_write(&write_child));
-
-    let execute_only = json!({
-        "profile": "build",
-        "capabilities": ["execute"]
-    });
-    assert_eq!(agent_call_execution_profile(&execute_only), "explore");
     assert!(!agent_call_requests_write(&execute_only));
 }
 
