@@ -303,3 +303,26 @@ cargo fmt --all -- --check
 ---
 
 *This document is the single front-to-back plan for unify. Execution is gated; start with Phase 0 only unless user expands scope.*
+
+---
+
+## Appendix — Phase 4 reconcile record (2026-08-02)
+
+### Desktop (`codex/desktop-product-20260726`)
+- Landed missing `apps/desktop/ui` workstation surface + shell packaging notes onto staging.
+- Renamed product plane `MakoPlane` → `HivePlane` and aligned package aliases to `@mitsuro/*`.
+- Staging already had Tauri shell/identity compatibility; product UI was the unique gap.
+
+### Mobile (`codex/release-staging-20260727-mobile`)
+- Audit: no non-mako unique files missing on staging.
+- Staging already contains Hive-renamed companion UI, mitsuro-diagnostics, and mobile perf/diagnostics suite from the identity snapshot.
+- Mobile branch remaining tip deltas are **behind** identity rename (legacy `mako/` paths) and are intentionally **not** reintroduced.
+- Disposition: **proven redundant for unique intended work** after identity snapshot; keep branch as historical reference only.
+
+### Cherry list
+| Source | Action | Result |
+|--------|--------|--------|
+| desktop-product `apps/desktop/ui` | checkout + Hive/Mitsuro rename | landed |
+| desktop-product shell package/README | selective | landed / fixed JSON |
+| mobile-branch unique non-identity | none | redundant |
+
