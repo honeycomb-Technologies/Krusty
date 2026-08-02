@@ -1330,8 +1330,9 @@ impl PreviewApp {
                             let start = text.floor_char_boundary(lo.min(text.len()));
                             if start < end {
                                 let selected = text[start..end].to_owned();
-                                let _ =
-                                    crate::tui_support::utils::clipboard::write_clipboard_text(&selected);
+                                let _ = crate::tui_support::utils::clipboard::write_clipboard_text(
+                                    &selected,
+                                );
                                 // Keep buffer selection so typing replaces the range.
                                 self.state.composer.set_selection(start, end);
                             }

@@ -7,8 +7,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::links::LinkSpan;
 use super::links::HoveredLink;
+use super::links::LinkSpan;
 
 /// OSC 8 hyperlink start sequence
 /// Format: ESC ] 8 ; ; URL BEL

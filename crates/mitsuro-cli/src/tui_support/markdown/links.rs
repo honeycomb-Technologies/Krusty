@@ -34,7 +34,6 @@ impl RenderedMarkdown {
     }
 }
 
-
 /// Information about a hovered hyperlink in rendered markdown.
 #[derive(Debug, Clone)]
 pub struct HoveredLink {

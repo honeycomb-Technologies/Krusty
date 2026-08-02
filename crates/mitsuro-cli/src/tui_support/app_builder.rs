@@ -17,9 +17,9 @@ use crate::plugins::PluginManager;
 use crate::process::ProcessRegistry;
 use crate::storage::{CredentialStore, Database, Preferences, SessionManager};
 use crate::tools::{register_all_tools, ToolRegistry};
-use crate::tui_support::AppServices;
 use crate::tui_support::themes::{Theme, THEME_REGISTRY};
 use crate::tui_support::utils::{AsyncChannels, McpStatusUpdate};
+use crate::tui_support::AppServices;
 use mitsuro_core::mcp::{McpConnectionAuthority, McpPackageConfig};
 use mitsuro_core::skills::SkillsManager;
 
@@ -384,7 +384,9 @@ fn resolve_initial_provider(
 ) -> ProviderId {
     current_model_key
         .map(|key| key.provider)
-        .or_else(|| crate::tui_support::auth::infer_provider_for_model(model_registry, current_model))
+        .or_else(|| {
+            crate::tui_support::auth::infer_provider_for_model(model_registry, current_model)
+        })
         .or(saved_active_provider)
         .or_else(|| credential_store.providers_with_auth().into_iter().next())
         .unwrap_or(ProviderId::MiniMax)
