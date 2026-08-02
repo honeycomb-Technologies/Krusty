@@ -652,7 +652,7 @@ private func milliseconds(_ date: Date) -> Int64 {
   Int64((date.timeIntervalSince1970 * 1_000).rounded())
 }
 
-// Shared definition used by MitsuroDiagnostics and the KrustyDiagnostics
+// Shared definition used by MitsuroDiagnostics and the legacy-name
 // compatibility bridge. Must use ModuleDefinitionBuilder (not ModuleDefinition
 // initializer) — the ModuleDefinition init is internal in expo-modules-core 55.
 @ModuleDefinitionBuilder
