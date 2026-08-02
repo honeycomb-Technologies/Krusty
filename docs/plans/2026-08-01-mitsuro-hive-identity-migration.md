@@ -53,6 +53,45 @@ fixture both pass database integrity and row-parity checks, old and new client/A
 compatibility tests pass, the generated web bundle contains only current product
 copy, and all required Rust and client validation gates pass.
 
+## Platform state cutover
+
+- Linux shell-installer upgrades must use the current canonical installer. It
+  stops the
+  supervised old generation, records a non-mutating database/WAL digest
+  manifest, invokes `mitsuro migrate-identity --confirm-offline`, verifies that
+  the source authority did not change, and only then starts canonical units.
+- macOS shell installation stages and verifies the release but fails closed on
+  automatic cutover because it lacks the Linux procfs proof. The operator must
+  stop both generations, run the exact staged physical migration command the
+  installer prints, and rerun the installer without starting Mitsuro between
+  those steps.
+- Windows direct installation publishes `mitsuro.exe` and its transition
+  command copy only. When the prior state root exists, the operator must stop
+  every old and canonical server/Hive process and run
+  `mitsuro migrate-identity --confirm-offline` before normal startup.
+- Homebrew and AUR install binaries or units only; they require the same manual
+  offline migration before first startup or service enablement when previous
+  state exists.
+- Desktop web-data migration is automatic only for the receipt-backed Linux XDG
+  and Windows LocalAppData roots. Wry does not expose authoritative WKWebView
+  storage on macOS, so the shell does not copy a guessed Application Support
+  directory. Preserve old macOS desktop data until a signed build passes manual
+  cookies/localStorage, connection, authentication, and preference continuity
+  checks; re-authentication is not proof of migration.
+- State cutover acceptance requires the regular, at-most-16-KiB
+  `.identity-migration-v2` file with exactly five ordered LF-terminated fields,
+  the exact preserved source root, bounded numeric fields, lowercase SHA-256
+  logical-SQLite and durable-tree fingerprints, and a consistent WAL stat
+  tuple. A structurally plausible v1 or partial receipt is not accepted.
+- The migration binary, not the installer shell, owns the held SQLite writer
+  fence and online backup. The previous root remains rollback authority; a
+  failed canonical root is quarantined rather than merged back or deleted.
+- After a successful cutover, the previous root, physical binaries, and desktop
+  app are recovery-only. No continuous lock prevents a same-user direct launch;
+  never run the previous generation except through a coordinated rollback that
+  first proves every canonical process quiescent and selects the previous
+  release and state together.
+
 ## Local cleanup boundary
 
 Old worktrees, branches, repositories, generated build trees, installed releases,

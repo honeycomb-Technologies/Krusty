@@ -12,7 +12,7 @@ Mitsuro solves this with a layered architecture: a unified type system at the bo
 
 ## The Type System
 
-Everything starts with the types defined under `crates/krusty-core/src/ai/types/`. These are Mitsuro's internal representation of conversations, completely independent of any provider's wire format.
+Everything starts with the types defined under `crates/mitsuro-core/src/ai/types/`. These are Mitsuro's internal representation of conversations, completely independent of any provider's wire format.
 
 The core types are:
 
@@ -27,7 +27,7 @@ Supporting types like `Usage` (with cache hit metrics), `ThinkingConfig`, `Conte
 
 ## AiClient: The Central Abstraction
 
-`AiClient` (in `crates/krusty-core/src/ai/client/core/client.rs`) is the single struct that all AI communication flows through. It holds three things: an HTTP client configured for SSE streaming (long timeouts, proper user-agent), an `AiClientConfig` describing which provider and format to use, and an API key.
+`AiClient` (in `crates/mitsuro-core/src/ai/client/core/client.rs`) is the single struct that all AI communication flows through. It holds three things: an HTTP client configured for SSE streaming (long timeouts, proper user-agent), an `AiClientConfig` describing which provider and format to use, and an API key.
 
 The client exposes a small surface area. Legacy text-only non-streaming calls go through `call_simple()` and `call_with_conversation()`; their usage-bearing counterparts return `SimpleCallResult`, whose optional normalized usage distinguishes an omitted provider field from a real zero. Streaming calls go through the streaming module. Extended thinking uses `call_with_thinking()`. Each method internally routes to the correct format handler and parser based on the client's configured `ApiFormat`, and streaming/non-streaming paths share the same usage normalizers.
 
@@ -35,7 +35,7 @@ Authentication is handled at the request-building level. The `build_request()` m
 
 ## AiClientConfig and CallOptions
 
-`AiClientConfig` (in `crates/krusty-core/src/ai/client/config/ai_client.rs`) captures everything needed to configure a client: the model ID, max tokens, optional base URL override, authentication style, provider ID, API format, and custom headers. Helper constructors like `for_anthropic_with_auth_detection()` and `for_openai_with_auth_detection()` handle the complexity of OAuth vs. API key routing, including choosing the correct endpoint (ChatGPT's Responses API vs. OpenAI's standard API) based on credential type.
+`AiClientConfig` (in `crates/mitsuro-core/src/ai/client/config/ai_client.rs`) captures everything needed to configure a client: the model ID, max tokens, optional base URL override, authentication style, provider ID, API format, and custom headers. Helper constructors like `for_anthropic_with_auth_detection()` and `for_openai_with_auth_detection()` handle the complexity of OAuth vs. API key routing, including choosing the correct endpoint (ChatGPT's Responses API vs. OpenAI's standard API) based on credential type.
 
 `CallOptions` is the per-request configuration: max tokens, temperature, tools, system prompt, thinking config, reasoning format, caching, context management, web search/fetch, and provider-specific knobs like Codex reasoning effort, Anthropic adaptive thinking effort, and the model-specific Fast implementation.
 
@@ -43,7 +43,7 @@ The key method is `canonicalized_for()`, which normalizes a `CallOptions` for a 
 
 ## The Format Abstraction Layer
 
-The format layer (in `crates/krusty-core/src/ai/format/`) is where provider differences get absorbed. The `FormatHandler` trait defines three methods:
+The format layer (in `crates/mitsuro-core/src/ai/format/`) is where provider differences get absorbed. The `FormatHandler` trait defines three methods:
 
 - `convert_messages()` -- Transform Mitsuro's `ModelMessage` values into provider-specific JSON.
 - `convert_tools()` -- Transform `AiTool` definitions into the provider's tool format.
@@ -61,7 +61,7 @@ The factory function `get_format_handler()` selects the right implementation bas
 
 ## Provider Registry
 
-The provider registry (under `crates/krusty-core/src/ai/providers/registry/`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, curated fallback models, and capabilities. Live catalog results replace those fallback rows when discovery succeeds.
+The provider registry (under `crates/mitsuro-core/src/ai/providers/registry/`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, curated fallback models, and capabilities. Live catalog results replace those fallback rows when discovery succeeds.
 
 Six selectable providers are built in:
 
@@ -80,9 +80,9 @@ Adding a new provider means adding a `ProviderConfig` entry to the `BUILTIN_PROV
 
 ## Model Profiles and Capabilities
 
-The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/models/metadata.rs`) stores factual data about a model: context window, max output, reasoning format, exact selectable reasoning levels, provider default, whether reasoning is mandatory, request control type, Fast implementation, pricing, and vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models. Server, TUI, mobile, and desktop clients prefer this metadata over guessing capabilities from model names; compatibility heuristics remain for older responses that do not include it.
+The model system has two layers. `ModelMetadata` (in `crates/mitsuro-core/src/ai/models/metadata.rs`) stores factual data about a model: context window, max output, reasoning format, exact selectable reasoning levels, provider default, whether reasoning is mandatory, request control type, Fast implementation, pricing, and vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models. Server, TUI, mobile, and desktop clients prefer this metadata over guessing capabilities from model names; compatibility heuristics remain for older responses that do not include it.
 
-`ModelProfile` (in `crates/krusty-core/src/ai/model_profile/profile/mod.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
+`ModelProfile` (in `crates/mitsuro-core/src/ai/model_profile/profile/mod.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
 
 Each profile also controls the layered system prompt: a base prompt (Mitsuro's operating contract), a provider guidance overlay (Anthropic gets "keep tool and plan state explicit"; OpenAI gets "preserve exact task continuity"), a model family overlay (Codex gets "continue through tool-use loops"; Gemini gets "ground decisions in explicit file evidence"), and a capability overlay based on context window size and API format. When a custom system prompt is provided, it replaces the entire layered stack.
 
@@ -91,10 +91,10 @@ Each profile also controls the layered system prompt: a base prompt (Mitsuro's o
 Streaming is where most of the complexity lives. The pipeline works like this:
 
 1. The client sends an HTTP POST with `stream: true` and gets back a byte stream.
-2. `SseStreamProcessor` (in `crates/krusty-core/src/ai/sse/processor/mod.rs`) receives byte chunks and handles SSE framing -- splitting on newlines, accumulating partial lines across chunk boundaries, stripping SSE comments and empty lines, and extracting `data:` payloads. It caps partial line buffers at 1MB to prevent unbounded memory growth.
-3. Each SSE data payload is parsed as JSON and handed to a provider-specific `SseParser` implementation. Three parsers exist in `crates/krusty-core/src/ai/parsers/`: `AnthropicParser`, `OpenAIParser`, and `GoogleParser`. Each knows how to interpret its provider's event types and convert them into `SseEvent` values.
+2. `SseStreamProcessor` (in `crates/mitsuro-core/src/ai/sse/processor/mod.rs`) receives byte chunks and handles SSE framing -- splitting on newlines, accumulating partial lines across chunk boundaries, stripping SSE comments and empty lines, and extracting `data:` payloads. It caps partial line buffers at 1MB to prevent unbounded memory growth.
+3. Each SSE data payload is parsed as JSON and handed to a provider-specific `SseParser` implementation. Three parsers exist in `crates/mitsuro-core/src/ai/parsers/`: `AnthropicParser`, `OpenAIParser`, and `GoogleParser`. Each knows how to interpret its provider's event types and convert them into `SseEvent` values.
 4. `SseEvent` values are mapped to `StreamPart` values (text deltas, tool call starts/deltas/completions, thinking events, usage, finish) and sent through an unbounded channel to the orchestrator.
-5. Text deltas pass through a `StreamBuffer` (in `crates/krusty-core/src/ai/stream_buffer.rs`) that breaks text into 64-character chunks and flushes every 16ms, targeting 60fps rendering in the TUI. Non-text events bypass the buffer and go directly to the channel.
+5. Text deltas pass through a `StreamBuffer` (in `crates/mitsuro-core/src/ai/stream_buffer.rs`) that breaks text into 64-character chunks and flushes every 16ms, targeting 60fps rendering in the TUI. Non-text events bypass the buffer and go directly to the channel.
 
 The `StreamDrainPolicy` from `ModelProfile` governs how the orchestrator drains the event channel: smooth mode processes small batches, moderate mode kicks in when the backlog exceeds a threshold, and catch-up mode activates for large backlogs. Codex models get more aggressive drain policies because they produce higher-volume output.
 
@@ -102,7 +102,7 @@ Tool calls are accumulated using `ToolCallAccumulator`, which collects argument 
 
 ## Extended Thinking
 
-Extended thinking (in `crates/krusty-core/src/ai/client/thinking.rs`) lets reasoning models return `Thinking` content blocks alongside regular text. The model catalog, rather than a global hard-coded cycle, determines which of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` are selectable. Requests for an unavailable level are normalized to the catalog default (or the first valid level), and models marked as mandatory reasoning cannot be switched off. `ultra` is retained only for backward-compatible parsing; it is never advertised as selectable and a legacy `ultra` request normalizes to `max`.
+Extended thinking (in `crates/mitsuro-core/src/ai/client/thinking.rs`) lets reasoning models return `Thinking` content blocks alongside regular text. The model catalog, rather than a global hard-coded cycle, determines which of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` are selectable. Requests for an unavailable level are normalized to the catalog default (or the first valid level), and models marked as mandatory reasoning cannot be switched off. `ultra` is retained only for backward-compatible parsing; it is never advertised as selectable and a legacy `ultra` request normalizes to `max`.
 
 The request encoding is provider-specific:
 
@@ -118,13 +118,13 @@ The streaming path handles thinking through `ThinkingStart`, `ThinkingDelta`, `S
 
 ## Retry and Backoff
 
-The retry module (in `crates/krusty-core/src/ai/retry/`) implements exponential backoff with jitter for transient API errors. `RetryConfig` specifies max retries, initial delay, max delay, and whether to add jitter. Three presets exist: default (5 retries, 1-32s), aggressive (8 retries, 2-60s), and gentle (3 retries, 0.5-8s).
+The retry module (in `crates/mitsuro-core/src/ai/retry/`) implements exponential backoff with jitter for transient API errors. `RetryConfig` specifies max retries, initial delay, max delay, and whether to add jitter. Three presets exist: default (5 retries, 1-32s), aggressive (8 retries, 2-60s), and gentle (3 retries, 0.5-8s).
 
 The `with_retry()` function wraps any async operation. On failure, it checks the `IsRetryable` trait to determine if the error is transient (HTTP 429, 500, 502, 503, 504), respects `Retry-After` headers when the server specifies a wait time, adds random jitter (0-1000ms) to prevent thundering herd problems, and doubles the delay on each attempt up to the configured maximum.
 
 ## Format Auto-Detection
 
-`detect_api_format()` (in `crates/krusty-core/src/ai/format_detection.rs`) provides the canonical mapping from provider to API format. OpenAI and Z.ai use `ApiFormat::OpenAI`; Grok uses `ApiFormat::OpenAIResponses`; Anthropic, MiniMax, and OpenRouter use `ApiFormat::Anthropic`. This is the fallback used when the caller does not specify a format explicitly. `ApiFormat::Google` is available to explicit internal/custom configurations, but there is no selectable Google provider.
+`detect_api_format()` (in `crates/mitsuro-core/src/ai/format_detection.rs`) provides the canonical mapping from provider to API format. OpenAI and Z.ai use `ApiFormat::OpenAI`; Grok uses `ApiFormat::OpenAIResponses`; Anthropic, MiniMax, and OpenRouter use `ApiFormat::Anthropic`. This is the fallback used when the caller does not specify a format explicitly. `ApiFormat::Google` is available to explicit internal/custom configurations, but there is no selectable Google provider.
 
 More nuanced detection happens in `AiClientConfig::for_openai_with_auth_detection()`, which examines the credential type and model name to choose between Chat Completions, Responses API, and ChatGPT's backend API. GPT-5+ models and Codex models prefer the Responses API. ChatGPT OAuth tokens require the ChatGPT backend endpoint. Everything else uses Chat Completions.
 
@@ -141,7 +141,7 @@ Mitsuro also keeps model identity separate from request speed. Standard is repre
 
 ## Dynamic Model Discovery
 
-Providers marked with `dynamic_models: true` (OpenAI, Anthropic, MiniMax, Grok, and OpenRouter) support runtime model discovery. The catalog module (`crates/krusty-core/src/ai/catalog.rs`) resolves provider credentials, routes to the provider-specific listing adapter, and parses each result into the shared `ModelMetadata` contract. Z.ai remains on curated static metadata because it does not expose a supported model-list endpoint.
+Providers marked with `dynamic_models: true` (OpenAI, Anthropic, MiniMax, Grok, and OpenRouter) support runtime model discovery. The catalog module (`crates/mitsuro-core/src/ai/catalog.rs`) resolves provider credentials, routes to the provider-specific listing adapter, and parses each result into the shared `ModelMetadata` contract. Z.ai remains on curated static metadata because it does not expose a supported model-list endpoint.
 
 Catalog startup and refresh are deliberately stale-safe:
 
@@ -153,7 +153,7 @@ Catalog startup and refresh are deliberately stale-safe:
 
 Credential changes invalidate the affected provider's cache before a canonical refresh. Provider-specific singleflight locks prevent duplicate fetches, and an authentication generation check discards results that began under older credentials. OpenAI catalog rows also retain API-key or ChatGPT OAuth provenance so the selected model is routed through the transport whose capabilities were advertised instead of guessing from its slug.
 
-ChatGPT catalog requests identify themselves with a Codex protocol compatibility version rather than Mitsuro's package version. The stable default is `0.144.4`; set `KRUSTY_CODEX_CLIENT_VERSION` when a newer server contract requires an explicit compatibility override.
+ChatGPT catalog requests identify themselves with a Codex protocol compatibility version rather than Mitsuro's package version. The stable default is `0.144.4`; set `MITSURO_CODEX_CLIENT_VERSION` when a newer server contract requires an explicit compatibility override.
 
 The current TTLs are 5 minutes for OpenAI, 6 hours for Anthropic and MiniMax, 12 hours for OpenRouter, and 24 hours for Grok. Cache metadata records fetch time, model count, and a fingerprint over model capabilities, auth provenance, and pricing, so missing or corrupted snapshots are treated as stale. This is a last-known-good cache, not a source of model truth: the live provider catalog wins whenever a refresh succeeds, while curated fallbacks remain the safety net when discovery is unavailable.
 

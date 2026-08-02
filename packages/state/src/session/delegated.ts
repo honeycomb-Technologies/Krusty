@@ -3,7 +3,7 @@ import type {
   DelegatedRunResponse,
   DelegatedToolKind,
   DelegatedToolStateResponse,
-} from '@krusty/api';
+} from '@mitsuro/api';
 
 import type {
   ChatMessage,
@@ -86,12 +86,21 @@ export function resolveDelegatedKind(
   toolName: string,
   args?: Record<string, unknown>,
   fallbackKind?: DelegatedToolKind | null,
+  authoritativeCapabilities?: unknown,
 ): DelegatedToolKind | undefined {
   if (isDelegatedKind(toolName)) {
     return toolName;
   }
 
   if (toolName === 'agent') {
+    const capabilitySource = authoritativeCapabilities ?? args?.capabilities;
+    if (Array.isArray(capabilitySource)) {
+      const capabilities = capabilitySource.filter(
+        (value): value is string => typeof value === 'string',
+      );
+      return capabilities.includes('write') ? 'build' : 'explore';
+    }
+
     const agentType = args?.agent_type;
     if (isDelegatedKind(agentType)) {
       return agentType;
@@ -101,12 +110,7 @@ export function resolveDelegatedKind(
       return profile;
     }
     const action = typeof args?.action === 'string' ? args.action : 'spawn';
-    if (action === 'spawn') {
-      const capabilities = Array.isArray(args?.capabilities)
-        ? args.capabilities.filter((value): value is string => typeof value === 'string')
-        : [];
-      return capabilities.includes('write') ? 'build' : 'explore';
-    }
+    if (action === 'spawn') return 'explore';
   }
 
   return fallbackKind ?? undefined;
@@ -704,6 +708,7 @@ export function applyDelegatedSessionState(
         toolCall.name,
         toolCall.arguments,
         snapshot?.kind ?? recentRun?.kind,
+        recentRun?.capabilities,
       );
       if (!delegatedKind) return toolCall;
 
@@ -731,7 +736,7 @@ export function applyDelegatedSessionState(
       }
 
       const delegated: DelegatedArtifactState = {
-        kind: snapshot.kind,
+        kind: delegatedKind,
         name: recentRun?.child_name || toolCall.delegated?.name,
         capabilities:
           recentRun?.capabilities || toolCall.delegated?.capabilities,

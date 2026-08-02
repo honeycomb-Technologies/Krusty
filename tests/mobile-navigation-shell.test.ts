@@ -49,7 +49,7 @@ test("thread selectors isolate modes and sort newest first", () => {
     session("chat-old", "chat", "2026-01-01T00:00:00Z"),
     session("code-new", "code", "2026-04-01T00:00:00Z", "/repo/b"),
     session("chat-new", "chat", "2026-03-01T00:00:00Z"),
-    session("mako", "mako", "2026-05-01T00:00:00Z"),
+    session("hive", "hive", "2026-05-01T00:00:00Z"),
   ];
 
   assert.deepEqual(
@@ -99,11 +99,11 @@ test("Threads and Toolbox share the same safe-area sheet metric", () => {
 test("Code composer metadata names the connected workspace and branch", () => {
   assert.deepEqual(
     formatWorkspaceContextMetadata(
-      "/Users/Jacob/Documents/Krusty",
+      "/Users/Jacob/Documents/Mitsuro",
       "codex/navigation-shell",
     ),
     {
-      label: "Krusty · codex/navigation-shell",
+      label: "Mitsuro · codex/navigation-shell",
       hasBranch: true,
     },
   );
@@ -126,11 +126,11 @@ test("header titles hide placeholders and keep meaningful thread names", () => {
 
 test("horizontal swipes move between adjacent modes without wrapping", () => {
   assert.equal(modeForHorizontalSwipe("chat", -80, 0), "code");
-  assert.equal(modeForHorizontalSwipe("code", -80, 0), "mako");
-  assert.equal(modeForHorizontalSwipe("mako", 80, 0), "code");
+  assert.equal(modeForHorizontalSwipe("code", -80, 0), "hive");
+  assert.equal(modeForHorizontalSwipe("hive", 80, 0), "code");
   assert.equal(modeForHorizontalSwipe("chat", 80, 0), null);
-  assert.equal(modeForHorizontalSwipe("mako", -80, 0), null);
-  assert.equal(modeForHorizontalSwipe("code", 20, -800), "mako");
+  assert.equal(modeForHorizontalSwipe("hive", -80, 0), null);
+  assert.equal(modeForHorizontalSwipe("code", 20, -800), "hive");
   assert.equal(modeForHorizontalSwipe("code", 20, 200), null);
 });
 
@@ -138,12 +138,12 @@ test("mode workspaces persist independently while Code keeps the legacy key", ()
   const storage = new MemoryStorage();
   const chatWorkspace = createWorkspaceStore(
     storage,
-    "krusty:workspace:chat",
+    "mitsuro:workspace:chat",
   );
   const codeWorkspace = createWorkspaceStore(storage);
-  const makoWorkspace = createWorkspaceStore(
+  const hiveWorkspace = createWorkspaceStore(
     storage,
-    "krusty:workspace:mako",
+    "mitsuro:workspace:hive",
   );
 
   chatWorkspace
@@ -151,13 +151,13 @@ test("mode workspaces persist independently while Code keeps the legacy key", ()
     .setWorkspace(null, "chat-session", "neutral");
   codeWorkspace
     .getState()
-    .setWorkspace("/repo/krusty", "code-session", "selected", "feature/ui");
-  makoWorkspace
+    .setWorkspace("/repo/mitsuro", "code-session", "selected", "feature/ui");
+  hiveWorkspace
     .getState()
-    .setWorkspace(null, "mako-session", "neutral");
+    .setWorkspace(null, "hive-session", "neutral");
 
   assert.equal(
-    createWorkspaceStore(storage, "krusty:workspace:chat").getState().sessionId,
+    createWorkspaceStore(storage, "mitsuro:workspace:chat").getState().sessionId,
     "chat-session",
   );
   assert.deepEqual(
@@ -167,14 +167,14 @@ test("mode workspaces persist independently while Code keeps the legacy key", ()
       targetBranch: createWorkspaceStore(storage).getState().targetBranch,
     },
     {
-      directory: "/repo/krusty",
+      directory: "/repo/mitsuro",
       sessionId: "code-session",
       targetBranch: "feature/ui",
     },
   );
   assert.equal(
-    createWorkspaceStore(storage, "krusty:workspace:mako").getState().sessionId,
-    "mako-session",
+    createWorkspaceStore(storage, "mitsuro:workspace:hive").getState().sessionId,
+    "hive-session",
   );
 });
 

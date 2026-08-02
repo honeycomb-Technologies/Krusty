@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure live warm-prefix cache behavior through an isolated Krusty server."""
+"""Measure live warm-prefix cache behavior through an isolated Mitsuro server."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ MEDIAN_TARGET_PCT = 93.85
 
 def load_harness() -> Any:
     path = Path(__file__).with_name("harness-e2e-loop.py")
-    spec = importlib.util.spec_from_file_location("krusty_cache_harness", path)
+    spec = importlib.util.spec_from_file_location("mitsuro_cache_harness", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load harness helpers from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -74,7 +74,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     args.root.mkdir(parents=True)
     project_dir = args.root / "workspace"
     project_dir.mkdir()
-    api = HARNESS.KrustyApi(base_url, args.timeout)
+    api = HARNESS.MitsuroApi(base_url, args.timeout)
     model = HARNESS.select_stable_exact_model(
         api, args.model, provider_id=args.provider, timeout=60
     )

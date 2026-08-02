@@ -69,3 +69,22 @@ Deno.test("legacy agent_type remains a delegated-kind fallback", () => {
 		"legacy verifier calls must still replay",
 	);
 });
+
+Deno.test("exact capabilities outrank conflicting legacy Agent labels", () => {
+	assertEquals(
+		resolveDelegatedKind("agent", {
+			profile: "verify",
+			capabilities: ["read", "write"],
+		}),
+		"build",
+		"write capability must render as a write-capable child",
+	);
+	assertEquals(
+		resolveDelegatedKind("agent", {
+			profile: "build",
+			capabilities: ["execute"],
+		}),
+		"explore",
+		"legacy build label must not turn execute-only into a writer",
+	);
+});

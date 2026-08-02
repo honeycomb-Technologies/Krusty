@@ -1,7 +1,7 @@
 import { StyleSheet, Text, View } from "react-native";
 import Markdown from "@ronradtke/react-native-markdown-display";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { Report } from "@krusty/api";
+import type { Report } from "@mitsuro/api";
 
 interface ReportDetailContentProps {
   report: Report;

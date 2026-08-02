@@ -9,6 +9,22 @@ target/
 /.tmp/
 **/target/
 **/dist/
+**/.mitsuro-shadow/
+# Canonical project-local runtime/private state. Keep authored
+# `.mitsuro/settings.json`, skills, policies, and extensions trackable.
+**/.mitsuro/tool-output/
+**/.mitsuro/reports/
+**/.mitsuro/mailbox/
+**/.mitsuro/logs/
+**/.mitsuro/run/
+**/.mitsuro/tokens/
+**/.mitsuro/backups/
+**/.mitsuro/hive/
+**/.mitsuro/plugins/
+**/.mitsuro/plans/
+**/.mitsuro/mitsuro.db
+**/.mitsuro/mitsuro.db-*
+# Pre-migration generated shadow output remains ignored until cleanup.
 **/.krusty-shadow/
 
 # Python test caches

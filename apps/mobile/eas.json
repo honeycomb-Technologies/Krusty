@@ -22,7 +22,7 @@
         "ios/build/**/*.xcarchive/dSYMs/**"
       ],
       "env": {
-        "EXPO_PUBLIC_KRUSTY_PERFORMANCE": "1"
+        "EXPO_PUBLIC_MITSURO_PERFORMANCE": "1"
       },
       "ios": {
         "autoIncrement": true

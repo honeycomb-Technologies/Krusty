@@ -36,10 +36,10 @@ import {
   WifiOff,
 } from "lucide-react-native";
 import type {
-  MakoSessionSummary,
+  HiveSessionSummary,
   SessionResponse,
   SessionType,
-} from "@krusty/api";
+} from "@mitsuro/api";
 
 import { useThemeContext } from "../../hooks/useTheme";
 import { SessionListSkeleton } from "../ui/Skeleton";
@@ -58,9 +58,9 @@ interface SessionDrawerProps {
   sessions: SessionResponse[];
   activeSessionId: string | null;
   onSelectSession: (session: SessionResponse) => void;
-  onSelectMakoSession: (sessionId: string) => void;
+  onSelectHiveSession: (sessionId: string) => void;
   onNewSession: (type: "chat" | "code") => void;
-  onNewMakoSession: () => void;
+  onNewHiveSession: () => void;
   onNewSessionWithDir: (path: string) => void;
   onDeleteSession: (id: string) => void;
   onOpenSettings?: () => void;
@@ -108,9 +108,9 @@ export function SessionDrawer({
   sessions,
   activeSessionId,
   onSelectSession,
-  onSelectMakoSession,
+  onSelectHiveSession,
   onNewSession,
-  onNewMakoSession,
+  onNewHiveSession,
   onNewSessionWithDir,
   onDeleteSession,
   onOpenSettings,
@@ -122,8 +122,8 @@ export function SessionDrawer({
   const t = theme.colors;
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const lastAutoExpandedCodeSessionRef = useRef<string | null>(null);
-  const [makoSessions, setMakoSessions] = useState<MakoSessionSummary[]>([]);
-  const [makoLoading, setMakoLoading] = useState(false);
+  const [hiveSessions, setHiveSessions] = useState<HiveSessionSummary[]>([]);
+  const [hiveLoading, setHiveLoading] = useState(false);
 
   const pickerProgress = useSharedValue(0);
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -155,27 +155,27 @@ export function SessionDrawer({
   );
 
   useEffect(() => {
-    if (!isOpen || activeMode !== "mako" || !client) {
+    if (!isOpen || activeMode !== "hive" || !client) {
       return;
     }
     let active = true;
     // Only show skeleton when we have no cached list to render.
-    setMakoLoading((current) => current || makoSessions.length === 0);
+    setHiveLoading((current) => current || hiveSessions.length === 0);
     void client
-      .listMakoSessions()
+      .listHiveSessions()
       .then((nextSessions) => {
         if (active) {
-          setMakoSessions(nextSessions);
+          setHiveSessions(nextSessions);
         }
       })
       .catch(() => {
         if (active) {
-          setMakoSessions([]);
+          setHiveSessions([]);
         }
       })
       .finally(() => {
         if (active) {
-          setMakoLoading(false);
+          setHiveLoading(false);
         }
       });
     return () => {
@@ -373,7 +373,7 @@ export function SessionDrawer({
     );
   };
 
-  // Chat/Mako use virtualized lists. Code keeps a small grouped ScrollView
+  // Chat/Hive use virtualized lists. Code keeps a small grouped ScrollView
   // because project folders expand/collapse in place.
   const content = (() => {
     if (activeMode !== "code") {
@@ -494,8 +494,8 @@ export function SessionDrawer({
         accessibilityLabel={`New ${activeMode} thread`}
         onPress={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          if (activeMode === "mako") {
-            onNewMakoSession();
+          if (activeMode === "hive") {
+            onNewHiveSession();
           } else {
             onNewSession(activeMode);
           }
@@ -554,16 +554,16 @@ export function SessionDrawer({
               </Text>
             </View>
           )
-        ) : activeMode === "mako" ? (
-          makoLoading && makoSessions.length === 0 ? (
+        ) : activeMode === "hive" ? (
+          hiveLoading && hiveSessions.length === 0 ? (
             <View style={styles.listContent}>
               <SessionListSkeleton count={4} />
             </View>
-          ) : makoSessions.length > 0 ? (
+          ) : hiveSessions.length > 0 ? (
             <FlatList
               style={styles.list}
               contentContainerStyle={styles.listContent}
-              data={makoSessions}
+              data={hiveSessions}
               keyExtractor={(session) => session.session_id}
               renderItem={({ item: session }) => {
                 const active = session.session_id === activeSessionId;
@@ -576,14 +576,14 @@ export function SessionDrawer({
                     accessibilityState={{ selected: active }}
                     onPress={() => {
                       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      onSelectMakoSession(session.session_id);
+                      onSelectHiveSession(session.session_id);
                     }}
                     style={[
                       styles.sessionItem,
                       active && { backgroundColor: `${t.userMessage}12` },
                     ]}
                   >
-                    <View style={styles.makoTitleRow}>
+                    <View style={styles.hiveTitleRow}>
                       <Text
                         numberOfLines={2}
                         style={[
@@ -786,7 +786,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 11,
   },
-  makoTitleRow: {
+  hiveTitleRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,

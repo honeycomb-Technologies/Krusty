@@ -3,13 +3,13 @@ import type {
   DiagnosticFields,
   DiagnosticSnapshot,
   MobileDiagnosticRecorder,
-} from '@krusty/state';
-import KrustyDiagnosticsModule from '../modules/krusty-diagnostics';
+} from '@mitsuro/state';
+import MitsuroDiagnosticsModule from '../modules/mitsuro-diagnostics';
 
 let activeRecorder: MobileDiagnosticRecorder | null = null;
 
 interface NativePerformanceGlobal {
-  __KRUSTY_NATIVE_PERFORMANCE__?: {
+  __MITSURO_NATIVE_PERFORMANCE__?: {
     begin(spanId: number, name: string): void;
     end(spanId: number, name: string): void;
   };
@@ -20,14 +20,14 @@ export function installMobileDiagnosticRecorder(
 ): void {
   activeRecorder = recorder;
   const root = globalThis as typeof globalThis & NativePerformanceGlobal;
-  const nativeModule = KrustyDiagnosticsModule;
+  const nativeModule = MitsuroDiagnosticsModule;
   if (recorder && nativeModule) {
-    root.__KRUSTY_NATIVE_PERFORMANCE__ = {
+    root.__MITSURO_NATIVE_PERFORMANCE__ = {
       begin: (spanId, name) => nativeModule.beginPerformanceSpan(spanId, name),
       end: (spanId, name) => nativeModule.endPerformanceSpan(spanId, name),
     };
   } else {
-    delete root.__KRUSTY_NATIVE_PERFORMANCE__;
+    delete root.__MITSURO_NATIVE_PERFORMANCE__;
   }
 }
 

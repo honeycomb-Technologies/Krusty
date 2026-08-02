@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, type MutableRefObject } from "react";
-import type { SessionType } from "@krusty/api";
-import { beginKrustyPerformanceSpan } from "@krusty/state";
+import type { SessionType } from "@mitsuro/api";
+import { beginMitsuroPerformanceSpan } from "@mitsuro/state";
 import { useShallow } from "zustand/react/shallow";
 
 import * as Haptics from "../../platform/haptics";
@@ -116,7 +116,7 @@ function StreamSideEffectsCoordinatorComponent({
       currentStreamSessionIdRef.current = view.sessionId;
       streamStartedAtRef.current = Date.now();
       finishStreamSpanRef.current?.();
-      finishStreamSpanRef.current = beginKrustyPerformanceSpan(
+      finishStreamSpanRef.current = beginMitsuroPerformanceSpan(
         "stream.finish",
         view.sessionId ?? undefined,
       );

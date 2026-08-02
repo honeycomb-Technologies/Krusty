@@ -1,5 +1,5 @@
 {
-  "name": "@krusty/mobile",
+  "name": "@mitsuro/mobile",
   "version": "0.9.20",
   "main": "expo-router/entry",
   "scripts": {
@@ -24,6 +24,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "diff": "9.0.0",
     "expo": "~55.0.28",
+    "expo-application": "~55.0.17",
     "expo-blur": "~55.0.16",
     "expo-build-properties": "~55.0.16",
     "expo-clipboard": "~55.0.15",

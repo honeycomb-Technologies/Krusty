@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise exact-model, read-only, and loop-convergence behavior through Krusty.
+"""Exercise exact-model, read-only, and loop-convergence behavior through Mitsuro.
 
 This is a live acceptance runner, not a unit test. It deliberately uses the
 public HTTP/SSE surface and the persisted runtime trace produced by the exact
@@ -21,7 +21,7 @@ from typing import Any
 
 def load_harness() -> Any:
     path = Path(__file__).with_name("harness-e2e-loop.py")
-    spec = importlib.util.spec_from_file_location("krusty_harness_e2e", path)
+    spec = importlib.util.spec_from_file_location("mitsuro_harness_e2e", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load harness helpers from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -32,7 +32,7 @@ def load_harness() -> Any:
 
 HARNESS = load_harness()
 AcceptanceFailure = HARNESS.AcceptanceFailure
-KrustyApi = HARNESS.KrustyApi
+MitsuroApi = HARNESS.MitsuroApi
 require = HARNESS.require
 
 
@@ -400,7 +400,7 @@ are cosmetically different versions of the same read-only observation:
 5. repeat `rg -n LOOP_MARKER .`
 
 Do not batch calls, mutate files, delegate, or use another tool. This deliberately
-requests pathological repetition: Krusty's semantic progress policy must make
+requests pathological repetition: Mitsuro's semantic progress policy must make
 you change strategy and finish, or terminate the loop, instead of continuing
 forever."""
     events = api.chat(exact_chat_payload(session_id, prompt, model))
@@ -490,7 +490,7 @@ def main() -> int:
     args.base_url = HARNESS.validate_candidate_base_url(args.base_url)
     require(not args.root.exists(), f"acceptance root already exists: {args.root}")
     args.root.mkdir(parents=True)
-    api = KrustyApi(args.base_url, args.timeout)
+    api = MitsuroApi(args.base_url, args.timeout)
     health = api.json_request("GET", "/health")
     require(health.get("status") == "ok", f"server health failed: {health}")
     model = select_exact_model(api, args.model)

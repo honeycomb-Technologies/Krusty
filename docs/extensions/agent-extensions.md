@@ -11,8 +11,8 @@ Zed-compatible WASM extension ABI, which targets editor and language features.
 Mitsuro loads extensions from three scopes:
 
 1. package roots contributed by enabled plugin bundles;
-2. the global `~/.krusty/extensions/agent/` root;
-3. the project's `.krusty/extensions/` root.
+2. the global `~/.mitsuro/extensions/agent/` root;
+3. the project's `.mitsuro/extensions/` root.
 
 Later scopes override an extension with the same ID, so trusted project code
 has the highest precedence. Project roots are fail-closed until the user grants
@@ -26,16 +26,16 @@ trust from outside the repository:
 
 The grant is keyed to the canonical project path and stored in the owner-only
 global runtime trust store. A repository cannot authorize itself by changing
-`.krusty/settings.json`; that file can only narrow an existing user grant.
+`.mitsuro/settings.json`; that file can only narrow an existing user grant.
 
 A root may contain standalone `.js`/`.ts` files or
-directories with `krusty-extension.json`. Invalid extensions produce structured
+directories with `mitsuro-extension.json`. Invalid extensions produce structured
 diagnostics without preventing other extensions from loading. When an edited
 extension fails validation or startup, its last-known-good worker and tools
 remain active.
 
 After trust is granted, optional project restrictions live in
-`.krusty/settings.json`:
+`.mitsuro/settings.json`:
 
 ```json
 {
@@ -87,8 +87,8 @@ not a sandboxed drop-in for the agent-extension API.
 An extension exports a default setup function:
 
 ```ts
-export default function setup(krusty) {
-  krusty.registerTool({
+export default function setup(mitsuro) {
+  mitsuro.registerTool({
     name: "release_status",
     description: "Inspect the current release state",
     parameters: {
@@ -103,24 +103,24 @@ export default function setup(krusty) {
     }
   });
 
-  krusty.registerCommand("release", {
+  mitsuro.registerCommand("release", {
     description: "Prepare a release",
     async handler(argument, context) {
       return `Preparing ${argument || "the next release"}`;
     }
   });
 
-  krusty.on("turn_complete", async (event, context) => {
-    await krusty.state.set("lastTurn", event);
+  mitsuro.on("turn_complete", async (event, context) => {
+    await mitsuro.state.set("lastTurn", event);
   });
 
-  krusty.on("tool.execute.before", async (input, output) => {
+  mitsuro.on("tool.execute.before", async (input, output) => {
     if (input.tool === "bash" && output.args.command.includes("deploy")) {
       return { block: true, reason: "Use the reviewed deploy command" };
     }
   });
 
-  krusty.addContext(async (context) =>
+  mitsuro.addContext(async (context) =>
     `Release worktree: ${context.working_dir}`
   );
 }

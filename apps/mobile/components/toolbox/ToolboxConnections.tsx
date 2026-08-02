@@ -9,7 +9,7 @@ import {
   View,
 } from "react-native";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
-import type { McpServerResponse, SkillInfo } from "@krusty/api";
+import type { McpServerResponse, SkillInfo } from "@mitsuro/api";
 
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";

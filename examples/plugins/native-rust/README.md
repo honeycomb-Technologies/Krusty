@@ -1,6 +1,6 @@
 # Native Rust Demo Plugin
 
-This is a minimal npm-shaped Krusty native plugin package.
+This is a minimal npm-shaped Mitsuro native plugin package.
 
 ## Build
 
@@ -12,12 +12,12 @@ npm run build
 The build copies the cdylib to the path declared by `plugin.toml`:
 
 ```text
-dist/linux-x64/libkrusty_native_rust_demo.so
+dist/linux-x64/libmitsuro_native_rust_demo.so
 ```
 
 ## Install locally
 
-From the Krusty repo root:
+From the Mitsuro repo root:
 
 ```text
 /plugins install ./examples/plugins/native-rust
@@ -38,4 +38,4 @@ npm run build
 /plugins reload native-rust-demo
 ```
 
-Krusty shadow-copies the dylib before loading it, so the rebuilt library can replace the source file while the previous copy remains loaded until the old plugin instance drops.
+Mitsuro shadow-copies the dylib before loading it, so the rebuilt library can replace the source file while the previous copy remains loaded until the old plugin instance drops.

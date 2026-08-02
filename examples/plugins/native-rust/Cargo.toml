@@ -1,5 +1,5 @@
 [package]
-name = "krusty-native-rust-demo"
+name = "mitsuro-native-rust-demo"
 version = "0.1.0"
 edition = "2021"
 publish = false

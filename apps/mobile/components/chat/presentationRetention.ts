@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolCall } from "@krusty/api";
+import type { ChatMessage, ToolCall } from "@mitsuro/api";
 
 /** Keep newest N turns fully rich; older turns are presentation-light. */
 export const RICH_RECENT_TURN_COUNT = 3;

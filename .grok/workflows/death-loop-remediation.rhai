@@ -1,6 +1,6 @@
 let meta = #{
     name: "death-loop-remediation",
-    description: "Verify death-loop remediation goals G1-G6 against the krusty tree",
+    description: "Verify death-loop remediation goals G1-G6 against the mitsuro tree",
     phases: [
         #{ title: "Inventory", detail: "Confirm plan docs and target files exist" },
         #{ title: "Core tests", detail: "Progress, shell policy, process wake unit coverage" },
@@ -42,12 +42,12 @@ let review_schema = #{
 
 phase("Inventory");
 let inv = agent(
-    "In /home/burgess/Work/krusty, verify these paths exist and briefly note purpose: "
+    "In /home/burgess/Work/mitsuro, verify these paths exist and briefly note purpose: "
         + "docs/plans/2026-07-31-death-loop-remediation.md, "
-        + "crates/krusty-core/src/agent/progress.rs, "
-        + "crates/krusty-core/src/agent/hooks/shell_policy.rs, "
-        + "crates/krusty-core/src/process/registry.rs, "
-        + "crates/krusty-server/src/process_wake.rs, "
+        + "crates/mitsuro-core/src/agent/progress.rs, "
+        + "crates/mitsuro-core/src/agent/hooks/shell_policy.rs, "
+        + "crates/mitsuro-core/src/process/registry.rs, "
+        + "crates/mitsuro-server/src/process_wake.rs, "
         + "apps/mobile/components/chat/composerGrowth.ts. "
         + "Use list_dir/read_file/grep only. Return files_ok=true only if all exist; list any missing.",
     #{ label: "inventory", capability_mode: "read-only", output_schema: inventory_schema },
@@ -61,15 +61,15 @@ if inv == () || !inv.success || inv.output.files_ok != true {
 
 phase("Core tests");
 let core = agent(
-    "In /home/burgess/Work/krusty run: cargo test -p krusty-core progress shell_policy process -- --nocapture 2>&1 | tail -80. "
-        + "Also run: cargo test -p krusty-server process_wake -- --nocapture 2>&1 | tail -40. "
+    "In /home/burgess/Work/mitsuro run: cargo test -p mitsuro-core progress shell_policy process -- --nocapture 2>&1 | tail -80. "
+        + "Also run: cargo test -p mitsuro-server process_wake -- --nocapture 2>&1 | tail -40. "
         + "Report passed=true only if both succeed. Include command and a short summary of failures if any.",
     #{ label: "core-tests", capability_mode: "execute", output_schema: test_schema },
 );
 
 phase("Mobile");
 let mobile = agent(
-    "In /home/burgess/Work/krusty run: deno test --unstable-sloppy-imports apps/mobile/test/composerGrowth.test.ts 2>&1. "
+    "In /home/burgess/Work/mitsuro run: deno test --unstable-sloppy-imports apps/mobile/test/composerGrowth.test.ts 2>&1. "
         + "Report passed=true only on full green. Note app.json buildNumber should be 273.",
     #{ label: "mobile-tests", capability_mode: "execute", output_schema: test_schema },
 );

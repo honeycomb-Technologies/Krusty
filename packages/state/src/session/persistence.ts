@@ -1,9 +1,9 @@
-import type { KrustyClient, ModelKey } from '@krusty/api';
+import type { MitsuroClient, ModelKey } from '@mitsuro/api';
 import type { createSessionsStore } from '../sessions';
 import type { PermissionMode, SessionMode, SessionStoreState } from './types';
 
 export async function syncSessionPresence(
-  client: KrustyClient,
+  client: MitsuroClient,
   sessionId: string,
   clientId: string | null,
   getState: () => SessionStoreState,
@@ -24,7 +24,7 @@ export async function syncSessionPresence(
 }
 
 export async function persistSessionMode(
-  client: KrustyClient,
+  client: MitsuroClient,
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   mode: SessionMode,
@@ -41,7 +41,7 @@ export async function persistSessionMode(
 }
 
 export async function persistSessionPermissionMode(
-  client: KrustyClient,
+  client: MitsuroClient,
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   permissionMode: PermissionMode,
@@ -58,7 +58,7 @@ export async function persistSessionPermissionMode(
 }
 
 export async function persistSessionModel(
-  client: KrustyClient,
+  client: MitsuroClient,
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   model: string | null,
@@ -79,7 +79,7 @@ export async function persistSessionModel(
 }
 
 export async function persistCurrentModel(
-  client: KrustyClient,
+  client: MitsuroClient,
   model: string | null,
   modelKey?: ModelKey | null,
 ) {

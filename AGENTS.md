@@ -12,19 +12,19 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - **Interactive assistant/session:** Agent. User-facing modes may be named Chat and Code.
 - **Durable autonomous system:** Hive. An individual delegated worker is a Hive Agent.
 - **Activity accent/state:** Pulse, only where the product design calls for that term.
-- Public product copy, screenshots, package descriptions, release notes, and repository prose should use Mitsuro, Agent, Hive, Hive Agent, and Pulse consistently. Do not present Krusty or Mako as current product names.
-- The canonical public repository is `honeycomb-Technologies/Mitsuro`. New mobile launch URLs use `mitsuro://`; `krusty://` remains a compatibility alias.
-- Existing identifiers such as `krusty`, `krusty-*`, `krusty-mako`, `@krusty/*`, `/api/mako/*`, `session_type = "mako"`, `~/.krusty`, Expo slugs, bundle IDs, database fields, native symbols, and deployed service names are compatibility contracts, not user-facing branding.
-- Use legacy identifiers in prose only when naming an exact command, path, package, route, schema value, or migration boundary, and format them as code.
-- Do not mechanically rename compatibility identifiers. A rename requires an explicit migration plan covering aliases, stored data, installed clients, deep links, deployments, rollback, and mixed-version behavior.
-- The supported terminal command remains `krusty` until a deliberate CLI migration ships. A future `mitsuro` command must retain a tested `krusty` compatibility alias for an announced transition period.
+- Public product copy, screenshots, package descriptions, release notes, and repository prose should use Mitsuro, Agent, Hive, Hive Agent, and Pulse consistently.
+- The canonical public repository is `honeycomb-Technologies/Mitsuro`. Mobile launch URLs use `mitsuro://`.
+- Canonical identifiers include `mitsuro`, `mitsuro-*`, `mitsuro-hive`, `@mitsuro/*`, `/api/hive/*`, `session_type = "hive"`, `~/.mitsuro`, and the corresponding Expo, native, database, and deployment names.
+- Prior identifiers may appear only in dedicated, tested compatibility readers and migrations. Those boundaries read prior state and write canonical state; they are not current product language.
+- Any compatibility retirement requires an explicit plan covering stored data, installed clients, deep links, deployments, rollback, and mixed-version behavior.
+- The supported terminal command is `mitsuro`. The deprecated `krusty` command remains a tested compatibility alias for the announced transition window; removing it requires the migration cutover criteria to pass.
 - If product language and an internal identifier differ, prefer clear translation at the UI/API boundary over leaking the internal name into the interface.
 
 ## Core Architecture
-- `crates/krusty-cli`: Terminal client and TUI runtime. Entry point with command parsing.
+- `crates/mitsuro-cli`: Terminal client and TUI runtime. Entry point with command parsing.
   - `src/main.rs`: CLI entry point, parses commands, starts ACP server or TUI with logging/setup.
   - `src/tui/`: Terminal UI module with blocks, handlers, state, themes, plugins.
-- `crates/krusty-core`: Shared runtime library.
+- `crates/mitsuro-core`: Shared runtime library.
   - `src/ai/`: AI provider layer with multi-provider clients, streaming support.
   - `src/agent/`: Agent system with event handling, hooks, sub-agents, in-place compaction.
   - `src/acp/`: Agent Client Protocol server for editor integration.
@@ -37,7 +37,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
   - `src/process/`: Background process registry/management.
   - `src/auth/`: OAuth/auth flows and token storage helpers.
   - `src/updater/`: Auto-updater for dev/release modes.
-- `crates/krusty-server`: Self-host API plus embedded web bundle for external clients.
+- `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
 - `apps/desktop/shell`: Tauri wrapper around the Expo web build.
 
@@ -89,14 +89,14 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Never silently substitute a different provider or model to make a failed request appear successful. Make fallbacks explicit in product behavior and diagnostics.
 
 ## Crate Boundaries
-- `krusty-cli`: terminal UX only. Do not re-implement core runtime logic here.
-- `krusty-core`: shared runtime. All shared business logic lives here.
-- `krusty-server`: HTTP API. Keep route handlers thin; push shared logic into core.
-- Move shared logic to `krusty-core`; avoid duplication across CLI/server.
+- `mitsuro-cli`: terminal UX only. Do not re-implement core runtime logic here.
+- `mitsuro-core`: shared runtime. All shared business logic lives here.
+- `mitsuro-server`: HTTP API. Keep route handlers thin; push shared logic into core.
+- Move shared logic to `mitsuro-core`; avoid duplication across CLI/server.
 
 ## Module-Specific Invariants
 
-### AI Provider Layer (`crates/krusty-core/src/ai/`)
+### AI Provider Layer (`crates/mitsuro-core/src/ai/`)
 - Keep provider-specific quirks isolated from shared response models.
 - Keep model-family prompt behavior in shared profiles; streaming and simple/conversation calls must build the same instruction layers.
 - Keep provider request/stream normalization in the shared AI transform layer; avoid scattering provider patches across individual transport call-sites.
@@ -104,7 +104,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Parser changes must preserve existing tool/thinking/message semantics.
 - Keep curated direct-provider model catalogs aligned with product-supported IDs; when a provider adds fast or effort variants, update static fallbacks and dynamic filtering together.
 
-### Tool System (`crates/krusty-core/src/tools/`)
+### Tool System (`crates/mitsuro-core/src/tools/`)
 - Tool argument parsing and error surfaces are user-facing contracts.
 - Keep permission/approval semantics explicit and conservative.
 - Avoid hidden filesystem/network side effects in tool implementations.
@@ -112,7 +112,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Delegated tool surfaces (subagents, remote MCP wrappers) must carry inherited governance metadata and enforce parent permission constraints.
 - Keep filesystem path policy owned by `ToolContext`/registry logic; do not reintroduce duplicate standalone path-validation helpers.
 
-### Storage (`crates/krusty-core/src/storage/`)
+### Storage (`crates/mitsuro-core/src/storage/`)
 - Migration safety first: schema changes must be forward-only and tested.
 - Keep read/write behavior explicit and transaction-aware.
 - Keep interrupted-turn recovery state separate from canonical conversation history.
@@ -121,7 +121,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - For push reliability changes, keep `database.rs`, `push_subscriptions.rs`, and `push_delivery_attempts.rs` aligned.
 - Never log sensitive credentials.
 
-### Agent Core (`crates/krusty-core/src/`)
+### Agent Core (`crates/mitsuro-core/src/`)
 - Keep subsystem contracts explicit between AI, tools, storage, plugins, and protocols.
 - Prefer typed boundaries over ad-hoc JSON passing.
 - Keep live in-place compaction as the default overflow path; `/pinch` and the pinch API route trigger manual compaction in the same session, not a session fork.
@@ -135,7 +135,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Keep plan lifecycle state canonical in core helpers; active-vs-archived plan resolution and effective work mode must not be re-derived independently in UI or server layers.
 - Capture runtime observability from the canonical `LoopEvent` boundary; do not add drift-prone provider/tool/UI-specific trace streams for the same execution path.
 
-### Server Routes (`crates/krusty-server/src/routes/`)
+### Server Routes (`crates/mitsuro-server/src/routes/`)
 - Keep request/response shapes synchronized with CLI, web, and mobile clients.
 - Validate and sanitize all user inputs before side effects.
 - Preserve streaming route stability and backpressure behavior.
@@ -152,7 +152,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
 - Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.
 
-### TUI (`crates/krusty-cli/src/tui/`)
+### TUI (`crates/mitsuro-cli/src/tui/`)
 - Protect frame-time performance and input responsiveness. Avoid heavy allocations in render/event hot paths.
 - Keep streaming updates idempotent and visually stable.
 - Keep stream backpressure policy, queue telemetry, and interruption recovery messaging explicit in shared TUI state/handlers.
@@ -161,19 +161,19 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Plan/task UI state must come from persisted plan lifecycle or explicit loop events, not heuristic parsing of assistant prose.
 - Keep contrast/readability strong in both dense and sparse views. Theme additions must update registry wiring and defaults intentionally. Avoid hardcoding colors outside theme primitives.
 
-### TUI Handlers (`crates/krusty-cli/src/tui/handlers/`)
+### TUI Handlers (`crates/mitsuro-cli/src/tui/handlers/`)
 - Keep keyboard/mouse/render handling deterministic.
 - Keep session/tool side effects explicit and traceable.
 - Keep model selection and quick-toggle flows on a shared handler path so persistence, auth rebinds, and recent-model state do not drift.
 
-### Extensions & WIT (`crates/krusty-core/src/extensions/`, `wit/`)
+### Extensions & WIT (`crates/mitsuro-core/src/extensions/`, `wit/`)
 - Treat WIT and extension host changes as ABI-sensitive.
 - Keep manifest parsing strict and error messages actionable.
 - Preserve compatibility rules across extension API versions.
 - Version contract changes intentionally; avoid silent breaking renames.
 - Keep generated/runtime expectations synchronized across crates.
 
-### Plugins (`crates/krusty-core/src/plugins/`)
+### Plugins (`crates/mitsuro-core/src/plugins/`)
 - Treat plugin install/update flows as security-sensitive.
 - Verify trust and signature requirements before writing plugin artifacts.
 - Keep lockfile and on-disk state transitions atomic and recoverable.
@@ -181,7 +181,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 
 ### Apps (`apps/`)
 - Preserve strict separation between app surfaces and core runtime internals.
-- Do not duplicate business logic that already exists in `krusty-core` or `krusty-server`.
+- Do not duplicate business logic that already exists in `mitsuro-core` or `mitsuro-server`.
 - Keep desktop and Expo web behavior aligned where features overlap.
 - Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 - Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
@@ -255,11 +255,11 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ## Default Dev Workflow
 - Build and run current local code only; do not require `git pull` for day-to-day refinement.
 - Rust builds inherit `TMPDIR` from `.cargo/config.toml`, pointing rustc temp files at the workspace `target/` directory instead of `/tmp`.
-- **Rust backend**: `cargo run -p krusty` from repo root.
+- **Rust backend**: `cargo run -p mitsuro` from repo root.
 - **Expo web dev server**: `cd apps/mobile && npx expo start --web --port 5173`.
 - Do active UI/web iteration at `http://localhost:5173` while the backend runs separately.
 - Frontend edits hot-reload automatically; Rust backend edits require a restart.
-- **ACP mode** (editor integration): `krusty acp`
+- **ACP mode** (editor integration): `mitsuro acp`
 
 ## Release Integration Workflow
 - Keep `main` as the last accepted release baseline. Cross-surface work intended for the next coordinated release belongs on the current dated `codex/release-staging-YYYYMMDD` branch.

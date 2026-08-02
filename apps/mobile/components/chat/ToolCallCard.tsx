@@ -29,7 +29,7 @@ import {
   presentTool,
   type ToolPresentation,
 } from "./toolPresentation";
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 
 interface ToolCallCardProps {
   toolCall: ToolCall;

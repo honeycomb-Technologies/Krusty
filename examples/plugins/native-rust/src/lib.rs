@@ -1,12 +1,12 @@
 use std::ffi::{c_char, c_void, CString};
 
-const KRUSTY_NATIVE_PLUGIN_ABI_VERSION: u32 = 1;
-const KRUSTY_NATIVE_EVENT_KEY: u32 = 1;
-const KRUSTY_NATIVE_EVENT_RESULT_IGNORED: u32 = 0;
-const KRUSTY_NATIVE_EVENT_RESULT_CONSUMED: u32 = 1;
+const MITSURO_NATIVE_PLUGIN_ABI_VERSION: u32 = 1;
+const MITSURO_NATIVE_EVENT_KEY: u32 = 1;
+const MITSURO_NATIVE_EVENT_RESULT_IGNORED: u32 = 0;
+const MITSURO_NATIVE_EVENT_RESULT_CONSUMED: u32 = 1;
 
 #[repr(C)]
-pub struct KrustyNativePluginV1 {
+pub struct MitsuroNativePluginV1 {
     pub abi_version: u32,
     pub create: Option<unsafe extern "C" fn() -> *mut c_void>,
     pub destroy: Option<unsafe extern "C" fn(instance: *mut c_void)>,
@@ -23,12 +23,12 @@ pub struct KrustyNativePluginV1 {
         ),
     >,
     pub handle_event:
-        Option<unsafe extern "C" fn(instance: *mut c_void, event: KrustyNativeEvent) -> u32>,
+        Option<unsafe extern "C" fn(instance: *mut c_void, event: MitsuroNativeEvent) -> u32>,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct KrustyNativeEvent {
+pub struct MitsuroNativeEvent {
     pub kind: u32,
     pub key_code: u32,
     pub modifiers: u32,
@@ -39,8 +39,8 @@ struct DemoState {
     key_presses: u64,
 }
 
-static PLUGIN: KrustyNativePluginV1 = KrustyNativePluginV1 {
-    abi_version: KRUSTY_NATIVE_PLUGIN_ABI_VERSION,
+static PLUGIN: MitsuroNativePluginV1 = MitsuroNativePluginV1 {
+    abi_version: MITSURO_NATIVE_PLUGIN_ABI_VERSION,
     create: Some(create),
     destroy: Some(destroy),
     on_activate: None,
@@ -51,7 +51,7 @@ static PLUGIN: KrustyNativePluginV1 = KrustyNativePluginV1 {
 };
 
 #[no_mangle]
-pub extern "C" fn krusty_plugin_entry() -> *const KrustyNativePluginV1 {
+pub extern "C" fn mitsuro_plugin_entry() -> *const MitsuroNativePluginV1 {
     &PLUGIN
 }
 
@@ -106,15 +106,15 @@ unsafe extern "C" fn render_text(
     );
 }
 
-unsafe extern "C" fn handle_event(instance: *mut c_void, event: KrustyNativeEvent) -> u32 {
-    if event.kind != KRUSTY_NATIVE_EVENT_KEY {
-        return KRUSTY_NATIVE_EVENT_RESULT_IGNORED;
+unsafe extern "C" fn handle_event(instance: *mut c_void, event: MitsuroNativeEvent) -> u32 {
+    if event.kind != MITSURO_NATIVE_EVENT_KEY {
+        return MITSURO_NATIVE_EVENT_RESULT_IGNORED;
     }
     let Some(state) = instance.cast::<DemoState>().as_mut() else {
-        return KRUSTY_NATIVE_EVENT_RESULT_IGNORED;
+        return MITSURO_NATIVE_EVENT_RESULT_IGNORED;
     };
     state.key_presses = state.key_presses.wrapping_add(1);
-    KRUSTY_NATIVE_EVENT_RESULT_CONSUMED
+    MITSURO_NATIVE_EVENT_RESULT_CONSUMED
 }
 
 unsafe fn emit(

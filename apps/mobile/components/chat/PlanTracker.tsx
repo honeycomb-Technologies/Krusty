@@ -13,7 +13,7 @@ import { BlurView } from "../../platform/blur";
 import { useThemeContext } from "../../hooks/useTheme";
 import { usePlanStore, useSessionStore } from "../../hooks/useStores";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 interface PlanTrackerProps {
   sessionType?: SessionType;

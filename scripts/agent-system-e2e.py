@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live provider proof for Krusty's dynamic agent selection and delegated builds."""
+"""Live provider proof for Mitsuro's dynamic agent selection and delegated builds."""
 
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ def load_module(filename: str, name: str) -> Any:
     return module
 
 
-HARNESS = load_module("harness-e2e-loop.py", "krusty_agent_harness")
-GROK = load_module("grok-core-behavior.py", "krusty_grok_contract")
-SATURATION = load_module("context-saturation-e2e.py", "krusty_saturation_contract")
+HARNESS = load_module("harness-e2e-loop.py", "mitsuro_agent_harness")
+GROK = load_module("grok-core-behavior.py", "mitsuro_grok_contract")
+SATURATION = load_module("context-saturation-e2e.py", "mitsuro_saturation_contract")
 AcceptanceFailure = HARNESS.AcceptanceFailure
 require = HARNESS.require
 
@@ -60,7 +60,7 @@ def write_fixture(project: Path) -> None:
         [
             "git",
             "-c",
-            "user.name=Krusty Eval",
+            "user.name=Mitsuro Eval",
             "-c",
             "user.email=eval@localhost",
             "-c",
@@ -322,7 +322,7 @@ def main() -> int:
     args = parse_args()
     args.base_url = HARNESS.validate_candidate_base_url(args.base_url)
     args.root.mkdir(parents=True, exist_ok=False)
-    api = HARNESS.KrustyApi(args.base_url, args.timeout)
+    api = HARNESS.MitsuroApi(args.base_url, args.timeout)
     summary: dict[str, Any] = {
         "status": "running",
         "base_url": args.base_url,

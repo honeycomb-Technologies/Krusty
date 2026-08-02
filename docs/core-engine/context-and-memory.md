@@ -60,7 +60,7 @@ The ledger also produces a **continuation contract** -- a serializable record th
 
 ## Conversation Compaction
 
-Compaction keeps a long-running session alive when the conversation approaches the model's context limit. It operates **in place**: the same session ID, database history, and UI thread continue after compaction. The pipeline lives in `crates/krusty-core/src/agent/compaction/`.
+Compaction keeps a long-running session alive when the conversation approaches the model's context limit. It operates **in place**: the same session ID, database history, and UI thread continue after compaction. The pipeline lives in `crates/mitsuro-core/src/agent/compaction/`.
 
 ### Triggers
 
@@ -105,7 +105,7 @@ Legacy session-forking helpers (`PinchContext`, linked child sessions) remain in
 
 Skills are Agent Skills-compatible instruction packages built around `SKILL.md`. Mitsuro discovers its native roots plus `.agents`, Pi, OpenCode, Claude, Codex, and registered package roots. Project roots are discovered upward through the worktree, with nearest-project definitions taking precedence over user and package definitions. Strict validation enforces the standard name/description limits and directory-name match; structured diagnostics explain invalid and shadowed definitions.
 
-The `SkillsManager` in `manager.rs` handles discovery, precedence, policy, diagnostics, package-root registration, and cache fingerprints. The `build_skills_context` function reads only enabled, model-invocable metadata and formats a bounded listing for the system context. Per-skill `allow`/`ask`/`deny` policy is persisted in `.krusty/skills-policy.json`; `ask` requires a supervised parent for model-driven loading, while `deny` is a hard block. Nearest-project policy wins among project files, but can only narrow user policy, never re-enable or loosen it.
+The `SkillsManager` in `manager.rs` handles discovery, precedence, policy, diagnostics, package-root registration, and cache fingerprints. The `build_skills_context` function reads only enabled, model-invocable metadata and formats a bounded listing for the system context. Per-skill `allow`/`ask`/`deny` policy is persisted in `.mitsuro/skills-policy.json`; `ask` requires a supervised parent for model-driven loading, while `deny` is a hard block. Nearest-project policy wins among project files, but can only narrow user policy, never re-enable or loosen it.
 
 When the model executes the deferred `skill` target through `tool_search`, the manager loads the full markdown content of the requested skill and injects it into the conversation. This lazy loading means skill content doesn't consume context budget until it's actually needed. The listing in the system prompt is lightweight and capped -- just names, descriptions, and bounded tags -- so the model knows what's available without paying the token cost of every skill's full instructions.
 

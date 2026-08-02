@@ -18,18 +18,17 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/.." && pwd)
 pkgbuild="$script_dir/PKGBUILD"
 srcinfo="$script_dir/.SRCINFO"
-archive_name="krusty-$version.tar.gz"
+archive_name="mitsuro-$version.tar.gz"
 archive_url="https://github.com/honeycomb-Technologies/Mitsuro/archive/refs/tags/v$version.tar.gz"
 expected_prefix="Mitsuro-$version/"
-temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/krusty-aur-release.XXXXXX")
+temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/mitsuro-aur-release.XXXXXX")
 trap 'rm -rf -- "$temp_dir"' EXIT
 archive_listing="$temp_dir/archive-entries.txt"
 archive_type_listing="$temp_dir/archive-entry-types.txt"
 archive_regular_listing="$temp_dir/archive-regular-entries.txt"
-source_manifest="$temp_dir/krusty-cli-Cargo.toml"
+source_manifest="$temp_dir/mitsuro-cli-Cargo.toml"
 
 tar_bin=${TAR:-tar}
 if ! command -v "$tar_bin" >/dev/null 2>&1; then
@@ -39,6 +38,10 @@ fi
 tar_version=$("$tar_bin" --version 2>/dev/null || true)
 if [[ "${tar_version%%$'\n'*}" != *"GNU tar"* ]]; then
     echo "GNU tar is required to validate the release archive (set TAR to its path)" >&2
+    exit 1
+fi
+if ! command -v makepkg >/dev/null 2>&1; then
+    echo "makepkg is required to generate synchronized AUR metadata" >&2
     exit 1
 fi
 
@@ -62,7 +65,7 @@ if [[ "$first_entry" != "$expected_prefix" ]]; then
     exit 1
 fi
 
-manifest_entry="${expected_prefix}crates/krusty-cli/Cargo.toml"
+manifest_entry="${expected_prefix}crates/mitsuro-cli/Cargo.toml"
 if ! LC_ALL=C awk -v prefix="$expected_prefix" -v manifest="$manifest_entry" '
     function unsafe_path(path, normalized, count, components, index_) {
         if (path == "" || substr(path, 1, 1) == "/" || path ~ /\\/) {
@@ -160,23 +163,42 @@ source_version=$(
         }
     ' "$source_manifest"
 )
+source_name=$(
+    awk '
+        /^\[package\][[:space:]]*$/ { in_package = 1; next }
+        in_package && /^\[/ { exit }
+        in_package && /^[[:space:]]*name[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*"/, "", value)
+            sub(/"[[:space:]]*(#.*)?$/, "", value)
+            print value
+            exit
+        }
+    ' "$source_manifest"
+)
+if [[ "$source_name" != "mitsuro" ]]; then
+    echo "release tag v$version contains CLI package ${source_name:-<missing>}, not mitsuro" >&2
+    exit 1
+fi
 if [[ "$source_version" != "$version" ]]; then
-    echo "release tag v$version contains krusty package version ${source_version:-<missing>}" >&2
+    echo "release tag v$version contains mitsuro package version ${source_version:-<missing>}" >&2
     exit 1
 fi
 
-if [[ -f "$repo_root/crates/krusty-mako/Cargo.toml" ]]; then
-    for required_entry in \
-        "${expected_prefix}crates/krusty-mako/Cargo.toml" \
-        "${expected_prefix}deploy/systemd/krusty-mako.service" \
-        "${expected_prefix}deploy/systemd/krusty-mako.socket" \
-        "${expected_prefix}deploy/systemd/krusty-serve.service"; do
-        if ! grep -Fqx "$required_entry" "$archive_regular_listing"; then
-            echo "release archive is missing required regular Hive service file: $required_entry" >&2
-            exit 1
-        fi
-    done
-fi
+for required_entry in \
+    "${expected_prefix}Cargo.toml" \
+    "${expected_prefix}crates/mitsuro-cli/Cargo.toml" \
+    "${expected_prefix}crates/mitsuro-cli/src/bin/krusty.rs" \
+    "${expected_prefix}crates/mitsuro-hive/Cargo.toml" \
+    "${expected_prefix}crates/mitsuro-hive/src/bin/krusty-mako.rs" \
+    "${expected_prefix}deploy/systemd/mitsuro-hive.service" \
+    "${expected_prefix}deploy/systemd/mitsuro-hive.socket" \
+    "${expected_prefix}deploy/systemd/mitsuro-serve.service"; do
+    if ! grep -Fqx "$required_entry" "$archive_regular_listing"; then
+        echo "release archive is missing required canonical bridge file: $required_entry" >&2
+        exit 1
+    fi
+done
 
 if command -v sha256sum >/dev/null 2>&1; then
     checksum=$(sha256sum "$temp_dir/$archive_name" | awk '{print $1}')
@@ -187,73 +209,55 @@ else
     exit 1
 fi
 
-update_file() {
-    local source_file=$1
+update_pkgbuild() {
     local temp_file
     temp_file=$(mktemp "$script_dir/.aur-update.XXXXXX")
     awk \
         -v version="$version" \
         -v checksum="$checksum" \
         -v archive_name="$archive_name" \
-        -v archive_url="$archive_url" \
-        -v file_kind="$2" '
-        file_kind == "pkgbuild" && /^pkgver=/ {
+        -v archive_url="$archive_url" '
+        /^pkgver=/ {
             print "pkgver=" version
             next
         }
-        file_kind == "pkgbuild" && /^pkgrel=/ {
+        /^pkgrel=/ {
             print "pkgrel=1"
             next
         }
-        file_kind == "pkgbuild" && /^sha256sums=/ {
+        /^source=/ {
+            print "source=(\047" archive_name "::" archive_url "\047)"
+            next
+        }
+        /^sha256sums=/ {
             print "sha256sums=(\047" checksum "\047)"
             next
         }
-        file_kind == "srcinfo" && /^\tpkgver = / {
-            print "\tpkgver = " version
-            next
-        }
-        file_kind == "srcinfo" && /^\tpkgrel = / {
-            print "\tpkgrel = 1"
-            next
-        }
-        file_kind == "srcinfo" && /^\tsource = / {
-            print "\tsource = " archive_name "::" archive_url
-            next
-        }
-        file_kind == "srcinfo" && /^\tsha256sums = / {
-            print "\tsha256sums = " checksum
-            next
-        }
         { print }
-    ' "$source_file" > "$temp_file"
+    ' "$pkgbuild" > "$temp_file"
     chmod 0644 "$temp_file"
-    mv -- "$temp_file" "$source_file"
+    mv -- "$temp_file" "$pkgbuild"
 }
 
-update_file "$pkgbuild" pkgbuild
-update_file "$srcinfo" srcinfo
+update_pkgbuild
 
 grep -Fqx "pkgver=$version" "$pkgbuild"
 grep -Fqx "pkgrel=1" "$pkgbuild"
+grep -Fqx "source=('$archive_name::$archive_url')" "$pkgbuild"
 grep -Fqx "sha256sums=('$checksum')" "$pkgbuild"
+
+generated_srcinfo=$(mktemp "$script_dir/.srcinfo-check.XXXXXX")
+trap 'rm -rf -- "$temp_dir" "$generated_srcinfo"' EXIT
+(
+    cd -- "$script_dir"
+    makepkg --printsrcinfo
+) > "$generated_srcinfo"
+chmod 0644 "$generated_srcinfo"
+mv -- "$generated_srcinfo" "$srcinfo"
 grep -Fqx $'\tpkgver = '"$version" "$srcinfo"
 grep -Fqx $'\tpkgrel = 1' "$srcinfo"
+grep -Fqx $'\tsource = '"$archive_name::$archive_url" "$srcinfo"
 grep -Fqx $'\tsha256sums = '"$checksum" "$srcinfo"
-
-if command -v makepkg >/dev/null 2>&1; then
-    generated_srcinfo=$(mktemp "$script_dir/.srcinfo-check.XXXXXX")
-    trap 'rm -rf -- "$temp_dir" "$generated_srcinfo"' EXIT
-    (
-        cd -- "$script_dir"
-        makepkg --printsrcinfo
-    ) > "$generated_srcinfo"
-    if ! cmp -s "$generated_srcinfo" "$srcinfo"; then
-        echo "generated .SRCINFO differs; replacing the checked-in metadata" >&2
-        chmod 0644 "$generated_srcinfo"
-        mv -- "$generated_srcinfo" "$srcinfo"
-    fi
-fi
 
 echo "Updated AUR metadata for v$version"
 echo "SHA-256: $checksum"

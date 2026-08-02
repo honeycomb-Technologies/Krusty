@@ -10,12 +10,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  canonical-identity:
+    name: Canonical Identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check canonical names and exact compatibility exceptions
+        run: bash scripts/check-canonical-names.sh
+      - name: Exercise installer migration and rollback fixtures
+        run: sh install.sh --self-test
+
   client-quality:
     name: Client Quality Gates
+    needs: canonical-identity
     uses: ./.github/workflows/client-quality.yml
 
   rust-check:
     name: Rust Check
+    needs: canonical-identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -28,6 +40,7 @@ jobs:
 
   rust-test:
     name: Rust Test
+    needs: canonical-identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -46,6 +59,7 @@ jobs:
 
   rust-clippy:
     name: Rust Clippy
+    needs: canonical-identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -59,6 +73,7 @@ jobs:
 
   rust-format:
     name: Rust Format
+    needs: canonical-identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,6 +85,7 @@ jobs:
 
   desktop-linux-bundle:
     name: Desktop Linux Bundle
+    needs: canonical-identity
     runs-on: ubuntu-latest
     defaults:
       run:

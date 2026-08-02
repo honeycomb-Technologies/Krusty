@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolCall } from "@krusty/api";
+import type { ChatMessage, ToolCall } from "@mitsuro/api";
 
 export interface StreamEffectView {
   sessionId: string | null;

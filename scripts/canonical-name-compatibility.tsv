@@ -1,0 +1,605 @@
+# Exact prior-identity compatibility and historical-evidence exceptions.
+# Scope: existing Git-tracked/nonignored-untracked names and committable working-tree text.
+# Format: path<TAB>tracked-path or content<TAB>tracked-path<TAB>line-number<TAB>exact source line
+# Generated from a frozen tree; source-line drift intentionally makes an entry stale.
+# Legacy-named compatibility entry points.
+path	apps/mobile/modules/mitsuro-diagnostics/ios/KrustyDiagnosticsCompatibilityModule.swift
+path	apps/mobile/widgets/MakoWidget.tsx
+path	crates/mitsuro-cli/src/bin/krusty.rs
+path	crates/mitsuro-hive/src/bin/krusty-mako.rs
+# Exact source-line compatibility and historical exceptions.
+content	.github/homebrew/mitsuro.rb	13	  conflicts_with "krusty", because: "both install the same compatibility commands"
+content	.github/homebrew/mitsuro.rb	38	    bin.install "krusty"
+content	.github/homebrew/mitsuro.rb	39	    bin.install "krusty-mako"
+content	.github/homebrew/mitsuro.rb	45	    assert_equal canonical_cli, shell_output("#{bin}/krusty --version").strip
+content	.github/homebrew/mitsuro.rb	46	    assert_equal canonical_hive, shell_output("#{bin}/krusty-mako --version").strip
+content	.github/workflows/release.yml	79	          test "$("$release_dir/mitsuro" --version)" = "$("$release_dir/krusty" --version)"
+content	.github/workflows/release.yml	80	          test "$("$release_dir/mitsuro-hive" --version)" = "$("$release_dir/krusty-mako" --version)"
+content	.github/workflows/release.yml	87	          test "$("$release_dir/mitsuro.exe" --version)" = "$("$release_dir/krusty.exe" --version)"
+content	.github/workflows/release.yml	96	          cp "target/${{ matrix.target }}/release/krusty" "$package_dir/"
+content	.github/workflows/release.yml	97	          cp "target/${{ matrix.target }}/release/krusty-mako" "$package_dir/"
+content	.github/workflows/release.yml	114	          # The old Windows updater extracts only krusty.exe. Give it the full
+content	.github/workflows/release.yml	116	          cp mitsuro.exe krusty.exe
+content	.github/workflows/release.yml	117	          cmp -s mitsuro.exe krusty.exe
+content	.github/workflows/release.yml	118	          7z a ../../../krusty-${{ matrix.target }}.zip krusty.exe
+content	.github/workflows/release.yml	121	          sha256sum krusty-${{ matrix.target }}.zip > krusty-${{ matrix.target }}.zip.sha256
+content	.github/workflows/release.yml	129	            krusty-${{ matrix.target }}.*
+content	.github/workflows/release.yml	194	            find artifacts -type f -name 'krusty-*.tar.gz*' -print
+content	.github/workflows/release.yml	203	          compatibility_name=krusty-x86_64-pc-windows-msvc.zip
+content	.github/workflows/release.yml	225	            "${compatibility_matches[0]}" krusty.exe <<'PY'
+content	.github/workflows/release.yml	308	              krusty-x86_64-pc-windows-msvc.zip | \
+content	.github/workflows/release.yml	309	              krusty-x86_64-pc-windows-msvc.zip.sha256 | \
+content	.github/workflows/release.yml	336	            krusty-x86_64-pc-windows-msvc.zip
+content	.github/workflows/release.yml	337	            krusty-x86_64-pc-windows-msvc.zip.sha256
+content	.gitignore	28	**/.krusty-shadow/
+content	.gitignore	91	.krusty/
+content	AGENTS.md	20	- The supported terminal command is `mitsuro`. The deprecated `krusty` command remains a tested compatibility alias for the announced transition window; removing it requires the migration cutover criteria to pass.
+content	README.md	76	`mitsuro` is the primary command. The deprecated `krusty` command remains a
+content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	12	const LEGACY_DESKTOP_ID: &str = "io.krusty.desktop";
+content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	13	const EARLY_DEVELOPMENT_DESKTOP_ID: &str = "dev.krusty.desktop";
+content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	183	        "window.__MITSURO_SERVER_URL='http://localhost:{0}';window.__MITSURO_SERVER_TOKEN='local';window.__KRUSTY_SERVER_URL='http://localhost:{0}';window.__KRUSTY_SERVER_TOKEN='local';",
+content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	954	        assert!(script.contains("__KRUSTY_SERVER_URL='http://localhost:4321'"));
+content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	955	        assert!(script.contains("__KRUSTY_SERVER_TOKEN='local'"));
+content	apps/mobile/app.json	11	      "krusty"
+content	apps/mobile/app.json	104	              "name": "MakoWidget",
+content	apps/mobile/app/_layout.tsx	24	    process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
+content	apps/mobile/diagnostics/jsHotPathProbe.ts	44	    process.env.EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1';
+content	apps/mobile/hooks/useWidgetSync.ts	20	    HiveWidgetInstances.push(require("../widgets/MakoWidget").default);
+content	apps/mobile/modules/mitsuro-diagnostics/expo-module.config.json	6	      "KrustyDiagnosticsCompatibilityModule"
+content	apps/mobile/modules/mitsuro-diagnostics/ios/KrustyDiagnosticsCompatibilityModule.swift	8	public class KrustyDiagnosticsCompatibilityModule: Module {
+content	apps/mobile/modules/mitsuro-diagnostics/ios/KrustyDiagnosticsCompatibilityModule.swift	10	    mitsuroDiagnosticsDefinition(moduleName: "KrustyDiagnostics")
+content	apps/mobile/modules/mitsuro-diagnostics/ios/KrustyDiagnosticsCompatibilityModule.swift	19	  return base.appendingPathComponent("KrustyDiagnostics/MetricKit", isDirectory: true)
+content	apps/mobile/modules/mitsuro-diagnostics/src/compatibility.ts	2	export const LEGACY_DIAGNOSTICS_MODULE_NAME = 'KrustyDiagnostics';
+content	apps/mobile/platform/identity-compatibility.ts	3	const LEGACY_DEEP_LINK_SCHEME = "krusty";
+content	apps/mobile/platform/identity-compatibility.ts	4	const LEGACY_REMOTE_TOKEN_HASH_KEY = "krusty-remote-token";
+content	apps/mobile/platform/identity-compatibility.ts	8	export const LEGACY_HIVE_NOTIFICATION_CATEGORY = "MAKO_SESSION";
+content	apps/mobile/platform/identity-compatibility.ts	9	export const LEGACY_HIVE_NOTIFICATION_ACTION = "OPEN_MAKO";
+content	apps/mobile/platform/identity-compatibility.ts	19	  | "__KRUSTY_SERVER_URL"
+content	apps/mobile/platform/identity-compatibility.ts	20	  | "__KRUSTY_SERVER_TOKEN",
+content	apps/mobile/platform/identity-compatibility.ts	34	    stringValue(globals.__KRUSTY_SERVER_URL),
+content	apps/mobile/platform/identity-compatibility.ts	35	    stringValue(globals.__KRUSTY_SERVER_TOKEN),
+content	apps/mobile/platform/identity-compatibility.ts	77	  if (data.type === "mako_update") {
+content	apps/mobile/platform/identity-compatibility.ts	80	  if (data.focus === "mako") {
+content	apps/mobile/platform/identity-storage.ts	19	    legacy: ["krusty_server_url"],
+content	apps/mobile/platform/identity-storage.ts	23	    legacy: ["krusty_server_token"],
+content	apps/mobile/platform/identity-storage.ts	27	    legacy: ["krusty:workspace"],
+content	apps/mobile/platform/identity-storage.ts	31	    legacy: ["krusty:workspace:chat"],
+content	apps/mobile/platform/identity-storage.ts	36	      "krusty:workspace:mako",
+content	apps/mobile/platform/identity-storage.ts	37	      "krusty:workspace:hive",
+content	apps/mobile/platform/identity-storage.ts	38	      "mitsuro:workspace:mako",
+content	apps/mobile/platform/identity-storage.ts	43	    legacy: ["krusty-permission-mode"],
+content	apps/mobile/platform/identity-storage.ts	47	    legacy: ["krusty:presence-client-id"],
+content	apps/mobile/platform/identity-storage.ts	51	    legacy: ["krusty_selected_model"],
+content	apps/mobile/platform/identity-storage.ts	55	    legacy: ["krusty-provider-filter-order-v1"],
+content	apps/mobile/platform/identity-storage.ts	59	    legacy: ["krusty_push_token"],
+content	apps/mobile/platform/identity-storage.ts	63	    legacy: ["krusty_notification_level"],
+content	apps/mobile/platform/identity-storage.ts	67	    legacy: ["krusty_pending_notification_actions_v1"],
+content	apps/mobile/platform/identity-storage.ts	71	    legacy: ["krusty_handled_notification_actions_v1"],
+content	apps/mobile/platform/identity-storage.ts	75	    legacy: ["krusty_preview_tabs_v1"],
+content	apps/mobile/platform/identity-storage.ts	79	    legacy: ["krusty:diagnostics:installation-v1"],
+content	apps/mobile/platform/identity-storage.ts	83	    legacy: ["krusty:diagnostics:pending-v1"],
+content	apps/mobile/test/identityMigration.test.ts	179	    "krusty://connect?url=https%3A%2F%2Fdevice.example&token=secret",
+content	apps/mobile/test/identityMigration.test.ts	182	    "https://device.example/#krusty-remote-token=secret",
+content	apps/mobile/test/identityMigration.test.ts	193	    __KRUSTY_SERVER_URL: "http://legacy.example",
+content	apps/mobile/test/identityMigration.test.ts	194	    __KRUSTY_SERVER_TOKEN: "legacy-token",
+content	apps/mobile/test/identityMigration.test.ts	200	    __KRUSTY_SERVER_URL: "http://legacy.example",
+content	apps/mobile/test/identityMigration.test.ts	201	    __KRUSTY_SERVER_TOKEN: "legacy-token",
+content	apps/mobile/test/identityMigration.test.ts	210	  const action = canonicalNotificationAction("OPEN_MAKO");
+content	apps/mobile/test/identityMigration.test.ts	212	    type: "mako_update",
+content	apps/mobile/test/identityMigration.test.ts	213	    focus: "mako",
+content	apps/mobile/test/identityMigration.test.ts	243	      configSource.includes("KrustyDiagnosticsCompatibilityModule"),
+content	apps/mobile/test/identityMigration.test.ts	291	      layout.includes("EXPO_PUBLIC_KRUSTY_PERFORMANCE") &&
+content	apps/mobile/test/identityMigration.test.ts	293	      probe.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE"),
+content	apps/mobile/test/identityMigration.test.ts	303	    new URL("../widgets/MakoWidget.tsx", import.meta.url).pathname,
+content	apps/mobile/test/identityMigration.test.ts	312	    names.includes("HiveWidget") && names.includes("MakoWidget"),
+content	apps/mobile/test/identityMigration.test.ts	316	    compatibilityWidget.includes('createWidget("MakoWidget", HiveWidgetView)') &&
+content	apps/mobile/test/identityMigration.test.ts	318	      sync.includes('require("../widgets/MakoWidget")'),
+content	apps/mobile/test/jsHotPathProbe.test.ts	17	      source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1'") &&
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	61	      expo.scheme.includes("krusty"),
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	121	  assert(!joined.includes("MakoSharkIcon"), "Hive must not expose the old shark mascot");
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	122	  assert(!joined.includes("KrustyLogo"), "empty states must use the Mitsuro logo");
+content	apps/mobile/widgets/MakoWidget.tsx	5	export default createWidget("MakoWidget", HiveWidgetView);
+content	aur/.SRCINFO	12		provides = krusty
+content	aur/.SRCINFO	13		conflicts = krusty
+content	aur/PKGBUILD	13	provides=('krusty')
+content	aur/PKGBUILD	14	conflicts=('krusty')
+content	aur/PKGBUILD	45	    [[ "$(target/release/mitsuro --version)" == "$(target/release/krusty --version)" ]]
+content	aur/PKGBUILD	48	            "$(target/release/krusty-mako --version)" ]]
+content	aur/PKGBUILD	64	    install -Dm755 "target/release/krusty" "$pkgdir/usr/bin/krusty"
+content	aur/PKGBUILD	67	        install -Dm755 "target/release/krusty-mako" "$pkgdir/usr/bin/krusty-mako"
+content	aur/check-package-template.sh	20	[[ " ${provides[*]} " == *" krusty "* ]]
+content	aur/check-package-template.sh	21	[[ " ${conflicts[*]} " == *" krusty "* ]]
+content	aur/check-package-template.sh	47	if grep -Eq 'crates/(krusty|krusty-mako)' "$pkgbuild"; then
+content	aur/check-package-template.sh	72	  grep -Fqx $'\tprovides = krusty' "$srcinfo"
+content	aur/check-package-template.sh	73	  grep -Fqx $'\tconflicts = krusty' "$srcinfo"
+content	aur/update-release.sh	191	    "${expected_prefix}crates/mitsuro-cli/src/bin/krusty.rs" \
+content	aur/update-release.sh	193	    "${expected_prefix}crates/mitsuro-hive/src/bin/krusty-mako.rs" \
+content	crates/mitsuro-cli/Cargo.toml	145	name = "krusty"
+content	crates/mitsuro-cli/Cargo.toml	146	path = "src/bin/krusty.rs"
+content	crates/mitsuro-cli/src/bin/krusty.rs	6	    eprintln!("`krusty` is deprecated; use `mitsuro` (arguments are forwarded unchanged)");
+content	crates/mitsuro-cli/src/main.rs	68	    #[command(name = "hive", alias = "mako", args_conflicts_with_subcommands = true)]
+content	crates/mitsuro-cli/src/tui/plugins/js.rs	87	globalThis.__krustyPluginRegistry = globalThis.__mitsuroPluginRegistry;
+content	crates/mitsuro-cli/src/tui/plugins/js.rs	88	globalThis.__krustyPluginLogs = globalThis.__mitsuroPluginLogs;
+content	crates/mitsuro-cli/src/tui/plugins/js.rs	99	globalThis.krusty = globalThis.mitsuro;
+content	crates/mitsuro-cli/src/tui/plugins/js.rs	106	}} else if (globalThis.krustyPlugin) {{
+content	crates/mitsuro-cli/src/tui/plugins/js.rs	107	  globalThis.__mitsuroPluginRegistry[{plugin_id}] = globalThis.krustyPlugin;
+content	crates/mitsuro-cli/src/tui/plugins/legacy_identity.rs	3	pub(super) const NATIVE_PLUGIN_ENTRY_SYMBOL: &[u8] = b"krusty_plugin_entry";
+content	crates/mitsuro-cli/src/tui/plugins/retroarch_identity.rs	14	const LEGACY_RELATIVE_ROOT: &str = ".config/krusty/gameboy-color";
+content	crates/mitsuro-client/src/types.rs	274	    #[serde(alias = "mako")]
+content	crates/mitsuro-client/src/types.rs	1126	            serde_json::from_str::<SessionType>(r#""mako""#).expect("deprecated session type"),
+content	crates/mitsuro-core/src/acp/agent/tests.rs	206	    let legacy = canonical.replacen("mitsuro:model-key:", "krusty:model-key:", 1);
+content	crates/mitsuro-core/src/agent/run_spec.rs	33	    #[serde(alias = "mako")]
+content	crates/mitsuro-core/src/agent/user_hooks/executor.rs	560	test "$MITSURO_PLUGIN_ID" = "$KRUSTY_PLUGIN_ID" &&
+content	crates/mitsuro-core/src/agent/user_hooks/executor.rs	561	test "$MITSURO_HOOK_CONFIG" = "$KRUSTY_HOOK_CONFIG" &&
+content	crates/mitsuro-core/src/agent/user_hooks/executor.rs	562	test "$MITSURO_PLUGIN_ROOT" = "$KRUSTY_PLUGIN_ROOT" &&
+content	crates/mitsuro-core/src/extensions/agent/process.rs	884	                r#"test "$MITSURO_EXTENSION_ID" = "$KRUSTY_EXTENSION_ID" &&
+content	crates/mitsuro-core/src/extensions/agent/process.rs	885	test "$MITSURO_EXTENSION_DIR" = "$KRUSTY_EXTENSION_DIR" &&
+content	crates/mitsuro-core/src/extensions/agent/process.rs	886	test "$MITSURO_EXTENSION_STATE_DIR" = "$KRUSTY_EXTENSION_STATE_DIR" &&
+content	crates/mitsuro-core/src/extensions/agent/process.rs	887	test "$MITSURO_WORKING_DIR" = "$KRUSTY_WORKING_DIR""#,
+content	crates/mitsuro-core/src/identity.rs	29	const LEGACY_ONLY_MIGRATION_GUIDANCE: &str = "legacy Mitsuro state requires an offline migration: run `mitsuro migrate-identity --confirm-offline`; compatibility updater payloads without the canonical executable may run `krusty migrate-identity --confirm-offline`, then install the canonical `mitsuro` command";
+content	crates/mitsuro-core/src/identity.rs	33	    pub const CONFIG_DIR_NAME: &str = ".krusty";
+content	crates/mitsuro-core/src/identity.rs	34	    pub const DATABASE_FILE_NAME: &str = "krusty.db";
+content	crates/mitsuro-core/src/identity.rs	35	    pub const HIVE_DIR_NAME: &str = "mako";
+content	crates/mitsuro-core/src/identity.rs	36	    pub const HIVE_SOCKET_FILE_NAME: &str = "mako.sock";
+content	crates/mitsuro-core/src/identity.rs	37	    pub const HIVE_KEY_FILE_NAME: &str = "mako-ipc.key";
+content	crates/mitsuro-core/src/identity.rs	38	    pub const HIVE_SOUL_FILE_NAME: &str = "MAKO_SOUL.md";
+content	crates/mitsuro-core/src/identity.rs	39	    pub const HIVE_IDENTITY_FILE_NAME: &str = "MAKO_IDENTITY.md";
+content	crates/mitsuro-core/src/identity.rs	40	    pub const HIVE_HEARTBEAT_FILE_NAME: &str = "MAKO_HEARTBEAT.md";
+content	crates/mitsuro-core/src/identity.rs	41	    pub const HIVE_MEMORY_FILE_NAME: &str = "MAKO_MEMORY.md";
+content	crates/mitsuro-core/src/identity.rs	42	    pub const HIVE_CHANNELS_FILE_NAME: &str = "MAKO_CHANNELS.md";
+content	crates/mitsuro-core/src/identity.rs	43	    pub const HIVE_PROJECT_OVERLAY_FILE_NAME: &str = "MAKO.md";
+content	crates/mitsuro-core/src/identity.rs	44	    pub const HIVE_PROJECT_OVERLAY_FILE_NAME_LOWERCASE: &str = "mako.md";
+content	crates/mitsuro-core/src/identity.rs	45	    pub const AGENT_EXTENSION_MANIFEST_FILE_NAME: &str = "krusty-extension.json";
+content	crates/mitsuro-core/src/identity.rs	46	    pub const ENV_PREFIX: &str = "KRUSTY_";
+content	crates/mitsuro-core/src/identity.rs	47	    pub const HIVE_ENV_PREFIX: &str = "KRUSTY_MAKO_";
+content	crates/mitsuro-core/src/identity.rs	48	    pub const EXTENSION_ID_ENV: &str = "KRUSTY_EXTENSION_ID";
+content	crates/mitsuro-core/src/identity.rs	49	    pub const EXTENSION_DIR_ENV: &str = "KRUSTY_EXTENSION_DIR";
+content	crates/mitsuro-core/src/identity.rs	50	    pub const EXTENSION_STATE_DIR_ENV: &str = "KRUSTY_EXTENSION_STATE_DIR";
+content	crates/mitsuro-core/src/identity.rs	51	    pub const WORKING_DIR_ENV: &str = "KRUSTY_WORKING_DIR";
+content	crates/mitsuro-core/src/identity.rs	52	    pub const PACKAGE_PLUGIN_ID_ENV: &str = "KRUSTY_PLUGIN_ID";
+content	crates/mitsuro-core/src/identity.rs	53	    pub const PACKAGE_HOOK_CONFIG_ENV: &str = "KRUSTY_HOOK_CONFIG";
+content	crates/mitsuro-core/src/identity.rs	54	    pub const PACKAGE_PLUGIN_ROOT_ENV: &str = "KRUSTY_PLUGIN_ROOT";
+content	crates/mitsuro-core/src/identity.rs	55	    pub const SESSION_TYPE: &str = "mako";
+content	crates/mitsuro-core/src/identity.rs	56	    pub const MEMORY_NAMESPACE: &str = "mako";
+content	crates/mitsuro-core/src/identity.rs	57	    pub const PROJECT_SETTINGS_FIELD: &str = "mako";
+content	crates/mitsuro-core/src/identity.rs	58	    pub const API_PREFIX: &str = "/mako";
+content	crates/mitsuro-core/src/identity.rs	59	    pub const CLI_NAME: &str = "krusty";
+content	crates/mitsuro-core/src/identity.rs	60	    pub const HIVE_CLI_NAME: &str = "mako";
+content	crates/mitsuro-core/src/identity.rs	61	    pub const ACP_MODEL_KEY_PREFIX: &str = "krusty:model-key:";
+content	crates/mitsuro-core/src/identity.rs	62	    pub const COMPACTION_SEGMENT_SCHEMA: &str = "krusty.compaction_segment.v1";
+content	crates/mitsuro-core/src/identity.rs	715	        || relative_path == Path::new("krusty.log")
+content	crates/mitsuro-core/src/identity.rs	716	        || relative_path == Path::new("krusty-desktop-server.log")
+content	crates/mitsuro-core/src/identity.rs	1708	        .any(|component| component.as_os_str() == std::ffi::OsStr::new(".krusty-releases"))
+content	crates/mitsuro-core/src/identity.rs	1715	            "krusty"
+content	crates/mitsuro-core/src/identity.rs	1716	                | "krusty.exe"
+content	crates/mitsuro-core/src/identity.rs	1717	                | "krusty-mako"
+content	crates/mitsuro-core/src/identity.rs	1718	                | "krusty-mako.exe"
+content	crates/mitsuro-core/src/identity.rs	1719	                | "krusty-desktop"
+content	crates/mitsuro-core/src/identity.rs	1720	                | "krusty-desktop.exe"
+content	crates/mitsuro-core/src/identity.rs	1721	                | "Krusty"
+content	crates/mitsuro-core/src/identity.rs	1722	                | "Krusty.exe"
+content	crates/mitsuro-core/src/identity.rs	1986	            Some("KRUSTY_MAKO_SOCKET")
+content	crates/mitsuro-core/src/identity.rs	1990	            Some("KRUSTY_PROVIDER")
+content	crates/mitsuro-core/src/identity.rs	2012	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
+content	crates/mitsuro-core/src/identity.rs	2056	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
+content	crates/mitsuro-core/src/identity.rs	2457	        std::fs::write(old.join("krusty.log"), "terminal runtime").expect("root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2458	        std::fs::write(old.join("krusty-desktop-server.log"), "desktop runtime")
+content	crates/mitsuro-core/src/identity.rs	2473	        assert!(!receipt.canonical_root.join("krusty.log").exists());
+content	crates/mitsuro-core/src/identity.rs	2476	            .join("krusty-desktop-server.log")
+content	crates/mitsuro-core/src/identity.rs	2509	        assert!(old.join("krusty.log").is_file());
+content	crates/mitsuro-core/src/identity.rs	2510	        assert!(old.join("krusty-desktop-server.log").is_file());
+content	crates/mitsuro-core/src/identity.rs	2562	        std::fs::write(backups.join("krusty-before.db"), "before").expect("old recovery snapshot");
+content	crates/mitsuro-core/src/identity.rs	2563	        std::fs::write(old.join("krusty.log"), "before").expect("root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2564	        std::fs::write(old.join("krusty-desktop-server.log"), "before").expect("root desktop log");
+content	crates/mitsuro-core/src/identity.rs	2569	        std::fs::write(backups.join("krusty-after.db"), "after").expect("new recovery snapshot");
+content	crates/mitsuro-core/src/identity.rs	2570	        std::fs::write(old.join("krusty.log"), "after").expect("changed root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2571	        std::fs::write(old.join("krusty-desktop-server.log"), "after")
+content	crates/mitsuro-core/src/identity.rs	2678	        assert!(guidance.contains("`krusty migrate-identity --confirm-offline`"));
+content	crates/mitsuro-core/src/identity.rs	2765	        for executable in ["/opt/archive/krusty", "/opt/current/mitsuro-hive"] {
+content	crates/mitsuro-core/src/identity.rs	2807	        seed_fake_linux_process(&legacy_proc, 101, 4242, Path::new("/opt/archive/krusty"));
+content	crates/mitsuro-core/src/identity.rs	2826	            Path::new("/opt/tools/mako-analysis-helper"),
+content	crates/mitsuro-core/src/identity.rs	2872	            "/opt/krusty",
+content	crates/mitsuro-core/src/identity.rs	2873	            "/opt/krusty-mako",
+content	crates/mitsuro-core/src/identity.rs	2876	            "/srv/.krusty-releases/0.9.20/random-name",
+content	crates/mitsuro-core/src/identity.rs	2882	            "/opt/mako-analysis-helper",
+content	crates/mitsuro-core/src/identity.rs	2883	            "/opt/krusty-helper",
+content	crates/mitsuro-core/src/identity.rs	2884	            "/srv/not-.krusty-releases/random-name",
+content	crates/mitsuro-core/src/identity.rs	2894	            Path::new("/opt/krusty"),
+content	crates/mitsuro-core/src/identity.rs	2906	            Path::new("/opt/krusty"),
+content	crates/mitsuro-core/src/plugins/manager/package.rs	385	    #[serde(default, alias = "krusty")]
+content	crates/mitsuro-core/src/plugins/signing.rs	10	const LEGACY_RELEASE_ENVELOPE_V1_DOMAIN: &[u8] = b"krusty-plugin-release-envelope-v1\0";
+content	crates/mitsuro-core/src/plugins/signing.rs	148	            r#"{{"manifest_version":1,"id":"signed.plugin","name":"Signed Plugin","version":"1.0.0","publisher":"signed.publisher","description":null,"runtime":"wasm","entry_component":"plugin.wasm","render_capabilities":[],"requested_permissions":{{"fs_read":false,"fs_write":false,"network":false,"process":false}},"release":{{"url":"https://plugins.example/plugin.wasm","sha256":"{}","signature":"","signing_key_id":"release-key","signature_scheme":"manifest-envelope-v1"}},"compat":{{"krusty_min":"0.7.0","krusty_max":null}}}}"#,
+content	crates/mitsuro-core/src/plugins/types.rs	102	    #[serde(default, rename = "krusty_min", alias = "mitsuro_min")]
+content	crates/mitsuro-core/src/plugins/types.rs	104	    #[serde(default, rename = "krusty_max", alias = "mitsuro_max")]
+content	crates/mitsuro-core/src/server_instance.rs	286	                identity: "krusty-server".to_string(),
+content	crates/mitsuro-core/src/server_instance.rs	312	            "/opt/krusty",
+content	crates/mitsuro-core/src/server_instance.rs	313	            "/opt/krusty-mako",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	327	                        CHECK (session_type IN ('chat', 'code', 'mako')),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1004	                        CHECK (session_type IN ('chat', 'code', 'mako'));
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1064	                    bundle_id TEXT NOT NULL DEFAULT 'io.krusty.mobile',
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1082	                "CREATE TABLE IF NOT EXISTS mako_runtime_state (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1094	                CREATE INDEX IF NOT EXISTS idx_mako_runtime_state_status
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1095	                    ON mako_runtime_state(status);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1096	                CREATE INDEX IF NOT EXISTS idx_mako_runtime_state_next_wake
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1097	                    ON mako_runtime_state(next_wake_at);",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1106	            if !Self::column_exists(&tx, "mako_runtime_state", "priority") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1108	                    "ALTER TABLE mako_runtime_state
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1118	            if !Self::column_exists(&tx, "mako_runtime_state", "crew_slug") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1120	                    "ALTER TABLE mako_runtime_state
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1131	                "CREATE TABLE IF NOT EXISTS mako_attention_state (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1139	                CREATE INDEX IF NOT EXISTS idx_mako_attention_state_user_scope
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1140	                    ON mako_attention_state(user_scope);",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1252	                CREATE TABLE mako_profiles (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1259	                CREATE UNIQUE INDEX idx_mako_profiles_user
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1260	                    ON mako_profiles(user_id) WHERE user_id IS NOT NULL;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1262	                CREATE TABLE mako_profile_documents (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1269	                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1272	                CREATE TABLE mako_crew_profiles (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1279	                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1282	                CREATE TABLE mako_crew_documents (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1290	                        REFERENCES mako_crew_profiles(profile_id, slug) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1303	                CREATE TABLE mako_controllers (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1315	                CREATE INDEX idx_mako_controllers_user ON mako_controllers(user_id);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1316	                CREATE INDEX idx_mako_controllers_status ON mako_controllers(status);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1318	                CREATE TABLE mako_schedules (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1352	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1354	                CREATE INDEX idx_mako_schedules_due
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1355	                    ON mako_schedules(status, next_fire_at);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1356	                CREATE INDEX idx_mako_schedules_controller
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1357	                    ON mako_schedules(controller_id, status);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1359	                CREATE TABLE mako_schedule_occurrences (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1371	                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1374	                CREATE TABLE mako_runs (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1405	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1407	                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE SET NULL,
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1408	                    FOREIGN KEY (occurrence_id) REFERENCES mako_schedule_occurrences(id) ON DELETE SET NULL
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1410	                CREATE INDEX idx_mako_runs_claim
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1411	                    ON mako_runs(status, available_at, priority DESC, created_at);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1412	                CREATE INDEX idx_mako_runs_controller_status
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1413	                    ON mako_runs(controller_id, status);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1414	                CREATE INDEX idx_mako_runs_concurrency
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1415	                    ON mako_runs(concurrency_key, status) WHERE concurrency_key IS NOT NULL;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1416	                CREATE INDEX idx_mako_runs_lease_expiry
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1417	                    ON mako_runs(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1418	                CREATE INDEX idx_mako_runs_session ON mako_runs(session_id);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1420	                CREATE TABLE mako_run_attempts (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1437	                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1439	                CREATE INDEX idx_mako_run_attempts_run
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1440	                    ON mako_run_attempts(run_id, attempt_no);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1442	                CREATE TABLE mako_daemon_leases (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1451	                CREATE TABLE mako_idempotency_keys (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1462	                CREATE INDEX idx_mako_idempotency_expiry ON mako_idempotency_keys(expires_at);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1464	                CREATE TABLE mako_controller_events (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1475	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1476	                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE SET NULL,
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1477	                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE SET NULL
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1479	                CREATE UNIQUE INDEX idx_mako_controller_events_dedupe
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1480	                    ON mako_controller_events(controller_id, dedupe_key)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1482	                CREATE INDEX idx_mako_controller_events_replay
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1483	                    ON mako_controller_events(controller_id, sequence);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1541	                CREATE TABLE mako_learning_runs (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1553	                CREATE TABLE mako_learning_candidates (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1576	                CREATE INDEX idx_mako_learning_candidates_owner_status
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1577	                    ON mako_learning_candidates(user_id, status, created_at DESC);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1578	                CREATE INDEX idx_mako_learning_candidates_project
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1579	                    ON mako_learning_candidates(project_dir, status);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1607	                        CHECK (namespace IN ('shared', 'mako', 'crew')),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1633	                    "ALTER TABLE agent_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'shared' CHECK (namespace IN ('shared', 'mako', 'crew'));",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1786	            if Self::table_exists(&tx, "mako_runs")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1787	                && Self::table_exists(&tx, "mako_controller_events")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1791	                CREATE TRIGGER mako_runs_transition_event
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1792	                AFTER UPDATE OF status ON mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1795	                    INSERT OR IGNORE INTO mako_controller_events (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1830	                    FROM mako_controller_events
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1846	            if Self::table_exists(&tx, "mako_controllers")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1848	                && Self::table_exists(&tx, "mako_runs")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1852	                ALTER TABLE mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1856	                CREATE TABLE mako_control_outbox (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1875	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1877	                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE CASCADE
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1879	                CREATE INDEX idx_mako_control_outbox_pending
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1880	                    ON mako_control_outbox(status, available_at, created_at);
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1896	            if Self::table_exists(&tx, "mako_runs")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1897	                && Self::table_exists(&tx, "mako_controller_events")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1901	                DROP TRIGGER IF EXISTS mako_runs_transition_event;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1902	                CREATE TRIGGER mako_runs_transition_event
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1903	                AFTER UPDATE OF status ON mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1906	                    INSERT OR IGNORE INTO mako_controller_events (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1912	                         FROM mako_controller_events
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1957	            if Self::table_exists(&tx, "mako_controller_events")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1958	                && Self::column_exists(&tx, "mako_controller_events", "payload_json")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	1962	                    UPDATE mako_controller_events
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2084	            if Self::table_exists(&tx, "mako_runs") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2085	                if Self::column_exists(&tx, "mako_runs", "last_error") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2087	                        "UPDATE mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2093	                if Self::column_exists(&tx, "mako_runs", "last_stop_reason") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2095	                        "UPDATE mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2109	                if Self::column_exists(&tx, "mako_runs", "outcome_json") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2112	                        UPDATE mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2130	            if Self::table_exists(&tx, "mako_run_attempts") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2131	                if Self::column_exists(&tx, "mako_run_attempts", "error") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2133	                        "UPDATE mako_run_attempts
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2139	                if Self::column_exists(&tx, "mako_run_attempts", "stop_reason") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2141	                        "UPDATE mako_run_attempts
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2156	            if Self::table_exists(&tx, "mako_runtime_state")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2157	                && Self::column_exists(&tx, "mako_runtime_state", "last_error")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2160	                    "UPDATE mako_runtime_state
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2166	            if Self::table_exists(&tx, "mako_control_outbox") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2167	                if Self::column_exists(&tx, "mako_control_outbox", "last_error") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2169	                        "UPDATE mako_control_outbox
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2175	                if Self::column_exists(&tx, "mako_control_outbox", "payload_json") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2178	                        UPDATE mako_control_outbox
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2203	            if Self::table_exists(&tx, "mako_runs")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2204	                && Self::table_exists(&tx, "mako_controller_events")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2208	                    DROP TRIGGER IF EXISTS mako_runs_transition_event;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2209	                    CREATE TRIGGER mako_runs_transition_event
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2210	                    AFTER UPDATE OF status ON mako_runs
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2213	                        INSERT OR IGNORE INTO mako_controller_events (
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2219	                             FROM mako_controller_events
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2330	            if Self::table_exists(&legacy_hive_model_tx, "mako_schedules") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2331	                if !Self::column_exists(&legacy_hive_model_tx, "mako_schedules", "model_key_json") {
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2333	                        .execute_batch("ALTER TABLE mako_schedules ADD COLUMN model_key_json TEXT;")
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2338	                    "mako_schedules",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2343	                            "ALTER TABLE mako_schedules ADD COLUMN model_catalog_revision TEXT;",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2646	                        bundle_id TEXT NOT NULL DEFAULT 'io.krusty.mobile',
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2886	                ("mako_attention_state", "hive_attention_state"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2887	                ("mako_control_outbox", "hive_control_outbox"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2888	                ("mako_controller_events", "hive_controller_events"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2889	                ("mako_controllers", "hive_controllers"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2890	                ("mako_crew_documents", "hive_crew_documents"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2891	                ("mako_crew_profiles", "hive_crew_profiles"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2892	                ("mako_daemon_leases", "hive_daemon_leases"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2893	                ("mako_idempotency_keys", "hive_idempotency_keys"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2894	                ("mako_learning_candidates", "hive_learning_candidates"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2895	                ("mako_learning_runs", "hive_learning_runs"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2896	                ("mako_profile_documents", "hive_profile_documents"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2897	                ("mako_profiles", "hive_profiles"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2898	                ("mako_run_attempts", "hive_run_attempts"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2899	                ("mako_runs", "hive_runs"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2900	                ("mako_runtime_state", "hive_runtime_state"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2901	                ("mako_schedule_occurrences", "hive_schedule_occurrences"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2902	                ("mako_schedules", "hive_schedules"),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2934	                                    WHEN 'mako' THEN 'hive'
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2958	                                    WHEN 'mako' THEN 'hive'
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2985	                    DROP TRIGGER IF EXISTS mako_runs_transition_event;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2986	                    DROP INDEX IF EXISTS idx_mako_runtime_state_status;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2987	                    DROP INDEX IF EXISTS idx_mako_runtime_state_next_wake;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2988	                    DROP INDEX IF EXISTS idx_mako_attention_state_user_scope;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2989	                    DROP INDEX IF EXISTS idx_mako_profiles_user;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2990	                    DROP INDEX IF EXISTS idx_mako_controllers_user;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2991	                    DROP INDEX IF EXISTS idx_mako_controllers_status;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2992	                    DROP INDEX IF EXISTS idx_mako_schedules_due;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2993	                    DROP INDEX IF EXISTS idx_mako_schedules_controller;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2994	                    DROP INDEX IF EXISTS idx_mako_runs_claim;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2995	                    DROP INDEX IF EXISTS idx_mako_runs_controller_status;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2996	                    DROP INDEX IF EXISTS idx_mako_runs_concurrency;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2997	                    DROP INDEX IF EXISTS idx_mako_runs_lease_expiry;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2998	                    DROP INDEX IF EXISTS idx_mako_runs_session;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	2999	                    DROP INDEX IF EXISTS idx_mako_run_attempts_run;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3000	                    DROP INDEX IF EXISTS idx_mako_idempotency_expiry;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3001	                    DROP INDEX IF EXISTS idx_mako_controller_events_dedupe;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3002	                    DROP INDEX IF EXISTS idx_mako_controller_events_replay;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3003	                    DROP INDEX IF EXISTS idx_mako_learning_candidates_owner_status;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3004	                    DROP INDEX IF EXISTS idx_mako_learning_candidates_project;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3005	                    DROP INDEX IF EXISTS idx_mako_control_outbox_pending;
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3145	                      WHERE key = 'theme' AND value = 'krusty'",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3266	                   AND (name LIKE 'mako_%' OR name LIKE 'idx_mako_%')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3277	                 WHERE lower(COALESCE(sql, '')) LIKE '%mako%'",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3288	                 WHERE lower(COALESCE(sql, '')) LIKE '%io.krusty.mobile%'",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3388	                 WHERE type = 'table' AND name LIKE 'mako_%'",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3461	                     VALUES (?1, 'Legacy Hive', 'now', 'now', 'mako')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3469	                "INSERT INTO mako_runtime_state (session_id, status)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3477	                "INSERT INTO mako_attention_state (user_scope, item_id)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3487	                 WHERE type = 'table' AND name LIKE 'mako_%'",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3567	                 VALUES ('session-1', 'Hive', 'now', 'now', 'mako')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3574	                "INSERT INTO mako_runtime_state (session_id, status)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3582	                "INSERT INTO mako_attention_state (user_scope, item_id)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3592	                 VALUES ('memory-1', 'project', 'Title', 'Body', 'mako')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3600	                 VALUES ('theme', 'krusty', 0)",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3608	                 VALUES ('device-1', 'user-1', 'device-token-1', 'io.krusty.mobile')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3620	                    'io.krusty.mobile', 'production', '{}', 1, 1, 'now', 'now'
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3682	                "io.krusty.mobile".to_string(),
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3683	                "io.krusty.mobile".to_string()
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3698	                 VALUES ('session-49', 'Hive', 'now', 'now', 'mako')",
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3705	                "INSERT INTO mako_runtime_state (session_id, status)
+content	crates/mitsuro-core/src/storage/database/migrations.rs	3715	                 VALUES ('memory-49', 'project', 'Title', 'Body', 'mako')",
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	431	                 '2026-07-17T00:00:00.000000Z', 'test:model', 'mako'
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	433	             INSERT INTO mako_controllers (
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	445	            "INSERT INTO mako_runs (
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	460	            "INSERT INTO mako_run_attempts (
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	492	                "INSERT INTO mako_controller_events (
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	504	            "INSERT INTO mako_runtime_state (
+content	crates/mitsuro-core/src/storage/database_tests/core.rs	515	            "INSERT INTO mako_control_outbox (
+content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	200	         CREATE TABLE mako_schedules (
+content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	204	         INSERT INTO mako_schedules (id, model) VALUES ('legacy', 'shared-model');",
+content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	216	               FROM mako_schedules WHERE id = 'legacy'",
+content	crates/mitsuro-core/src/storage/memories/model.rs	55	    #[serde(alias = "mako")]
+content	crates/mitsuro-core/src/storage/project_settings.rs	201	    #[serde(alias = "mako")]
+content	crates/mitsuro-core/src/storage/sessions/types.rs	51	    #[serde(alias = "mako")]
+content	crates/mitsuro-core/src/storage/sessions/types.rs	86	            serde_json::from_str::<SessionType>(r#""mako""#).unwrap(),
+content	crates/mitsuro-core/src/storage/sessions/types.rs	89	        assert_eq!(SessionType::from_str("mako").unwrap(), SessionType::Hive);
+content	crates/mitsuro-hive-protocol/src/auth.rs	22	const LEGACY_V1_HELLO_DOMAIN: &str = "mako-ipc-hello-v1";
+content	crates/mitsuro-hive-protocol/src/auth.rs	23	const LEGACY_V1_ACK_DOMAIN: &str = "mako-ipc-ack-v1";
+content	crates/mitsuro-hive-protocol/src/auth.rs	498	            b"mako-ipc-hello-v1\n1.2\nclient\nnonce\n7"
+content	crates/mitsuro-hive-protocol/src/auth.rs	509	            b"mako-ipc-ack-v1\n1.2\ninstance\ndaemon\nclient-nonce\nserver-nonce\n9"
+content	crates/mitsuro-hive/Cargo.toml	33	name = "krusty-mako"
+content	crates/mitsuro-hive/Cargo.toml	34	path = "src/bin/krusty-mako.rs"
+content	crates/mitsuro-hive/src/bin/krusty-mako.rs	6	    eprintln!("`krusty-mako` is deprecated; use `mitsuro-hive`");
+content	crates/mitsuro-hive/src/legacy_identity.rs	9	        format!("krusty:mako:controller:{session_id}").as_bytes(),
+content	crates/mitsuro-hive/src/legacy_identity.rs	17	        format!("krusty:mako:tool-approval:{controller_id}:{run_id}:{tool_call_id}").as_bytes(),
+content	crates/mitsuro-hive/src/legacy_identity.rs	31	            "krusty:mako:pending-message:{user_id}:{client_kind}:{session_id}:{idempotency_key}"
+content	crates/mitsuro-hive/src/legacy_identity.rs	41	        format!("mako:{kind}:{schedule_id}:{timestamp_micros}").as_bytes(),
+content	crates/mitsuro-server/src/apns.rs	1255	        assert_eq!(json["aps"]["category"], "MAKO_SESSION");
+content	crates/mitsuro-server/src/apns.rs	1256	        assert_eq!(json["type"], "mako_update");
+content	crates/mitsuro-server/src/apns.rs	1257	        assert_eq!(json["focus"], "mako");
+content	crates/mitsuro-server/src/apns.rs	1258	        assert_eq!(json["eventType"], "mako_update");
+content	crates/mitsuro-server/src/legacy_identity.rs	6	pub(crate) const HIVE_API_PREFIX: &str = "/mako";
+content	crates/mitsuro-server/src/legacy_identity.rs	7	pub(crate) const HIVE_SESSION_TYPE: &str = "mako";
+content	crates/mitsuro-server/src/legacy_identity.rs	8	pub(crate) const HIVE_PUSH_EVENT: &str = "mako_update";
+content	crates/mitsuro-server/src/legacy_identity.rs	9	pub(crate) const HIVE_NOTIFICATION_FOCUS: &str = "mako";
+content	crates/mitsuro-server/src/legacy_identity.rs	10	pub(crate) const HIVE_APNS_CATEGORY: &str = "MAKO_SESSION";
+content	crates/mitsuro-server/src/legacy_identity.rs	11	pub(crate) const APNS_BUNDLE_ID: &str = "io.krusty.mobile";
+content	crates/mitsuro-server/src/legacy_identity.rs	12	pub(crate) const OAUTH_RESULT_STORAGE_KEY: &str = "krusty:oauth-result";
+content	crates/mitsuro-server/src/legacy_identity.rs	13	pub(crate) const OAUTH_RESULT_CHANNEL: &str = "krusty:oauth";
+content	crates/mitsuro-server/src/legacy_identity.rs	14	pub(crate) const OAUTH_COMPLETE_EVENT_TYPE: &str = "krusty-oauth-complete";
+content	crates/mitsuro-server/src/legacy_identity.rs	20	/// Canonical `/hive` and deprecated `/mako` routes have their own fixed DTOs.
+content	crates/mitsuro-server/src/push.rs	895	        assert_eq!(delivery.category.as_deref(), Some("MAKO_SESSION"));
+content	crates/mitsuro-server/src/push.rs	898	            "mako_update"
+content	crates/mitsuro-server/src/push.rs	902	            "mako"
+content	crates/mitsuro-server/src/routes/hive/tests.rs	176	    assert_eq!(legacy.session_type, "mako");
+content	crates/mitsuro-server/src/routes/sessions/tests.rs	781	        (None, "mako"),
+content	crates/mitsuro-server/src/routes/sessions/tests.rs	782	        (Some("0"), "mako"),
+content	crates/mitsuro-server/src/routes/sessions/tests.rs	783	        (Some("1"), "mako"),
+content	crates/mitsuro-server/src/routes/sessions/tests.rs	784	        (Some("malformed"), "mako"),
+content	crates/mitsuro-server/src/routes/sessions/tests.rs	785	        (Some("2.0"), "mako"),
+content	crates/mitsuro-server/src/types/sessions.rs	98	        assert_eq!(serde_json::to_value(legacy).expect("legacy wire"), "mako");
+content	docs/interfaces/hive.md	53	The deprecated `krusty hive` spelling remains a tested alias for existing
+content	docs/interfaces/server-api.md	115	`/api/hive` is the canonical autonomous API namespace. `/api/mako` remains the
+content	docs/operations/build-and-deploy.md	93	`krusty-x86_64-pc-windows-msvc.zip` with an independently named checksum
+content	docs/operations/build-and-deploy.md	96	contains only `mitsuro.exe`; the old archive contains only `krusty.exe`, whose
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	9	**Runtime authority at plan time:** `krusty serve` PID 216212, binary
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	10	`~/.local/bin/.krusty-releases/death-loop-remediation-20260731-074236/krusty`
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	11	(v0.9.20, matches `target/release/krusty`)
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	12	**Source audit:** live sessions in `~/.krusty/krusty.db` + Codex/Grok reference trees
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	124	- Renaming CLI/`krusty` identifiers.
+content	docs/plans/2026-07-31-agent-orchestration-completion.md	221	| W5.2 | Release build + install to `krusty-serve` release path (same pattern as death-loop-remediation) |
+content	docs/plans/2026-07-31-death-loop-remediation.md	33	- Unit/integration tests green for krusty-core progress/shell/process.
+content	docs/plans/2026-07-31-death-loop-remediation.md	42	5. Server binary updated and `krusty-serve` healthy.
+content	install.sh	20	LEGACY_BINARY="krusty"
+content	install.sh	21	LEGACY_DAEMON_BINARY="krusty-mako"
+content	install.sh	24	LEGACY_CONFIG_BASENAME=".krusty"
+content	install.sh	25	LEGACY_DATABASE_BASENAME="krusty.db"
+content	install.sh	26	LEGACY_HIVE_DIR_BASENAME="mako"
+content	install.sh	27	LEGACY_HIVE_KEY_BASENAME="mako-ipc.key"
+content	install.sh	28	LEGACY_RUNTIME_BASENAME="krusty"
+content	install.sh	29	LEGACY_SOCKET_BASENAME="mako.sock"
+content	install.sh	30	LEGACY_CURRENT_BASENAME=".krusty-current"
+content	install.sh	31	LEGACY_RELEASES_BASENAME=".krusty-releases"
+content	install.sh	32	LEGACY_MARKER_BASENAME=".krusty-systemd-managed"
+content	install.sh	33	LEGACY_HIVE_SOCKET_UNIT="krusty-mako.socket"
+content	install.sh	34	LEGACY_HIVE_SERVICE_UNIT="krusty-mako.service"
+content	install.sh	35	LEGACY_SERVE_UNIT="krusty-serve.service"
+content	install.sh	973	        krusty-desktop|krusty-desktop.exe|Krusty|Krusty.exe)
+content	packages/api/src/client.ts	364					`${this.baseUrl}/api/mako/capabilities`,
+content	packages/api/src/client.ts	381					`${this.baseUrl}/api/mako/sessions`,
+content	packages/api/src/compatibility.ts	9	export { MitsuroApiError as KrustyApiError } from './client';
+content	packages/api/src/compatibility.ts	12		MitsuroClientConfig as KrustyClientConfig,
+content	packages/api/src/compatibility.ts	13		MitsuroRequestDiagnostic as KrustyRequestDiagnostic,
+content	packages/api/src/compatibility.ts	14		MitsuroRequestDiagnosticOutcome as KrustyRequestDiagnosticOutcome,
+content	packages/api/src/compatibility.ts	19		HiveAttentionItem as MakoAttentionItem,
+content	packages/api/src/compatibility.ts	20		HiveAttentionItemKind as MakoAttentionItemKind,
+content	packages/api/src/compatibility.ts	21		HiveAttentionResponse as MakoAttentionResponse,
+content	packages/api/src/compatibility.ts	22		HiveAttentionSection as MakoAttentionSection,
+content	packages/api/src/compatibility.ts	23		HiveBootstrapResponse as MakoBootstrapResponse,
+content	packages/api/src/compatibility.ts	24		HiveCadenceSummary as MakoCadenceSummary,
+content	packages/api/src/compatibility.ts	25		HiveChannelItem as MakoChannelItem,
+content	packages/api/src/compatibility.ts	26		HiveChannelKind as MakoChannelKind,
+content	packages/api/src/compatibility.ts	27		HiveChannelStatus as MakoChannelStatus,
+content	packages/api/src/compatibility.ts	28		HiveChannelsResponse as MakoChannelsResponse,
+content	packages/api/src/compatibility.ts	29		HiveCrewDocumentKind as MakoCrewDocumentKind,
+content	packages/api/src/compatibility.ts	30		HiveCrewMember as MakoCrewMember,
+content	packages/api/src/compatibility.ts	31		HiveCrewResponse as MakoCrewResponse,
+content	packages/api/src/compatibility.ts	32		HiveCrewRuntimeMember as MakoCrewRuntimeMember,
+content	packages/api/src/compatibility.ts	33		HiveCrewRuntimeStatus as MakoCrewRuntimeStatus,
+content	packages/api/src/compatibility.ts	34		HiveCurrentResponse as MakoCurrentResponse,
+content	packages/api/src/compatibility.ts	35		HiveCurrentRunSummary as MakoCurrentRunSummary,
+content	packages/api/src/compatibility.ts	36		HiveDaemonSummary as MakoDaemonSummary,
+content	packages/api/src/compatibility.ts	37		HiveDiagnosticSeverity as MakoDiagnosticSeverity,
+content	packages/api/src/compatibility.ts	38		HiveDiagnosticsSummary as MakoDiagnosticsSummary,
+content	packages/api/src/compatibility.ts	39		HiveDispatchOptions as MakoDispatchOptions,
+content	packages/api/src/compatibility.ts	40		HiveDispatchResponse as MakoDispatchResponse,
+content	packages/api/src/compatibility.ts	41		HiveDstPolicy as MakoDstPolicy,
+content	packages/api/src/compatibility.ts	42		HiveGlobalSchedule as MakoGlobalSchedule,
+content	packages/api/src/compatibility.ts	43		HiveHealthState as MakoHealthState,
+content	packages/api/src/compatibility.ts	44		HiveHomeDocument as MakoHomeDocument,
+content	packages/api/src/compatibility.ts	45		HiveHomeDocumentKind as MakoHomeDocumentKind,
+content	packages/api/src/compatibility.ts	46		HiveHomeResponse as MakoHomeResponse,
+content	packages/api/src/compatibility.ts	47		HiveHomeStatus as MakoHomeStatus,
+content	packages/api/src/compatibility.ts	48		HiveKnowledgeHealthSummary as MakoKnowledgeHealthSummary,
+content	packages/api/src/compatibility.ts	49		HiveMainResponse as MakoMainResponse,
+content	packages/api/src/compatibility.ts	50		HiveMisfireConfig as MakoMisfireConfig,
+content	packages/api/src/compatibility.ts	51		HiveMonthlyDayPolicy as MakoMonthlyDayPolicy,
+content	packages/api/src/compatibility.ts	52		HivePendingApproval as MakoPendingApproval,
+content	packages/api/src/compatibility.ts	53		HiveQueuePressure as MakoQueuePressure,
+content	packages/api/src/compatibility.ts	54		HiveRecoverDaemonResponse as MakoRecoverDaemonResponse,
+content	packages/api/src/compatibility.ts	55		HiveRecurrenceV1 as MakoRecurrenceV1,
+content	packages/api/src/compatibility.ts	56		HiveRetryPolicy as MakoRetryPolicy,
+content	packages/api/src/compatibility.ts	57		HiveRunDiagnostic as MakoRunDiagnostic,
+content	packages/api/src/compatibility.ts	58		HiveRunDiagnosticKind as MakoRunDiagnosticKind,
+content	packages/api/src/compatibility.ts	59		HiveRunPriority as MakoRunPriority,
+content	packages/api/src/compatibility.ts	60		HiveRunWakeEvent as MakoRunWakeEvent,
+content	packages/api/src/compatibility.ts	61		HiveRuntimeState as MakoRuntimeState,
+content	packages/api/src/compatibility.ts	62		HiveRuntimeStatus as MakoRuntimeStatus,
+content	packages/api/src/compatibility.ts	63		HiveSchedule as MakoSchedule,
+content	packages/api/src/compatibility.ts	64		HiveScheduleMutationResponse as MakoScheduleMutationResponse,
+content	packages/api/src/compatibility.ts	65		HiveScheduleOverlapPolicy as MakoScheduleOverlapPolicy,
+content	packages/api/src/compatibility.ts	66		HiveScheduleStatus as MakoScheduleStatus,
+content	packages/api/src/compatibility.ts	67		HiveScheduleWeekday as MakoScheduleWeekday,
+content	packages/api/src/compatibility.ts	68		HiveScheduleWriteRequest as MakoScheduleWriteRequest,
+content	packages/api/src/compatibility.ts	69		HiveSessionStatus as MakoSessionStatus,
+content	packages/api/src/compatibility.ts	70		HiveSessionSummary as MakoSessionSummary,
+content	packages/api/src/compatibility.ts	71		HiveStatusSummary as MakoStatusSummary,
+content	packages/api/src/compatibility.ts	75		dispatchMako: 'dispatchHive',
+content	packages/api/src/compatibility.ts	76		getMakoMain: 'getHiveMain',
+content	packages/api/src/compatibility.ts	77		ensureMakoMain: 'ensureHiveMain',
+content	packages/api/src/compatibility.ts	78		listMakoSchedules: 'listHiveSchedules',
+content	packages/api/src/compatibility.ts	79		listMakoSessionSchedules: 'listHiveSessionSchedules',
+content	packages/api/src/compatibility.ts	80		createMakoSchedule: 'createHiveSchedule',
+content	packages/api/src/compatibility.ts	81		pauseMakoSchedule: 'pauseHiveSchedule',
+content	packages/api/src/compatibility.ts	82		resumeMakoSchedule: 'resumeHiveSchedule',
+content	packages/api/src/compatibility.ts	83		getMakoCurrent: 'getHiveCurrent',
+content	packages/api/src/compatibility.ts	84		getMakoAttention: 'getHiveAttention',
+content	packages/api/src/compatibility.ts	85		setMakoAttentionRead: 'setHiveAttentionRead',
+content	packages/api/src/compatibility.ts	86		setMakoAttentionCleared: 'setHiveAttentionCleared',
+content	packages/api/src/compatibility.ts	87		getMakoHome: 'getHiveHome',
+content	packages/api/src/compatibility.ts	88		bootstrapMakoHome: 'bootstrapHiveHome',
+content	packages/api/src/compatibility.ts	89		updateMakoHomeDocument: 'updateHiveHomeDocument',
+content	packages/api/src/compatibility.ts	90		updateMakoCrewDocument: 'updateHiveCrewDocument',
+content	packages/api/src/compatibility.ts	91		getMakoCrew: 'getHiveCrew',
+content	packages/api/src/compatibility.ts	92		getMakoChannels: 'getHiveChannels',
+content	packages/api/src/compatibility.ts	93		recoverMakoDaemon: 'recoverHiveDaemon',
+content	packages/api/src/compatibility.ts	94		listMakoSessions: 'listHiveSessions',
+content	packages/api/src/compatibility.ts	95		getMakoSessionStatus: 'getHiveSessionStatus',
+content	packages/api/src/compatibility.ts	96		sendMakoMessage: 'sendHiveMessage',
+content	packages/api/src/compatibility.ts	97		scheduleMakoSession: 'scheduleHiveSession',
+content	packages/api/src/compatibility.ts	98		setMakoSessionPriority: 'setHiveSessionPriority',
+content	packages/api/src/compatibility.ts	99		setMakoSessionCrew: 'setHiveSessionCrew',
+content	packages/api/src/compatibility.ts	100		pauseMakoSession: 'pauseHiveSession',
+content	packages/api/src/compatibility.ts	101		resumeMakoSession: 'resumeHiveSession',
+content	packages/api/src/compatibility.ts	102		cancelMakoSession: 'cancelHiveSession',
+content	packages/api/src/compatibility.ts	103		observeMakoSession: 'observeHiveSession',
+content	packages/api/src/compatibility.ts	112	export interface KrustyClient extends LegacyHiveClientMethods {}
+content	packages/api/src/compatibility.ts	114	export class KrustyClient extends MitsuroClient {}
+content	packages/api/src/compatibility.ts	122		Object.defineProperty(KrustyClient.prototype, legacyMethod, {
+content	packages/api/src/legacy-wire.ts	2	const LEGACY_HIVE_ROUTE_PREFIX = '/mako';
+content	packages/api/src/legacy-wire.ts	30		return { ...value, session_type: 'mako' } as T;
+content	packages/api/src/legacy-wire.ts	36		return session.session_type === 'mako'
+content	packages/api/src/legacy-wire.ts	63	 * opaque. A user payload that happens to contain `session_type: "mako"` must
+content	packages/api/test/identity-compatibility.test.ts	4	import { KrustyClient } from "../src/compatibility.ts";
+content	packages/api/test/identity-compatibility.test.ts	25	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
+content	packages/api/test/identity-compatibility.test.ts	27	      return json([{ id: "old", session_type: "mako" }]);
+content	packages/api/test/identity-compatibility.test.ts	35	    calls[0] === "/api/hive/main" && calls[1] === "/api/mako/main",
+content	packages/api/test/identity-compatibility.test.ts	54	    if (path === "/api/mako/sessions") return json([]);
+content	packages/api/test/identity-compatibility.test.ts	55	    if (path === "/api/mako/dispatch" && method === "POST") {
+content	packages/api/test/identity-compatibility.test.ts	66	    mutations[0]?.path === "/api/mako/dispatch",
+content	packages/api/test/identity-compatibility.test.ts	81	    if (path === "/api/mako/sessions") return json([]);
+content	packages/api/test/identity-compatibility.test.ts	84	      assert(payload.session_type === "mako", "a proven old server must receive its stored enum");
+content	packages/api/test/identity-compatibility.test.ts	85	      return json({ id: "created", session_type: "mako" });
+content	packages/api/test/identity-compatibility.test.ts	98	      "/api/hive/capabilities,/api/mako/capabilities,/api/hive/sessions,/api/mako/sessions",
+content	packages/api/test/identity-compatibility.test.ts	113	    if (path === "/api/mako/sessions") return json([]);
+content	packages/api/test/identity-compatibility.test.ts	116	      assert(payload.session_type === "mako", "old chat transport must receive its session enum");
+content	packages/api/test/identity-compatibility.test.ts	154	        session: { id: "session-1", session_type: "mako" },
+content	packages/api/test/identity-compatibility.test.ts	161	                input: { session_type: "mako", note: "user-owned data" },
+content	packages/api/test/identity-compatibility.test.ts	178	    opaqueInput?.session_type === "mako",
+content	packages/api/test/identity-compatibility.test.ts	187	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
+content	packages/api/test/identity-compatibility.test.ts	190	  const client = new KrustyClient({ baseUrl: "https://example.test", fetchImpl });
+content	packages/api/test/identity-compatibility.test.ts	191	  assert((await client.getMakoMain()).session_id === "main", "old method should forward through the safe transport bridge");
+content	scripts/identity-env.sh	11	      KRUSTY_MAKO_*)
+content	scripts/identity-env.sh	12	        suffix=${legacy_name#KRUSTY_MAKO_}
+content	scripts/identity-env.sh	15	      KRUSTY_*)
+content	scripts/identity-env.sh	16	        suffix=${legacy_name#KRUSTY_}
+content	scripts/identity-env.sh	28	  done < <(compgen -A variable 'KRUSTY_')
+content	scripts/identity-env.sh	34	    KRUSTY_TEST_VALUE=previous
+content	scripts/identity-env.sh	40	    KRUSTY_TEST_VALUE=previous
+content	scripts/identity-env.sh	46	    KRUSTY_TEST_VALUE=previous
+content	scripts/identity-env.sh	52	    KRUSTY_MAKO_TEST_SOCKET=previous-hive

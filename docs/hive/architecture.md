@@ -17,17 +17,17 @@ The HTTP server is a control-plane client, not a second Hive runtime.
 CLI / mobile / web
         |
         v
-krusty-server (authentication, HTTP, SSE)
+mitsuro-server (authentication, HTTP, SSE)
         |
         | authenticated, versioned Unix-socket protocol
         v
-krusty-mako (ownership checks, scheduler, recovery, event log)
+mitsuro-hive (ownership checks, scheduler, recovery, event log)
         |
         v
 execution host (currently daemon-owned; child-worker boundary is evolvable)
         |
         v
-krusty-core (orchestrator, tools, storage, providers)
+mitsuro-core (orchestrator, tools, storage, providers)
 ```
 
 The daemon is the only production process allowed to claim scheduled work or

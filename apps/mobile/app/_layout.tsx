@@ -11,15 +11,17 @@ import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
 import { NotificationProvider } from '../hooks/useNotifications';
-import { configureKrustyPerformance } from '@krusty/state';
+import { configureMitsuroPerformance } from '@mitsuro/state';
 import { MobileDiagnosticsProvider } from '../diagnostics/MobileDiagnosticsProvider';
 import { installJsHotPathProbe } from '../diagnostics/jsHotPathProbe';
 
 const BOOT_BACKGROUND = '#0e0e11';
 
 installJsHotPathProbe();
-configureKrustyPerformance(
-  __DEV__ || process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
+configureMitsuroPerformance(
+  __DEV__ ||
+    process.env.EXPO_PUBLIC_MITSURO_PERFORMANCE === '1' ||
+    process.env.EXPO_PUBLIC_KRUSTY_PERFORMANCE === '1',
 );
 
 LogBox.ignoreLogs([
@@ -27,12 +29,12 @@ LogBox.ignoreLogs([
   'Invalid DOM property `transform-origin`. Did you mean `transformOrigin`?',
 ]);
 
-const globalWithKrustyLogFilter = globalThis as typeof globalThis & {
-  __krustySvgWarningFilterInstalled?: boolean;
+const globalWithMitsuroLogFilter = globalThis as typeof globalThis & {
+  __mitsuroSvgWarningFilterInstalled?: boolean;
 };
 
-if (!globalWithKrustyLogFilter.__krustySvgWarningFilterInstalled) {
-  globalWithKrustyLogFilter.__krustySvgWarningFilterInstalled = true;
+if (!globalWithMitsuroLogFilter.__mitsuroSvgWarningFilterInstalled) {
+  globalWithMitsuroLogFilter.__mitsuroSvgWarningFilterInstalled = true;
   const originalConsoleError = console.error.bind(console);
   console.error = (...args: unknown[]) => {
     const message = args.map(String).join(' ');

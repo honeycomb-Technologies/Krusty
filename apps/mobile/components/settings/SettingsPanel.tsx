@@ -16,8 +16,9 @@ import type {
 	PreviewSettings,
 	PreviewSettingsPatch,
 	ProviderStatus,
-} from "@krusty/api";
-import type { ColorScheme } from "@krusty/ui";
+	SkillInfo,
+} from "@mitsuro/api";
+import type { ColorScheme } from "@mitsuro/ui";
 
 import * as Haptics from "../../platform/haptics";
 import { openURL } from "../../platform/linking";
@@ -33,6 +34,7 @@ import {
 	PreviewSection,
 	ProvidersSection,
 	SettingsHeader,
+	SkillsSection,
 } from "./sections";
 import {
 	type ActiveOAuthFlow,
@@ -139,6 +141,10 @@ export function SettingsPanel({
 	const [activeOAuthFlow, setActiveOAuthFlow] =
 		useState<ActiveOAuthFlow | null>(null);
 	const [oauthCode, setOauthCode] = useState("");
+	const [skills, setSkills] = useState<SkillInfo[]>([]);
+	const [skillsLoading, setSkillsLoading] = useState(false);
+	const [skillsMessage, setSkillsMessage] = useState<string | null>(null);
+	const [skillPageStart, setSkillPageStart] = useState(0);
 
 	const [previewSettings, setPreviewSettings] =
 		useState<PreviewSettings | null>(null);
@@ -190,6 +196,24 @@ export function SettingsPanel({
 		}
 	}, [client]);
 
+	const loadSkills = useCallback(async () => {
+		if (!client) {
+			setSkills([]);
+			return;
+		}
+
+		setSkillsLoading(true);
+		try {
+			const nextSkills = await client.getSkills();
+			setSkills(nextSkills);
+			setSkillsMessage(null);
+		} catch (err) {
+			setSkillsMessage(toErrorMessage(err, "Failed to load skills."));
+		} finally {
+			setSkillsLoading(false);
+		}
+	}, [client]);
+
 	const loadPreview = useCallback(async () => {
 		if (!client) {
 			setPreviewSettings(null);
@@ -220,6 +244,7 @@ export function SettingsPanel({
 		if (!client || !isConnected) return;
 		await Promise.all([
 			loadProviders(),
+			loadSkills(),
 			loadPreview(),
 		]);
 	}, [
@@ -227,6 +252,7 @@ export function SettingsPanel({
 		isConnected,
 		loadPreview,
 		loadProviders,
+		loadSkills,
 	]);
 
 	useEffect(() => {
@@ -574,6 +600,22 @@ export function SettingsPanel({
 					onExchangeOAuthCode={() => void handleExchangeOAuthCode()}
 					onRevokeOAuth={(providerId) => void handleRevokeOAuth(providerId)}
 					onOauthCodeChange={setOauthCode}
+				/>
+			</SettingsDisclosure>
+
+			<SettingsDisclosure
+				title="Skills"
+				summary={skillsLoading ? "Loading…" : `${skills.length} loaded`}
+				expanded={openSection === "skills"}
+				onPress={() => toggleDisclosure("skills")}
+			>
+				<SkillsSection
+					isConnected={isConnected}
+					loading={skillsLoading}
+					skills={skills}
+					message={skillsMessage}
+					pageStart={skillPageStart}
+					onPageStartChange={setSkillPageStart}
 				/>
 			</SettingsDisclosure>
 

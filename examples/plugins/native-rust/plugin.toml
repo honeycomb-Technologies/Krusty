@@ -2,14 +2,14 @@ manifest_version = 1
 id = "native-rust-demo"
 name = "Native Rust Demo"
 version = "0.1.0"
-publisher = "krusty.examples"
+publisher = "mitsuro.examples"
 description = "Minimal hot-reloadable native Rust TUI plugin package."
 runtime = "native"
-entry_component = "dist/linux-x64/libkrusty_native_rust_demo.so"
+entry_component = "dist/linux-x64/libmitsuro_native_rust_demo.so"
 render_capabilities = ["text"]
 
 [requested_permissions]
 process = true
 
 [compat]
-krusty_min = "0.7.0"
+mitsuro_min = "0.7.0"

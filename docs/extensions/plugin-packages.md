@@ -8,15 +8,15 @@ A package declares plugin manifests in `package.json`:
 
 ```json
 {
-  "name": "@krusty/example-plugin",
+  "name": "@mitsuro/example-plugin",
   "version": "1.0.0",
-  "krusty": {
+  "mitsuro": {
     "plugins": ["./plugin.toml"]
   }
 }
 ```
 
-If `package.json` does not contain `krusty.plugins`, Mitsuro falls back to `./plugin.toml` when present.
+If `package.json` does not contain `mitsuro.plugins`, Mitsuro falls back to `./plugin.toml` when present.
 An explicit list may contain at most 256 unique, normalized manifest paths.
 Each manifest is limited to 1 MiB and all manifests in one package are limited
 to 8 MiB in aggregate, bounding both parser work and package fan-out.
@@ -47,7 +47,7 @@ network = true
 process = true
 
 [compat]
-krusty_min = "0.7.0"
+mitsuro_min = "0.7.0"
 ```
 
 `entry_component` is optional for bundle-only packages. Every component path is
@@ -162,7 +162,7 @@ publisher and original key material, or use
 `PluginManager::bind_existing_trusted_key_to_publisher` to explicitly bind an
 existing stored key.
 Publishers can generate the exact domain-separated bytes with the exported
-`krusty_core::plugins::plugin_release_signing_payload` helper; Mitsuro verifies
+`mitsuro_core::plugins::plugin_release_signing_payload` helper; Mitsuro verifies
 that envelope before it downloads the referenced artifact, then verifies the
 artifact digest before publication.
 
@@ -183,8 +183,8 @@ Local package directory:
 npm package:
 
 ```text
-/plugins install npm:@krusty/example-plugin
-/plugins install npm:@krusty/example-plugin@1.2.3
+/plugins install npm:@mitsuro/example-plugin
+/plugins install npm:@mitsuro/example-plugin@1.2.3
 ```
 
 Mitsuro never executes directly from a mutable source directory. It stages a
@@ -338,7 +338,7 @@ they use the governed persistent worker API described in
 
 ## Plugin directory / catalog
 
-The `/plugins` popup includes installed plugins plus an official, searchable catalog seeded from `docs/extensions/catalog.json`. The new `apps/website` Svelte/Bun site also publishes the same catalog at `/plugin-catalog.json` for the future `krusty.dev` relaunch. Press `/` in the popup to search; press `Enter` on an installed plugin to enable/disable it or on a catalog plugin to install its package reference.
+The `/plugins` popup includes installed plugins plus an official, searchable catalog seeded from `docs/extensions/catalog.json`. The new `apps/website` Svelte/Bun site also publishes the same catalog at `/plugin-catalog.json` for the future `mitsuro.dev` relaunch. Press `/` in the popup to search; press `Enter` on an installed plugin to enable/disable it or on a catalog plugin to install its package reference.
 
 Additional catalogs can be hosted as static JSON or TOML files locally or
 behind HTTPS. Plain HTTP and redirects that downgrade from HTTPS are rejected:
@@ -352,7 +352,7 @@ behind HTTPS. Plain HTTP and redirects that downgrade from HTTPS are rejected:
       "name": "Example",
       "version": "1.0.0",
       "publisher": "example.publisher",
-      "package": "npm:@krusty/example-plugin",
+      "package": "npm:@mitsuro/example-plugin",
       "runtime": "native",
       "description": "Example searchable plugin listing",
       "tags": ["example"],
@@ -374,7 +374,7 @@ flag on entries loaded from configured third-party catalogs.
 Register a catalog source with:
 
 ```text
-/plugins add-source https://example.com/krusty-plugin-catalog.json example
+/plugins add-source https://example.com/mitsuro-plugin-catalog.json example
 /plugins remove-source example
 /plugins catalog
 ```
@@ -387,13 +387,13 @@ Native plugins are dynamic libraries loaded through Mitsuro's C ABI. They are un
 
 Rules:
 
-- Export `krusty_plugin_entry`.
-- Return a `KrustyNativePluginV1` function table.
+- Export `mitsuro_plugin_entry`.
+- Return a `MitsuroNativePluginV1` function table.
 - Do not expose Rust trait objects across the dylib boundary.
 - Keep persistent application state in the Mitsuro host when hot reload must preserve it.
 - Treat plugin `Drop`/reload as shell lifecycle, not necessarily runtime shutdown.
 
-Native reload uses a shadow copy of the entry dylib in `.krusty-shadow/` under the package/install root. This lets a source dylib be rebuilt while the old loaded copy remains mapped by the OS.
+Native reload uses a shadow copy of the entry dylib in `.mitsuro-shadow/` under the package/install root. This lets a source dylib be rebuilt while the old loaded copy remains mapped by the OS.
 The TUI enumerates plugins from inert descriptors and instantiates only the
 selected component. When a native host is dropped, it releases the library
 handle and deletes its shadow copy.
@@ -409,12 +409,12 @@ packages should omit `entry_component` and contribute `agent_extensions`,
 
 ### js
 
-`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Mitsuro looks for libnode at `KRUSTY_LIBNODE` first, then `EDON_LIBNODE_PATH`.
+`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Mitsuro looks for libnode at `MITSURO_LIBNODE` first, then `EDON_LIBNODE_PATH`.
 
 JS/TS plugins register a small text-mode TUI object:
 
 ```ts
-(globalThis as any).krusty.registerPlugin({
+(globalThis as any).mitsuro.registerPlugin({
   tick() {},
   onActivate() {},
   onDeactivate() {},

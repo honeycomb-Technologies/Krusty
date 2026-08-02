@@ -1,0 +1,48 @@
+[Unit]
+Description=Mitsuro Hive autonomous backend service
+Requires=mitsuro-hive.socket
+After=network-online.target mitsuro-hive.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/.mitsuro-current/mitsuro-hive daemon --socket %t/mitsuro/hive.sock --key %h/.mitsuro/run/hive-ipc.key
+Environment=RUST_LOG=mitsuro_hive=info
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PATH is for Hive-launched coding tools; it never selects the service binary.
+# User services inherit the user manager's environment. Deployments should add
+# an UnsetEnvironment= drop-in for unrelated credentials and bootstrap tokens;
+# keep only provider/push variables intentionally trusted by Hive.
+Restart=always
+RestartSec=2s
+TimeoutStopSec=45s
+KillMode=mixed
+OOMPolicy=stop
+UMask=0077
+LimitNOFILE=65536
+TasksMax=512
+
+# Hive needs the project tree and its own state, but not arbitrary home writes.
+# It also validates and re-secures the systemd-owned private socket directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-%t/mitsuro -%h/.mitsuro -%h/Work -%h/.cargo -%h/.bun -%h/.cache -%h/.npm -%h/.local/share
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
+Also=mitsuro-hive.socket

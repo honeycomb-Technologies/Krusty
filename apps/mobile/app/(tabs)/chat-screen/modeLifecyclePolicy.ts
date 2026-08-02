@@ -1,4 +1,4 @@
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 export interface ModeLifecyclePolicy {
   keepPresence: boolean;

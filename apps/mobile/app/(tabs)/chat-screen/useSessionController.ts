@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { AppState } from "react-native";
 
-import type { ModelInfo, ModelKey, SessionResponse, SessionType } from "@krusty/api";
+import type { ModelInfo, ModelKey, SessionResponse, SessionType } from "@mitsuro/api";
 import {
   modelKeysEqual,
   resolveUsableModel,
-} from "@krusty/state";
+} from "@mitsuro/state";
 
 import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
 import * as SecureStore from "../../../platform/secure-store";
-import { normalizeProviderId, SELECTED_MODEL_KEY } from "./helpers";
+import { normalizeProviderId } from "./helpers";
+import {
+  deleteMigratedAsyncValue,
+  IDENTITY_STORAGE_KEYS,
+  readMigratedAsyncValue,
+  writeCanonicalAsyncValue,
+} from "../../../platform/identity-storage";
 import { resolveModeLifecyclePolicy } from "./modeLifecyclePolicy";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
@@ -70,17 +76,18 @@ export function useSessionController({
 
   const sessionsRefreshInFlightRef = useRef(false);
   const persistedResolvedModelRef = useRef<string | null | undefined>(undefined);
+  const persistedModelCandidateRef = useRef<string | null | undefined>(undefined);
   const attemptedWorkspaceSessionHydrationRef = useRef<
     Record<SessionType, string | null>
   >({
     chat: null,
     code: null,
-    mako: null,
+    hive: null,
   });
   const ownedLastSessionIdByTypeRef = useRef<Record<SessionType, string | null>>({
     chat: null,
     code: null,
-    mako: null,
+    hive: null,
   });
   const lastSessionIdByTypeRef =
     externalLastSessionIdByTypeRef ?? ownedLastSessionIdByTypeRef;
@@ -116,7 +123,14 @@ export function useSessionController({
   const ensureModelReady = useCallback(async (
     targetStore: SessionStoreApi = sessionStore,
   ) => {
-    const existingModel = targetStore.getState().model;
+    if (persistedModelCandidateRef.current === undefined) {
+      persistedModelCandidateRef.current = await readMigratedAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.selectedModel,
+      ).catch(() => null);
+    }
+    const existingModel =
+      targetStore.getState().model ?? persistedModelCandidateRef.current;
     let catalog = models;
     let fallbackDefault = defaultModelId;
     let fallbackDefaultKey = defaultModelKey;
@@ -154,8 +168,13 @@ export function useSessionController({
         state.setModel(selectedModel.id, nextProvider, selectedModel);
       }
       if (persistedResolvedModelRef.current !== selectedModel.id) {
-        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
+        await writeCanonicalAsyncValue(
+          SecureStore,
+          IDENTITY_STORAGE_KEYS.selectedModel,
+          selectedModel.id,
+        );
         persistedResolvedModelRef.current = selectedModel.id;
+        persistedModelCandidateRef.current = selectedModel.id;
       }
       return selectedModel.id;
     }
@@ -164,8 +183,12 @@ export function useSessionController({
       targetStore.getState().setModel(null);
     }
     if (persistedResolvedModelRef.current !== null) {
-      await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
+      await deleteMigratedAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.selectedModel,
+      ).catch(() => {});
       persistedResolvedModelRef.current = null;
+      persistedModelCandidateRef.current = null;
     }
     return null;
   }, [
@@ -203,7 +226,7 @@ export function useSessionController({
   // rapid mode switches do not emit a PUT/DELETE pair for every intermediate
   // surface.
   useEffect(() => {
-    for (const mode of ["chat", "code", "mako"] as const) {
+    for (const mode of ["chat", "code", "hive"] as const) {
       const state = modeStores[mode].session.getState();
       if (mode !== activeMode && !state.isStreaming) {
         if (state.isLoading && state.messages.length === 0) {
@@ -230,7 +253,7 @@ export function useSessionController({
     const reconcilePresence = () => {
       presenceTimer = null;
       if (disposed) return;
-      for (const mode of ["chat", "code", "mako"] as const) {
+      for (const mode of ["chat", "code", "hive"] as const) {
         const state = modeStores[mode].session.getState();
         const policy = resolveModeLifecyclePolicy(
           activeMode,
@@ -290,7 +313,7 @@ export function useSessionController({
       return;
     }
 
-    // Parallel chat/code/mako loads were a major source of resume thrash and
+    // Parallel chat/code/hive loads were a major source of resume thrash and
     // made mode switches feel crashy under load. Background modes warm on
     // first focus instead of all at once.
     const type = activeMode;
@@ -379,7 +402,7 @@ export function useSessionController({
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") {
-        for (const mode of ["chat", "code", "mako"] as const) {
+        for (const mode of ["chat", "code", "hive"] as const) {
           const state = modeStores[mode].session.getState();
           state.stopPresenceHeartbeat(state.sessionId);
         }

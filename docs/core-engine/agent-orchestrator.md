@@ -8,7 +8,7 @@ This document explains how it works from the inside out.
 
 Early in development, the TUI had its own agentic loop, the HTTP server had another, and the ACP server had a third. They duplicated logic for streaming, tool execution, error handling, and state persistence. When a bug was fixed in one, the others lagged behind. When a feature was added — say, failure detection — it had to be implemented three times.
 
-The orchestrator eliminated that. It lives in `crates/krusty-core/src/agent/orchestrator.rs` and owns the entire lifecycle of an AI turn: accepting a conversation, calling the provider, processing the stream, executing tools, detecting failures, and repeating until the AI finishes or a guard intervenes. The TUI, server, and ACP are now thin presentation layers that create an orchestrator, call `run()`, and react to its events.
+The orchestrator eliminated that. It lives in `crates/mitsuro-core/src/agent/orchestrator.rs` and owns the entire lifecycle of an AI turn: accepting a conversation, calling the provider, processing the stream, executing tools, detecting failures, and repeating until the AI finishes or a guard intervenes. The TUI, server, and ACP are now thin presentation layers that create an orchestrator, call `run()`, and react to its events.
 
 The architecture looks like this:
 
@@ -27,7 +27,7 @@ Product surfaces build a validated `RunSpec`, which owns the per-run configurati
 
 - `session_id` — which conversation this run belongs to
 - `working_dir` and `project_dir` — filesystem context for tool execution
-- `permission_mode` — whether tools run autonomously or require user approval (can be overridden by per-project `.krusty/settings.json`)
+- `permission_mode` — whether tools run autonomously or require user approval (can be overridden by per-project `.mitsuro/settings.json`)
 - `max_iterations` — optional turn budget (the hard ceiling on how many AI round-trips this run can make)
 - `stream_idle_timeout` — how long to wait for data on a stalled stream before giving up
 - `initial_work_mode` — whether the session starts in Build mode (read/write) or Plan mode (read-only)
@@ -60,14 +60,14 @@ Before each AI call, the orchestrator builds a context-injected copy of the conv
 - **Environment context** — platform, shell, date, current git branch, modification counts
 - **Persistent memory** — user preferences, feedback, project notes pulled from the database (capped at 8KB)
 - **Project instructions** — contents of `KRAB.md`, `CLAUDE.md`, `.cursorrules`, or similar instruction files found in the project hierarchy
-- **Project settings** — any `system_prompt_append` from `.krusty/settings.json`
+- **Project settings** — any `system_prompt_append` from `.mitsuro/settings.json`
 - **Plan context** — the active plan's task list, progress, and which tasks are ready vs. blocked
 - **Delegated run context** — recent sub-agent investigations, so the AI knows what's already been explored
 - **Autonomous task context** — pending and in-progress Hive tasks
 - **Report context** — recent reports available via `ReadReport`
 - **Skills context** — available skills and how to invoke them
 
-This injection happens every iteration, so the AI always sees current state. The context module lives in `crates/krusty-core/src/agent/context.rs`.
+This injection happens every iteration, so the AI always sees current state. The context module lives in `crates/mitsuro-core/src/agent/context.rs`.
 
 ### 3. Context compaction check
 
@@ -87,7 +87,7 @@ keeps the session ID, durable history, and client thread intact.
 
 ### 4. Stream the AI response
 
-The orchestrator calls `ai_client.call_streaming()` with the context-injected conversation and receives a stream of `StreamPart` events. The stream processor in `crates/krusty-core/src/agent/stream.rs` accumulates text, thinking blocks, and tool calls while forwarding deltas to the event channel as `TextDelta`, `ThinkingDelta`, `ToolCallStart`, and `ToolCallComplete` events.
+The orchestrator calls `ai_client.call_streaming()` with the context-injected conversation and receives a stream of `StreamPart` events. The stream processor in `crates/mitsuro-core/src/agent/stream.rs` accumulates text, thinking blocks, and tool calls while forwarding deltas to the event channel as `TextDelta`, `ThinkingDelta`, `ToolCallStart`, and `ToolCallComplete` events.
 
 During streaming, the orchestrator periodically checkpoints the partial assistant state to the database. If the process crashes mid-stream, the session recovery system can detect an interrupted turn and present options to the user.
 
@@ -113,7 +113,7 @@ Before executing tools, the orchestrator checks for repeated read-only explorati
 
 ### 9. Execute tools
 
-Tool calls go through `crates/krusty-core/src/agent/executor/mod.rs`. For each tool call in the batch:
+Tool calls go through `crates/mitsuro-core/src/agent/executor/mod.rs`. For each tool call in the batch:
 
 1. **Advertised capability check** — the call name must exist in the exact function-tool set frozen from the canonical provider request. An unadvertised or hallucinated call returns a structured `tool_not_advertised` result before extensions, approvals, recovery interaction persistence, or registry execution.
 2. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately.
@@ -146,11 +146,11 @@ Tool results are saved as a user message (since tool results go in the user role
 
 Every pass through the main loop is a "turn" — one AI call and its resulting tool executions. The iteration counter increments at the top of each loop pass. The turn budget (`max_iterations`) provides a hard ceiling.
 
-`AgentState` in `crates/krusty-core/src/agent/state.rs` tracks turn count, timing, and interruption status. Interactive, ACP, and delegated runs are unlimited by default. `AgentConfig` can provide separate explicit `primary_max_turns`, `subagent_max_turns`, and `acp_max_turns` resource ceilings; the legacy `max_turns` field remains a lower-precedence migration fallback. Semantic repetition is handled by the progress ledger rather than a hidden turn count.
+`AgentState` in `crates/mitsuro-core/src/agent/state.rs` tracks turn count, timing, and interruption status. Interactive, ACP, and delegated runs are unlimited by default. `AgentConfig` can provide separate explicit `primary_max_turns`, `subagent_max_turns`, and `acp_max_turns` resource ceilings; the legacy `max_turns` field remains a lower-precedence migration fallback. Semantic repetition is handled by the progress ledger rather than a hidden turn count.
 
 ## The Hook System
 
-Hooks intercept tool calls before and after execution. They're defined by the `PreToolHook` and `PostToolHook` traits in `crates/krusty-core/src/agent/hooks/mod.rs`.
+Hooks intercept tool calls before and after execution. They're defined by the `PreToolHook` and `PostToolHook` traits in `crates/mitsuro-core/src/agent/hooks/mod.rs`.
 
 ### Built-in Hooks
 
@@ -173,7 +173,7 @@ The hook is regex-based with proper shell quoting awareness, so `rm '-rf' /` is 
 
 ### User-Configurable Hooks
 
-Users can define their own hooks in `crates/krusty-core/src/agent/user_hooks/mod.rs`. Each hook is a shell command with a regex pattern that matches tool names. The hook receives JSON on stdin containing the tool name, arguments, hook ID, and hook type.
+Users can define their own hooks in `crates/mitsuro-core/src/agent/user_hooks/mod.rs`. Each hook is a shell command with a regex pattern that matches tool names. The hook receives JSON on stdin containing the tool name, arguments, hook ID, and hook type.
 
 The exit code protocol:
 - `0` — continue (stdout/stderr not shown)
@@ -186,7 +186,7 @@ The `UserPreToolHook` and `UserPostToolHook` wrappers adapt user hooks into the 
 
 ## Context Ledger
 
-The `ContextLedger` in `crates/krusty-core/src/agent/context_ledger.rs` tracks the high-level state of the conversation for compaction and recovery decisions. It counts canonical messages, summarized messages, dropped messages, pinned messages (like project instructions), and replayed messages. It also extracts the latest user objective — the most recent user message that contains actual text (not just tool results).
+The `ContextLedger` in `crates/mitsuro-core/src/agent/context_ledger.rs` tracks the high-level state of the conversation for compaction and recovery decisions. It counts canonical messages, summarized messages, dropped messages, pinned messages (like project instructions), and replayed messages. It also extracts the latest user objective — the most recent user message that contains actual text (not just tool results).
 
 The ledger records:
 
@@ -199,7 +199,7 @@ When a session approaches its useful context limit, the compaction pipeline
 summarizes older history and continues in the same session. Manual `/pinch`,
 automatic pressure handling, and provider-overflow recovery use this shared
 in-place path. The summarizer in
-`crates/krusty-core/src/agent/summarizer.rs` produces four fields:
+`crates/mitsuro-core/src/agent/summarizer.rs` produces four fields:
 
 - `work_summary` — 2-3 paragraphs of what was accomplished
 - `key_decisions` — architectural choices and trade-offs
@@ -223,7 +223,7 @@ The recovery state includes the context ledger snapshot, the stop reason (if any
 
 ## The LoopEvent / LoopInput Protocol
 
-`LoopEvent` (in `crates/krusty-core/src/agent/loop_events.rs`) is a tagged enum with roughly 30 variants covering every observable state change:
+`LoopEvent` (in `crates/mitsuro-core/src/agent/loop_events.rs`) is a tagged enum with roughly 30 variants covering every observable state change:
 
 **Streaming events** — `TextDelta`, `TextDeltaWithCitations`, `ThinkingDelta`, `ThinkingComplete`
 
@@ -253,11 +253,11 @@ This protocol is the complete contract between the orchestrator and any consumer
 
 ## Cancellation
 
-`AgentCancellation` in `crates/krusty-core/src/agent/cancellation.rs` wraps a `tokio_util::CancellationToken`. It provides `cancel()` to signal all tasks, `child_token()` to create scoped sub-tokens for individual operations, and `reset()` to create a fresh token for the next request. This is how the user's Ctrl+C propagates through nested async operations — the cancellation token flows from the session down through the orchestrator, into tool execution, and through sub-agent spawning.
+`AgentCancellation` in `crates/mitsuro-core/src/agent/cancellation.rs` wraps a `tokio_util::CancellationToken`. It provides `cancel()` to signal all tasks, `child_token()` to create scoped sub-tokens for individual operations, and `reset()` to create a fresh token for the next request. This is how the user's Ctrl+C propagates through nested async operations — the cancellation token flows from the session down through the orchestrator, into tool execution, and through sub-agent spawning.
 
 ## Plan Mode Integration
 
-The orchestrator has deep integration with plan mode through `crates/krusty-core/src/agent/plan_handler.rs`. When the AI calls `set_work_mode` or `enter_plan_mode`, the orchestrator intercepts the call before it reaches the tool registry, updates the session's work mode in the database, and emits a `ModeChange` event.
+The orchestrator has deep integration with plan mode through `crates/mitsuro-core/src/agent/plan_handler.rs`. When the AI calls `set_work_mode` or `enter_plan_mode`, the orchestrator intercepts the call before it reaches the tool registry, updates the session's work mode in the database, and emits a `ModeChange` event.
 
 In plan mode, the AI can read files and explore the codebase but cannot write. The `PlanModeHook` enforces this by blocking write-category tools and modifying bash commands. When the AI produces a response that contains a structured plan (detected by `try_detect_plan()`), the orchestrator parses it, saves it to the database, and emits `PlanUpdate` and `PlanComplete` events. The consumer then presents the plan to the user for confirmation before switching to build mode.
 
@@ -267,19 +267,19 @@ During build mode with an active plan, the AI uses `task_start` and `task_comple
 
 | File | Purpose |
 |------|---------|
-| `crates/krusty-core/src/agent/orchestrator.rs` | The orchestrator itself — config, services, and the main loop |
-| `crates/krusty-core/src/agent/mod.rs` | Module index and public re-exports |
-| `crates/krusty-core/src/agent/executor/mod.rs` | Tool execution engine with approval workflow and retry policy |
-| `crates/krusty-core/src/agent/state.rs` | Turn counting, timing, and per-session configuration |
-| `crates/krusty-core/src/agent/hooks/mod.rs` | SafetyHook, PlanModeHook, LoggingHook, and the hook traits |
-| `crates/krusty-core/src/agent/user_hooks/mod.rs` | User-configurable hooks with shell command execution |
-| `crates/krusty-core/src/agent/failure.rs` | Repeated failure detection and exploration loop guards |
-| `crates/krusty-core/src/agent/context.rs` | Context injection — system prompt assembly from all sources |
-| `crates/krusty-core/src/agent/context_ledger.rs` | Context tracking for compaction and continuation decisions |
-| `crates/krusty-core/src/agent/compaction/mod.rs` | Live conversation compaction (same-session context trimming) |
-| `crates/krusty-core/src/agent/summarizer.rs` | AI-powered conversation summarization for session handoff |
-| `crates/krusty-core/src/agent/cancellation.rs` | Cancellation token wrapper for async task interruption |
-| `crates/krusty-core/src/agent/plan_handler.rs` | Plan and mode switch tool handlers |
-| `crates/krusty-core/src/agent/loop_events.rs` | LoopEvent and LoopInput type definitions |
-| `crates/krusty-core/src/agent/stream.rs` | Stream processing — accumulates AI response chunks |
-| `crates/krusty-core/src/agent/tool_control.rs` | Approval, retry, and result-shaping policy |
+| `crates/mitsuro-core/src/agent/orchestrator.rs` | The orchestrator itself — config, services, and the main loop |
+| `crates/mitsuro-core/src/agent/mod.rs` | Module index and public re-exports |
+| `crates/mitsuro-core/src/agent/executor/mod.rs` | Tool execution engine with approval workflow and retry policy |
+| `crates/mitsuro-core/src/agent/state.rs` | Turn counting, timing, and per-session configuration |
+| `crates/mitsuro-core/src/agent/hooks/mod.rs` | SafetyHook, PlanModeHook, LoggingHook, and the hook traits |
+| `crates/mitsuro-core/src/agent/user_hooks/mod.rs` | User-configurable hooks with shell command execution |
+| `crates/mitsuro-core/src/agent/failure.rs` | Repeated failure detection and exploration loop guards |
+| `crates/mitsuro-core/src/agent/context.rs` | Context injection — system prompt assembly from all sources |
+| `crates/mitsuro-core/src/agent/context_ledger.rs` | Context tracking for compaction and continuation decisions |
+| `crates/mitsuro-core/src/agent/compaction/mod.rs` | Live conversation compaction (same-session context trimming) |
+| `crates/mitsuro-core/src/agent/summarizer.rs` | AI-powered conversation summarization for session handoff |
+| `crates/mitsuro-core/src/agent/cancellation.rs` | Cancellation token wrapper for async task interruption |
+| `crates/mitsuro-core/src/agent/plan_handler.rs` | Plan and mode switch tool handlers |
+| `crates/mitsuro-core/src/agent/loop_events.rs` | LoopEvent and LoopInput type definitions |
+| `crates/mitsuro-core/src/agent/stream.rs` | Stream processing — accumulates AI response chunks |
+| `crates/mitsuro-core/src/agent/tool_control.rs` | Approval, retry, and result-shaping policy |

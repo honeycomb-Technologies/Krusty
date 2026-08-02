@@ -34,7 +34,7 @@ npx expo export --platform web
 Run the local server from the repository root:
 
 ```bash
-cargo run -p krusty
+cargo run -p mitsuro
 ```
 
 Run the Expo client in another terminal:
@@ -55,9 +55,9 @@ A good pull request:
 - preserves compatibility unless a migration is part of the change;
 - avoids unrelated formatting or cleanup.
 
-Some internal commands, package names, routes, and storage paths still use the
-legacy `krusty` or `mako` names. Do not rename those contracts casually. New
-user-facing copy should use Mitsuro, Agent, and Hive.
+Use Mitsuro for the harness and Hive for durable autonomous work in code,
+documentation, tests, packages, routes, storage, and release artifacts. Keep
+any prior-identity reader isolated to a tested compatibility boundary.
 
 ## Reporting bugs
 

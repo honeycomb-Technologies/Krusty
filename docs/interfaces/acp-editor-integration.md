@@ -10,14 +10,14 @@ The Agent Client Protocol is a standardized way for code editors to communicate 
 
 Think of it like LSP, but for AI agents instead of language servers. LSP standardized how editors talk to code intelligence tools. ACP standardizes how editors talk to AI coding assistants. Any editor that speaks ACP can work with any agent that implements it.
 
-Mitsuro implements the agent side. When you configure your editor to use Mitsuro, the editor spawns `krusty acp` as a subprocess. From that point on, the two communicate over stdin/stdout using JSON-RPC 2.0 messages.
+Mitsuro implements the agent side. When you configure your editor to use Mitsuro, the editor spawns `mitsuro acp` as a subprocess. From that point on, the two communicate over stdin/stdout using JSON-RPC 2.0 messages.
 
 ## How the Connection Works
 
 The transport layer is deliberately simple. The editor spawns Mitsuro as a child process:
 
 ```
-krusty acp
+mitsuro acp
 ```
 
 Once running, Mitsuro takes over stdin and stdout for ACP communication. All diagnostic output goes to stderr so it doesn't interfere with the protocol messages. The editor writes JSON-RPC requests to Mitsuro's stdin. Mitsuro writes JSON-RPC responses and notifications to stdout. No TCP sockets, no HTTP, no WebSockets -- just piped stdio.
@@ -26,17 +26,17 @@ When the ACP server starts, it goes through a short initialization sequence:
 
 1. **Tool registration.** Mitsuro registers its ACP-compatible tool set. This is a subset of the full tool catalog: path-scoped file operations, search, read-only web access, patching, and bounded deferred-tool discovery. Arbitrary host command execution and long-lived process management are excluded because an editor approval prompt is not an OS sandbox.
 
-2. **Credential detection.** The server looks for API credentials in three places, checked in order: explicit environment variables (`KRUSTY_PROVIDER` + `KRUSTY_API_KEY`), provider-specific environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.), and finally Mitsuro's stored credential file at `~/.krusty/tokens/credentials.json`. The first match wins.
+2. **Credential detection.** The server looks for API credentials in three places, checked in order: explicit environment variables (`MITSURO_PROVIDER` + `MITSURO_API_KEY`), provider-specific environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.), and finally Mitsuro's stored credential file at `~/.mitsuro/tokens/credentials.json`. The first match wins.
 
 3. **Waiting for the handshake.** The server creates a notification channel and waits for the editor to send the `initialize` request. This is where the two sides exchange capabilities and version information.
 
 The connection stays alive until the editor closes the subprocess or the stdin pipe is closed. On disconnect, Mitsuro cleans up all active sessions.
 
-## The KrustyAgent
+## The MitsuroAgent
 
-At the center of the ACP implementation is `KrustyAgent`. This is a Rust struct that implements the `Agent` trait from the `agent_client_protocol` crate, which defines all the methods an ACP agent must support.
+At the center of the ACP implementation is `MitsuroAgent`. This is a Rust struct that implements the `Agent` trait from the `agent_client_protocol` crate, which defines all the methods an ACP agent must support.
 
-When the editor sends a JSON-RPC request, the ACP connection dispatches it to the corresponding method on `KrustyAgent`. The main protocol methods are:
+When the editor sends a JSON-RPC request, the ACP connection dispatches it to the corresponding method on `MitsuroAgent`. The main protocol methods are:
 
 - **`initialize`** -- The editor introduces itself, sends its capabilities, and receives Mitsuro's capabilities in return. Mitsuro advertises that it supports embedded context (file content sent inline with prompts), session loading, and session modes.
 
@@ -113,7 +113,7 @@ The first detected model becomes the default. When the editor sends `set_session
 
 Mitsuro's ACP server works with any editor that implements the client side of the Agent Client Protocol. The currently supported editors are:
 
-- **Zed** -- Native ACP support. Zed spawns `krusty acp` and surfaces the agent in its assistant panel. File mentions using `@` syntax send embedded resource content blocks that Mitsuro converts to formatted code blocks for the AI.
+- **Zed** -- Native ACP support. Zed spawns `mitsuro acp` and surfaces the agent in its assistant panel. File mentions using `@` syntax send embedded resource content blocks that Mitsuro converts to formatted code blocks for the AI.
 - **Neovim** -- Through ACP client plugins. The agent appears as a chat interface within Neovim.
 - **JetBrains** -- IntelliJ, WebStorm, PyCharm, and the rest of the JetBrains family through their ACP integration.
 - **Marimo** -- The Python notebook editor, which uses ACP for its AI assistance features.
@@ -128,20 +128,20 @@ ACP mode is configured primarily through environment variables. The editor typic
 
 | Variable | Description |
 |----------|-------------|
-| `KRUSTY_PROVIDER` + `KRUSTY_API_KEY` | Explicit provider and key. Provider values: `anthropic`, `openai`, `openrouter`, `minimax`, `zai` |
+| `MITSURO_PROVIDER` + `MITSURO_API_KEY` | Explicit provider and key. Provider values: `anthropic`, `openai`, `openrouter`, `minimax`, `zai` |
 | `ANTHROPIC_API_KEY` | Direct Anthropic API key |
 | `OPENAI_API_KEY` | Direct OpenAI API key |
 | `OPENROUTER_API_KEY` | Direct OpenRouter API key |
 | `MINIMAX_API_KEY` | Direct MiniMax API key |
 | `ZAI_API_KEY` | Direct Z.ai API key |
 
-If no environment variables are set, Mitsuro falls back to its stored credentials at `~/.krusty/tokens/credentials.json`. If you have already authenticated through the TUI or web interface, ACP mode will pick up those credentials automatically.
+If no environment variables are set, Mitsuro falls back to its stored credentials at `~/.mitsuro/tokens/credentials.json`. If you have already authenticated through the TUI or web interface, ACP mode will pick up those credentials automatically.
 
 **Optional:**
 
 | Variable | Description |
 |----------|-------------|
-| `KRUSTY_MODEL` | Override the default model for the configured provider |
+| `MITSURO_MODEL` | Override the default model for the configured provider |
 
 ## How ACP Differs from the TUI and Server
 

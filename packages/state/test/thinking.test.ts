@@ -1,4 +1,4 @@
-import type { ModelInfo } from '@krusty/api';
+import type { ModelInfo } from '@mitsuro/api';
 import {
   cycleThinkingLevel,
   normalizeThinkingLevel,

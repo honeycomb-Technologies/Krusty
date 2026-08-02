@@ -10,9 +10,9 @@ Sub-agents solve both problems. For exploration, Mitsuro fans out multiple read-
 
 ## The Sub-Agent System
 
-At the core of delegation is `SubAgentPool`, defined in `crates/krusty-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks through `AgentScheduler`, an actor-owned adaptive queue. It takes an AI client, a cancellation token, an optional user concurrency ceiling, and a stagger delay, then spawns tasks as independent tokio tasks. There is no product-wide fixed four-agent limit: the scheduler derives an initial target from host parallelism, grows under healthy backlog, and backs off under provider pressure.
+At the core of delegation is `SubAgentPool`, defined in `crates/mitsuro-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks through `AgentScheduler`, an actor-owned adaptive queue. It takes an AI client, a cancellation token, an optional user concurrency ceiling, and a stagger delay, then spawns tasks as independent tokio tasks. There is no product-wide fixed four-agent limit: the scheduler derives an initial target from host parallelism, grows under healthy backlog, and backs off under provider pressure.
 
-Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. Its control flow has the same basic provider/tool continuation shape as the parent -- call the model, execute accepted tool requests, retain governed results, and continue -- but it is **not** the parent streaming orchestrator. It runs through the separately governed, non-streaming `execute_agent_loop` mini-kernel in `crates/krusty-core/src/agent/subagent/execution/runtime.rs`, parameterized over an `AgentConfig` trait for the different agent types.
+Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. Its control flow has the same basic provider/tool continuation shape as the parent -- call the model, execute accepted tool requests, retain governed results, and continue -- but it is **not** the parent streaming orchestrator. It runs through the separately governed, non-streaming `execute_agent_loop` mini-kernel in `crates/mitsuro-core/src/agent/subagent/execution/runtime.rs`, parameterized over an `AgentConfig` trait for the different agent types.
 
 That boundary is intentional and explicit. Delegated workers reuse the parent's exact `AiClient`, model identity, semantic `ProgressLedger`, history shaping, cancellation tree, process registry, and inherited permission/path/tool/turn ceiling. They do not consume `RunSpec`, emit the full parent `LoopEvent` stream, or own the parent session's crash-continuation state. A delegated run has a persisted lifecycle record and final evidence artifact; a later related run may use that artifact as a resume seed, but this is not equivalent to resuming a first-class child conversation at an interrupted provider/tool boundary. Unifying the kernels remains a possible focused refactor, not a reason to duplicate or rewrite the rest of core.
 
@@ -22,7 +22,7 @@ Results come back as `SubAgentResult`, which includes whether the task succeeded
 
 ## The Four Agent Types
 
-The unified `agent` tool (`crates/krusty-core/src/tools/implementations/agent/mod.rs`) is the primary way the main agent spawns sub-agents. It accepts an `agent_type` parameter that selects one of four flavors:
+The unified `agent` tool (`crates/mitsuro-core/src/tools/implementations/agent/mod.rs`) is the primary way the main agent spawns sub-agents. It accepts an `agent_type` parameter that selects one of four flavors:
 
 **Explore** agents investigate the codebase. They are read-only -- they can use glob, grep, read, and list, but cannot write files, run shell commands, or modify anything. They get a focused system prompt instructing them to gather evidence, follow references across modules, and report findings in a structured format with specific file paths and line references. Explore agents inherit the parent run's exact resolved model and client. A future fast-model substitution must resolve a separate exact provider, authentication, and API runtime; it cannot change only the model slug. They also inherit context from the parent conversation, so they understand what the user has been working on.
 
@@ -52,7 +52,7 @@ Build agents are submitted eagerly to the adaptive scheduler. `max_concurrency` 
 
 ## The Team System
 
-Beyond the agent tool's one-shot delegation, Mitsuro has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
+Beyond the agent tool's one-shot delegation, Mitsuro has a persistent team system for longer-running coordination. The `TeamManager` (`crates/mitsuro-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
 
 Each teammate is defined by a `TeammateConfig` with a semantic name, a role, and an optional turn budget. `TeamManager` assigns a deterministic creature identity for display and keeps the semantic name for task ownership and cancellation. There are three roles:
 
@@ -66,7 +66,7 @@ The manager provides lifecycle controls: `list_teammates` to check status, `canc
 
 ## The Auto-Classifier
 
-When Mitsuro operates in autonomous mode (Hive), there is no human in the loop to approve tool calls. The auto-classifier (`crates/krusty-core/src/agent/autonomy/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
+When Mitsuro operates in autonomous mode (Hive), there is no human in the loop to approve tool calls. The auto-classifier (`crates/mitsuro-core/src/agent/autonomy/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
 
 The classifier works in two stages:
 

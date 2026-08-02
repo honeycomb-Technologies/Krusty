@@ -29,10 +29,10 @@ Build outputs:
 - openSUSE: install the generated `Mitsuro-<version>-1.x86_64.rpm`.
 
 After install, launch with:
-- `krusty-desktop` (compatibility binary)
+- `mitsuro-desktop` (compatibility binary)
 
 If your Wayland compositor has dmabuf issues, force X11 fallback:
-- `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 krusty-desktop`
+- `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 mitsuro-desktop`
 
 ## Bundle Notes
 - `bun run build` / `bun run build:linux` creates Linux `.deb` and `.rpm`.

@@ -1,4 +1,4 @@
-import type { ContentBlock } from '@krusty/api';
+import type { ContentBlock } from '@mitsuro/api';
 
 import {
   MAX_MESSAGE_CONTENT_LENGTH,

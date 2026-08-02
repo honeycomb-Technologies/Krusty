@@ -6,8 +6,8 @@ export const catalog = {
       "id": "native-rust-demo",
       "name": "Native Rust Demo",
       "version": "0.1.0",
-      "publisher": "krusty.examples",
-      "package": "npm:@krusty/native-rust-demo",
+      "publisher": "mitsuro.examples",
+      "package": "npm:@mitsuro/native-rust-demo",
       "description": "Reference package for hot-reloadable native Rust TUI plugins.",
       "runtime": "native",
       "tags": [
@@ -24,8 +24,8 @@ export const catalog = {
       "id": "js-ts-demo",
       "name": "JS/TS Demo",
       "version": "0.1.0",
-      "publisher": "krusty.examples",
-      "package": "npm:@krusty/js-ts-demo",
+      "publisher": "mitsuro.examples",
+      "package": "npm:@mitsuro/js-ts-demo",
       "description": "Reference package for TypeScript TUI plugins executed through edon/libnode.",
       "runtime": "js",
       "tags": [

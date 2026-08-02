@@ -118,7 +118,7 @@
       <h2>Publish through npm. List through a catalog.</h2>
       <p>
         Mitsuro installs npm-shaped packages and reads a static catalog. To list a plugin, publish a
-        package with the compatibility key <code>krusty.plugins</code> in package.json and submit a
+        package with the compatibility key <code>mitsuro.plugins</code> in package.json and submit a
         catalog entry.
       </p>
     </div>
@@ -130,7 +130,7 @@
       </div>
       <div class="panel-card">
         <h3>2. Declare</h3>
-        <p>Point <code>krusty.plugins</code> at one or more plugin.toml manifests.</p>
+        <p>Point <code>mitsuro.plugins</code> at one or more plugin.toml manifests.</p>
       </div>
       <div class="panel-card">
         <h3>3. Index</h3>

@@ -9,7 +9,7 @@ import type {
   WorkflowCommand,
   WorkflowMutation,
   WorkspaceMode,
-} from '@krusty/api';
+} from '@mitsuro/api';
 
 export interface ToolCall {
   id: string;
@@ -186,10 +186,10 @@ export interface SessionStoreState {
    */
   cancelPendingSessionLoad: () => void;
   /**
-   * Ensure and load the durable per-user Mako companion session.
-   * Does not create a new job/run session — resolves GET/POST /mako/main.
+   * Ensure and load the durable per-user Hive companion session.
+   * Does not create a new job/run session — resolves GET/POST /hive/main.
    */
-  ensureMakoMainSession: () => Promise<string | null>;
+  ensureHiveMainSession: () => Promise<string | null>;
   clearSession: () => void;
   initSession: (
     sessionId: string,

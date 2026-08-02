@@ -44,8 +44,8 @@ import {
   supportsThinking,
   type ModelInfo,
   type ThinkingLevel,
-} from '@krusty/api';
-import type { PermissionMode } from '@krusty/state';
+} from '@mitsuro/api';
+import type { PermissionMode } from '@mitsuro/state';
 
 interface AccordionControlsProps {
   thinkingLevel: ThinkingLevel;
@@ -72,7 +72,7 @@ interface AccordionControlsProps {
   modelInfo?: ModelInfo | null;
   isOpen: boolean;
   onToggle: () => void;
-  sessionType?: 'chat' | 'code' | 'mako';
+  sessionType?: 'chat' | 'code' | 'hive';
 }
 
 interface ProviderFilterAction {

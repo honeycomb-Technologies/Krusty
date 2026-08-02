@@ -29,7 +29,7 @@
     }
   ];
 
-  const installCommand = 'cargo install --git https://github.com/honeycomb-Technologies/Mitsuro --package krusty';
+  const installCommand = 'cargo install --git https://github.com/honeycomb-Technologies/Mitsuro --package mitsuro';
 </script>
 
 <svelte:head>
@@ -60,7 +60,7 @@
       </div>
       <div class="terminal-body">
         <Wordmark />
-        <p><span class="prompt">$</span> <span class="command">krusty</span></p>
+        <p><span class="prompt">$</span> <span class="command">mitsuro</span></p>
         <p class="comment">booting local agent runtime...</p>
         <p><span class="ok">✓</span> plugins: native • wasm • js/ts</p>
         <p><span class="ok">✓</span> package directory: {plugins.length} official entries</p>

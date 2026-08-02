@@ -11,6 +11,19 @@ import { AppState, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import * as SecureStore from "../platform/secure-store";
 import { useConnection } from "./useConnection";
+import {
+  canonicalNotificationAction,
+  canonicalNotificationData,
+  HIVE_NOTIFICATION_ACTION,
+  HIVE_NOTIFICATION_CATEGORY,
+  LEGACY_HIVE_NOTIFICATION_ACTION,
+  LEGACY_HIVE_NOTIFICATION_CATEGORY,
+} from "../platform/identity-compatibility";
+import {
+  IDENTITY_STORAGE_KEYS,
+  readMigratedAsyncValue,
+  writeCanonicalAsyncValue,
+} from "../platform/identity-storage";
 
 export type NotificationLevel = "all" | "important" | "silent";
 export type NotificationRegistrationState =
@@ -24,12 +37,14 @@ export type NotificationRegistrationState =
 // Native-only — expo-notifications and expo-device crash on web
 let Notifications: any = null;
 let Device: any = null;
+let Application: { applicationId?: string | null } | null = null;
 let foregroundNotificationLevel: NotificationLevel = "important";
 
 if (Platform.OS !== "web") {
   try {
     Notifications = require("expo-notifications");
     Device = require("expo-device");
+    Application = require("expo-application");
     Notifications.setNotificationHandler({
       handleNotification: async (notification: unknown) => {
         const data = notificationResponseData(
@@ -61,17 +76,12 @@ if (Platform.OS !== "web") {
   }
 }
 
-const PUSH_TOKEN_KEY = "krusty_push_token";
-const NOTIFICATION_LEVEL_KEY = "krusty_notification_level";
-const PENDING_ACTIONS_KEY = "krusty_pending_notification_actions_v1";
-const HANDLED_ACTIONS_KEY = "krusty_handled_notification_actions_v1";
 const MAX_HANDLED_ACTIONS = 100;
 const ACTION_RETRY_BASE_MS = 1_000;
 const EXPO_PROJECT_ID = "6e327449-af3c-4138-b1c4-7ceca2baf243";
 
 const TOOL_APPROVAL_CATEGORY = "TOOL_APPROVAL";
 const CHAT_SESSION_CATEGORY = "CHAT_SESSION";
-const MAKO_SESSION_CATEGORY = "MAKO_SESSION";
 type NotificationResponseData = {
   type?: string;
   kind?: string;
@@ -111,7 +121,10 @@ function notificationResponseData(value: unknown): NotificationResponseData {
     root.data && typeof root.data === "object" && !Array.isArray(root.data)
       ? (root.data as Record<string, unknown>)
       : {};
-  return { ...nested, ...root } as NotificationResponseData;
+  return canonicalNotificationData({
+    ...nested,
+    ...root,
+  }) as NotificationResponseData;
 }
 
 async function registerNotificationCategories() {
@@ -137,13 +150,25 @@ async function registerNotificationCategories() {
     },
   ]);
 
-  await Notifications.setNotificationCategoryAsync(MAKO_SESSION_CATEGORY, [
+  await Notifications.setNotificationCategoryAsync(HIVE_NOTIFICATION_CATEGORY, [
     {
-      identifier: "OPEN_MAKO",
+      identifier: HIVE_NOTIFICATION_ACTION,
       buttonTitle: "Open Hive",
       options: { opensAppToForeground: true },
     },
   ]);
+  // Notifications already queued by an older server retain their category and
+  // action identifiers, so register that pair for the bridge window too.
+  await Notifications.setNotificationCategoryAsync(
+    LEGACY_HIVE_NOTIFICATION_CATEGORY,
+    [
+      {
+        identifier: LEGACY_HIVE_NOTIFICATION_ACTION,
+        buttonTitle: "Open Hive",
+        options: { opensAppToForeground: true },
+      },
+    ],
+  );
 }
 
 type RegisteredNotificationTokens = {
@@ -253,7 +278,7 @@ interface NotificationContextValue {
     tokenCount: number,
     elapsedSeconds: number,
   ) => Promise<void>;
-  notifyMakoUpdate: (
+  notifyHiveUpdate: (
     title: string,
     body: string,
     sessionId?: string,
@@ -284,17 +309,24 @@ function parseStoredActions(value: string | null): PendingNotificationAction[] {
   try {
     const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is PendingNotificationAction =>
-        Boolean(
-          item &&
-            typeof item === "object" &&
-            typeof item.id === "string" &&
-            typeof item.actionIdentifier === "string" &&
-            item.data &&
-            typeof item.data === "object",
-        ),
-    );
+    return parsed.flatMap((item): PendingNotificationAction[] => {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.id !== "string" ||
+        typeof item.actionIdentifier !== "string" ||
+        !item.data ||
+        typeof item.data !== "object" ||
+        Array.isArray(item.data)
+      ) {
+        return [];
+      }
+      return [{
+        ...item,
+        actionIdentifier: canonicalNotificationAction(item.actionIdentifier),
+        data: canonicalNotificationData(item.data) as NotificationResponseData,
+      } as PendingNotificationAction];
+    });
   } catch {
     return [];
   }
@@ -343,8 +375,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   const persistPendingActions = useCallback(async () => {
     setPendingActionCount(pendingActionsRef.current.length);
-    await SecureStore.setItemAsync(
-      PENDING_ACTIONS_KEY,
+    await writeCanonicalAsyncValue(
+      SecureStore,
+      IDENTITY_STORAGE_KEYS.pendingNotificationActions,
       JSON.stringify(pendingActionsRef.current),
     );
   }, []);
@@ -354,8 +387,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       ...handledActionsRef.current.filter((value) => value !== id),
       id,
     ].slice(-MAX_HANDLED_ACTIONS);
-    await SecureStore.setItemAsync(
-      HANDLED_ACTIONS_KEY,
+    await writeCanonicalAsyncValue(
+      SecureStore,
+      IDENTITY_STORAGE_KEYS.handledNotificationActions,
       JSON.stringify(handledActionsRef.current),
     );
   }, []);
@@ -439,7 +473,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const enqueueResponse = useCallback(
     async (response: NotificationResponseEvent) => {
       const responseId = response.notification.request.identifier;
-      const actionIdentifier = response.actionIdentifier;
+      const actionIdentifier = canonicalNotificationAction(
+        response.actionIdentifier,
+      );
       const data = notificationResponseData(
         response.notification.request.content.data,
       );
@@ -447,7 +483,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         actionIdentifier !== "APPROVE" &&
         actionIdentifier !== "DENY" &&
         actionIdentifier !== "VIEW_CHAT" &&
-        actionIdentifier !== "OPEN_MAKO" &&
+        actionIdentifier !== HIVE_NOTIFICATION_ACTION &&
         actionIdentifier !== Notifications?.DEFAULT_ACTION_IDENTIFIER
       ) {
         return;
@@ -481,9 +517,16 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     void registerNotificationCategories().catch(() => {});
 
     void Promise.all([
-      SecureStore.getItemAsync(NOTIFICATION_LEVEL_KEY),
-      SecureStore.getItemAsync(PENDING_ACTIONS_KEY),
-      SecureStore.getItemAsync(HANDLED_ACTIONS_KEY),
+      readMigratedAsyncValue(SecureStore, IDENTITY_STORAGE_KEYS.notificationLevel),
+      readMigratedAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.pendingNotificationActions,
+      ),
+      readMigratedAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.handledNotificationActions,
+      ),
+      readMigratedAsyncValue(SecureStore, IDENTITY_STORAGE_KEYS.pushToken),
     ]).then(async ([saved, pending, handled]) => {
         if (disposed) return;
         if (saved === "all" || saved === "important" || saved === "silent") {
@@ -537,7 +580,11 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         setNativeDeviceToken(tokens.nativeDeviceToken);
         setRegistrationState("token_ready");
         if (tokens.displayToken) {
-          await SecureStore.setItemAsync(PUSH_TOKEN_KEY, tokens.displayToken);
+          await writeCanonicalAsyncValue(
+            SecureStore,
+            IDENTITY_STORAGE_KEYS.pushToken,
+            tokens.displayToken,
+          );
         }
       } catch (error) {
         if (!cancelled) {
@@ -627,19 +674,24 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       let expoRegistered = false;
       const errors: string[] = [];
       if (Platform.OS === "ios" && nativeDeviceToken) {
-        try {
-          await client.registerApnsDevice(
-            nativeDeviceToken,
-            undefined,
-            notificationLevel,
-            __DEV__ ? "sandbox" : "production",
-          );
-          if (generation !== registrationGenerationRef.current) return;
-          directApnsRegistered = true;
-        } catch (error) {
-          errors.push(
-            error instanceof Error ? error.message : "Direct APNs registration failed",
-          );
+        const runtimeBundleId = Application?.applicationId?.trim();
+        if (!runtimeBundleId) {
+          errors.push("Direct APNs registration requires the installed app bundle identifier");
+        } else {
+          try {
+            await client.registerApnsDevice(
+              nativeDeviceToken,
+              runtimeBundleId,
+              notificationLevel,
+              __DEV__ ? "sandbox" : "production",
+            );
+            if (generation !== registrationGenerationRef.current) return;
+            directApnsRegistered = true;
+          } catch (error) {
+            errors.push(
+              error instanceof Error ? error.message : "Direct APNs registration failed",
+            );
+          }
         }
       }
       if (generation !== registrationGenerationRef.current) return;
@@ -701,7 +753,11 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     async (level: NotificationLevel) => {
       foregroundNotificationLevel = level;
       setNotificationLevel(level);
-      await SecureStore.setItemAsync(NOTIFICATION_LEVEL_KEY, level);
+      await writeCanonicalAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.notificationLevel,
+        level,
+      );
     },
     [],
   );
@@ -777,7 +833,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     [notificationLevel],
   );
 
-  const notifyMakoUpdate = useCallback(
+  const notifyHiveUpdate = useCallback(
     async (title: string, body: string, sessionId?: string) => {
       if (!Notifications || notificationLevel === "silent") return;
       if (nativeDeliveryRegisteredRef.current) return;
@@ -786,8 +842,8 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         content: {
           title: `Hive: ${title}`,
           body,
-          categoryIdentifier: MAKO_SESSION_CATEGORY,
-          data: { type: "mako_update", kind: "user_message", sessionId, focus: "mako" },
+          categoryIdentifier: HIVE_NOTIFICATION_CATEGORY,
+          data: { type: "hive_update", kind: "user_message", sessionId, focus: "hive" },
           sound: notificationLevel === "all" ? "default" : false,
         },
         trigger: null,
@@ -807,7 +863,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     submitToolApprovalAction,
     notifyToolApproval,
     notifyStreamComplete,
-    notifyMakoUpdate,
+    notifyHiveUpdate,
   };
 
   return (

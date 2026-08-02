@@ -10,8 +10,8 @@ import { Folder, FolderOpen, ChevronRight, ChevronDown, ChevronLeft, Check } fro
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
-import type { SessionResponse } from '@krusty/api';
-import type { MakoTopLevelView } from '../mako/types';
+import type { SessionResponse } from '@mitsuro/api';
+import type { HiveTopLevelView } from '../hive/types';
 
 interface DirEntry { name: string; path: string }
 interface DirCache { current: string; parent: string | null; directories: DirEntry[] }
@@ -41,8 +41,8 @@ export interface SessionListProps {
   onNewSessionWithDir: (path: string) => void;
   activeTab: number;
   onTabChange: (index: number) => void;
-  activeMakoView?: MakoTopLevelView;
-  onSelectMakoView?: (view: MakoTopLevelView) => void;
+  activeHiveView?: HiveTopLevelView;
+  onSelectHiveView?: (view: HiveTopLevelView) => void;
   showPicker?: boolean;
   onPickerDone?: () => void;
 }
@@ -56,8 +56,8 @@ export function SessionList({
   onNewSessionWithDir,
   activeTab,
   onTabChange,
-  activeMakoView,
-  onSelectMakoView,
+  activeHiveView,
+  onSelectHiveView,
   showPicker,
   onPickerDone,
 }: SessionListProps) {
@@ -268,7 +268,7 @@ const styles = StyleSheet.create({
   sessionMeta: { flexDirection: 'row', gap: 8, marginTop: 3 },
   sessionTime: { fontSize: 12 },
   sessionModel: { fontSize: 12 },
-  makoItem: {
+  hiveItem: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
@@ -277,15 +277,15 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 2,
   },
-  makoCopy: {
+  hiveCopy: {
     flex: 1,
     minWidth: 0,
   },
-  makoTitle: {
+  hiveTitle: {
     fontSize: 14,
     fontWeight: '500',
   },
-  makoDetail: {
+  hiveDetail: {
     marginTop: 3,
     fontSize: 12,
   },

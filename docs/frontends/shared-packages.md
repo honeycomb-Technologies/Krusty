@@ -1,21 +1,21 @@
 # Shared TypeScript Packages
 
-Mitsuro's frontend lives in a monorepo managed by Bun. The mobile app and the desktop app are separate applications, but they share a significant amount of code through three internal packages: `@krusty/api`, `@krusty/state`, and `@krusty/ui`. These packages live under `packages/` in the repository and are linked as workspace dependencies, meaning Bun resolves them locally without publishing anything to a registry.
+Mitsuro's frontend lives in a monorepo managed by Bun. The mobile app and the desktop app are separate applications, but they share a significant amount of code through three internal packages: `@mitsuro/api`, `@mitsuro/state`, and `@mitsuro/ui`. These packages live under `packages/` in the repository and are linked as workspace dependencies, meaning Bun resolves them locally without publishing anything to a registry.
 
 The goal is straightforward: write business logic once, use it everywhere. Both the mobile client (Expo/React Native) and the desktop client (React/Tauri) talk to the same Mitsuro server API, manage the same state, and render with the same visual language. Shared packages eliminate the duplication.
 
 ## The API Package
 
-`@krusty/api` is the TypeScript client that talks to the Mitsuro server's REST API. It exports a single class, `KrustyClient`, along with every TypeScript type used in the request/response cycle.
+`@mitsuro/api` is the TypeScript client that talks to the Mitsuro server's REST API. It exports a single class, `MitsuroClient`, along with every TypeScript type used in the request/response cycle.
 
-### KrustyClient
+### MitsuroClient
 
 You create a client by passing a configuration object with the server's base URL and an optional bearer token:
 
 ```ts
-import { KrustyClient } from '@krusty/api';
+import { MitsuroClient } from '@mitsuro/api';
 
-const client = new KrustyClient({
+const client = new MitsuroClient({
   baseUrl: 'http://localhost:3000',
   token: 'your-auth-token',
 });
@@ -46,11 +46,11 @@ The package also exports a small set of thinking-related utilities in `thinking.
 
 ## The State Package
 
-`@krusty/state` provides Zustand-based stores that manage all client-side state. Zustand is a minimal state management library for React -- each store is a hook that components subscribe to, and updates trigger re-renders only in components that read the changed slice. The package depends on `@krusty/api` for its client class and types, and declares Zustand as a peer dependency so the consuming app controls the version.
+`@mitsuro/state` provides Zustand-based stores that manage all client-side state. Zustand is a minimal state management library for React -- each store is a hook that components subscribe to, and updates trigger re-renders only in components that read the changed slice. The package depends on `@mitsuro/api` for its client class and types, and declares Zustand as a peer dependency so the consuming app controls the version.
 
 ### Storage Abstraction
 
-The package defines a `KrustyStorage` interface with three methods: `get`, `set`, and `delete`. This is a simple key-value contract that mirrors `localStorage`. A `MemoryStorage` implementation ships for testing. The mobile app provides its own implementation backed by `expo-secure-store` on native and `localStorage` on web. This abstraction lets stores persist state across app restarts without coupling to any platform-specific API.
+The package defines a `MitsuroStorage` interface with three methods: `get`, `set`, and `delete`. This is a simple key-value contract that mirrors `localStorage`. A `MemoryStorage` implementation ships for testing. The mobile app provides its own implementation backed by `expo-secure-store` on native and `localStorage` on web. This abstraction lets stores persist state across app restarts without coupling to any platform-specific API.
 
 ### Session Store
 
@@ -76,7 +76,7 @@ The plan store (`createPlanStore`) manages the task list that appears during pla
 
 ## The UI Package
 
-`@krusty/ui` defines the visual language shared across platforms. It exports design tokens and a theme system rather than React components, since mobile and desktop have different component libraries (React Native versus DOM).
+`@mitsuro/ui` defines the visual language shared across platforms. It exports design tokens and a theme system rather than React components, since mobile and desktop have different component libraries (React Native versus DOM).
 
 ### Design Tokens
 
@@ -100,13 +100,13 @@ The `theme.ts` file builds on the tokens to create complete theme objects. The `
 Both apps declare the shared packages as workspace dependencies using Bun's `workspace:*` protocol. In the mobile app's `package.json`, for example, the hooks and components import directly from the package names:
 
 ```ts
-import { KrustyClient } from '@krusty/api';
-import { createSessionStore, createWorkspaceStore } from '@krusty/state';
-import { createTheme, type ColorScheme } from '@krusty/ui';
+import { MitsuroClient } from '@mitsuro/api';
+import { createSessionStore, createWorkspaceStore } from '@mitsuro/state';
+import { createTheme, type ColorScheme } from '@mitsuro/ui';
 ```
 
 Bun resolves these imports to the local `packages/` directories at install time. There is no build step for the packages -- each package's `main` and `types` fields point directly at `src/index.ts`, so the consuming app's bundler (Metro for mobile, Vite for desktop) handles TypeScript compilation. Edit a file in `packages/api/src/` and the change is immediately reflected in whichever app you are running.
 
 ## Package Manager
 
-The monorepo uses Bun as its package manager and runtime. Bun's workspace support links the `@krusty/*` packages without publishing, and its speed makes installs and script execution noticeably faster than npm or yarn.
+The monorepo uses Bun as its package manager and runtime. Bun's workspace support links the `@mitsuro/*` packages without publishing, and its speed makes installs and script execution noticeably faster than npm or yarn.

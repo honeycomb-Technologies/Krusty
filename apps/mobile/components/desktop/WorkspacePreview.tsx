@@ -17,17 +17,22 @@ import {
   X,
 } from "lucide-react-native";
 
-import type { PortEntry, PreviewSettings } from "@krusty/api";
+import type { PortEntry, PreviewSettings } from "@mitsuro/api";
 
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
+import {
+  deleteMigratedSyncValue,
+  IDENTITY_STORAGE_KEYS,
+  readMigratedSyncValue,
+  writeCanonicalSyncValue,
+} from "../../platform/identity-storage";
 
-const PREVIEW_SESSION_KEY = "krusty_preview_tabs_v1";
-// Preview content is untrusted localhost app output served through the Krusty proxy.
+// Preview content is untrusted localhost app output served through the Mitsuro proxy.
 // Keep scripts/forms working for dev previews, but intentionally omit
 // allow-same-origin and top-navigation so preview JavaScript cannot access the
-// Krusty parent app or call privileged same-origin APIs.
+// Mitsuro parent app or call privileged same-origin APIs.
 const PREVIEW_IFRAME_SANDBOX =
   "allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-presentation allow-scripts";
 
@@ -219,7 +224,10 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
   useEffect(() => {
     if (!isWeb || !serverUrl || tabsRestored) return;
 
-    const raw = sessionStorage.getItem(PREVIEW_SESSION_KEY);
+    const raw = readMigratedSyncValue(
+      sessionStorage,
+      IDENTITY_STORAGE_KEYS.previewTabs,
+    );
     if (!raw) {
       const blankTab = createBlankPreviewTab();
       setPreviewTabs([blankTab]);
@@ -301,7 +309,7 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
         setActiveTabId(restoredTabs[0]?.id ?? null);
       }
     } catch {
-      sessionStorage.removeItem(PREVIEW_SESSION_KEY);
+      deleteMigratedSyncValue(sessionStorage, IDENTITY_STORAGE_KEYS.previewTabs);
       const blankTab = createBlankPreviewTab();
       setPreviewTabs([blankTab]);
       setActiveTabId(blankTab.id);
@@ -323,7 +331,11 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
       })),
       activeTabId,
     });
-    sessionStorage.setItem(PREVIEW_SESSION_KEY, payload);
+    writeCanonicalSyncValue(
+      sessionStorage,
+      IDENTITY_STORAGE_KEYS.previewTabs,
+      payload,
+    );
   }, [activeTabId, isWeb, previewTabs]);
 
   const createNewTab = useCallback(() => {

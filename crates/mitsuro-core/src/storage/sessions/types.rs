@@ -1,0 +1,159 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+use crate::ai::models::ModelKey;
+use crate::tools::registry::PermissionMode;
+
+/// Session metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    pub updated_at: DateTime<Utc>,
+    pub token_count: Option<usize>,
+    /// Parent session ID for linked sessions (pinch)
+    pub parent_session_id: Option<String>,
+    /// Working directory for this session
+    pub working_dir: Option<String>,
+    /// Explicit active project directory, when different from the session root.
+    pub project_dir: Option<String>,
+    /// Whether the session is operating without a project or within an explicit project.
+    pub workspace_mode: WorkspaceMode,
+    /// High-level session surface type.
+    pub session_type: SessionType,
+    /// User ID for multi-tenant isolation
+    pub user_id: Option<String>,
+    /// Current work mode for this session
+    pub work_mode: WorkMode,
+    /// Model selected for this session
+    pub model: Option<String>,
+    /// Exact provider/auth/transport identity when selected by a modern client.
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    /// Catalog revision that was active when `model_key` was persisted.
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
+    /// Optional target branch selected for this session
+    pub target_branch: Option<String>,
+    /// Permission mode selected for this session's tool execution.
+    pub permission_mode: PermissionMode,
+}
+
+/// Session type for high-level product surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionType {
+    Chat,
+    #[default]
+    Code,
+    #[serde(alias = "mako")]
+    Hive,
+}
+
+impl fmt::Display for SessionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionType::Chat => write!(f, "chat"),
+            SessionType::Code => write!(f, "code"),
+            SessionType::Hive => write!(f, "hive"),
+        }
+    }
+}
+
+impl FromStr for SessionType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "chat" => Ok(SessionType::Chat),
+            "code" => Ok(SessionType::Code),
+            "hive" | crate::identity::legacy::SESSION_TYPE => Ok(SessionType::Hive),
+            other => Err(format!("Unknown session type: {}", other)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod identity_compatibility_tests {
+    use super::SessionType;
+    use std::str::FromStr;
+
+    #[test]
+    fn old_session_type_reads_as_hive_and_global_serialization_is_canonical() {
+        assert_eq!(
+            serde_json::from_str::<SessionType>(r#""mako""#).unwrap(),
+            SessionType::Hive
+        );
+        assert_eq!(SessionType::from_str("mako").unwrap(), SessionType::Hive);
+        assert_eq!(SessionType::Hive.to_string(), "hive");
+        assert_eq!(
+            serde_json::to_string(&SessionType::Hive).unwrap(),
+            r#""hive""#
+        );
+    }
+}
+
+/// Session workspace mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    #[default]
+    Neutral,
+    Selected,
+    Created,
+}
+
+impl fmt::Display for WorkspaceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkspaceMode::Neutral => write!(f, "neutral"),
+            WorkspaceMode::Selected => write!(f, "selected"),
+            WorkspaceMode::Created => write!(f, "created"),
+        }
+    }
+}
+
+impl FromStr for WorkspaceMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "neutral" => Ok(WorkspaceMode::Neutral),
+            "selected" => Ok(WorkspaceMode::Selected),
+            "created" => Ok(WorkspaceMode::Created),
+            other => Err(format!("Unknown workspace mode: {}", other)),
+        }
+    }
+}
+
+/// Session work mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkMode {
+    #[default]
+    Build,
+    Plan,
+}
+
+impl fmt::Display for WorkMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkMode::Build => write!(f, "build"),
+            WorkMode::Plan => write!(f, "plan"),
+        }
+    }
+}
+
+impl FromStr for WorkMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "build" => Ok(WorkMode::Build),
+            "plan" => Ok(WorkMode::Plan),
+            other => Err(format!("Unknown work mode: {}", other)),
+        }
+    }
+}

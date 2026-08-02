@@ -2,7 +2,7 @@
 
 This crate extracts the authentication ("X sub login") subsystem from the Grok Build CLI into a reusable, well-behaved Rust library.
 
-Goal: let projects like **Krusty** (and any other harness) obtain valid Grok/xAI credentials, share the login state with the official `grok` CLI, and make authenticated calls to Grok models / composer / agentic endpoints **without** running inside the Grok Build TUI.
+Goal: let projects like **Mitsuro** (and any other harness) obtain valid Grok/xAI credentials, share the login state with the official `grok` CLI, and make authenticated calls to Grok models / composer / agentic endpoints **without** running inside the Grok Build TUI.
 
 ## Features
 - All login flows the official client supports:
@@ -44,7 +44,7 @@ This library mirrors that discipline:
 
 You get a valid token (or a clear error) with almost zero disk traffic on the hot path.
 
-## Usage in Krusty (or any other harness)
+## Usage in Mitsuro (or any other harness)
 
 ```toml
 # Cargo.toml
@@ -59,7 +59,7 @@ use grok_auth::{AuthConfig, authenticated_client};
 async fn main() -> anyhow::Result<()> {
     let cfg = AuthConfig::from_env()?;
     // optionally merge your own config.toml snippet
-    // cfg.merge_toml(&std::fs::read_to_string("krusty-grok.toml")?)?;
+    // cfg.merge_toml(&std::fs::read_to_string("mitsuro-grok.toml")?)?;
 
     let client = authenticated_client(cfg).await?;
 
@@ -69,20 +69,20 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Run `cargo run --example krusty_auth` after filling a real `XAI_API_KEY` or doing a login.
+Run `cargo run --example mitsuro_auth` after filling a real `XAI_API_KEY` or doing a login.
 
 ### Sharing login state with the official `grok` CLI
 
 Just use the default `~/.grok/auth.json` path (the library does this by default).
 After `grok login` (or `grok-auth` login), both sides see the same tokens and profile info.
 
-### External provider (great for Krusty)
+### External provider (great for Mitsuro)
 
-If you already have a fancy login flow in Krusty (corporate SSO, hardware key, etc.), implement the documented contract:
+If you already have a fancy login flow in Mitsuro (corporate SSO, hardware key, etc.), implement the documented contract:
 
 ```bash
-export GROK_AUTH_PROVIDER_COMMAND="/usr/local/bin/krusty-auth-provider"
-export GROK_AUTH_PROVIDER_LABEL="Krusty Corp"
+export GROK_AUTH_PROVIDER_COMMAND="/usr/local/bin/mitsuro-auth-provider"
+export GROK_AUTH_PROVIDER_LABEL="Mitsuro Corp"
 ```
 
 Your binary prints the token (bare or `{"access_token": "...", "refresh_token": "...", "expires_in": 3600}`) on **stdout** and human messages / login URLs on **stderr**.
@@ -104,7 +104,7 @@ What you get after that:
 - You can still do very powerful agentic work by:
   1. Using the raw model with tool calling (if the backend exposes the same schemas).
   2. Implementing a lightweight version of the tool registry + loop on top of this auth client.
-  3. Using the external-provider hook + the same `auth.json` so the official `grok` and Krusty can even hand off sessions in the future.
+  3. Using the external-provider hook + the same `auth.json` so the official `grok` and Mitsuro can even hand off sessions in the future.
 
 If you want to go deeper (reverse more of the WS ACP protocol, the generated tool events, the exact chat proxy shape), we can continue the RE on the binary and extend this library.
 
@@ -121,7 +121,7 @@ If you want to go deeper (reverse more of the WS ACP protocol, the generated too
 
 ```bash
 cd grok-auth
-cargo run --example krusty_auth
+cargo run --example mitsuro_auth
 ```
 
 ## Status & future
@@ -131,13 +131,13 @@ This is a clean-room reimplementation based on:
 - Reverse engineering of the 0.2.33 binary (strings, AuthManager paths, external provider contract, auth.json format, refresh watcher, etc.)
 - Local `~/.grok/auth.json` and config inspection
 
-It should be good enough for real use in Krusty today for model access and simple agent loops.
+It should be good enough for real use in Mitsuro today for model access and simple agent loops.
 
 Missing (but easy to add later):
 - Full WebSocket ACP client for the richest "Grok Build" session experience.
 - More of the generated tool schema / event types (we have them from the binary strings).
 
-Contributions / PRs for Krusty integration welcome.
+Contributions / PRs for Mitsuro integration welcome.
 
 ## License
 

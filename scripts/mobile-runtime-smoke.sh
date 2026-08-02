@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/identity-env.sh"
 
-BASE_URL="${KRUSTY_MOBILE_SERVER:-http://127.0.0.1:3000}"
+BASE_URL="${MITSURO_MOBILE_SERVER:-http://127.0.0.1:3000}"
 RUN_CHAT="${MOBILE_SMOKE_CHAT:-0}"
 
 for arg in "$@"; do
@@ -15,15 +16,15 @@ for arg in "$@"; do
 done
 
 TMPDIR="${TMPDIR:-/tmp}"
-HEALTH_JSON="$TMPDIR/krusty-mobile-health.json"
-MODELS_JSON="$TMPDIR/krusty-mobile-models.json"
-SESSIONS_JSON="$TMPDIR/krusty-mobile-sessions.json"
-CREATE_JSON="$TMPDIR/krusty-mobile-created-session.json"
-STATE_JSON="$TMPDIR/krusty-mobile-session-state.json"
-SERVER_ACCESS_JSON="$TMPDIR/krusty-mobile-server-access.json"
-SERVER_STATUS_JSON="$TMPDIR/krusty-mobile-server-status.json"
-CREDENTIALS_JSON="$TMPDIR/krusty-mobile-credentials.json"
-CHAT_SSE="$TMPDIR/krusty-mobile-chat.sse"
+HEALTH_JSON="$TMPDIR/mitsuro-mobile-health.json"
+MODELS_JSON="$TMPDIR/mitsuro-mobile-models.json"
+SESSIONS_JSON="$TMPDIR/mitsuro-mobile-sessions.json"
+CREATE_JSON="$TMPDIR/mitsuro-mobile-created-session.json"
+STATE_JSON="$TMPDIR/mitsuro-mobile-session-state.json"
+SERVER_ACCESS_JSON="$TMPDIR/mitsuro-mobile-server-access.json"
+SERVER_STATUS_JSON="$TMPDIR/mitsuro-mobile-server-status.json"
+CREDENTIALS_JSON="$TMPDIR/mitsuro-mobile-credentials.json"
+CHAT_SSE="$TMPDIR/mitsuro-mobile-chat.sse"
 
 api() {
 	local path="$1"
@@ -34,7 +35,7 @@ curl_json() {
 	curl -fsS -H 'Accept: application/json' "$@"
 }
 
-printf '== Krusty mobile runtime smoke ==\n'
+printf '== Mitsuro mobile runtime smoke ==\n'
 printf 'server: %s\n' "$BASE_URL"
 
 curl_json "$(api /health)" >"$HEALTH_JSON"

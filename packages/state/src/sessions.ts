@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { KrustyClient, SessionResponse } from '@krusty/api';
+import type { MitsuroClient, SessionResponse } from '@mitsuro/api';
 import type { createWorkspaceStore } from './workspace';
 
 export interface SessionListItem {
@@ -11,7 +11,7 @@ export interface SessionListItem {
   working_dir?: string | null;
   project_dir?: string | null;
   workspace_mode?: 'neutral' | 'selected' | 'created';
-  session_type?: 'chat' | 'code' | 'mako';
+  session_type?: 'chat' | 'code' | 'hive';
   target_branch?: string | null;
   permission_mode?: 'supervised' | 'autonomous';
 }
@@ -48,7 +48,7 @@ function sessionsListSignature(sessions: SessionListItem[]): string {
 }
 
 export function createSessionsStore(
-  client: KrustyClient,
+  client: MitsuroClient,
   workspace: ReturnType<typeof createWorkspaceStore>,
 ) {
   let loadSessionsInFlight: Promise<void> | null = null;

@@ -2,6 +2,23 @@
 
 Mitsuro ships as a desktop application for Linux (and eventually macOS and Windows) using Tauri. If you've heard of Electron — the framework behind VS Code, Slack, and Discord — Tauri solves the same problem but in a fundamentally different way. Instead of bundling an entire copy of Chromium, Tauri uses the operating system's built-in web renderer (WebKitGTK on Linux, WebKit on macOS, WebView2 on Windows). The result is a desktop app that weighs tens of megabytes instead of hundreds, uses a fraction of the RAM, and starts faster.
 
+## Desktop data identity migration
+
+The desktop shell can receipt and validate the previous desktop data namespace
+under Linux's XDG data root and Windows LocalAppData. It preserves the source,
+copies into `io.mitsuro.desktop` through a private staging directory, validates
+the copied tree, and publishes it atomically.
+
+macOS is intentionally different. Wry does not expose an authoritative
+WKWebView data-directory path, so copying a similarly named Application Support
+directory would not prove that cookies, localStorage, or other WebKit state
+followed the new application identity. The shell therefore performs no
+automatic macOS desktop web-data copy. Preserve every previous desktop data
+namespace and require a signed macOS build plus manual continuity checks for
+connection settings, authentication, preferences, and localStorage-backed UI
+state before retiring it. Re-authentication or explicit user reconfiguration
+must be reported as such; it is not evidence that storage migrated.
+
 The desktop app doesn't contain its own UI. It wraps the same Expo/React web build that powers the mobile app and the embedded server frontend. One codebase produces the mobile app, the web frontend, and the desktop app — Tauri just provides the native window and the Rust backend that ties everything together.
 
 ## How Tauri Works
@@ -37,7 +54,7 @@ A production build follows these steps:
 
 1. **Expo web export.** Tauri's `beforeBuildCommand` runs `npx expo export --platform web` inside the `apps/mobile/` directory. This produces a static HTML/CSS/JS bundle in `apps/mobile/dist/`.
 
-2. **Rust compilation.** Tauri compiles the Rust backend (`src-tauri/src/main.rs`) along with its dependencies: `krusty-core` for server detection, `krusty-server` for the embedded server, `tokio` for async runtime, and `tracing` for structured logging.
+2. **Rust compilation.** Tauri compiles the Rust backend (`src-tauri/src/main.rs`) along with its dependencies: `mitsuro-core` for server detection, `mitsuro-server` for the embedded server, `tokio` for async runtime, and `tracing` for structured logging.
 
 3. **Asset bundling.** Tauri takes the static web assets from step 1 and embeds them into the native binary.
 
@@ -72,13 +89,13 @@ This is where the desktop app does something clever. When the app launches, its 
 
 The startup sequence in `main.rs` works like this:
 
-1. **Check for an existing server.** The app calls `server_instance::detect_running_server()`, which looks for an already-running Mitsuro server process. If you started `krusty serve` in a terminal before launching the desktop app, it finds that instance and reuses it.
+1. **Check for an existing server.** The app calls `server_instance::detect_running_server()`, which looks for an already-running Mitsuro server process. If you started `mitsuro serve` in a terminal before launching the desktop app, it finds that instance and reuses it.
 
 2. **Start an embedded server if needed.** If no server is running, the app starts one inside its own process. It prefers port 3000 but will fall back to a random available port if 3000 is taken. The server launches in a background tokio task and writes a PID file so other Mitsuro instances can discover it.
 
 3. **Wait for health.** The app polls the server's health endpoint for up to 5 seconds (50 attempts at 100ms intervals) before proceeding. This ensures the server is ready to accept requests before the UI tries to connect.
 
-4. **Inject the connection URL.** Once the server is ready, Tauri's `setup` hook runs a small JavaScript snippet in the web view: `window.__KRUSTY_SERVER_URL = 'http://localhost:PORT'` and `window.__KRUSTY_SERVER_TOKEN = 'local'`. The Expo app's `useConnection` hook checks for these globals on startup. When it finds them, it skips the manual server configuration screen and connects automatically.
+4. **Inject the connection URL.** Once the server is ready, Tauri's `setup` hook runs a small JavaScript snippet in the web view: `window.__MITSURO_SERVER_URL = 'http://localhost:PORT'` and `window.__MITSURO_SERVER_TOKEN = 'local'`. The Expo app's `useConnection` hook checks for these globals on startup. When it finds them, it skips the manual server configuration screen and connects automatically.
 
 The result is seamless: you launch the desktop app and it's immediately connected to a Mitsuro server, either one you already had running or one it started for you. No configuration dialogs, no URLs to paste, no tokens to copy.
 
@@ -106,13 +123,13 @@ Hot reloading works for the frontend — edit a React component and it updates i
 
 ## Dependencies
 
-The Rust side (`Cargo.toml`) pulls in a focused set of dependencies: **tauri** v2 as the framework, **krusty-server** and **krusty-core** so the app can start and detect server instances, **tokio** for the async runtime, and **tracing** for structured logging. The JavaScript side has a single dev dependency: `@tauri-apps/cli`, the Tauri CLI that orchestrates builds and the dev server. The project uses Bun as its package manager.
+The Rust side (`Cargo.toml`) pulls in a focused set of dependencies: **tauri** v2 as the framework, **mitsuro-server** and **mitsuro-core** so the app can start and detect server instances, **tokio** for the async runtime, and **tracing** for structured logging. The JavaScript side has a single dev dependency: `@tauri-apps/cli`, the Tauri CLI that orchestrates builds and the dev server. The project uses Bun as its package manager.
 
 ## Build Targets and Distribution
 
 The bundle configuration in `tauri.conf.json` defines how the app is packaged:
 
-- **Identifier:** `io.krusty.desktop`
+- **Identifier:** `io.mitsuro.desktop`
 - **Category:** DeveloperTool
 - **License:** MIT
 - **Publisher:** Mitsuro
@@ -132,6 +149,6 @@ The choice of Tauri over Electron comes down to three factors:
 
 **Memory usage.** An Electron app runs its own Chromium process with its own V8 isolate. A Tauri app renders in a lightweight system web view. In practice, Tauri apps use significantly less RAM, which is relevant when the desktop app will be running alongside a code editor, terminal, browser, and the Mitsuro server itself.
 
-**Rust backend.** Mitsuro is a Rust project. Tauri's backend is Rust. This means the desktop app can import `krusty-core` and `krusty-server` directly as Cargo dependencies and call into them natively — no IPC overhead, no foreign function interface, no subprocess spawning. The embedded server runs in the same process as the desktop window. Electron would have required either a separate server process or bridging between Node.js and Rust via N-API or similar.
+**Rust backend.** Mitsuro is a Rust project. Tauri's backend is Rust. This means the desktop app can import `mitsuro-core` and `mitsuro-server` directly as Cargo dependencies and call into them natively — no IPC overhead, no foreign function interface, no subprocess spawning. The embedded server runs in the same process as the desktop window. Electron would have required either a separate server process or bridging between Node.js and Rust via N-API or similar.
 
 The trade-off is that Tauri's web view has slightly less consistent behavior across platforms compared to Electron's bundled Chromium. The WebKit workaround for Linux DMA-BUF rendering is one example. In practice, for a React-based chat interface, these differences are minor and manageable.

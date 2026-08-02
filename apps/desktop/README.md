@@ -5,7 +5,7 @@ This directory is reserved for desktop packaging around the React/Expo web clien
 ## Scope
 - Native wrapper and packaging
 - OS integration (notifications, file dialogs, autostart)
-- Local connection configuration for the Mitsuro self-hosted runtime (`krusty-server` compatibility crate)
+- Local connection configuration for the Mitsuro self-hosted runtime (`mitsuro-server` compatibility crate)
 
 ## Active Scaffold
 - `shell/` contains a Tauri wrapper targeting `apps/mobile`.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Mitsuro Hive private IPC socket
+Before=mitsuro-hive.service
+
+[Socket]
+ListenStream=%t/mitsuro/hive.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=true
+Service=mitsuro-hive.service
+
+[Install]
+WantedBy=sockets.target

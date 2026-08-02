@@ -113,7 +113,7 @@ Deno.test("quiet-only scheduler never admits heavy work during sustained input",
   const { clock, flushed, scheduler } = createQuietOnlyHarness();
 
   scheduler.submit("chat");
-  for (const value of ["code", "mako", "chat", "mako"]) {
+  for (const value of ["code", "hive", "chat", "hive"]) {
     clock.advanceBy(80);
     scheduler.submit(value);
   }
@@ -126,14 +126,14 @@ Deno.test("quiet-only scheduler never admits heavy work during sustained input",
   clock.advanceBy(1);
 
   assertEquals(flushed.length, 1, "latest destination flushes after input quiets");
-  assertEquals(flushed[0].value, "mako", "only the final intent may be admitted");
+  assertEquals(flushed[0].value, "hive", "only the final intent may be admitted");
   assertEquals(flushed[0].atMs, 420, "quiet deadline follows the final submission");
 });
 
 Deno.test("manual flush admits immediately and invalidates the scheduled callback", () => {
   const { clock, flushed, scheduler } = createHarness();
 
-  scheduler.submit("mako");
+  scheduler.submit("hive");
   clock.advanceBy(25);
   assert(scheduler.flush(), "flush must report admitted pending work");
   assertEquals(flushed[0].atMs, 25, "manual flush must be immediate");

@@ -1,10 +1,10 @@
 import {
-	beginKrustyPerformanceSpan,
-	configureKrustyPerformance,
-	getKrustyPerformanceSnapshot,
-	recordKrustyPerformanceMetric,
-	resetKrustyPerformance,
-	trackKrustyPerformanceResource,
+	beginMitsuroPerformanceSpan,
+	configureMitsuroPerformance,
+	getMitsuroPerformanceSnapshot,
+	recordMitsuroPerformanceMetric,
+	resetMitsuroPerformance,
+	trackMitsuroPerformanceResource,
 } from '../src/performance.ts';
 
 declare const Deno: {
@@ -16,27 +16,27 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 Deno.test('performance spans and resources stay bounded and releasable', () => {
-	configureKrustyPerformance(true);
-	resetKrustyPerformance();
+	configureMitsuroPerformance(true);
+	resetMitsuroPerformance();
 
-	const finish = beginKrustyPerformanceSpan('stream.flush', 'session-1');
-	const release = trackKrustyPerformanceResource('stream_connections');
+	const finish = beginMitsuroPerformanceSpan('stream.flush', 'session-1');
+	const release = trackMitsuroPerformanceResource('stream_connections');
 	assert(
-		getKrustyPerformanceSnapshot().resources.stream_connections === 1,
+		getMitsuroPerformanceSnapshot().resources.stream_connections === 1,
 		'active resource should be visible while tracked',
 	);
 
 	const duration = finish();
-	recordKrustyPerformanceMetric('session.snapshot_max_slice', {
+	recordMitsuroPerformanceMetric('session.snapshot_max_slice', {
 		durationMs: 3.25,
 	});
-	recordKrustyPerformanceMetric('session.snapshot_yields', { count: 4 });
+	recordMitsuroPerformanceMetric('session.snapshot_yields', { count: 4 });
 	assert(duration !== null && duration >= 0, 'enabled span should record duration');
 	assert(finish() === null, 'span completion should be idempotent');
 	release();
 	release();
 
-	const snapshot = getKrustyPerformanceSnapshot();
+	const snapshot = getMitsuroPerformanceSnapshot();
 	assert(snapshot.entries.length === 3, 'span and numeric metrics should be retained');
 	assert(snapshot.entries[0]?.name === 'stream.flush', 'span name should be retained');
 	assert(
@@ -54,16 +54,16 @@ Deno.test('performance spans and resources stay bounded and releasable', () => {
 });
 
 Deno.test('disabled performance instrumentation is a no-op', () => {
-	configureKrustyPerformance(false);
-	resetKrustyPerformance();
+	configureMitsuroPerformance(false);
+	resetMitsuroPerformance();
 
-	const finish = beginKrustyPerformanceSpan('session.open');
-	const release = trackKrustyPerformanceResource('session_requests');
+	const finish = beginMitsuroPerformanceSpan('session.open');
+	const release = trackMitsuroPerformanceResource('session_requests');
 	release();
 
 	assert(finish() === null, 'disabled span should not record work');
 	assert(
-		getKrustyPerformanceSnapshot().entries.length === 0,
+		getMitsuroPerformanceSnapshot().entries.length === 0,
 		'disabled instrumentation should keep no entries',
 	);
 });

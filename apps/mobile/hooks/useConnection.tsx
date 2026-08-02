@@ -1,13 +1,19 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import * as SecureStore from '../platform/secure-store';
 import { platformFetch } from '../platform/fetch';
-import { KrustyClient } from '@krusty/api';
+import { MitsuroClient } from '@mitsuro/api';
 import { recordRequestDiagnostic } from '../diagnostics/mobileDiagnostics';
+import {
+  deleteConnectionCredentials,
+  readConnectionCredentials,
+  writeConnectionCredentials,
+} from '../platform/identity-storage';
+import { connectionFromInjectedGlobals } from '../platform/identity-compatibility';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 interface ConnectionContextValue {
-  client: KrustyClient | null;
+  client: MitsuroClient | null;
   status: ConnectionStatus;
   isConnected: boolean;
   isConfigured: boolean;
@@ -34,13 +40,8 @@ const ConnectionContext = createContext<ConnectionContextValue>({
   reconnect: async () => {},
 });
 
-const STORAGE_KEYS = {
-  serverUrl: 'krusty_server_url',
-  serverToken: 'krusty_server_token',
-} as const;
-
 export function ConnectionProvider({ children }: { children: ReactNode }) {
-  const [client, setClient] = useState<KrustyClient | null>(null);
+  const [client, setClient] = useState<MitsuroClient | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [serverToken, setServerToken] = useState<string | null>(null);
@@ -52,22 +53,27 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       // Tauri desktop: auto-connect via injected globals
-      const tauriUrl = typeof window !== 'undefined' && (window as any).__KRUSTY_SERVER_URL;
-      const tauriToken = typeof window !== 'undefined' && (window as any).__KRUSTY_SERVER_TOKEN;
-      if (tauriUrl && tauriToken) {
+      const tauriConnection = typeof window === 'undefined'
+        ? null
+        : connectionFromInjectedGlobals(window as unknown as Record<string, unknown>);
+      if (tauriConnection) {
         setIsConfigured(true);
-        setServerUrl(tauriUrl);
-        await doConnect(tauriUrl, tauriToken);
+        setServerUrl(tauriConnection.serverUrl);
+        await doConnect(tauriConnection.serverUrl, tauriConnection.token);
         setLoaded(true);
         return;
       }
 
-      const savedUrl = await SecureStore.getItemAsync(STORAGE_KEYS.serverUrl);
-      const savedToken = await SecureStore.getItemAsync(STORAGE_KEYS.serverToken);
-      if (savedUrl && savedToken) {
-        setIsConfigured(true);
-        setServerUrl(savedUrl);
-        await doConnect(savedUrl, savedToken);
+      try {
+        const saved = await readConnectionCredentials(SecureStore);
+        if (saved) {
+          setIsConfigured(true);
+          setServerUrl(saved.serverUrl);
+          await doConnect(saved.serverUrl, saved.token);
+        }
+      } catch (loadError) {
+        setStatus('error');
+        setError(loadError instanceof Error ? loadError.message : 'Stored connection is invalid');
       }
       setLoaded(true);
     })();
@@ -78,7 +84,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const newClient = new KrustyClient({
+      const newClient = new MitsuroClient({
         baseUrl: url,
         token,
         ...(platformFetch
@@ -126,8 +132,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const connect = useCallback(async (url: string, token: string): Promise<boolean> => {
     const success = await doConnect(url, token);
     if (success) {
-      await SecureStore.setItemAsync(STORAGE_KEYS.serverUrl, url);
-      await SecureStore.setItemAsync(STORAGE_KEYS.serverToken, token);
+      await writeConnectionCredentials(SecureStore, { serverUrl: url, token });
       setIsConfigured(true);
     }
     return success;
@@ -139,16 +144,14 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setServerUrl(null);
     setServerToken(null);
     setError(null);
-    SecureStore.deleteItemAsync(STORAGE_KEYS.serverUrl);
-    SecureStore.deleteItemAsync(STORAGE_KEYS.serverToken);
+    void deleteConnectionCredentials(SecureStore);
     setIsConfigured(false);
   }, []);
 
   const reconnect = useCallback(async () => {
-    const savedUrl = await SecureStore.getItemAsync(STORAGE_KEYS.serverUrl);
-    const savedToken = await SecureStore.getItemAsync(STORAGE_KEYS.serverToken);
-    if (savedUrl && savedToken) {
-      await doConnect(savedUrl, savedToken);
+    const saved = await readConnectionCredentials(SecureStore);
+    if (saved) {
+      await doConnect(saved.serverUrl, saved.token);
     }
   }, []);
 

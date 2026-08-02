@@ -1,4 +1,4 @@
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 type IsCurrent = () => boolean;
 
@@ -27,7 +27,7 @@ export function createSessionCreationCoordinator<T>(): SessionCreationCoordinato
   const generations: Record<SessionType, number> = {
     chat: 0,
     code: 0,
-    mako: 0,
+    hive: 0,
   };
   const pending = new Map<SessionType, PendingCreation<T>>();
 

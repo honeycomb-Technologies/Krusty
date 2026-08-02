@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { KrustyClient, GitBranch, GitStatusResponse, GitWorktree } from '@krusty/api';
+import type { MitsuroClient, GitBranch, GitStatusResponse, GitWorktree } from '@mitsuro/api';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -18,7 +18,7 @@ export interface GitStoreState {
 }
 
 export function createGitStore(
-  client: KrustyClient,
+  client: MitsuroClient,
   getDirectory: () => string | null,
   onDirectoryChange?: (path: string) => void,
   onSessionUpdate?: (sessionId: string, data: { project_dir: string; working_dir: string; workspace_mode: string }) => Promise<void>,

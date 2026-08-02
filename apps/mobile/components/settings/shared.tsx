@@ -5,8 +5,8 @@ import type {
   OAuthStartResponse,
   PortEntry,
   ProviderStatus,
-} from "@krusty/api";
-import type { ColorScheme } from "@krusty/ui";
+} from "@mitsuro/api";
+import type { ColorScheme } from "@mitsuro/ui";
 
 import { useNotifications, type NotificationLevel } from "../../hooks/useNotifications";
 import { useThemeContext } from "../../hooks/useTheme";

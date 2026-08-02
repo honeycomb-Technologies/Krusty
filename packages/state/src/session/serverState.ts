@@ -1,4 +1,4 @@
-import type { SessionStateResponse as ApiSessionStateResponse } from '@krusty/api';
+import type { SessionStateResponse as ApiSessionStateResponse } from '@mitsuro/api';
 import type { createPlanStore } from '../plan';
 import { applyDelegatedSessionState } from './delegated';
 import { applyLivePartialAssistant, applyRecoveryParity } from './transient';

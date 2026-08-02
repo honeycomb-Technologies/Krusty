@@ -28,7 +28,7 @@ The key design principle is that none of these entry points contain any AI logic
 
 The caller receives events through the first channel and sends user interactions (tool approvals, question responses, cancellation) through the second. This channel pair is the entire interface between the core and the presentation layer. The orchestrator then spawns a tokio task that runs `run_inner`, the actual loop.
 
-Before entering the loop, `run_inner` unpacks its configuration: session ID, working directory, project directory, permission mode (supervised or autonomous), maximum iteration budget, stream idle timeout, and the initial work mode (build or plan). It loads per-project settings from `.krusty/settings.json`, which can override the permission mode or disable specific tools. It initializes a `CompactionManager` sized to the model's context window, and a `ContextLedger` that tracks conversation state for crash recovery.
+Before entering the loop, `run_inner` unpacks its configuration: session ID, working directory, project directory, permission mode (supervised or autonomous), maximum iteration budget, stream idle timeout, and the initial work mode (build or plan). It loads per-project settings from `.mitsuro/settings.json`, which can override the permission mode or disable specific tools. It initializes a `CompactionManager` sized to the model's context window, and a `ContextLedger` that tracks conversation state for crash recovery.
 
 ---
 
@@ -40,7 +40,7 @@ At the top of every loop iteration, the orchestrator calls `context::inject_cont
 2. **Environment context.** Platform details, the current model ID, git branch, and other environmental facts gathered from the local machine.
 3. **Persistent memory.** User preferences, project decisions, and feedback stored in the memory database. Only memories with meaningful overlap with the latest user objective are previewed; generic terms do not qualify on their own. Previews are capped at three memories per type, 180 characters each, with a 2 KiB total ceiling.
 4. **Project instructions.** Contents of instruction files discovered in the project root: `KRAB.md`, `CLAUDE.md`, `.cursorrules`, `AGENTS.md`, and others. These are read from disk on every iteration so they always reflect the latest version.
-5. **Project settings append.** An optional `system_prompt_append` from `.krusty/settings.json`.
+5. **Project settings append.** An optional `system_prompt_append` from `.mitsuro/settings.json`.
 6. **Plan context.** If a plan exists for this session, its current state (tasks, completion status, dependencies) is serialized and injected so the AI knows what has been done and what remains.
 7. **Delegated run context.** Summaries of recent sub-agent explorations, so the AI can resume or deepen prior investigations instead of starting over.
 8. **Autonomous task context.** Status of any autonomous tasks assigned to this session.

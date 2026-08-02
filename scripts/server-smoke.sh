@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/identity-env.sh"
 
-BASE_URL="${KRUSTY_BASE_URL:-http://localhost:3000}"
-SMOKE_ROOT="${KRUSTY_SMOKE_ROOT:-$(pwd)/target/server-smoke}"
+BASE_URL="${MITSURO_BASE_URL:-http://localhost:3000}"
+SMOKE_ROOT="${MITSURO_SMOKE_ROOT:-$(pwd)/target/server-smoke}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -86,11 +87,11 @@ assert_json_eq() {
 
 mkdir -p "$SMOKE_ROOT/projects"
 FRESH_CODE_DIR="$SMOKE_ROOT/projects/fresh-code-session"
-MAKO_DIR="$SMOKE_ROOT/projects/mako-smoke"
-mkdir -p "$MAKO_DIR"
+HIVE_DIR="$SMOKE_ROOT/projects/hive-smoke"
+mkdir -p "$HIVE_DIR"
 
 CODE_SESSION_ID=""
-MAKO_SESSION_ID=""
+HIVE_SESSION_ID=""
 
 printf 'Server smoke target: %s\n' "$BASE_URL"
 
@@ -145,34 +146,34 @@ assert_status 200 "memories endpoint"
 request GET "/api/memories/snapshot?project_dir=$(urlencode "$FRESH_CODE_DIR")"
 assert_status 200 "memory snapshot endpoint"
 
-request GET /api/mako/current
-assert_status 200 "mako current endpoint"
+request GET /api/hive/current
+assert_status 200 "hive current endpoint"
 
-request POST /api/mako/dispatch "$(jq -nc \
+request POST /api/hive/dispatch "$(jq -nc \
   --arg task 'Smoke-test current status' \
-  --arg project_dir "$MAKO_DIR" \
+  --arg project_dir "$HIVE_DIR" \
   '{task: $task, project_dir: $project_dir, priority: "normal"}')"
 if [[ "$RESPONSE_STATUS" == "200" || "$RESPONSE_STATUS" == "201" ]]; then
-  pass "dispatch Mako run"
-  MAKO_SESSION_ID="$(json '.session_id')"
+  pass "dispatch Hive run"
+  HIVE_SESSION_ID="$(json '.session_id')"
 else
-  fail "dispatch Mako run" "expected HTTP 200/201, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
+  fail "dispatch Hive run" "expected HTTP 200/201, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
 fi
 
-if [[ -z "$MAKO_SESSION_ID" ]]; then
+if [[ -z "$HIVE_SESSION_ID" ]]; then
   printf '\nSummary: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
   exit 1
 fi
 
-request GET "/api/mako/sessions/$MAKO_SESSION_ID/status"
-assert_status 200 "get Mako session status"
-assert_json_eq '.session_type' 'mako' "Mako session type"
+request GET "/api/hive/sessions/$HIVE_SESSION_ID/status"
+assert_status 200 "get Hive session status"
+assert_json_eq '.session_type' 'hive' "Hive session type"
 
-request DELETE "/api/mako/sessions/$MAKO_SESSION_ID"
+request DELETE "/api/hive/sessions/$HIVE_SESSION_ID"
 if [[ "$RESPONSE_STATUS" == "204" || "$RESPONSE_STATUS" == "200" ]]; then
-  pass "cancel Mako smoke session"
+  pass "cancel Hive smoke session"
 else
-  fail "cancel Mako smoke session" "expected HTTP 200/204, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
+  fail "cancel Hive smoke session" "expected HTTP 200/204, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
 fi
 
 request DELETE "/api/sessions/$CODE_SESSION_ID"

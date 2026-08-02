@@ -214,10 +214,10 @@ export function CardGridSkeleton({ cards = 3 }: { cards?: number }) {
   );
 }
 
-export function MakoHomeSkeleton() {
+export function HiveHomeSkeleton() {
   return (
-    <SkeletonBlock style={styles.makoHome}>
-      <View style={styles.makoStatus}>
+    <SkeletonBlock style={styles.hiveHome}>
+      <View style={styles.hiveStatus}>
         <SkeletonLine width="48%" height={12} tone="soft" />
         <Skeleton width={16} height={16} radius={8} />
       </View>
@@ -314,12 +314,12 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingVertical: 4,
   },
-  makoHome: {
+  hiveHome: {
     flex: 1,
     gap: 12,
     paddingTop: 4,
   },
-  makoStatus: {
+  hiveStatus: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",

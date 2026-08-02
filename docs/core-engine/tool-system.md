@@ -2,7 +2,7 @@
 
 The tool system is how Mitsuro does things. When the AI decides it needs to read a file, search the codebase, run a shell command, or edit code, it makes a tool call. The tool system receives that call, checks whether it's allowed, runs any safety checks, executes the tool, and returns the result. Every action the AI takes in your environment flows through this system.
 
-At the center is the **ToolRegistry** -- a HashMap of tool implementations behind an `Arc<RwLock<>>`, with pre-execution and post-execution hooks attached. The registry manages tool registration, lookup, permission enforcement, and the full execution lifecycle. It's defined in `crates/krusty-core/src/tools/registry/runtime.rs`.
+At the center is the **ToolRegistry** -- a HashMap of tool implementations behind an `Arc<RwLock<>>`, with pre-execution and post-execution hooks attached. The registry manages tool registration, lookup, permission enforcement, and the full execution lifecycle. It's defined in `crates/mitsuro-core/src/tools/registry/runtime.rs`.
 
 ## The Tool Trait
 
@@ -25,7 +25,7 @@ Every tool receives a `ToolContext` that carries the working directory, allowed 
 
 ## Built-in Tools
 
-Mitsuro registers its tools at startup via `register_all_tools()` in `crates/krusty-core/src/tools/implementations/mod.rs`. They fall into several categories.
+Mitsuro registers its tools at startup via `register_all_tools()` in `crates/mitsuro-core/src/tools/implementations/mod.rs`. They fall into several categories.
 
 ### File I/O
 
@@ -72,7 +72,7 @@ Sub-agents can also run in the background via `run_in_background: true`, returni
 
 ### Interaction & State
 
-**AskUserQuestion** prompts the user for input from within the AI's reasoning flow. **Skill** loads specialized instruction sets from `~/.krusty/skills/` or the project's `.krusty/skills/` directory. **Memory** persists knowledge across sessions -- user preferences, project context, feedback. **SetWorkMode**, **EnterPlanMode**, and **SetWorkspaceContext** let the AI toggle between plan mode and build mode or update workspace metadata.
+**AskUserQuestion** prompts the user for input from within the AI's reasoning flow. **Skill** loads specialized instruction sets from `~/.mitsuro/skills/` or the project's `.mitsuro/skills/` directory. **Memory** persists knowledge across sessions -- user preferences, project context, feedback. **SetWorkMode**, **EnterPlanMode**, and **SetWorkspaceContext** let the AI toggle between plan mode and build mode or update workspace metadata.
 
 ### Hive (Autonomous Mode)
 
@@ -114,7 +114,7 @@ Sub-agents inherit their parent's permission mode through `DelegationPolicy`. An
 
 ## Safety Hooks
 
-The `SafetyHook` (defined in `crates/krusty-core/src/agent/hooks/builtins.rs`) is a pre-execution hook that blocks dangerous bash commands before they run. It fires only for bash/shell/execute tools and checks the command against several categories of dangerous patterns.
+The `SafetyHook` (defined in `crates/mitsuro-core/src/agent/hooks/builtins.rs`) is a pre-execution hook that blocks dangerous bash commands before they run. It fires only for bash/shell/execute tools and checks the command against several categories of dangerous patterns.
 
 **What gets blocked:**
 
@@ -135,7 +135,7 @@ The **PlanModeHook** is a separate pre-hook that enforces plan mode restrictions
 
 AI models have limited context windows, and tool output can be enormous -- a `cargo build` might produce thousands of lines, or a file read might return a massive source file. Sending all of that back wastes tokens and can push important context out of the window.
 
-The truncation system (in `crates/krusty-core/src/tools/truncation.rs`) applies dual limits: a maximum number of lines and a maximum number of bytes. It supports two modes:
+The truncation system (in `crates/mitsuro-core/src/tools/truncation.rs`) applies dual limits: a maximum number of lines and a maximum number of bytes. It supports two modes:
 
 **Tail truncation** keeps the most recent output. This is used for bash command output, where the end of the output (error messages, final status) is usually more relevant than the beginning. The bash tool defaults to 2,000 lines and 50 KB.
 
@@ -147,7 +147,7 @@ The bash tool additionally strips ANSI escape sequences before truncation, since
 
 ## MCP Tools
 
-Mitsuro discovers external tools at runtime through the Model Context Protocol. When MCP servers are configured, the `McpManager` connects to them and queries their tool catalogs. Each discovered tool gets wrapped in an `McpTool` struct (in `crates/krusty-core/src/mcp/tool.rs`) that implements the `Tool` trait, making MCP tools indistinguishable from built-in tools at the registry level.
+Mitsuro discovers external tools at runtime through the Model Context Protocol. When MCP servers are configured, the `McpManager` connects to them and queries their tool catalogs. Each discovered tool gets wrapped in an `McpTool` struct (in `crates/mitsuro-core/src/mcp/tool.rs`) that implements the `Tool` trait, making MCP tools indistinguishable from built-in tools at the registry level.
 
 MCP tool names are namespaced as `mcp__{server}_{tool}` to avoid collisions with built-in tools. Their parameter schemas are sanitized on registration -- the wrapper ensures every schema has `additionalProperties: false`, valid `required` arrays, and proper object structure, since external servers don't always produce schemas that meet Anthropic's strict requirements.
 
@@ -155,7 +155,7 @@ One important detail: MCP tools execute on external servers and bypass Mitsuro's
 
 ## Tool Matching
 
-The `matching` module (in `crates/krusty-core/src/tools/matching.rs`) provides the fuzzy matching cascade used by the Edit, MultiEdit, and ApplyPatch tools. It's not about matching tool calls to tools (that's a simple HashMap lookup by name) -- it's about matching the text strings the AI provides against the actual file content.
+The `matching` module (in `crates/mitsuro-core/src/tools/matching.rs`) provides the fuzzy matching cascade used by the Edit, MultiEdit, and ApplyPatch tools. It's not about matching tool calls to tools (that's a simple HashMap lookup by name) -- it's about matching the text strings the AI provides against the actual file content.
 
 AI models frequently produce text that doesn't exactly match the file: trailing whitespace differences, smart quotes instead of ASCII quotes, collapsed whitespace, or minor typos. The five-pass cascade handles all of these:
 

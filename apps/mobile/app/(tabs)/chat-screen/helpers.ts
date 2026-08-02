@@ -3,16 +3,15 @@ import { Dimensions } from "react-native";
 import type {
   ChatMessage,
   SessionType,
-} from "@krusty/api";
-import type { ToolCall } from "@krusty/state";
-export { isModelUsable, normalizeProviderId } from "@krusty/state";
+} from "@mitsuro/api";
+import type { ToolCall } from "@mitsuro/state";
+export { isModelUsable, normalizeProviderId } from "@mitsuro/state";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 
 export const SPLIT_PANEL_HEIGHT = SCREEN_HEIGHT * 0.42;
 export const CHAT_BAR_ZONE = 130;
-export const SELECTED_MODEL_KEY = "krusty_selected_model";
-export const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
+export const TAB_TYPES: SessionType[] = ["chat", "code", "hive"];
 
 export type WorkspaceMode = "neutral" | "selected" | "created";
 
@@ -24,7 +23,7 @@ export function tabForSessionType(type: SessionType): number {
   switch (type) {
     case "chat":
       return 0;
-    case "mako":
+    case "hive":
       return 2;
     default:
       return 1;

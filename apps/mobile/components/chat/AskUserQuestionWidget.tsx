@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput, StyleSheet } from "react-native";
 import { HelpCircle, Check, Send } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 
 interface QuestionOption {
   label: string;

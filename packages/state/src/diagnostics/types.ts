@@ -164,6 +164,6 @@ export interface DiagnosticNativeMetricKitFrame {
 }
 
 export interface DiagnosticUploadClient {
-  /** Authenticated transport implemented by KrustyClient once Honey supports it. */
+  /** Authenticated transport implemented by MitsuroClient once Honey supports it. */
   uploadMobileDiagnostics(batch: DiagnosticUploadBatch): Promise<void>;
 }

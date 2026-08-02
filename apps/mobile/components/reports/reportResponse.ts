@@ -1,4 +1,4 @@
-import type { ReportSummary } from "@krusty/api";
+import type { ReportSummary } from "@mitsuro/api";
 
 export function reportSummariesFromResponse(value: unknown): ReportSummary[] {
   if (!value || typeof value !== "object") return [];

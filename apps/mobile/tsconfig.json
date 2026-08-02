@@ -5,9 +5,9 @@
     "baseUrl": ".",
     "moduleSuffixes": [".native", ".web", ""],
     "paths": {
-      "@krusty/api": ["../../packages/api/src"],
-      "@krusty/state": ["../../packages/state/src"],
-      "@krusty/ui": ["../../packages/ui/src"],
+      "@mitsuro/api": ["../../packages/api/src"],
+      "@mitsuro/state": ["../../packages/state/src"],
+      "@mitsuro/ui": ["../../packages/ui/src"],
       "zustand": ["./node_modules/zustand"],
       "zustand/*": ["./node_modules/zustand/*"]
     }

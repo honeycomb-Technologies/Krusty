@@ -64,17 +64,17 @@ release.
 Start the terminal app:
 
 ```bash
-krusty
+mitsuro
 ```
 
 Start the server and web workspace:
 
 ```bash
-krusty serve
+mitsuro serve
 ```
 
-Mitsuro is the product name. The installed `krusty` command remains available
-for compatibility with existing installations and automation.
+`mitsuro` is the primary command. The deprecated `krusty` command remains a
+tested compatibility alias during the announced migration window.
 
 ### Build from source
 
@@ -132,10 +132,8 @@ engineering guidance lives in [AGENTS.md](AGENTS.md).
 
 ## Project status
 
-Mitsuro is under active development. Some internal package, executable, route,
-and storage identifiers still use the legacy `krusty` or `mako` names so
-existing installations keep working. Public product language and new links use
-Mitsuro, Agent, and Hive.
+Mitsuro is under active development. Current source, release artifacts, and
+documentation use Mitsuro for the harness and Hive for durable autonomous work.
 
 ## License
 

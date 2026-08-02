@@ -11,17 +11,18 @@ import {
   createWorkspaceStore,
   createGitStore,
   createPlanStore,
-} from "@krusty/state";
+} from "@mitsuro/state";
 import type {
   SessionsStoreState,
   SessionStoreState,
   WorkspaceStoreState,
   GitStoreState,
   PlanStoreState,
-} from "@krusty/state";
-import type { KrustyClient } from "@krusty/api";
-import type { SessionType } from "@krusty/api";
-import { createStorage } from "../platform/krusty-storage";
+} from "@mitsuro/state";
+import type { MitsuroClient } from "@mitsuro/api";
+import type { SessionType } from "@mitsuro/api";
+import { createStorage } from "../platform/mitsuro-storage";
+import { IDENTITY_STORAGE_KEYS } from "../platform/identity-storage";
 import { useStore } from "zustand";
 
 // Store types
@@ -50,28 +51,28 @@ interface ModeStores {
 const StoresContext = createContext<StoresContextValue | null>(null);
 
 interface StoresProviderProps {
-  client: KrustyClient | null;
+  client: MitsuroClient | null;
   children: ReactNode;
 }
 
 const STORAGE_HYDRATION_KEYS = [
-  "krusty:workspace",
-  "krusty:workspace:chat",
-  "krusty:workspace:mako",
-  "krusty-permission-mode",
-  "krusty:presence-client-id",
+  IDENTITY_STORAGE_KEYS.workspaceCode.canonical,
+  IDENTITY_STORAGE_KEYS.workspaceChat.canonical,
+  IDENTITY_STORAGE_KEYS.workspaceHive.canonical,
+  IDENTITY_STORAGE_KEYS.permissionMode.canonical,
+  IDENTITY_STORAGE_KEYS.presenceClientId.canonical,
 ] as const;
 
-function buildStores(client: KrustyClient, storage: ReturnType<typeof createStorage>) {
-  // Keep the legacy workspace key attached to Code so existing project and
-  // branch selection survives the migration to independent mode slots.
+function buildStores(client: MitsuroClient, storage: ReturnType<typeof createStorage>) {
+  // Code keeps the original shared workspace slot; the storage adapter upgrades
+  // its prior key before the mode stores are constructed.
   const workspaces: Record<SessionType, WorkspaceStore> = {
-    chat: createWorkspaceStore(storage, "krusty:workspace:chat"),
+    chat: createWorkspaceStore(storage, IDENTITY_STORAGE_KEYS.workspaceChat.canonical),
     code: createWorkspaceStore(storage),
-    mako: createWorkspaceStore(storage, "krusty:workspace:mako"),
+    hive: createWorkspaceStore(storage, IDENTITY_STORAGE_KEYS.workspaceHive.canonical),
   };
   const sessions = createSessionsStore(client, workspaces.code);
-  const modes = (["chat", "code", "mako"] as const).reduce(
+  const modes = (["chat", "code", "hive"] as const).reduce(
     (result, mode) => {
       const plan = createPlanStore();
       result[mode] = {
@@ -146,7 +147,7 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
   useEffect(() => {
     return () => {
       if (!stores) return;
-      for (const mode of ["chat", "code", "mako"] as const) {
+      for (const mode of ["chat", "code", "hive"] as const) {
         stores.modes[mode].session.getState().cleanup();
       }
     };

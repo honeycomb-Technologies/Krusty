@@ -1,4 +1,4 @@
-import type { PlanItem as ApiPlanItem, WorkflowSnapshot } from '@krusty/api';
+import type { PlanItem as ApiPlanItem, WorkflowSnapshot } from '@mitsuro/api';
 import { create } from 'zustand';
 
 export interface PlanItem {

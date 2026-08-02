@@ -6,7 +6,7 @@ import {
   MessagesSquare,
   Toolbox,
 } from "lucide-react-native";
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 import { useThemeContext } from "../../hooks/useTheme";
 import * as Haptics from "../../platform/haptics";
@@ -23,7 +23,7 @@ const MODES: Array<{
 }> = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "code", label: "Code", icon: Code2 },
-  { id: "mako", label: "Hive", icon: HiveIcon },
+  { id: "hive", label: "Hive", icon: HiveIcon },
 ];
 
 interface MobileAppHeaderProps {

@@ -6,10 +6,20 @@ The final product mark is one exact rounded cell rotated point-up. Hive uses thr
 
 Source-of-truth artwork lives in `assets/branding/mitsuro/`. Launcher and native splash PNGs in `apps/mobile/assets/` are renders of those sources. The splash Lottie is vector-only and traces all six cell sides simultaneously.
 
-Compatibility identifiers such as crate names, database fields, API routes, legacy URL schemes, and bundle IDs may continue to use `krusty` or `mako` while alias-based migrations are completed. User-facing product copy should use Mitsuro, Agent, Hive, Hive Agent, and Pulse.
+Current crate names, database fields, API routes, URL schemes, bundle IDs, and
+release artifacts use Mitsuro and Hive. Prior identifiers are confined to the
+tested migration readers and transition aliases listed by the canonical-name
+audit.
 
-The canonical GitHub repository is `honeycomb-Technologies/Mitsuro`, the App Store Connect product name is Mitsuro, and new mobile launch URLs use `mitsuro://`. The previous `krusty://` scheme remains registered as a compatibility alias.
+The canonical GitHub repository is `honeycomb-Technologies/Mitsuro`, the App
+Store Connect product name is Mitsuro, and mobile launch URLs use `mitsuro://`.
 
-Internal package names, executable names, routes, storage paths, and platform
-identifiers may retain legacy compatibility values until they can be migrated
-without breaking existing installations.
+Windows archive installation changes binaries only. A machine with the prior
+state root must keep every server and Hive generation stopped while
+`mitsuro migrate-identity --confirm-offline` performs the one-time state
+cutover; normal startup comes only after that command succeeds. The Linux shell
+installer performs the same cutover under its procfs-proven offline service
+handoff. macOS shell installation fails closed and prints the exact staged
+migration command to run manually before retrying. Homebrew and AUR install
+binaries or units only and require manual offline migration before first
+startup when previous state exists.

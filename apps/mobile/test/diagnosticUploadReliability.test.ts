@@ -41,8 +41,8 @@ Deno.test('diagnostic completion drains checkpoints before one empty marker', as
     'periodic uploads must not contend with an active stress run',
   );
   assert(
-    provider.includes("beginKrustyPerformanceSpan('diagnostics.persist')")
-      && provider.includes("beginKrustyPerformanceSpan('diagnostics.upload')"),
+    provider.includes("beginMitsuroPerformanceSpan('diagnostics.persist')")
+      && provider.includes("beginMitsuroPerformanceSpan('diagnostics.upload')"),
     'diagnostics overhead must be attributed in the next report',
   );
 });

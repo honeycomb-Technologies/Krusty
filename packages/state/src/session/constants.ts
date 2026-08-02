@@ -17,7 +17,7 @@ export const MAX_LIVE_TOOL_OUTPUT_LENGTH = 80_000;
 export const MAX_CACHED_SESSION_MESSAGES = 80;
 /** Max lastKnownServerState entries retained per mode store. */
 export const MAX_LAST_KNOWN_SERVER_STATE = 32;
-export const PRESENCE_CLIENT_STORAGE_KEY = 'krusty:presence-client-id';
+export const PRESENCE_CLIENT_STORAGE_KEY = 'mitsuro:presence-client-id';
 export const SUPPORTED_IMAGE_MIME_TYPES = [
   'image/jpeg',
   'image/png',

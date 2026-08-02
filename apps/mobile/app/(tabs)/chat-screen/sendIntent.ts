@@ -1,7 +1,7 @@
-import type { SessionResponse, SessionType, WorkspaceMode } from "@krusty/api";
-import type { SendMessageOptions } from "@krusty/state";
+import type { SessionResponse, SessionType, WorkspaceMode } from "@mitsuro/api";
+import type { SendMessageOptions } from "@mitsuro/state";
 
-const TAB_SESSION_TYPES: SessionType[] = ["chat", "code", "mako"];
+const TAB_SESSION_TYPES: SessionType[] = ["chat", "code", "hive"];
 
 interface ResolveSendIntentArgs {
   activeTab: number;

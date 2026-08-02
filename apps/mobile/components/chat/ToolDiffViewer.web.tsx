@@ -8,10 +8,10 @@ import {
 import rustLanguage from "@shikijs/langs/rust";
 import { useThemeContext } from "../../hooks/useTheme";
 import {
-  KRUSTY_DIFF_THEME_NAMES,
-  krustyDarkDiffTheme,
-  krustyLightDiffTheme,
-} from "./krustyDiffThemes";
+  MITSURO_DIFF_THEME_NAMES,
+  mitsuroDarkDiffTheme,
+  mitsuroLightDiffTheme,
+} from "./mitsuroDiffThemes";
 import type { ToolDiffPresentation } from "./toolDiffModel";
 
 interface ToolDiffViewerProps {
@@ -22,7 +22,7 @@ interface ToolDiffViewerProps {
   maxLines?: number;
 }
 
-const KRUSTY_DIFF_CSS = `
+const MITSURO_DIFF_CSS = `
   :host {
     --diffs-font-family: "SFMono-Regular", "SF Mono", ui-monospace, monospace;
     --diffs-header-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -34,15 +34,15 @@ const KRUSTY_DIFF_CSS = `
   [data-diffs-header="default"] {
     min-height: 34px;
     padding-inline: 10px;
-    border-bottom: 1px solid var(--krusty-diff-border);
+    border-bottom: 1px solid var(--mitsuro-diff-border);
   }
   [data-separator="metadata"] {
     opacity: .82;
   }
 `;
 
-registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.dark, async () => krustyDarkDiffTheme);
-registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.light, async () => krustyLightDiffTheme);
+registerCustomTheme(MITSURO_DIFF_THEME_NAMES.dark, async () => mitsuroDarkDiffTheme);
+registerCustomTheme(MITSURO_DIFF_THEME_NAMES.light, async () => mitsuroLightDiffTheme);
 // Metro cannot safely bundle Pierre's runtime-generated absolute Rust grammar
 // import when node_modules is shared by a worktree. Registering the grammar as
 // a static module keeps the web diff viewer deterministic.
@@ -54,14 +54,14 @@ export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
   const t = theme.colors;
   const options = useMemo(
     () => ({
-      theme: KRUSTY_DIFF_THEME_NAMES[theme.scheme],
+      theme: MITSURO_DIFF_THEME_NAMES[theme.scheme],
       themeType: theme.scheme,
       diffStyle: "unified" as const,
       diffIndicators: "classic" as const,
       lineDiffType: "word" as const,
       hunkSeparators: "metadata" as const,
       overflow: "scroll" as const,
-      unsafeCSS: KRUSTY_DIFF_CSS,
+      unsafeCSS: MITSURO_DIFF_CSS,
     }),
     [theme.scheme],
   );
@@ -75,7 +75,7 @@ export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
     "--diffs-modified-color": t.info,
     "--diffs-bg-context-override": t.card,
     "--diffs-bg-separator-override": t.muted,
-    "--krusty-diff-border": t.border,
+    "--mitsuro-diff-border": t.border,
   } as React.CSSProperties;
   const files = useMemo(
     () =>

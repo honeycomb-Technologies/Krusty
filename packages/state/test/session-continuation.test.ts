@@ -1,7 +1,7 @@
 import { createSessionStore } from "../src/session/store.ts";
 import { STATE_POLL_DEGRADED_MESSAGE } from "../src/session/constants.ts";
 import type { ChatMessage, ToolCall } from "../src/session/types.ts";
-import { KrustyApiError } from "@krusty/api";
+import { MitsuroApiError } from "@mitsuro/api";
 
 declare const Deno: {
 	test(name: string, fn: () => void | Promise<void>): void;
@@ -963,7 +963,7 @@ Deno.test("a stale persisted session is cleared without discarding its workspace
 	const sessions = createSessionsStore();
 	const client = {
 		getSession: async () => {
-			throw new KrustyApiError(404, "Session deleted-session not found", "");
+			throw new MitsuroApiError(404, "Session deleted-session not found", "");
 		},
 		removeSessionPresence: async () => ({}),
 	};

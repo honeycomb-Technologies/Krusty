@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
 import { Alert } from "react-native";
 
-import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
+import type { ModelInfo, SessionResponse, SessionType } from "@mitsuro/api";
 import {
-  beginKrustyPerformanceSpan,
+  beginMitsuroPerformanceSpan,
   type Attachment as SessionAttachment,
-} from "@krusty/state";
+} from "@mitsuro/state";
 import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
 import * as Haptics from "../../../platform/haptics";
 import * as SecureStore from "../../../platform/secure-store";
 import {
-  SELECTED_MODEL_KEY,
   getWorkspaceMode,
   sessionTypeForTab,
   tabForSessionType,
   type WorkspaceMode,
 } from "./helpers";
+import {
+  IDENTITY_STORAGE_KEYS,
+  writeCanonicalAsyncValue,
+} from "../../../platform/identity-storage";
 import {
   findCodeSessionForProject,
   resolveSendIntent,
@@ -215,7 +218,7 @@ export function useSessionActions({
       const targetStore = modeStores[targetType].session;
       const creationCoordinator = sessionCreationCoordinatorRef.current;
       sessionSelectionSchedulerRef.current?.cancel();
-      const finishShellSpan = beginKrustyPerformanceSpan(
+      const finishShellSpan = beginMitsuroPerformanceSpan(
         "new_chat.shell",
         targetType,
       );
@@ -249,7 +252,7 @@ export function useSessionActions({
         const session = await creationCoordinator.run(
           targetType,
           async (isCurrent) => {
-            const finishBindSpan = beginKrustyPerformanceSpan(
+            const finishBindSpan = beginMitsuroPerformanceSpan(
               "new_chat.session_bind",
               targetType,
             );
@@ -304,26 +307,26 @@ export function useSessionActions({
   );
 
   /**
-   * Ensure the durable per-user Mako companion is the active session.
-   * Used when opening the Mako tab and before any Mako composer send.
+   * Ensure the durable per-user Hive companion is the active session.
+   * Used when opening the Hive tab and before any Hive composer send.
    */
-  const ensureMakoCompanionSession = useCallback(async (): Promise<string | null> => {
+  const ensureHiveCompanionSession = useCallback(async (): Promise<string | null> => {
     if (!client) {
       return null;
     }
-    return sessionStore.getState().ensureMakoMainSession();
+    return sessionStore.getState().ensureHiveMainSession();
   }, [client, sessionStore]);
 
   const ensureSessionForSend = useCallback(async (): Promise<ResolvedSendIntent | null> => {
-    // Mako always sends on the durable main companion — never ad-hoc createSession.
-    if (activeTab === 2 || sessionTypeForTab(activeTab) === "mako") {
-      const mainId = await ensureMakoCompanionSession();
+    // Hive always sends on the durable main companion — never ad-hoc createSession.
+    if (activeTab === 2 || sessionTypeForTab(activeTab) === "hive") {
+      const mainId = await ensureHiveCompanionSession();
       if (!mainId) {
         return null;
       }
       return {
         shouldPrecreate: false,
-        sendOptions: { sessionType: "mako" },
+        sendOptions: { sessionType: "hive" },
       };
     }
 
@@ -351,7 +354,7 @@ export function useSessionActions({
       const session = await sessionCreationCoordinatorRef.current.run(
         targetType,
         async (isCurrent) => {
-          const finishBindSpan = beginKrustyPerformanceSpan(
+          const finishBindSpan = beginMitsuroPerformanceSpan(
             "new_chat.session_bind",
             targetType,
           );
@@ -417,7 +420,7 @@ export function useSessionActions({
     async (id: string) => {
       setDrawerOpen(false);
       const target = sessions.find((session) => session.id === id);
-      const targetType = target?.session_type ?? "mako";
+      const targetType = target?.session_type ?? "hive";
       sessionCreationCoordinatorRef.current.invalidate(targetType);
       lastSessionIdByTypeRef.current[targetType] = id;
       setActiveTab(tabForSessionType(targetType));
@@ -508,9 +511,9 @@ export function useSessionActions({
   );
 
   const handleNewSession = useCallback(async (sessionType?: SessionType) => {
-    // Mako has one durable companion — never create a fresh peer chat from "new".
-    if (sessionType === "mako" || (sessionType == null && activeTab === 2)) {
-      await ensureMakoCompanionSession();
+    // Hive has one durable companion — never create a fresh peer chat from "new".
+    if (sessionType === "hive" || (sessionType == null && activeTab === 2)) {
+      await ensureHiveCompanionSession();
       setActiveTab(2);
       setDrawerOpen(false);
       return;
@@ -519,7 +522,7 @@ export function useSessionActions({
   }, [
     activeTab,
     createSessionForCurrentTab,
-    ensureMakoCompanionSession,
+    ensureHiveCompanionSession,
     setActiveTab,
     setDrawerOpen,
   ]);
@@ -539,7 +542,7 @@ export function useSessionActions({
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            const activeEntry = (["chat", "code", "mako"] as const).find(
+            const activeEntry = (["chat", "code", "hive"] as const).find(
               (mode) => modeStores[mode].session.getState().sessionId === id,
             );
             const targetStore = activeEntry
@@ -652,7 +655,11 @@ export function useSessionActions({
       sessionStore
         .getState()
         .setModel(modelId, modelInfo?.provider ?? null, modelInfo ?? null);
-      void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
+      void writeCanonicalAsyncValue(
+        SecureStore,
+        IDENTITY_STORAGE_KEYS.selectedModel,
+        modelId,
+      );
     },
     [models, sessionStore],
   );
@@ -676,7 +683,7 @@ export function useSessionActions({
     loadSession,
     loadSessionById,
     openProjectInCode,
-    ensureMakoCompanionSession,
+    ensureHiveCompanionSession,
     handleNewSession,
     handleDirectorySelected,
     handleDeleteSession,

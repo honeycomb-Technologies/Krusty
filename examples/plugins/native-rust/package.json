@@ -1,11 +1,11 @@
 {
-  "name": "@krusty/native-rust-demo",
+  "name": "@mitsuro/native-rust-demo",
   "version": "0.1.0",
   "private": true,
-  "krusty": {
+  "mitsuro": {
     "plugins": ["./plugin.toml"]
   },
   "scripts": {
-    "build": "cargo build --release && mkdir -p dist/linux-x64 && cp target/release/libkrusty_native_rust_demo.so dist/linux-x64/"
+    "build": "cargo build --release && mkdir -p dist/linux-x64 && cp target/release/libmitsuro_native_rust_demo.so dist/linux-x64/"
   }
 }

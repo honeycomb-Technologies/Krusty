@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Mitsuro",
-    "slug": "krusty",
+    "slug": "mitsuro",
     "version": "0.9.20",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "io.krusty.mobile",
+      "bundleIdentifier": "io.mitsuro.mobile",
       "backgroundColor": "#0e0e11",
       "icon": {
         "light": "./assets/icons/ios-light.png",
@@ -37,7 +37,7 @@
       "buildNumber": "274"
     },
     "android": {
-      "package": "io.krusty.mobile",
+      "package": "io.mitsuro.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0e0e11"
@@ -82,14 +82,28 @@
       [
         "expo-widgets",
         {
-          "groupIdentifier": "group.io.krusty.mobile",
+          "groupIdentifier": "group.io.mitsuro.mobile",
           "enablePushNotifications": true,
           "frequentUpdates": true,
           "widgets": [
             {
-              "name": "MakoWidget",
+              "name": "HiveWidget",
               "displayName": "Hive Status",
               "description": "Daily updates and status from your Hive agent",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "systemLarge",
+                "accessoryCircular",
+                "accessoryRectangular",
+                "accessoryInline"
+              ],
+              "contentMarginsDisabled": false
+            },
+            {
+              "name": "MakoWidget",
+              "displayName": "Hive Status (Compatibility)",
+              "description": "Keeps an existing Hive status widget active during the Mitsuro transition",
               "supportedFamilies": [
                 "systemSmall",
                 "systemMedium",

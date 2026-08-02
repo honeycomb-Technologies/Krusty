@@ -1,4 +1,4 @@
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 
 export type AssistantVisualSegment =
   | {

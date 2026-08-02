@@ -1,9 +1,9 @@
 {
-  "name": "@krusty/js-ts-demo",
+  "name": "@mitsuro/js-ts-demo",
   "version": "0.1.0",
   "private": true,
-  "description": "Minimal edon/libnode TypeScript TUI plugin for Krusty.",
-  "krusty": {
+  "description": "Minimal edon/libnode TypeScript TUI plugin for Mitsuro.",
+  "mitsuro": {
     "plugins": ["./plugin.toml"]
   }
 }

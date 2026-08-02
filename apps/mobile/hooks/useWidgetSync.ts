@@ -5,16 +5,26 @@ import {
   type ChatWidgetCadenceState,
 } from "./presentationCadence";
 
-// Native-only — widget instances loaded dynamically to avoid crash on web
-let MakoWidgetInstance: any = null;
+// Native-only — widget instances loaded dynamically to avoid crash on web.
+// Update both kinds while installed widgets and native/OTA generations overlap.
+const HiveWidgetInstances: any[] = [];
 let ChatWidgetInstance: any = null;
 
 if (Platform.OS === "ios") {
   try {
-    MakoWidgetInstance = require("../widgets/MakoWidget").default;
+    HiveWidgetInstances.push(require("../widgets/HiveWidget").default);
+  } catch {
+    // The installed native build may predate the canonical widget kind.
+  }
+  try {
+    HiveWidgetInstances.push(require("../widgets/MakoWidget").default);
+  } catch {
+    // Compatibility kind may be absent after its eventual retirement.
+  }
+  try {
     ChatWidgetInstance = require("../widgets/ChatWidget").default;
   } catch {
-    // Widgets not available
+    // Widget support is unavailable in this native build.
   }
 }
 
@@ -57,7 +67,7 @@ export function useWidgetSync(chatState: ChatState) {
   ]);
 }
 
-interface MakoState {
+interface HiveState {
   status: "active" | "idle" | "running" | "offline";
   lastUpdate: string;
   briefing: string;
@@ -68,14 +78,16 @@ interface MakoState {
   serverConnected: boolean;
 }
 
-export function useMakoWidgetSync(state: MakoState) {
+export function useHiveWidgetSync(state: HiveState) {
   useEffect(() => {
     if (Platform.OS !== "ios") return;
 
-    try {
-      MakoWidgetInstance.updateSnapshot(state);
-    } catch {
-      // Widget may not be configured yet
+    for (const widget of HiveWidgetInstances) {
+      try {
+        widget.updateSnapshot(state);
+      } catch {
+        // This widget kind may not exist in the installed native generation.
+      }
     }
   }, [
     state.status,

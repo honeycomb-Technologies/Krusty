@@ -101,7 +101,7 @@ impl AuthConfig {
         Ok(cfg)
     }
 
-    /// Merge in values from a partial config (e.g. from a toml file in Krusty).
+    /// Merge in values from a partial config (e.g. from a toml file in Mitsuro).
     pub fn merge_toml(&mut self, toml: &str) -> Result<()> {
         #[derive(Deserialize)]
         struct Partial {

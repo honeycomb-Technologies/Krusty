@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@krusty/api";
+import type { ChatMessage } from "@mitsuro/api";
 import {
   compactHistoricalMessage,
   isTurnInRichWindow,

@@ -26,6 +26,11 @@ import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
 import * as SecureStore from '../../platform/secure-store';
+import {
+  IDENTITY_STORAGE_KEYS,
+  readMigratedAsyncValue,
+  writeCanonicalAsyncValue,
+} from '../../platform/identity-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
@@ -58,8 +63,8 @@ import { MitsuroMark } from '../brand';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import { formatWorkspaceContextMetadata } from './composerMetadata';
 import Svg, { Path, Polygon } from 'react-native-svg';
-import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
-import type { PermissionMode } from '@krusty/state';
+import type { ThinkingLevel, ModelInfo, SessionType } from '@mitsuro/api';
+import type { PermissionMode } from '@mitsuro/state';
 
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from '../../platform/speech';
 
@@ -159,7 +164,6 @@ const MODEL_POPOVER_Z_INDEX = 45;
 const PROVIDER_PILL_STEP = 64;
 /** Gap between provider dock / model list and the Agent FAB column. */
 const DOCK_TO_FAB_GAP = 10;
-const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
 const WEB_INPUT_STYLE = Platform.OS === 'web'
   ? ({
       outlineStyle: 'none',
@@ -600,7 +604,10 @@ function ChatBarComponent(props: ChatBarProps) {
 
   useEffect(() => {
     let cancelled = false;
-    void SecureStore.getItemAsync(PROVIDER_FILTER_ORDER_KEY)
+    void readMigratedAsyncValue(
+      SecureStore,
+      IDENTITY_STORAGE_KEYS.providerFilterOrder,
+    )
       .then((raw) => {
         if (cancelled) return;
         setProviderFilterOrder(parseProviderFilterOrder(raw));
@@ -684,7 +691,7 @@ function ChatBarComponent(props: ChatBarProps) {
 
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
-  const isMako = sessionType === 'mako';
+  const isHive = sessionType === 'hive';
   const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
@@ -732,13 +739,21 @@ function ChatBarComponent(props: ChatBarProps) {
     if (providerFilterOrder === null || providerFilterOrder.length > 0 || providerFilters.length === 0) return;
     const initialOrder = [...providerFilters].reverse().map((provider) => provider.id);
     setProviderFilterOrder(initialOrder);
-    void SecureStore.setItemAsync(PROVIDER_FILTER_ORDER_KEY, JSON.stringify(initialOrder));
+    void writeCanonicalAsyncValue(
+      SecureStore,
+      IDENTITY_STORAGE_KEYS.providerFilterOrder,
+      JSON.stringify(initialOrder),
+    );
   }, [providerFilterOrder, providerFilters]);
 
   const handleProviderFiltersReorder = useCallback((providerIds: string[]) => {
     const nextOrder = uniqueProviderOrder(providerIds);
     setProviderFilterOrder(nextOrder);
-    void SecureStore.setItemAsync(PROVIDER_FILTER_ORDER_KEY, JSON.stringify(nextOrder));
+    void writeCanonicalAsyncValue(
+      SecureStore,
+      IDENTITY_STORAGE_KEYS.providerFilterOrder,
+      JSON.stringify(nextOrder),
+    );
   }, []);
 
   const providerFilterActions = useMemo(
@@ -1156,7 +1171,7 @@ function ChatBarComponent(props: ChatBarProps) {
   );
   const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
 
-  // Chat and Mako share a five-control stack. Code adds Build/Plan as the
+  // Chat and Hive share a five-control stack. Code adds Build/Plan as the
   // sixth control. Derive picker geometry from the surface profile rather than
   // keeping a six-row offset that overlaps the provider filters on shorter FABs.
   const hasWorkMode = !showComposerChrome ? false : sessionType === 'code';
@@ -1442,7 +1457,7 @@ function ChatBarComponent(props: ChatBarProps) {
                   }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
                   onBlur={() => setInputFocused(false)}
-                  placeholder={isMako ? "Message Hive..." : "Message Agent..."}
+                  placeholder={isHive ? "Message Hive..." : "Message Agent..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
                   scrollEnabled={composerBarHeight >= COMPOSER_MAX_HEIGHT}
@@ -1597,7 +1612,7 @@ function ChatBarComponent(props: ChatBarProps) {
         onSend={handleSend}
         canSend={canSend}
         disabled={disabled}
-        placeholder={isMako ? "Message Hive..." : "Message Agent..."}
+        placeholder={isHive ? "Message Hive..." : "Message Agent..."}
         mutedForeground={t.mutedForeground}
         foreground={t.foreground}
         userMessage={t.userMessage}

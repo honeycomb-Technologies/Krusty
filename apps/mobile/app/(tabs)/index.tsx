@@ -38,7 +38,7 @@ import {
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
-import { MakoScreen } from "../../components/mako/MakoScreen";
+import { HiveScreen } from "../../components/hive/HiveScreen";
 import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
@@ -52,19 +52,19 @@ import Animated, { runOnJS } from "react-native-reanimated";
 import type {
   SessionResponse,
   SessionType,
-} from "@krusty/api";
-import type { MakoTopLevelView } from "../../components/mako/types";
-import type { MakoChatContext } from "../../components/mako/types";
+} from "@mitsuro/api";
+import type { HiveTopLevelView } from "../../components/hive/types";
+import type { HiveChatContext } from "../../components/hive/types";
 import type {
   Attachment as SessionAttachment,
   PermissionMode,
   ThinkingLevel,
-} from "@krusty/state";
+} from "@mitsuro/state";
 import {
-  beginKrustyPerformanceSpan,
+  beginMitsuroPerformanceSpan,
   modelKeysEqual,
   supportsFastMode,
-} from "@krusty/state";
+} from "@mitsuro/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
@@ -201,12 +201,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     })),
     activeMode,
   );
-  const makoThinking = useSessionStore(
-    (state) => (activeMode === "mako" ? state.isThinking : false),
+  const hiveThinking = useSessionStore(
+    (state) => (activeMode === "hive" ? state.isThinking : false),
     activeMode,
   );
-  const makoLoading = useSessionStore(
-    (state) => (activeMode === "mako" ? state.isLoading : false),
+  const hiveLoading = useSessionStore(
+    (state) => (activeMode === "hive" ? state.isLoading : false),
     activeMode,
   );
   const sessionId = sessionView.sessionId ?? null;
@@ -231,8 +231,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const setDrawerOpen = useCallback((open: boolean) => {
     setActiveSheet(open ? "threads" : null);
   }, []);
-  const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
-  const [makoNotificationTarget, setMakoNotificationTarget] = useState<{
+  const [hiveTopLevel, setHiveTopLevel] = useState<HiveTopLevelView>("hive");
+  const [hiveNotificationTarget, setHiveNotificationTarget] = useState<{
     messageId?: string;
     reportId?: string;
   } | null>(null);
@@ -249,7 +249,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   >({
     chat: 0,
     code: 0,
-    mako: 0,
+    hive: 0,
   });
   const toolboxTab = toolboxTabByMode[activeMode];
   const setToolboxTab = useCallback(
@@ -349,19 +349,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         ? sessions.find((candidate) => candidate.id === targetSessionId)
         : null;
       const targetType =
-        targetSession?.session_type ?? (focus === "mako" ? "mako" : activeMode);
+        targetSession?.session_type ?? (focus === "hive" ? "hive" : activeMode);
 
-      if (focus === "mako") {
-        setMakoTopLevel("mako");
-        setMakoNotificationTarget({
+      if (focus === "hive") {
+        setHiveTopLevel("hive");
+        setHiveNotificationTarget({
           ...(params?.messageId ? { messageId: params.messageId } : {}),
           ...(params?.reportId ? { reportId: params.reportId } : {}),
         });
       }
       setActiveTab(tabForSessionType(targetType));
       if (!targetSessionId) {
-        if (focus === "mako") {
-          await stores.modes.mako.session.getState().ensureMakoMainSession();
+        if (focus === "hive") {
+          await stores.modes.hive.session.getState().ensureHiveMainSession();
         }
         return;
       }
@@ -390,7 +390,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     const reportId = Array.isArray(routeParams.reportId)
       ? routeParams.reportId[0]
       : routeParams.reportId;
-    if ((targetSessionId && targetSessionId !== sessionId) || focus === "mako") {
+    if ((targetSessionId && targetSessionId !== sessionId) || focus === "hive") {
       void handleNotificationNavigate("/(tabs)", {
         ...(targetSessionId ? { sessionId: targetSessionId } : {}),
         ...(focus ? { focus } : {}),
@@ -483,7 +483,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         mimeType: attachment.mimeType ?? "application/octet-stream",
       })) as SessionAttachment[];
 
-      if (activeMode === "mako" && !sessionStore.getState().sessionId) {
+      if (activeMode === "hive" && !sessionStore.getState().sessionId) {
         const task = content.trim();
         if (!client || !task) {
           return;
@@ -502,11 +502,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           return;
         }
         try {
-          const response = await client.dispatchMako(task, {
+          const response = await client.dispatchHive(task, {
             projectDir: workspaceDirectory ?? undefined,
             model: resolvedModel,
           });
-          lastSessionIdByTypeRef.current.mako = response.session_id;
+          lastSessionIdByTypeRef.current.hive = response.session_id;
           await sessionsStore.getState().loadSessions();
           await sessionStore.getState().loadSession(response.session_id, true);
           void Haptics.notificationAsync(
@@ -586,7 +586,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [isDesktop]);
   const handleToolboxOpen = useCallback(() => {
     finishToolboxOpenSpanRef.current?.();
-    finishToolboxOpenSpanRef.current = beginKrustyPerformanceSpan(
+    finishToolboxOpenSpanRef.current = beginMitsuroPerformanceSpan(
       "toolbox.open",
       activeMode,
     );
@@ -627,7 +627,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       if (mode === requestedMode) return;
       cancelPendingSessionSelection();
       finishModeSwitchSpanRef.current?.();
-      finishModeSwitchSpanRef.current = beginKrustyPerformanceSpan(
+      finishModeSwitchSpanRef.current = beginMitsuroPerformanceSpan(
         "mode.switch",
         `${activeMode}->${mode}`,
       );
@@ -646,18 +646,18 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     finishModeSwitchSpanRef.current = null;
   }, [activeMode]);
 
-  const handleNewMakoSession = useCallback(() => {
-    handleModeChange("mako");
+  const handleNewHiveSession = useCallback(() => {
+    handleModeChange("hive");
     setActiveSheet(null);
-    const makoStore = stores.modes.mako.session;
-    makoStore.getState().detachSession();
-    makoStore.getState().clearSession();
+    const hiveStore = stores.modes.hive.session;
+    hiveStore.getState().detachSession();
+    hiveStore.getState().clearSession();
   }, [handleModeChange, stores.modes]);
 
-  const handleSelectMakoView = useCallback(
-    (view: MakoTopLevelView) => {
-      handleModeChange("mako");
-      setMakoTopLevel(view);
+  const handleSelectHiveView = useCallback(
+    (view: HiveTopLevelView) => {
+      handleModeChange("hive");
+      setHiveTopLevel(view);
       setDrawerOpen(false);
     },
     [handleModeChange],
@@ -734,7 +734,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
       <View style={styles.topBarActions}>
         <Pressable
-          onPress={() => handleSelectMakoView("mako")}
+          onPress={() => handleSelectHiveView("hive")}
           style={styles.toolboxCornerBtn}
           accessibilityRole="button"
           accessibilityLabel="Open Hive"
@@ -781,7 +781,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           requestedMode === activeMode
             && sessionId
             && requestedModeDisplayTitle
-            && activeMode !== "mako"
+            && activeMode !== "hive"
             ? handleRenameSession
             : undefined
         }
@@ -801,7 +801,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           activeToolCallId={activeToolCallId}
           bottomPadding={composerReserveHeight}
           hideJumpToLatest={bottomControlsOpen}
-          showPlanTracker={activeMode !== "mako"}
+          showPlanTracker={activeMode !== "hive"}
           errorBannerHeight={errorBannerHeight}
           onErrorBannerHeightChange={(nextHeight) => {
             setErrorBannerHeight((current) =>
@@ -920,7 +920,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               sessionType={activeMode}
               projectDirectory={workspaceDirectory}
               onOpenSettings={() => router.navigate("/(tabs)/settings")}
-              onOpenMakoRun={(id) => void loadSessionById(id)}
+              onOpenHiveRun={(id) => void loadSessionById(id)}
               onOpenProject={(path, branch) =>
                 void openProjectInCode(path, branch)
               }
@@ -942,7 +942,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               setActiveSheet(null);
               router.navigate("/(tabs)/settings");
             }}
-            onOpenMakoRun={(id) => void loadSessionById(id)}
+            onOpenHiveRun={(id) => void loadSessionById(id)}
             onOpenProject={(path, branch) =>
               void openProjectInCode(path, branch)
             }
@@ -952,13 +952,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     </SafeAreaView>
   );
 
-  const makoChat: MakoChatContext = {
+  const hiveChat: HiveChatContext = {
     sessionId,
     title: sessionTitle,
     error,
-    isLoading: makoLoading,
+    isLoading: hiveLoading,
     isStreaming,
-    isThinking: makoThinking,
+    isThinking: hiveThinking,
     activeToolCallId,
     thinkingLevel: thinkingLevel as ThinkingLevel,
     permissionMode: permissionMode as PermissionMode,
@@ -988,20 +988,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     onModelSelect: handleModelSelect,
   };
 
-  // Desktop owns the full Mako product surface. Mobile uses a single active
+  // Desktop owns the full Hive product surface. Mobile uses a single active
   // conversation surface so mode switches stay crash-free.
-  const makoContent = (
+  const hiveContent = (
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
-      <MakoScreen
+      <HiveScreen
         workspaceDirectory={workspaceDirectory}
-        requestedTopLevel={makoTopLevel}
-        requestedThreadMessageId={makoNotificationTarget?.messageId}
-        requestedReportId={makoNotificationTarget?.reportId}
+        requestedTopLevel={hiveTopLevel}
+        requestedThreadMessageId={hiveNotificationTarget?.messageId}
+        requestedReportId={hiveNotificationTarget?.reportId}
         onOpenRunById={loadSessionById}
         onOpenProject={openProjectInCode}
         onDeleteRun={handleDeleteSession}
-        onTopLevelChange={setMakoTopLevel}
-        chat={makoChat}
+        onTopLevelChange={setHiveTopLevel}
+        chat={hiveChat}
       />
     </Animated.View>
   );
@@ -1025,7 +1025,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         >
           {/* One stable native transcript tree for every mobile mode. Parallel
               FlatLists crashed under New Architecture, while swapping the
-              Mako tree forced expensive Fabric unmount/mount transactions. */}
+              Hive tree forced expensive Fabric unmount/mount transactions. */}
           {chatTranscriptSurface}
         </View>
       </View>
@@ -1052,7 +1052,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           setActiveSheet(null);
           router.navigate("/(tabs)/settings");
         }}
-        onOpenMakoRun={(id) => void loadSessionById(id)}
+        onOpenHiveRun={(id) => void loadSessionById(id)}
         onOpenProject={(path, branch) =>
           void openProjectInCode(path, branch)
         }
@@ -1138,8 +1138,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       onOpenSettings={() => router.navigate("/(tabs)/settings")}
       activeTab={activeTab}
       onTabChange={(index) => handleModeChange(sessionTypeForTab(index))}
-      activeMakoView={makoTopLevel}
-      onSelectMakoView={handleSelectMakoView}
+      activeHiveView={hiveTopLevel}
+      onSelectHiveView={handleSelectHiveView}
     >
       <StreamSideEffectsCoordinator
         activeMode={activeMode}
@@ -1147,7 +1147,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       />
       {renameModal}
       {isDesktop ? (
-        activeTab === 2 ? makoContent : chatContent
+        activeTab === 2 ? hiveContent : chatContent
       ) : (
         mobileContent
       )}
@@ -1159,9 +1159,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           sessions={sessions}
           activeSessionId={sessionId}
           onSelectSession={(session) => void loadSession(session)}
-          onSelectMakoSession={(id) => void loadSessionById(id)}
+          onSelectHiveSession={(id) => void loadSessionById(id)}
           onNewSession={(type) => void handleNewSession(type)}
-          onNewMakoSession={handleNewMakoSession}
+          onNewHiveSession={handleNewHiveSession}
           onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
           onDeleteSession={handleDeleteSession}
           onOpenSettings={() => {

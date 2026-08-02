@@ -25,7 +25,7 @@ This document covers the major architectural decisions behind Mitsuro — what w
 
 **Why SQLite won:** Mitsuro is local-first software. Users shouldn't need to install, configure, or manage a database server. SQLite gives us:
 
-- **Zero configuration** — the database is a single file at `~/.krusty/krusty.db`
+- **Zero configuration** — the database is a single file at `~/.mitsuro/mitsuro.db`
 - **Ships with the binary** — no external dependency
 - **Full SQL** — complex queries for session management, message pagination, credential lookups
 - **WAL mode** — concurrent reads during writes, which matters when the TUI is reading session data while the orchestrator is writing tool results
@@ -35,7 +35,7 @@ This document covers the major architectural decisions behind Mitsuro — what w
 
 ## 3. Why One Orchestrator Loop?
 
-**The choice:** A single `AgenticOrchestrator` in krusty-core that all interfaces (TUI, server, ACP, Hive) use.
+**The choice:** A single `AgenticOrchestrator` in mitsuro-core that all interfaces (TUI, server, ACP, Hive) use.
 
 **Alternatives considered:** Separate loops per interface (each with their own streaming/tool logic), a shared library with per-interface wrappers.
 
@@ -169,7 +169,7 @@ remote-capability alternatives.
 
 - **`curl | sh` install** — download one file, put it in PATH, done
 - **No Docker** — no container runtime needed, no compose files, no volume mounts
-- **No separate frontend** — the web UI is embedded via rust-embed. `krusty serve` is literally one command
+- **No separate frontend** — the web UI is embedded via rust-embed. `mitsuro serve` is literally one command
 - **Portable** — copy the binary to another machine and it works
 
 **The trade-off:** Larger binary size (~50MB with the embedded web frontend). Longer compilation times. The web frontend must be built before the Rust binary can compile (it gets embedded at compile time). Updates require replacing the entire binary rather than hot-swapping a frontend bundle.
@@ -185,7 +185,7 @@ remote-capability alternatives.
 - **Supervised for interactive work** — you see every write operation before it happens
 - **Autonomous for trusted workflows** — Hive and experienced users can skip the approval dialog
 - **Safety hooks as a backstop** — even in autonomous mode, the SafetyHook blocks obviously dangerous commands (rm -rf, sudo, fork bombs). This prevents the worst outcomes without requiring human judgment for every tool call
-- **Per-project overrides** — a project's `.krusty/settings.json` can set its own permission mode
+- **Per-project overrides** — a project's `.mitsuro/settings.json` can set its own permission mode
 
 **The trade-off:** Two modes is a coarse granularity. Some users want "approve bash but auto-approve file reads" or "approve writes to src/ but auto-approve writes to tests/". The current model doesn't support this. The tool policy system has the infrastructure for finer-grained control, but exposing it to users without making the UX confusing is an unsolved design problem.
 

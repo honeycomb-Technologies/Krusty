@@ -4,7 +4,7 @@ Mitsuro ships a self-hosted web server built on Axum, Rust's async web framework
 
 ## Architecture
 
-The server lives in `crates/krusty-server/`. It exposes an Axum `Router` assembled by the `build_router()` function in `lib.rs`. All shared state lives in a single `AppState` struct that gets cloned (cheaply, via `Arc`) into every request handler.
+The server lives in `crates/mitsuro-server/`. It exposes an Axum `Router` assembled by the `build_router()` function in `lib.rs`. All shared state lives in a single `AppState` struct that gets cloned (cheaply, via `Arc`) into every request handler.
 
 `AppState` holds everything the server needs at runtime: the AI client, a tool registry, credential store, model registry, MCP manager, process registry, session locks, push notification services, and the Hive runtime manager. Each field is wrapped in an `Arc` (and often an `RwLock`) so concurrent requests can share state safely without contention.
 
@@ -19,7 +19,7 @@ The route tree is assembled in `routes/mod.rs`, which nests each API group under
 - `/api/files` -- filesystem read/write/tree
 - `/api/git` -- repository status, branches, worktrees
 - `/api/credentials` -- provider API key management
-- `/api/mako` -- autonomous agent dispatch
+- `/api/hive` -- autonomous agent dispatch
 - `/api/mcp` -- MCP server management
 - `/api/plugins` -- installable plugin lifecycle and contribution refresh
 - `/api/extensions` -- agent-extension status, trust, and reload
@@ -44,7 +44,7 @@ the same way they must isolate host tool execution.
 
 Mitsuro uses `rust-embed` to compile the Expo web build directly into the server binary. At compile time, the `WebAssets` struct includes all files from `apps/mobile/dist`. When a request doesn't match any API route, the `serve_web_app` fallback handler looks for a matching static asset. If none is found, it serves `index.html` for SPA client-side routing.
 
-This means a production Mitsuro build is a single binary with no external files. Run `krusty serve` and every client surface is available immediately at `http://localhost:3000`. If the web build directory is absent at compile time (common during backend-only development), `rust-embed` gracefully produces an empty asset set and the server falls back to a plain-text message confirming the API is running.
+This means a production Mitsuro build is a single binary with no external files. Run `mitsuro serve` and every client surface is available immediately at `http://localhost:3000`. If the web build directory is absent at compile time (common during backend-only development), `rust-embed` gracefully produces an empty asset set and the server falls back to a plain-text message confirming the API is running.
 
 Static assets get intelligent caching headers. Immutable bundled files (those under `_expo/static/`) receive a one-year `Cache-Control` with the `immutable` directive. HTML files are served with `no-cache` to ensure clients always get the latest shell. Everything else gets a one-hour cache.
 
@@ -52,7 +52,7 @@ Static assets get intelligent caching headers. Immutable bundled files (those un
 
 The chat endpoint at `POST /api/chat` is the heart of the server. It accepts a JSON body with a message, optional session ID, model override, thinking level, content blocks (text and images), and permission mode. It returns a Server-Sent Events (SSE) stream.
 
-When a request arrives, the handler either creates a new session or loads an existing one. It acquires a per-session mutex to prevent concurrent agentic loops on the same session -- if the session is already busy, the request gets a 409 Conflict response. The handler then resolves an AI client for the requested model, loads the conversation history from the database, and launches the `AgenticOrchestrator` from `krusty-core`.
+When a request arrives, the handler either creates a new session or loads an existing one. It acquires a per-session mutex to prevent concurrent agentic loops on the same session -- if the session is already busy, the request gets a 409 Conflict response. The handler then resolves an AI client for the requested model, loads the conversation history from the database, and launches the `AgenticOrchestrator` from `mitsuro-core`.
 
 The orchestrator runs an agentic loop: it sends messages to the AI provider, processes tool calls, and emits `LoopEvent`s through a channel. The chat handler translates these events into `AgenticEvent` variants and forwards them over the SSE stream.
 
@@ -102,6 +102,23 @@ Key session endpoints:
 
 The pinch operation is noteworthy. It runs the same durable compaction pipeline used for automatic context pressure and provider-overflow recovery: old content is summarized, a recent verbatim tail is retained, and the session's messages are replaced atomically. It does not fork a child session, so the session ID, ownership, active plan, and client continuity remain unchanged.
 
+### Mixed-version generic session bridge
+
+Canonical clients opt into canonical typed session and chat discriminators by
+sending `X-Mitsuro-Wire-Version: 2` or a newer all-digit numeric version. If
+that header is absent, malformed, `0`, or `1`, the generic session/chat
+endpoints return the legacy typed discriminator spellings required by
+transition clients. The server includes `Vary: X-Mitsuro-Wire-Version` so
+intermediaries never reuse a representation negotiated for a different client
+generation.
+
+`/api/hive` is the canonical autonomous API namespace. `/api/mako` remains the
+legacy namespace during the compatibility window and returns the legacy typed
+representation. This negotiation applies only to explicitly typed generic
+session/chat identity discriminators. It must not inspect or rewrite opaque
+payloads, nested tool data, user content, provider data, or extension-defined
+semantics.
+
 ## Tool Execution
 
 The tool API at `/api/tools` has two endpoints. `GET /api/tools` lists all registered tools with their names and descriptions. `POST /api/tools/execute` runs a tool directly, bypassing the agentic loop.
@@ -134,7 +151,7 @@ Delivery uses retry logic with exponential backoff (up to 3 attempts). Stale sub
 
 ### Apple Push Notifications
 
-The `ApnsService` uses JWT token-based authentication with an ES256 `.p8` key from Apple. Configuration comes from environment variables: `KRUSTY_APNS_KEY_PATH`, `KRUSTY_APNS_KEY_ID`, `KRUSTY_APNS_TEAM_ID`, and `KRUSTY_APNS_BUNDLE_ID`. The service caches JWT tokens for 50 minutes (Apple allows up to 60) and sends notifications through Apple's HTTP/2 API.
+The `ApnsService` uses JWT token-based authentication with an ES256 `.p8` key from Apple. Configuration comes from environment variables: `MITSURO_APNS_KEY_PATH`, `MITSURO_APNS_KEY_ID`, `MITSURO_APNS_TEAM_ID`, and `MITSURO_APNS_BUNDLE_ID`. The service caches JWT tokens for 50 minutes (Apple allows up to 60) and sends notifications through Apple's HTTP/2 API.
 
 APNs supports event types including tool approval requests, completions, and Hive status updates. Device tokens are stored in SQLite, and devices that fail repeatedly (more than 10 consecutive failures) are automatically pruned.
 
@@ -150,17 +167,17 @@ PTY output flows back through the WebSocket, either as JSON `output` messages or
 
 Hive is Mitsuro's autonomous agent mode. While normal chat sessions are request-response (the user sends a message, the agent responds), Hive sessions run continuously in the background with full tool access.
 
-The Hive API at `/api/mako` provides:
+The Hive API at `/api/hive` provides:
 
-- `POST /api/mako/dispatch` -- start a new autonomous task with a description and optional project directory
-- `GET /api/mako/sessions` -- list all Hive sessions with their runtime state
-- `GET /api/mako/sessions/:id/status` -- detailed status including task list and agent state
-- `GET /api/mako/sessions/:id/events` -- SSE stream of live events (with replay from persisted trace)
-- `POST /api/mako/sessions/:id/message` -- inject a user message into a running session
-- `POST /api/mako/sessions/:id/pause` / `POST .../resume` -- pause and resume execution
-- `DELETE /api/mako/sessions/:id` -- cancel and delete a session
+- `POST /api/hive/dispatch` -- start a new autonomous task with a description and optional project directory
+- `GET /api/hive/sessions` -- list all Hive sessions with their runtime state
+- `GET /api/hive/sessions/:id/status` -- detailed status including task list and agent state
+- `GET /api/hive/sessions/:id/events` -- SSE stream of live events (with replay from persisted trace)
+- `POST /api/hive/sessions/:id/message` -- inject a user message into a running session
+- `POST /api/hive/sessions/:id/pause` / `POST .../resume` -- pause and resume execution
+- `DELETE /api/hive/sessions/:id` -- cancel and delete a session
 
-The `MakoRuntimeManager` owns the lifecycle of autonomous sessions. Each session gets its own tokio task running the orchestrator loop in `PermissionMode::Autonomous` with a `TickEngine` that injects synthetic ticks every 30 seconds to keep the agent working. Events flow through a broadcast channel so multiple clients can observe the same session.
+The `HiveRuntimeManager` owns the lifecycle of autonomous sessions. Each session gets its own tokio task running the orchestrator loop in `PermissionMode::Autonomous` with a `TickEngine` that injects synthetic ticks every 30 seconds to keep the agent working. Events flow through a broadcast channel so multiple clients can observe the same session.
 
 Hive sessions persist their runtime state (running, sleeping, paused, error) to SQLite. On server restart, `restore_persisted_sessions` resumes any sessions that were running or sleeping. Sleeping sessions that have a future wake time get a scheduled timer; those past due resume immediately.
 
@@ -183,10 +200,10 @@ to its principal; an untrusted forwarded header is insufficient.
 
 ## First-Run Setup
 
-When you run `krusty serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. API keys are stored in an owner-readable file written atomically with restrictive permissions on Unix. OAuth providers use the separate token store.
+When you run `mitsuro serve` for the first time, the CLI checks for configured credentials. If none exist, it launches an interactive setup wizard that prompts for a provider selection and API key. API keys are stored in an owner-readable file written atomically with restrictive permissions on Unix. OAuth providers use the separate token store.
 
 The serve command also integrates with Tailscale. If Tailscale is installed and the device is online, the server automatically configures `tailscale serve` to proxy the local port, making Mitsuro accessible at `https://<machine-name>.<tailnet>.ts.net`. If permissions are insufficient, it prints a one-time fix command (`sudo tailscale set --operator=$USER`). If Tailscale is not installed, it suggests installing it.
 
-The server writes a PID file on startup and cleans it up on shutdown. If a server is already running on the same machine, `krusty serve` detects it, prints its URL, and exits rather than starting a duplicate instance.
+The server writes a PID file on startup and cleans it up on shutdown. If a server is already running on the same machine, `mitsuro serve` detects it, prints its URL, and exits rather than starting a duplicate instance.
 
 The credential management API at `/api/credentials` provides runtime configuration without restarting. `GET /api/credentials` lists all providers with their configuration status. `POST /api/credentials/:provider` sets an API key and triggers a background model catalog refresh for providers that support dynamic model lists (OpenAI, Anthropic, MiniMax, Grok, and OpenRouter). `DELETE /api/credentials/:provider` removes a provider's credentials and restores its curated fallback catalog.

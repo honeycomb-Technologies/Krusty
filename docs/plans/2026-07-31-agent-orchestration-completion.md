@@ -1,11 +1,14 @@
 # Goal: Agent orchestration completion (agnostic children + death-loop solid)
 
-**Status:** in progress (implementation started 2026-07-31)  
+> Historical pre-migration record: prior command, service, database, and release
+> path identifiers below are preserved exactly as observed on 2026-07-31.
 
-**Created:** 2026-07-31  
-**Runtime authority at plan time:** `krusty serve` PID 216212, binary  
-`~/.local/bin/.krusty-releases/death-loop-remediation-20260731-074236/krusty`  
-(v0.9.20, matches `target/release/krusty`)  
+**Status:** in progress (implementation started 2026-07-31)
+
+**Created:** 2026-07-31
+**Runtime authority at plan time:** `krusty serve` PID 216212, binary
+`~/.local/bin/.krusty-releases/death-loop-remediation-20260731-074236/krusty`
+(v0.9.20, matches `target/release/krusty`)
 **Source audit:** live sessions in `~/.krusty/krusty.db` + Codex/Grok reference trees
 
 ---
@@ -89,38 +92,38 @@ Key sessions: `cf41373d` (CI poll), `06c504d3` (archaeology), `6d527692` (post-r
 
 ## Success criteria (done means)
 
-1. **Agnostic child**  
-   - Spawn API: `name` + `instructions` (prompt) + optional capability ceiling + `run_in_background`.  
-   - No user/model-facing requirement to pick plan/verify/explore/build as agent *kinds*.  
-   - Child system prompt is generic worker + **parent instructions only** (plus project AGENTS.md / policy).  
+1. **Agnostic child**
+   - Spawn API: `name` + `instructions` (prompt) + optional capability ceiling + `run_in_background`.
+   - No user/model-facing requirement to pick plan/verify/explore/build as agent *kinds*.
+   - Child system prompt is generic worker + **parent instructions only** (plus project AGENTS.md / policy).
    - Display and completion use the parent-chosen **name**.
 
-2. **Event-driven wait**  
-   - Background shell completion → durable steer / live `LoopInput::Steer` (already present; must stay).  
-   - Background **child** completion → same class of notify (parent does not poll `status` in a loop).  
+2. **Event-driven wait**
+   - Background shell completion → durable steer / live `LoopInput::Steer` (already present; must stay).
+   - Background **child** completion → same class of notify (parent does not poll `status` in a loop).
    - Soft budget text prefers wake over poll.
 
-3. **No death loops / solid convergence**  
-   - CI/status polls classified as observe; no-progress ledger trustworthy (non-empty evidence signatures).  
-   - Guard path: Warn → Replan → **forced synthesis turn** (not only `Error` + push).  
-   - Pure exploration cannot expand forever without Communicate/answer.  
+3. **No death loops / solid convergence**
+   - CI/status polls classified as observe; no-progress ledger trustworthy (non-empty evidence signatures).
+   - Guard path: Warn → Replan → **forced synthesis turn** (not only `Error` + push).
+   - Pure exploration cannot expand forever without Communicate/answer.
    - Bash pure file-read/search nudged toward dedicated tools.
 
-4. **Parent tendency**  
-   - System/tool contract: multi-scope or long digs → spawn child; small one-file work → stay parent.  
+4. **Parent tendency**
+   - System/tool contract: multi-scope or long digs → spawn child; small one-file work → stay parent.
    - Live smoke: at least one Code session produces `delegated_runs` rows and parent-thin transcript.
 
-5. **Verification on the running Honey binary**  
+5. **Verification on the running Honey binary**
    - Rebuild/install path documented; `/health` version; process wake smoke; child spawn smoke; guard stop lands with synthesis.
 
 ---
 
 ## Non-goals
 
-- Full multi-agent UI redesign (beyond status by name).  
-- Renaming CLI/`krusty` identifiers.  
-- Hard global max_turns as the primary loop detector.  
-- Keeping Plan/Verify as permanent separate engines “for legacy.”  
+- Full multi-agent UI redesign (beyond status by name).
+- Renaming CLI/`krusty` identifiers.
+- Hard global max_turns as the primary loop detector.
+- Keeping Plan/Verify as permanent separate engines “for legacy.”
 - Shipping spiral-fix branch wholesale without review (pull only needed pieces).
 
 ---
@@ -141,7 +144,7 @@ agent spawn:
   # lifecycle: list | status | wait | message | interrupt | resume
 ```
 
-**Deprecate as product surface:** `profile` enum of plan/verify/explore/build as *kinds*.  
+**Deprecate as product surface:** `profile` enum of plan/verify/explore/build as *kinds*.
 **Optional later:** named instruction templates (Codex-style custom agent TOML) as *presets*, not engines.
 
 **Effect:** one mental model for parent and for engineers.
@@ -251,11 +254,11 @@ W3.1–W3.2 can start in parallel with W1 if needed; W3.3 should land after guar
 
 ## Implementation notes (for whoever builds)
 
-- Prefer **one** `execute_child` path over four `execute_*` specialists.  
-- Capabilities: parent `DelegationPolicy` remains the ceiling.  
-- `components` parallel build may remain as an **optimization** of the same child runtime (multiple children with different names/instructions), not a separate “BuildAgent” type.  
-- Do not reintroduce giant tool manuals in system prompt; schemas stay the tool contract.  
-- Keep UI history vs model history split (already correct).  
+- Prefer **one** `execute_child` path over four `execute_*` specialists.
+- Capabilities: parent `DelegationPolicy` remains the ceiling.
+- `components` parallel build may remain as an **optimization** of the same child runtime (multiple children with different names/instructions), not a separate “BuildAgent” type.
+- Do not reintroduce giant tool manuals in system prompt; schemas stay the tool contract.
+- Keep UI history vs model history split (already correct).
 - Measure success with **runtime_traces** + `delegated_runs` + journal, not vibes.
 
 ---
@@ -273,19 +276,19 @@ W3.1–W3.2 can start in parallel with W1 if needed; W3.3 should land after guar
 
 ## Tracking checklist
 
-- [ ] W0 contract frozen  
-- [ ] W1 agnostic child runtime  
-- [ ] W2 process + child completion notify  
-- [ ] W3 progress fidelity + synthesis landing + spiral pressure  
-- [ ] W4 parent tendency  
-- [ ] W5 live binary verified  
+- [ ] W0 contract frozen
+- [ ] W1 agnostic child runtime
+- [ ] W2 process + child completion notify
+- [ ] W3 progress fidelity + synthesis landing + spiral pressure
+- [ ] W4 parent tendency
+- [ ] W5 live binary verified
 
 ---
 
 ## References
 
-- Session audit (this thread): death-loop binary, heavy sessions, bash/CI patterns  
-- `docs/plans/2026-07-31-death-loop-remediation.md` (partially shipped)  
-- Codex: https://learn.chatgpt.com/docs/agent-configuration/subagents  
-- Local: `harness-review-20260721/codex`, `harness-review-20260721/grok-build`  
-- Commit: `8fcbae7` process wake; spiral-fix `8b8a929` not on main  
+- Session audit (this thread): death-loop binary, heavy sessions, bash/CI patterns
+- `docs/plans/2026-07-31-death-loop-remediation.md` (partially shipped)
+- Codex: https://learn.chatgpt.com/docs/agent-configuration/subagents
+- Local: `harness-review-20260721/codex`, `harness-review-20260721/grok-build`
+- Commit: `8fcbae7` process wake; spiral-fix `8b8a929` not on main

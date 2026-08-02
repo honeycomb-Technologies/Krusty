@@ -1,4 +1,4 @@
-export type KrustyPerformancePhase =
+export type MitsuroPerformancePhase =
 	| 'app.launch'
 	| 'new_chat.shell'
 	| 'new_chat.session_bind'
@@ -20,7 +20,7 @@ export type KrustyPerformancePhase =
 	| 'diagnostics.upload'
 	| 'live_activity.update';
 
-export type KrustyPerformanceMetric =
+export type MitsuroPerformanceMetric =
 	| 'session.snapshot_max_slice'
 	| 'session.snapshot_yields'
 	| 'transcript.visible_messages'
@@ -28,7 +28,7 @@ export type KrustyPerformanceMetric =
 	| 'transcript.visible_tools'
 	| 'transcript.visible_markdown_characters';
 
-export type KrustyPerformanceResource =
+export type MitsuroPerformanceResource =
 	| 'stream_connections'
 	| 'state_polling'
 	| 'presence_heartbeats'
@@ -36,18 +36,18 @@ export type KrustyPerformanceResource =
 	| 'toolbox_requests'
 	| 'live_activity_updates';
 
-export interface KrustyPerformanceEntry {
-	name: KrustyPerformancePhase | KrustyPerformanceMetric;
+export interface MitsuroPerformanceEntry {
+	name: MitsuroPerformancePhase | MitsuroPerformanceMetric;
 	durationMs: number;
 	count?: number;
 	startedAtMs: number;
 	detail?: string;
 }
 
-export interface KrustyPerformanceSnapshot {
+export interface MitsuroPerformanceSnapshot {
 	enabled: boolean;
-	entries: KrustyPerformanceEntry[];
-	resources: Partial<Record<KrustyPerformanceResource, number>>;
+	entries: MitsuroPerformanceEntry[];
+	resources: Partial<Record<MitsuroPerformanceResource, number>>;
 }
 
 interface PerformanceLike {
@@ -57,33 +57,33 @@ interface PerformanceLike {
 	clearMarks?(name?: string): void;
 }
 
-interface KrustyPerformanceGlobal {
+interface MitsuroPerformanceGlobal {
 	performance?: PerformanceLike;
-	__KRUSTY_NATIVE_PERFORMANCE__?: {
-		begin(spanId: number, name: KrustyPerformancePhase): void;
-		end(spanId: number, name: KrustyPerformancePhase): void;
+	__MITSURO_NATIVE_PERFORMANCE__?: {
+		begin(spanId: number, name: MitsuroPerformancePhase): void;
+		end(spanId: number, name: MitsuroPerformancePhase): void;
 	};
-	__KRUSTY_PERFORMANCE__?: {
-		snapshot: () => KrustyPerformanceSnapshot;
+	__MITSURO_PERFORMANCE__?: {
+		snapshot: () => MitsuroPerformanceSnapshot;
 		reset: () => void;
 	};
 }
 
 const MAX_ENTRIES = 256;
-const entries: KrustyPerformanceEntry[] = [];
-const resources: Partial<Record<KrustyPerformanceResource, number>> = {};
+const entries: MitsuroPerformanceEntry[] = [];
+const resources: Partial<Record<MitsuroPerformanceResource, number>> = {};
 let enabled = false;
 let nextSpanId = 0;
 
-function performanceGlobal(): KrustyPerformanceGlobal {
-	return globalThis as typeof globalThis & KrustyPerformanceGlobal;
+function performanceGlobal(): MitsuroPerformanceGlobal {
+	return globalThis as typeof globalThis & MitsuroPerformanceGlobal;
 }
 
 function clockNow(): number {
 	return performanceGlobal().performance?.now() ?? Date.now();
 }
 
-function snapshot(): KrustyPerformanceSnapshot {
+function snapshot(): MitsuroPerformanceSnapshot {
 	return {
 		enabled,
 		entries: entries.slice(),
@@ -91,28 +91,28 @@ function snapshot(): KrustyPerformanceSnapshot {
 	};
 }
 
-export function resetKrustyPerformance(): void {
+export function resetMitsuroPerformance(): void {
 	entries.length = 0;
-	for (const key of Object.keys(resources) as KrustyPerformanceResource[]) {
+	for (const key of Object.keys(resources) as MitsuroPerformanceResource[]) {
 		delete resources[key];
 	}
 }
 
-export function configureKrustyPerformance(nextEnabled: boolean): void {
+export function configureMitsuroPerformance(nextEnabled: boolean): void {
 	enabled = nextEnabled;
 	const root = performanceGlobal();
-	root.__KRUSTY_PERFORMANCE__ = {
+	root.__MITSURO_PERFORMANCE__ = {
 		snapshot,
-		reset: resetKrustyPerformance,
+		reset: resetMitsuroPerformance,
 	};
 }
 
-export function getKrustyPerformanceSnapshot(): KrustyPerformanceSnapshot {
+export function getMitsuroPerformanceSnapshot(): MitsuroPerformanceSnapshot {
 	return snapshot();
 }
 
-export function beginKrustyPerformanceSpan(
-	name: KrustyPerformancePhase,
+export function beginMitsuroPerformanceSpan(
+	name: MitsuroPerformancePhase,
 	detail?: string,
 ): () => number | null {
 	if (!enabled) {
@@ -122,10 +122,10 @@ export function beginKrustyPerformanceSpan(
 	const root = performanceGlobal();
 	const startedAtMs = clockNow();
 	const spanId = nextSpanId++;
-	const startMark = `krusty.${name}.${spanId}.start`;
-	const endMark = `krusty.${name}.${spanId}.end`;
+	const startMark = `mitsuro.${name}.${spanId}.start`;
+	const endMark = `mitsuro.${name}.${spanId}.end`;
 	root.performance?.mark?.(startMark);
-	root.__KRUSTY_NATIVE_PERFORMANCE__?.begin(spanId, name);
+	root.__MITSURO_NATIVE_PERFORMANCE__?.begin(spanId, name);
 	let ended = false;
 
 	return () => {
@@ -133,10 +133,10 @@ export function beginKrustyPerformanceSpan(
 		ended = true;
 		const durationMs = Math.max(0, clockNow() - startedAtMs);
 		root.performance?.mark?.(endMark);
-		root.performance?.measure?.(`krusty.${name}`, startMark, endMark);
+		root.performance?.measure?.(`mitsuro.${name}`, startMark, endMark);
 		root.performance?.clearMarks?.(startMark);
 		root.performance?.clearMarks?.(endMark);
-		root.__KRUSTY_NATIVE_PERFORMANCE__?.end(spanId, name);
+		root.__MITSURO_NATIVE_PERFORMANCE__?.end(spanId, name);
 		entries.push({ name, durationMs, startedAtMs, detail });
 		if (entries.length > MAX_ENTRIES) {
 			entries.splice(0, entries.length - MAX_ENTRIES);
@@ -145,8 +145,8 @@ export function beginKrustyPerformanceSpan(
 	};
 }
 
-export function recordKrustyPerformanceMetric(
-	name: KrustyPerformanceMetric,
+export function recordMitsuroPerformanceMetric(
+	name: MitsuroPerformanceMetric,
 	values: { durationMs?: number; count?: number },
 ): void {
 	if (!enabled) return;
@@ -167,16 +167,16 @@ export function recordKrustyPerformanceMetric(
 	}
 }
 
-export function setKrustyPerformanceResource(
-	name: KrustyPerformanceResource,
+export function setMitsuroPerformanceResource(
+	name: MitsuroPerformanceResource,
 	value: number,
 ): void {
 	if (!enabled) return;
 	resources[name] = Math.max(0, Math.floor(value));
 }
 
-export function trackKrustyPerformanceResource(
-	name: KrustyPerformanceResource,
+export function trackMitsuroPerformanceResource(
+	name: MitsuroPerformanceResource,
 ): () => void {
 	if (!enabled) return () => {};
 	resources[name] = (resources[name] ?? 0) + 1;
