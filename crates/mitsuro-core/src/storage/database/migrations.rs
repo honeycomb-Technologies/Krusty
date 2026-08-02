@@ -57,11 +57,18 @@ impl Database {
 
     /// Rebuild a table by rewriting its CREATE TABLE SQL so CHECK constraints
     /// can accept a renamed discriminator without data loss.
-    fn rebuild_table_with_sql_rewrite(
+    ///
+    /// Optional `value_rewrites` map column values during the copy so data that
+    /// only exists under the old CHECK enum (e.g. session_type='mako') can land
+    /// in a table whose rewritten CHECK only accepts the canonical value
+    /// ('hive'). Plain UPDATE-before-rebuild cannot do this: the old CHECK
+    /// rejects the canonical spelling.
+    fn rebuild_table_with_sql_rewrite_and_values(
         tx: &rusqlite::Transaction,
         table: &str,
         from: &[&str],
         to: &[&str],
+        value_rewrites: &[(&str, &str, &str)],
     ) -> Result<()> {
         assert_eq!(from.len(), to.len());
         let create_sql: String = match tx.query_row(
@@ -77,7 +84,7 @@ impl Database {
         for (old, new) in from.iter().zip(to.iter()) {
             rewritten = rewritten.replace(old, new);
         }
-        if rewritten == create_sql {
+        if rewritten == create_sql && value_rewrites.is_empty() {
             return Ok(());
         }
 
@@ -86,7 +93,43 @@ impl Database {
         let create_tmp = rewritten.replacen(table, &tmp, 1);
         tx.execute_batch(&create_tmp)
             .with_context(|| format!("create rewritten table {tmp}"))?;
-        tx.execute_batch(&format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";"))
+
+        let insert_sql = if value_rewrites.is_empty() {
+            format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";")
+        } else {
+            let mut columns: Vec<String> = Vec::new();
+            {
+                let mut stmt = tx
+                    .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                    .with_context(|| format!("inspect columns for {table}"))?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                for row in rows {
+                    columns.push(row?);
+                }
+            }
+            ensure!(
+                !columns.is_empty(),
+                "cannot rewrite values for empty table definition {table}"
+            );
+            let select_list = columns
+                .iter()
+                .map(|column| {
+                    if let Some((_, from_value, to_value)) = value_rewrites
+                        .iter()
+                        .find(|(name, _, _)| *name == column.as_str())
+                    {
+                        format!(
+                            "CASE WHEN \"{column}\" = '{from_value}' THEN '{to_value}' ELSE \"{column}\" END AS \"{column}\""
+                        )
+                    } else {
+                        format!("\"{column}\"")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO \"{tmp}\" SELECT {select_list} FROM \"{table}\";")
+        };
+        tx.execute_batch(&insert_sql)
             .with_context(|| format!("copy rows into {tmp}"))?;
 
         let mut index_sqls: Vec<String> = Vec::new();
@@ -2852,6 +2895,12 @@ impl Database {
         // - CHECK constraints are rewritten to accept the canonical values
         if current_version < 55 {
             info!("Running migration 55: hive table renames and CHECK rewrites");
+            // foreign_keys cannot be toggled mid-transaction; disable before
+            // opening the rewrite transaction so sessions/agent_memories can
+            // be rebuilt without "database table is locked" from child FKs.
+            self.conn
+                .pragma_update(None, "foreign_keys", "OFF")
+                .context("disabling foreign_keys for hive identity rewrite")?;
             let hive_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
                 .context("acquiring hive identity schema migration lock")?;
 
@@ -2885,40 +2934,36 @@ impl Database {
                 }
             }
 
-            // Data first so rebuilt CHECK tables accept the canonical values.
-            let _ = hive_tx.execute(
-                "UPDATE sessions SET session_type = 'hive' WHERE session_type = 'mako'",
-                [],
-            );
+            // CHECK constraints still only accept the legacy discriminator, so
+            // UPDATE-before-rebuild is impossible. Remap values during the
+            // table rewrite copy instead.
+            Self::rebuild_table_with_sql_rewrite_and_values(
+                &hive_tx,
+                "sessions",
+                &["'mako'"],
+                &["'hive'"],
+                &[("session_type", "mako", "hive")],
+            )
+            .context("Migration 55: rebuild sessions CHECK for hive")?;
             if Self::table_exists(&hive_tx, "agent_memories") {
-                let _ = hive_tx.execute(
-                    "UPDATE agent_memories SET namespace = 'hive' WHERE namespace = 'mako'",
-                    [],
-                );
-            }
-
-            // Disable FKs for table rebuilds (sessions is widely referenced).
-            hive_tx.pragma_update(None, "foreign_keys", "OFF")?;
-
-            Self::rebuild_table_with_sql_rewrite(&hive_tx, "sessions", &["'mako'"], &["'hive'"])
-                .context("Migration 55: rebuild sessions CHECK for hive")?;
-            if Self::table_exists(&hive_tx, "agent_memories") {
-                Self::rebuild_table_with_sql_rewrite(
+                Self::rebuild_table_with_sql_rewrite_and_values(
                     &hive_tx,
                     "agent_memories",
                     &["'mako'"],
                     &["'hive'"],
+                    &[("namespace", "mako", "hive")],
                 )
                 .context("Migration 55: rebuild agent_memories CHECK for hive")?;
             }
-
-            hive_tx.pragma_update(None, "foreign_keys", "ON")?;
 
             hive_tx.execute(
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (55)",
                 [],
             )?;
             hive_tx.commit()?;
+            self.conn
+                .pragma_update(None, "foreign_keys", "ON")
+                .context("re-enabling foreign_keys after hive identity rewrite")?;
         }
 
         if privacy_cleanup_requested {
