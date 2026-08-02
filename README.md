@@ -57,8 +57,7 @@ The default CLI experience is the modern Mitsuro terminal UI:
 
 ```bash
 mitsuro
-# compatibility alias still works
-krusty
+
 ```
 
 The previous full-screen TUI is archived on git branch `archive/tui-v1-20260802`
