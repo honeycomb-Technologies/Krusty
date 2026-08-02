@@ -92,7 +92,7 @@ fn session_creation_supports_legacy_required_provider_columns() {
         )
         .expect("legacy row");
 
-    assert_eq!(provider, "krusty");
+    assert_eq!(provider, "mitsuro");
     assert!(model.is_empty());
 }
 

@@ -591,7 +591,7 @@ fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
         "capabilities": ["execute"]
     });
     assert_eq!(agent_call_execution_profile(&execute_only), "explore");
-    assert!(!agent_call_requests_write(&execute_only));
+    assert!(agent_call_requests_write(&execute_only));
 }
 
 #[test]

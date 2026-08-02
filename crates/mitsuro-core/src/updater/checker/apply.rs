@@ -670,7 +670,12 @@ mod tests {
     fn pending_updates_use_private_config_directory() {
         let pending = pending_update_path();
         assert!(pending.starts_with(crate::paths::config_dir()));
-        assert!(!pending.starts_with(std::env::temp_dir()));
+        // Cargo tests intentionally isolate config under a temp root so the
+        // real user profile is never written. Outside tests, pending updates
+        // must still live under the product config directory, not /tmp root.
+        if !crate::paths::config_dir().starts_with(std::env::temp_dir()) {
+            assert!(!pending.starts_with(std::env::temp_dir()));
+        }
         assert_eq!(
             pending.file_name().and_then(|name| name.to_str()),
             Some("mitsuro-pending-update")

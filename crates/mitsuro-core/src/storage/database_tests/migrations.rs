@@ -139,8 +139,8 @@ fn provider_aware_model_identity_columns_are_additive() {
 
     let schedule_columns: Vec<String> = db
         .conn()
-        .prepare("PRAGMA table_info(mako_schedules)")
-        .expect("prepare Mako schedule columns")
+        .prepare("PRAGMA table_info(hive_schedules)")
+        .expect("prepare Hive schedule columns")
         .query_map([], |row| row.get(1))
         .expect("query Mako schedule columns")
         .collect::<rusqlite::Result<_>>()
@@ -172,7 +172,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -208,12 +208,12 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
             "SELECT model, model_key_json, model_catalog_revision
-               FROM mako_schedules WHERE id = 'legacy'",
+               FROM hive_schedules WHERE id = 'legacy'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -270,7 +270,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let claimed: String = db
         .conn()
         .query_row(
@@ -300,7 +300,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -355,7 +355,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
 }
 
 #[test]
@@ -378,14 +378,14 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
             DROP INDEX idx_delegated_runs_expired_host_lease;
             ALTER TABLE delegated_runs DROP COLUMN host_lease_expires_at_ms;
             ALTER TABLE delegated_runs DROP COLUMN host_owner_id;
-            DELETE FROM schema_version WHERE version = 54;
+            DELETE FROM schema_version WHERE version >= 54;
             "#,
         )
         .expect("rewind background host lease migration");
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -409,7 +409,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
 }
 
 #[test]

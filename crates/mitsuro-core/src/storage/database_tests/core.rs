@@ -10,7 +10,7 @@ use super::{create_test_db, seed_legacy_delegated_runs_schema};
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 54, "Expected current schema version to be 54");
+    assert_eq!(version, 55, "Expected current schema version to be 55");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 54, "Expected final schema version");
+    assert_eq!(version, 55, "Expected final schema version");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn concurrent_process_initialization_serializes_migrations() {
             .join()
             .expect("database initializer thread should not panic")
             .expect("concurrent database initialization should succeed");
-        assert_eq!(version, 54);
+        assert_eq!(version, 55);
     }
 }
 
@@ -108,15 +108,15 @@ fn privacy_migration_releases_exclusive_lock_while_first_handle_stays_open() {
     drop(seed);
 
     let first = Database::new(&db_path).expect("complete privacy migration");
-    assert_eq!(first.get_schema_version(), 54);
+    assert_eq!(first.get_schema_version(), 55);
 
     // Keep the migration-winning handle alive. A locking-mode restore without
     // a subsequent database access retains SQLite's exclusive lock and makes
     // this second independently supervised process time out.
     let second = Database::new(&db_path)
         .expect("second process should open while migration winner remains alive");
-    assert_eq!(second.get_schema_version(), 54);
-    assert_eq!(first.get_schema_version(), 54);
+    assert_eq!(second.get_schema_version(), 55);
+    assert_eq!(first.get_schema_version(), 55);
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
         .expect("release peer snapshot");
     drop(reader);
     let recovered = Database::new(&db_path).expect("retry privacy migration after peer release");
-    assert_eq!(recovered.get_schema_version(), 54);
+    assert_eq!(recovered.get_schema_version(), 55);
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
 
     let flush_count: i64 = db
         .conn()
@@ -295,7 +295,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -312,20 +312,20 @@ fn migration_34_backfills_provider_call_classification() {
 fn migrations_35_through_44_create_mako_backend_contracts() {
     let (db, _temp) = create_test_db();
     let expected_tables = [
-        "mako_profiles",
-        "mako_profile_documents",
-        "mako_controllers",
-        "mako_schedules",
-        "mako_schedule_occurrences",
-        "mako_runs",
-        "mako_run_attempts",
-        "mako_daemon_leases",
-        "mako_idempotency_keys",
-        "mako_controller_events",
-        "mako_control_outbox",
+        "hive_profiles",
+        "hive_profile_documents",
+        "hive_controllers",
+        "hive_schedules",
+        "hive_schedule_occurrences",
+        "hive_runs",
+        "hive_run_attempts",
+        "hive_daemon_leases",
+        "hive_idempotency_keys",
+        "hive_controller_events",
+        "hive_control_outbox",
         "conversation_episodes",
-        "mako_learning_runs",
-        "mako_learning_candidates",
+        "hive_learning_runs",
+        "hive_learning_candidates",
         "agent_memory_revisions",
         "knowledge_snapshots",
     ];
@@ -374,7 +374,7 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate legacy memories");
-    assert_eq!(db.get_schema_version(), 54);
+    assert_eq!(db.get_schema_version(), 55);
 
     let fact_metadata: (String, String, f64) = db
         .conn()
@@ -429,9 +429,9 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
                  id, title, created_at, updated_at, model, session_type
              ) VALUES (
                  'session-privacy', 'Mako', '2026-07-17T00:00:00.000000Z',
-                 '2026-07-17T00:00:00.000000Z', 'test:model', 'mako'
+                 '2026-07-17T00:00:00.000000Z', 'test:model', 'hive'
              );
-             INSERT INTO mako_controllers (
+             INSERT INTO hive_controllers (
                  id, scope_key, session_id, status, timezone,
                  max_concurrent_runs, created_at, updated_at
              ) VALUES (
@@ -443,7 +443,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
         .expect("seed ownership rows");
     db.conn()
         .execute(
-            "INSERT INTO mako_runs (
+            "INSERT INTO hive_runs (
                  id, controller_id, session_id, kind, objective, config_json,
                  status, available_at, attempt_count, max_attempts,
                  last_stop_reason, last_error, outcome_json, created_at, updated_at
@@ -458,7 +458,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
         .expect("seed raw run copies");
     db.conn()
         .execute(
-            "INSERT INTO mako_run_attempts (
+            "INSERT INTO hive_run_attempts (
                  id, run_id, attempt_no, worker_id, lease_token, lease_epoch,
                  started_at, outcome, stop_reason, error
              ) VALUES (
@@ -490,7 +490,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     ] {
         db.conn()
             .execute(
-                "INSERT INTO mako_controller_events (
+                "INSERT INTO hive_controller_events (
                      controller_id, sequence, event_type, run_id, payload_json, created_at
                  ) VALUES (
                      'controller-privacy', ?1, 'agentic_event', 'run-privacy', ?2,
@@ -502,7 +502,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     }
     db.conn()
         .execute(
-            "INSERT INTO mako_runtime_state (
+            "INSERT INTO hive_runtime_state (
                  session_id, status, last_error, current_run_id, updated_at
              ) VALUES (
                  'session-privacy', 'error', ?1, 'run-privacy',
@@ -513,7 +513,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
         .expect("seed raw runtime error");
     db.conn()
         .execute(
-            "INSERT INTO mako_control_outbox (
+            "INSERT INTO hive_control_outbox (
                  id, controller_id, session_id, run_id, control_kind, dedupe_key,
                  payload_json, status, available_at, last_error, created_at, updated_at
              ) VALUES (
@@ -533,6 +533,21 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
             ],
         )
         .expect("seed raw outbox copies");
+    // Privacy migration 43 still targets legacy mako_* table names. Put the
+    // seeded rows back on those names before rewinding schema_version so the
+    // redaction path can run, then migration 55 renames them to hive_*.
+    db.conn()
+        .execute_batch(
+            r#"
+            ALTER TABLE hive_controllers RENAME TO mako_controllers;
+            ALTER TABLE hive_runs RENAME TO mako_runs;
+            ALTER TABLE hive_run_attempts RENAME TO mako_run_attempts;
+            ALTER TABLE hive_controller_events RENAME TO mako_controller_events;
+            ALTER TABLE hive_runtime_state RENAME TO mako_runtime_state;
+            ALTER TABLE hive_control_outbox RENAME TO mako_control_outbox;
+            "#,
+        )
+        .expect("restore legacy table names for privacy migration replay");
     db.conn()
         .execute("DELETE FROM schema_version WHERE version >= 43", [])
         .expect("rewind to migration 42");
@@ -556,12 +571,12 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     );
 
     let migrated = Database::new(&db_path).expect("apply privacy migration");
-    assert_eq!(migrated.get_schema_version(), 54);
+    assert_eq!(migrated.get_schema_version(), 55);
     let event_payloads: String = migrated
         .conn()
         .query_row(
             "SELECT group_concat(payload_json, '|')
-               FROM mako_controller_events
+               FROM hive_controller_events
               WHERE controller_id = 'controller-privacy'",
             [],
             |row| row.get(0),
@@ -571,7 +586,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     let approval_payload: String = migrated
         .conn()
         .query_row(
-            "SELECT payload_json FROM mako_controller_events
+            "SELECT payload_json FROM hive_controller_events
               WHERE controller_id = 'controller-privacy' AND sequence = 2",
             [],
             |row| row.get(0),
@@ -584,10 +599,10 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     assert_eq!(approval_payload["arguments_redacted"], true);
 
     for sql in [
-        "SELECT COALESCE(last_error, '') || COALESCE(last_stop_reason, '') || COALESCE(outcome_json, '') FROM mako_runs WHERE id = 'run-privacy'",
-        "SELECT COALESCE(error, '') || COALESCE(stop_reason, '') FROM mako_run_attempts WHERE id = 'attempt-privacy'",
-        "SELECT COALESCE(last_error, '') FROM mako_runtime_state WHERE session_id = 'session-privacy'",
-        "SELECT COALESCE(last_error, '') || payload_json FROM mako_control_outbox WHERE id = 'outbox-privacy'",
+        "SELECT COALESCE(last_error, '') || COALESCE(last_stop_reason, '') || COALESCE(outcome_json, '') FROM hive_runs WHERE id = 'run-privacy'",
+        "SELECT COALESCE(error, '') || COALESCE(stop_reason, '') FROM hive_run_attempts WHERE id = 'attempt-privacy'",
+        "SELECT COALESCE(last_error, '') FROM hive_runtime_state WHERE session_id = 'session-privacy'",
+        "SELECT COALESCE(last_error, '') || payload_json FROM hive_control_outbox WHERE id = 'outbox-privacy'",
     ] {
         let durable_copy: String = migrated
             .conn()
@@ -653,7 +668,7 @@ fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
     );
 
     let recovered = Database::new(&db_path).expect("resume physical privacy cleanup");
-    assert_eq!(recovered.get_schema_version(), 54);
+    assert_eq!(recovered.get_schema_version(), 55);
     drop(recovered);
 
     for path in [

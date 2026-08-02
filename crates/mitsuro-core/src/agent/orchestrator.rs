@@ -3534,7 +3534,7 @@ mod tests {
         let repo = temp.path();
         fs::create_dir_all(repo.join(".git"))?;
         fs::write(repo.join("AGENTS.md"), "repo instructions")?;
-        fs::write(repo.join("MAKO.md"), "Always Swimming.")?;
+        fs::write(repo.join("HIVE.md"), "Always Swimming.")?;
 
         let skills = RwLock::new(SkillsManager::with_defaults(repo));
         let conversation = vec![ModelMessage {
@@ -3578,13 +3578,13 @@ mod tests {
             matches!(
                 &message.content[0],
                 Content::Text { text }
-                    if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]") && text.contains("Always Swimming.")
+                    if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]") && text.contains("Always Swimming.")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
+                Content::Text { text } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
             )
         }));
         Ok(())

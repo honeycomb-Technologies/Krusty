@@ -163,21 +163,21 @@ fn tool_events_do_not_split_a_streaming_word_across_agent_parts() {
     let mut projection = ConversationProjection::new("session");
     projection.push_user_prompt("u1", "Inspect this.".to_owned(), Vec::new(), false);
     projection.apply_event(LoopEvent::TextDelta {
-        delta: "Checking Hive/M".to_owned(),
+        delta: "Checking Foo/B".to_owned(),
     });
     projection.apply_event(LoopEvent::ToolCallStart {
         id: "read-1".to_owned(),
         name: "read".to_owned(),
     });
     projection.apply_event(LoopEvent::TextDelta {
-        delta: "ako next.".to_owned(),
+        delta: "ar next.".to_owned(),
     });
 
     let parts = &projection.presentation().turns[0].parts;
     assert_eq!(parts.len(), 2);
     assert!(matches!(
         &parts[0],
-        TimelinePart::AgentText(part) if part.text == "Checking Hive/Hive next."
+        TimelinePart::AgentText(part) if part.text == "Checking Foo/Bar next."
     ));
     assert!(matches!(&parts[1], TimelinePart::Tool(_)));
 }

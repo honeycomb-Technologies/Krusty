@@ -55,6 +55,64 @@ impl Database {
         .is_ok()
     }
 
+    /// Rebuild a table by rewriting its CREATE TABLE SQL so CHECK constraints
+    /// can accept a renamed discriminator without data loss.
+    fn rebuild_table_with_sql_rewrite(
+        tx: &rusqlite::Transaction,
+        table: &str,
+        from: &[&str],
+        to: &[&str],
+    ) -> Result<()> {
+        assert_eq!(from.len(), to.len());
+        let create_sql: String = match tx.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        ) {
+            Ok(sql) => sql,
+            Err(_) => return Ok(()),
+        };
+
+        let mut rewritten = create_sql.clone();
+        for (old, new) in from.iter().zip(to.iter()) {
+            rewritten = rewritten.replace(old, new);
+        }
+        if rewritten == create_sql {
+            return Ok(());
+        }
+
+        let tmp = format!("{table}__hive_rewrite");
+        tx.execute_batch(&format!("DROP TABLE IF EXISTS \"{tmp}\";"))?;
+        let create_tmp = rewritten.replacen(table, &tmp, 1);
+        tx.execute_batch(&create_tmp)
+            .with_context(|| format!("create rewritten table {tmp}"))?;
+        tx.execute_batch(&format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";"))
+            .with_context(|| format!("copy rows into {tmp}"))?;
+
+        let mut index_sqls: Vec<String> = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index'
+                   AND tbl_name = ?1
+                   AND sql IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([table], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                index_sqls.push(row?);
+            }
+        }
+
+        tx.execute_batch(&format!("DROP TABLE \"{table}\";"))?;
+        tx.execute_batch(&format!("ALTER TABLE \"{tmp}\" RENAME TO \"{table}\";"))?;
+
+        for sql in index_sqls {
+            tx.execute_batch(&sql)
+                .with_context(|| format!("recreate index for {table}: {sql}"))?;
+        }
+        Ok(())
+    }
+
     fn checkpoint_wal_without_busy_readers(&self, phase: &str) -> Result<()> {
         let (busy, log_frames, checkpointed_frames) = self
             .conn
@@ -194,7 +252,7 @@ impl Database {
                     model TEXT,
                     working_dir TEXT,
                     session_type TEXT NOT NULL DEFAULT 'code'
-                        CHECK (session_type IN ('chat', 'code', 'mako')),
+                        CHECK (session_type IN ('chat', 'code', 'hive')),
                     permission_mode TEXT NOT NULL DEFAULT 'autonomous'
                         CHECK (permission_mode IN ('supervised', 'autonomous'))
                 );
@@ -871,7 +929,7 @@ impl Database {
                 tx.execute_batch(
                     r#"
                     ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'code'
-                        CHECK (session_type IN ('chat', 'code', 'mako'));
+                        CHECK (session_type IN ('chat', 'code', 'hive'));
                     "#,
                 )?;
             }
@@ -1474,7 +1532,7 @@ impl Database {
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                     canonical_key TEXT,
                     namespace TEXT NOT NULL DEFAULT 'shared'
-                        CHECK (namespace IN ('shared', 'mako', 'crew')),
+                        CHECK (namespace IN ('shared', 'hive', 'crew')),
                     namespace_id TEXT,
                     status TEXT NOT NULL DEFAULT 'active'
                         CHECK (status IN ('active', 'superseded', 'deleted')),
@@ -1500,7 +1558,7 @@ impl Database {
             }
             if !Self::column_exists(&tx, "agent_memories", "namespace") {
                 tx.execute_batch(
-                    "ALTER TABLE agent_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'shared' CHECK (namespace IN ('shared', 'mako', 'crew'));",
+                    "ALTER TABLE agent_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'shared' CHECK (namespace IN ('shared', 'hive', 'crew'));",
                 )?;
             }
             if !Self::column_exists(&tx, "agent_memories", "namespace_id") {
@@ -2787,6 +2845,87 @@ impl Database {
             )?;
             host_lease_tx.commit()?;
         }
+
+        // Migration 55: finish Mitsuro/Hive identity in durable schema.
+        // - Canonical session_type / memory namespace values are "hive"
+        // - Backend tables created as mako_* are renamed to hive_*
+        // - CHECK constraints are rewritten to accept the canonical values
+        if current_version < 55 {
+            info!("Running migration 55: hive table renames and CHECK rewrites");
+            let hive_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring hive identity schema migration lock")?;
+
+            // Prefer renaming physical tables over dual-writing. Indexes that
+            // still reference old names are recreated with the table rebuild
+            // path below when CHECK SQL must change.
+            let renames = [
+                ("mako_runtime_state", "hive_runtime_state"),
+                ("mako_attention_state", "hive_attention_state"),
+                ("mako_profiles", "hive_profiles"),
+                ("mako_profile_documents", "hive_profile_documents"),
+                ("mako_crew_profiles", "hive_crew_profiles"),
+                ("mako_crew_documents", "hive_crew_documents"),
+                ("mako_controllers", "hive_controllers"),
+                ("mako_schedules", "hive_schedules"),
+                ("mako_schedule_occurrences", "hive_schedule_occurrences"),
+                ("mako_runs", "hive_runs"),
+                ("mako_run_attempts", "hive_run_attempts"),
+                ("mako_daemon_leases", "hive_daemon_leases"),
+                ("mako_idempotency_keys", "hive_idempotency_keys"),
+                ("mako_controller_events", "hive_controller_events"),
+                ("mako_learning_runs", "hive_learning_runs"),
+                ("mako_learning_candidates", "hive_learning_candidates"),
+                ("mako_control_outbox", "hive_control_outbox"),
+            ];
+            for (from, to) in renames {
+                if Self::table_exists(&hive_tx, from) && !Self::table_exists(&hive_tx, to) {
+                    hive_tx
+                        .execute_batch(&format!("ALTER TABLE \"{from}\" RENAME TO \"{to}\";"))
+                        .with_context(|| format!("rename {from} -> {to}"))?;
+                }
+            }
+
+            // Data first so rebuilt CHECK tables accept the canonical values.
+            let _ = hive_tx.execute(
+                "UPDATE sessions SET session_type = 'hive' WHERE session_type = 'mako'",
+                [],
+            );
+            if Self::table_exists(&hive_tx, "agent_memories") {
+                let _ = hive_tx.execute(
+                    "UPDATE agent_memories SET namespace = 'hive' WHERE namespace = 'mako'",
+                    [],
+                );
+            }
+
+            // Disable FKs for table rebuilds (sessions is widely referenced).
+            hive_tx.pragma_update(None, "foreign_keys", "OFF")?;
+
+            Self::rebuild_table_with_sql_rewrite(
+                &hive_tx,
+                "sessions",
+                &["'mako'"],
+                &["'hive'"],
+            )
+            .context("Migration 55: rebuild sessions CHECK for hive")?;
+            if Self::table_exists(&hive_tx, "agent_memories") {
+                Self::rebuild_table_with_sql_rewrite(
+                    &hive_tx,
+                    "agent_memories",
+                    &["'mako'"],
+                    &["'hive'"],
+                )
+                .context("Migration 55: rebuild agent_memories CHECK for hive")?;
+            }
+
+            hive_tx.pragma_update(None, "foreign_keys", "ON")?;
+
+            hive_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (55)",
+                [],
+            )?;
+            hive_tx.commit()?;
+        }
+
 
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;

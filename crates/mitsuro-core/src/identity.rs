@@ -40,8 +40,8 @@ pub mod legacy {
     pub const HIVE_HEARTBEAT_FILE_NAME: &str = "MAKO_HEARTBEAT.md";
     pub const HIVE_MEMORY_FILE_NAME: &str = "MAKO_MEMORY.md";
     pub const HIVE_CHANNELS_FILE_NAME: &str = "MAKO_CHANNELS.md";
-    pub const HIVE_PROJECT_OVERLAY_FILE_NAME: &str = "MAKO.md";
-    pub const HIVE_PROJECT_OVERLAY_FILE_NAME_LOWERCASE: &str = "mako.md";
+    pub const HIVE_PROJECT_OVERLAY_FILE_NAME: &str = "HIVE.md";
+    pub const HIVE_PROJECT_OVERLAY_FILE_NAME_LOWERCASE: &str = "hive.md";
     pub const AGENT_EXTENSION_MANIFEST_FILE_NAME: &str = "krusty-extension.json";
     pub const ENV_PREFIX: &str = "KRUSTY_";
     pub const HIVE_ENV_PREFIX: &str = "KRUSTY_MAKO_";
