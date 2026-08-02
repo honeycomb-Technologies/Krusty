@@ -32,7 +32,7 @@ use mitsuro_core::storage::{
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::SessionManager;
 
-use super::interactions::{resolve_pending_mako_run, PendingMakoInteraction};
+use super::interactions::{resolve_pending_hive_run, PendingHiveInteraction};
 use super::{
     build_user_content, chat, deliver_steering_with_rollover, forward_loop_event,
     prepare_chat_contract_for_test, run_delegated_progress_bridge, run_orchestrator_event_bridge,
@@ -226,12 +226,12 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
         .expect("diagnostic trace should insert");
 
     assert!(matches!(
-        resolve_pending_mako_run(
+        resolve_pending_hive_run(
             &state,
             &session_id,
             "tool-1",
             None,
-            PendingMakoInteraction::ToolApproval,
+            PendingHiveInteraction::ToolApproval,
         ),
         Ok(run_id) if run_id == "durable-run-1"
     ));
@@ -248,12 +248,12 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
         )
         .expect("durable settlement should insert");
     assert!(matches!(
-        resolve_pending_mako_run(
+        resolve_pending_hive_run(
             &state,
             &session_id,
             "tool-1",
             None,
-            PendingMakoInteraction::ToolApproval,
+            PendingHiveInteraction::ToolApproval,
         ),
         Err(AppError::Conflict(_))
     ));
