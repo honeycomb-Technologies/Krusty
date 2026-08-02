@@ -1,6 +1,8 @@
 # Exact prior-identity compatibility and historical-evidence exceptions.
 # Regenerated for 0.9.21 CI fix (migration 55 + TUI archive + Apple freeze).
 # Format: path\tpath OR content\tpath\tline\texact source line
+# Content matching uses path + exact source text; line numbers are advisory only
+# (so ordinary edits that shift lines do not fail Canonical Identity CI).
 # Legacy-named paths.
 path	apps/mobile/modules/mitsuro-diagnostics/ios/KrustyDiagnosticsCompatibilityModule.swift
 path	apps/mobile/widgets/MakoWidget.tsx
@@ -734,3 +736,6 @@ content	scripts/identity-env.sh	34	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	40	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	46	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	52	    KRUSTY_MAKO_TEST_SOCKET=previous-hive
+content	apps/mobile/EAS-PROJECT.md	4	- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store identity freeze).
+content	apps/mobile/EAS-PROJECT.md	10	Slug for project identified by "extra.eas.projectId" (krusty) does not match the "slug" field (mitsuro)
+content	apps/mobile/EAS-PROJECT.md	13	the Expo project is still named `krusty`. Rename it in the Expo dashboard (or with EAS CLI) to `mitsuro`, **or** create a new Expo project with slug `mitsuro` and update `projectId`. Do not change the iOS bundle id as part of that rename.

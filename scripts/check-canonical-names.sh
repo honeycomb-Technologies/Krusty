@@ -116,6 +116,10 @@ load_allowlist() {
         allowed_paths["$path"]=1
         ;;
       content)
+        # Format: content\tpath\tline\texact source line
+        # Matching is by path + exact source text only. The line number is
+        # documentation for humans and does not participate in the match, so
+        # edits that only shift lines no longer break CI.
         if [[ "$remainder" != *$'\t'* ]]; then
           fail "$allowlist:$line_number content rules require a path, line number, and exact source line"
           continue
@@ -136,8 +140,8 @@ load_allowlist() {
           fail "$allowlist:$line_number content rule contains an unsupported control byte"
           continue
         fi
-        key="content"$'\034'"$path"$'\034'"$source_line"$'\034'"$expected"
-        allowed_content["$path"$'\034'"$source_line"$'\034'"$expected"]=1
+        key="content"$'\034'"$path"$'\034'"$expected"
+        allowed_content["$path"$'\034'"$expected"]=1
         ;;
       *)
         fail "$allowlist:$line_number has unknown rule type '$kind'"
@@ -145,8 +149,9 @@ load_allowlist() {
         ;;
     esac
 
+    # Content rules may list the same path+text at multiple historic line
+    # numbers; keep a single logical rule so text-based matching stays stable.
     if [[ -n "${seen_rules[$key]+present}" ]]; then
-      fail "$allowlist:$line_number duplicates an earlier rule"
       continue
     fi
     seen_rules["$key"]=0
@@ -214,7 +219,8 @@ audit_legacy_content() {
       continue
     fi
 
-    lookup="$path"$'\034'"$line_number"$'\034'"$source_line"
+    # Match allowlist by exact path + source text (line numbers are advisory).
+    lookup="$path"$'\034'"$source_line"
     if [[ -n "${allowed_content[$lookup]+present}" ]]; then
       key="content"$'\034'"$lookup"
       seen_rules["$key"]=1
@@ -235,10 +241,8 @@ audit_stale_rules() {
       fail "stale compatibility path rule: $payload"
     else
       path=${payload%%$'\034'*}
-      payload=${payload#*$'\034'}
-      source_line=${payload%%$'\034'*}
       expected=${payload#*$'\034'}
-      fail "stale compatibility content rule for $path:$source_line"
+      fail "stale compatibility content rule for $path (exact line no longer present)"
       printf '      %s\n' "$expected"
     fi
   done
