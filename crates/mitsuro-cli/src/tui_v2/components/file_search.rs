@@ -11,10 +11,7 @@ use ratatui::{
 use crate::tui_v2::{
     app::state::UiState,
     components::{
-        primitive::{
-            assist_chrome::AssistChrome,
-            list_window::visible_range,
-        },
+        primitive::{assist_chrome::AssistChrome, list_window::visible_range},
         scrollbars,
     },
     input::file_search,
@@ -44,7 +41,7 @@ pub fn render(
     }
 
     let matches =
-        file_search::suggestions(entries, &state.composer.text(), state.composer.cursor_byte());
+        file_search::suggestions(entries, state.composer.text(), state.composer.cursor_byte());
     if matches.is_empty() {
         frame.render_widget(
             Paragraph::new("No project entries match.").style(
@@ -71,7 +68,11 @@ pub fn render(
     } else {
         chrome.body
     };
-    let window = visible_range(matches.len(), selected, usize::from(list_area.height.max(1)));
+    let window = visible_range(
+        matches.len(),
+        selected,
+        usize::from(list_area.height.max(1)),
+    );
     let pointer = if state.capability.glyph_mode == GlyphMode::Ascii {
         "> "
     } else {

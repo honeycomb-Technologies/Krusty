@@ -278,7 +278,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             target_branch: None,
             session_type: Some(SessionType::Hive),
             permission_mode: None,
-        })
+        }),
     )
     .await;
     assert!(matches!(create, Err(AppError::Conflict(_))));
@@ -316,7 +316,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
     assert!(matches!(update, Err(AppError::Conflict(_))));
@@ -329,7 +329,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
         Json(PinchRequest {
             preservation_hints: None,
             direction: None,
-        })
+        }),
     )
     .await;
     assert!(matches!(pinch, Err(AppError::Conflict(_))));
@@ -366,7 +366,7 @@ async fn session_create_persists_full_continuation_contract() {
             target_branch: Some("feature/continue".to_string()),
             session_type: Some(SessionType::Code),
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -424,7 +424,7 @@ async fn create_session_persists_user_ownership() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
     let (_, Json(response)) = match result {
@@ -463,7 +463,7 @@ async fn create_session_resolves_relative_workspace_paths_within_user_root() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -497,7 +497,7 @@ async fn create_session_accepts_fresh_absolute_workspace_path_with_existing_ance
             target_branch: None,
             session_type: Some(SessionType::Code),
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -528,7 +528,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
 
@@ -557,7 +557,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
 
@@ -596,7 +596,7 @@ async fn get_session_rejects_foreign_owner() {
         Query(GetSessionQuery {
             limit: None,
             offset: None,
-        })
+        }),
     )
     .await;
 
@@ -745,7 +745,7 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
         HeaderMap::new(),
         Query(ListSessionsQuery {
             working_dir: Some("repo".to_string()),
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session list should succeed"));
@@ -1425,7 +1425,7 @@ Status: in_progress
         Json(PinchRequest {
             preservation_hints: Some("Keep the route semantics intact.".to_string()),
             direction: Some("Continue the server audit.".to_string()),
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("pinch should succeed"));
@@ -1490,7 +1490,7 @@ async fn pinch_session_rejects_an_active_session_writer() {
         Json(PinchRequest {
             preservation_hints: None,
             direction: None,
-        })
+        }),
     )
     .await;
 
@@ -1539,7 +1539,7 @@ async fn pinch_session_resolves_legacy_relative_working_dir_against_user_home() 
         Json(PinchRequest {
             preservation_hints: None,
             direction: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("pinch should succeed"));
@@ -1612,7 +1612,7 @@ async fn create_session_persists_exact_model_key_and_catalog_revision() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("exact session creation should succeed"));
@@ -1654,7 +1654,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -1676,7 +1676,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session update should succeed"));
@@ -1698,7 +1698,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session update should succeed"));
@@ -1727,7 +1727,7 @@ async fn session_routes_apply_workspace_updates() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -1747,7 +1747,7 @@ async fn session_routes_apply_workspace_updates() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("workspace update should succeed"));
@@ -1777,7 +1777,7 @@ async fn session_routes_apply_workspace_updates() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("neutral workspace update should succeed"));
@@ -1806,7 +1806,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -1826,7 +1826,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
 
@@ -1865,7 +1865,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             target_branch: None,
             session_type: None,
             permission_mode: None,
-        })
+        }),
     )
     .await
     .unwrap_or_else(|_| panic!("session creation should succeed"));
@@ -1885,7 +1885,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
-        })
+        }),
     )
     .await;
 

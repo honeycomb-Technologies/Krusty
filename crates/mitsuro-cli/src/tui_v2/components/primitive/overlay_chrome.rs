@@ -71,7 +71,10 @@ impl OverlayChromeLayout {
 }
 
 impl OverlayChrome<'_> {
-    pub fn for_overlay(kind: &OverlayKind, capability: CapabilityProfile) -> OverlayChrome<'static> {
+    pub fn for_overlay(
+        kind: &OverlayKind,
+        capability: CapabilityProfile,
+    ) -> OverlayChrome<'static> {
         OverlayChrome {
             title: kind.label(),
             hints: overlay_hints(kind, capability),
@@ -104,7 +107,11 @@ impl OverlayChrome<'_> {
             .border_set(border_set)
             .border_style(Style::default().fg(theme.border_focused))
             .style(Style::default().bg(theme.surface).fg(theme.foreground))
-            .title(Line::from(self.title).centered().style(Style::default().fg(theme.identity)));
+            .title(
+                Line::from(self.title)
+                    .centered()
+                    .style(Style::default().fg(theme.identity)),
+            );
 
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
@@ -167,11 +174,7 @@ pub fn paint_crossbar(
     }
     line.push_str(right);
     frame.render_widget(
-        Paragraph::new(line).style(
-            Style::default()
-                .fg(theme.border_focused)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(line).style(Style::default().fg(theme.border_focused).bg(theme.surface)),
         Rect::new(outer.x, shelf_y, outer.width, 1),
     );
 }
@@ -186,18 +189,18 @@ fn paint_hints(
     if area.is_empty() {
         return;
     }
-    let separator = if capability.glyph_mode
-        == crate::tui_v2::model::capability::GlyphMode::Ascii
-    {
+    let separator = if capability.glyph_mode == crate::tui_v2::model::capability::GlyphMode::Ascii {
         " | "
     } else {
         " · "
     };
     let fitted = fit_hint_segments(hints, separator, usize::from(area.width));
     frame.render_widget(
-        Paragraph::new(fitted)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.foreground_muted).bg(theme.surface)),
+        Paragraph::new(fitted).alignment(Alignment::Center).style(
+            Style::default()
+                .fg(theme.foreground_muted)
+                .bg(theme.surface),
+        ),
         area,
     );
 }
@@ -301,13 +304,7 @@ pub fn overlay_hints(kind: &OverlayKind, capability: CapabilityProfile) -> &'sta
                 "↑/↓ choose  ·  Enter run  ·  Esc close"
             }
         }
-        OverlayKind::Help => {
-            if ascii {
-                "Esc close"
-            } else {
-                "Esc close"
-            }
-        }
+        OverlayKind::Help => "Esc close",
         OverlayKind::SessionPicker => {
             if ascii {
                 "Up/Down choose | Enter open | Esc close"
@@ -336,13 +333,7 @@ pub fn overlay_hints(kind: &OverlayKind, capability: CapabilityProfile) -> &'sta
                 "↑/↓ choose  ·  Enter apply  ·  Esc close"
             }
         }
-        OverlayKind::PlanGoal => {
-            if ascii {
-                "Esc close"
-            } else {
-                "Esc close"
-            }
-        }
+        OverlayKind::PlanGoal => "Esc close",
         OverlayKind::Processes => {
             if ascii {
                 "Up/Down choose | Enter stop | Esc close"
@@ -364,13 +355,7 @@ pub fn overlay_hints(kind: &OverlayKind, capability: CapabilityProfile) -> &'sta
                 "PgUp/PgDn scroll  ·  c copy  ·  Esc close"
             }
         }
-        OverlayKind::AttachmentPreview => {
-            if ascii {
-                "Esc close"
-            } else {
-                "Esc close"
-            }
-        }
+        OverlayKind::AttachmentPreview => "Esc close",
     }
 }
 
@@ -437,7 +422,13 @@ mod tests {
         // Hints centered on the footer band.
         let hints_y = 9u16;
         let row: String = (3..45)
-            .map(|x| buffer.cell((x, hints_y)).expect("hint cell").symbol().to_owned())
+            .map(|x| {
+                buffer
+                    .cell((x, hints_y))
+                    .expect("hint cell")
+                    .symbol()
+                    .to_owned()
+            })
             .collect::<Vec<_>>()
             .join("");
         let trimmed = row.trim();
@@ -499,7 +490,10 @@ mod tests {
             OverlayKind::AttachmentPreview,
         ] {
             assert!(!overlay_hints(&kind, capability).is_empty());
-            assert_eq!(OverlayChrome::for_overlay(&kind, capability).title, kind.label());
+            assert_eq!(
+                OverlayChrome::for_overlay(&kind, capability).title,
+                kind.label()
+            );
         }
     }
 }

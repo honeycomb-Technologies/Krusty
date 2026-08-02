@@ -212,11 +212,7 @@ fn with_user_bubble_chrome(measured: &MeasuredPart) -> MeasuredPart {
     // top border, content…, bottom border
     rows.push(empty(0));
     rows.extend(measured.rows.iter().cloned());
-    let tail = measured
-        .rows
-        .last()
-        .map(|row| row.source_end)
-        .unwrap_or(0);
+    let tail = measured.rows.last().map(|row| row.source_end).unwrap_or(0);
     rows.push(empty(tail));
     MeasuredPart {
         key: measured.key.clone(),
@@ -291,22 +287,18 @@ fn display_part(
             // Bash: fixed terminal window that live-tails (does not grow unboundedly).
             let rows = match tool_display.panel_kind {
                 crate::tui_v2::presentation::tool::ArtifactPanelKind::Terminal => {
-                    terminal_panel_rows(tool_display.artifact_lines.len(), viewport_height, expanded)
-                }
-                crate::tui_v2::presentation::tool::ArtifactPanelKind::Diff
-                | crate::tui_v2::presentation::tool::ArtifactPanelKind::Code => {
-                    panel_rows(
+                    terminal_panel_rows(
                         tool_display.artifact_lines.len(),
                         viewport_height,
                         expanded,
                     )
                 }
+                crate::tui_v2::presentation::tool::ArtifactPanelKind::Diff
+                | crate::tui_v2::presentation::tool::ArtifactPanelKind::Code => {
+                    panel_rows(tool_display.artifact_lines.len(), viewport_height, expanded)
+                }
                 crate::tui_v2::presentation::tool::ArtifactPanelKind::Generic => {
-                    panel_rows(
-                        tool_display.artifact_lines.len(),
-                        viewport_height,
-                        false,
-                    )
+                    panel_rows(tool_display.artifact_lines.len(), viewport_height, false)
                 }
             };
             let measurement =

@@ -102,10 +102,7 @@ pub fn render_context_bar(
                 Paragraph::new(Line::from(vec![
                     pulse,
                     Span::raw(" "),
-                    Span::styled(
-                        "working",
-                        Style::default().fg(theme.foreground_muted),
-                    ),
+                    Span::styled("working", Style::default().fg(theme.foreground_muted)),
                 ]))
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme.foreground_muted)),
@@ -160,11 +157,7 @@ pub fn render_context_bar(
             .filter(|p| !p.is_empty());
         let mut right = Vec::new();
         right.push(Span::styled(
-            truncate_to_width(
-                title,
-                usize::from(meta.width.saturating_sub(4)).max(8),
-                "…",
-            ),
+            truncate_to_width(title, usize::from(meta.width.saturating_sub(4)).max(8), "…"),
             Style::default()
                 .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),

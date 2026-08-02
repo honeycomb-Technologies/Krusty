@@ -98,15 +98,13 @@ impl ScrollRegion {
             };
             let cell = Rect::new(x, area.y.saturating_add(row), 1, 1);
             frame.render_widget(
-                Paragraph::new(symbol).style(
-                    Style::default()
-                        .bg(theme.surface)
-                        .fg(if thumb.contains(&row) {
-                            theme.border_focused
-                        } else {
-                            theme.border
-                        }),
-                ),
+                Paragraph::new(symbol).style(Style::default().bg(theme.surface).fg(
+                    if thumb.contains(&row) {
+                        theme.border_focused
+                    } else {
+                        theme.border
+                    },
+                )),
                 cell,
             );
         }

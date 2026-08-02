@@ -187,7 +187,6 @@ pub fn read_clipboard_text() -> Option<String> {
     None
 }
 
-
 /// Write text to the system clipboard.
 ///
 /// On Linux prefers native tools (`wl-copy` / `xclip` / `xsel`) so the

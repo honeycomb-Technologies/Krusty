@@ -161,12 +161,10 @@ pub fn render_workspace_sidebar(
         return;
     }
 
-    let plan_area = layout
-        .region(LayoutRegionId::PlanDock)
-        .unwrap_or(inspector);
+    let plan_area = layout.region(LayoutRegionId::PlanDock).unwrap_or(inspector);
     let plugin_area = layout.region(LayoutRegionId::PluginDock);
-    let plugin_focused = state.dock.plugin_focused
-        || matches!(state.focus, FocusTarget::PluginDock);
+    let plugin_focused =
+        state.dock.plugin_focused || matches!(state.focus, FocusTarget::PluginDock);
 
     render_plan_dock(frame, plan_area, plan, plugin_focused, capability, theme);
 
@@ -243,11 +241,7 @@ fn render_plan_dock(
         }
     }
     frame.render_widget(
-        Paragraph::new(lines).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.surface)),
         inner,
     );
 }
@@ -287,18 +281,21 @@ fn render_plugin_dock(
             Style::default().fg(theme.foreground_muted),
         ));
         lines.push(Line::default());
-        for id in available.into_iter().take(usize::from(inner.height.saturating_sub(3)).max(1)) {
-            lines.push(Line::styled(
-                id,
-                Style::default().fg(theme.foreground),
-            ));
+        for id in available
+            .into_iter()
+            .take(usize::from(inner.height.saturating_sub(3)).max(1))
+        {
+            lines.push(Line::styled(id, Style::default().fg(theme.foreground)));
         }
     }
 
-    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX).min(inner.height);
+    let content_height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height);
     let content = Rect::new(
         inner.x,
-        inner.y
+        inner
+            .y
             .saturating_add(inner.height.saturating_sub(content_height) / 2),
         inner.width,
         content_height,
@@ -306,11 +303,7 @@ fn render_plugin_dock(
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(theme.foreground)
-                    .bg(theme.surface),
-            ),
+            .style(Style::default().fg(theme.foreground).bg(theme.surface)),
         content,
     );
 }
@@ -418,11 +411,7 @@ pub fn render_appearance(
 
 fn paint(frame: &mut Frame, area: Rect, lines: Vec<Line<'_>>, theme: SemanticTheme) {
     frame.render_widget(
-        Paragraph::new(lines).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.surface)),
         area,
     );
 }

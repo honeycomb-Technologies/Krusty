@@ -327,3 +327,37 @@ cargo fmt --all -- --check
 | desktop-product shell package/README | selective | landed / fixed JSON |
 | mobile-branch unique non-identity | none | redundant |
 
+---
+
+## Appendix — Phase 6 freeze record (2026-08-02)
+
+**Authority tip:** `c022d532` (`c022d532c25d9d03b4c42d8cf88ce6e420e2667a`) on `codex/release-staging-20260801`  
+**Remote:** `origin` → `honeycomb-Technologies/Mitsuro`
+
+### Validation (AGENTS required)
+
+| Check | Result |
+|-------|--------|
+| `cargo check --workspace` | green |
+| `cargo test --workspace --no-fail-fast` | green (all crates; ~2.4k unit tests) |
+| `cargo clippy --workspace -- -D warnings` | green (legacy v1 `tui` allows dead_code; tui_v2 nits fixed) |
+| `cargo fmt --all -- --check` | green |
+
+### Stage disposition
+
+| Phase | Status |
+|-------|--------|
+| P0 preserve | done — named branches on origin |
+| P1 identity snapshot | done |
+| P2 agent-loop core/server | done + schema migration 55 |
+| P3 tui_v2 default | done |
+| P4 desktop/mobile | done (desktop UI landed; mobile proven redundant) |
+| P5 git sync | done — staging tip + preserve branches pushed; Mac remote retargeted to Mitsuro |
+| P6 validation freeze | **done at tip above** |
+
+### Explicit stop
+
+- **No** merge to `main`
+- **No** production restart / public release without separate approval
+- Private Honey preview must be built from this tip SHA only if requested later
+

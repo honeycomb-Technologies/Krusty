@@ -147,7 +147,11 @@ fn render_window(
             if let Some(last) = lines.last_mut() {
                 last.2 = byte.saturating_add(1); // include newline in src_end (buffer parity)
             }
-            lines.push((String::new(), byte.saturating_add(1), byte.saturating_add(1)));
+            lines.push((
+                String::new(),
+                byte.saturating_add(1),
+                byte.saturating_add(1),
+            ));
             line_src_start = byte.saturating_add(1);
             continue;
         }
@@ -182,8 +186,7 @@ fn render_window(
     let first_row = viewport_offset
         .map(|off| off.min(max_first))
         .unwrap_or_else(|| cursor_row.saturating_sub(height.saturating_sub(1)));
-    let cursor_in_frame =
-        cursor_row >= first_row && cursor_row < first_row.saturating_add(height);
+    let cursor_in_frame = cursor_row >= first_row && cursor_row < first_row.saturating_add(height);
     let visible = lines
         .into_iter()
         .enumerate()
@@ -200,8 +203,12 @@ fn render_window(
                     // local offsets relative to full line before horizontal window
                     let local_lo = lo.saturating_sub(src_start);
                     let local_hi = hi.saturating_sub(src_start).min(line.len());
-                    let (vis_lo, vis_hi) =
-                        map_local_range_through_window(&line, local_lo, local_hi, horizontal_offset);
+                    let (vis_lo, vis_hi) = map_local_range_through_window(
+                        &line,
+                        local_lo,
+                        local_hi,
+                        horizontal_offset,
+                    );
                     if vis_lo < vis_hi && vis_lo < clipped.len() {
                         selected.push((vis_lo, vis_hi.min(clipped.len())));
                     }

@@ -1,5 +1,6 @@
 //! Terminal User Interface for Mitsuro
 
+#![allow(dead_code, unused_imports, unused_variables)]
 pub mod animation;
 pub mod app;
 pub(crate) mod app_builder;

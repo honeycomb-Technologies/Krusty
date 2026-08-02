@@ -186,7 +186,9 @@ impl TranscriptLayout {
             .selection_rows
             .iter()
             .min_by_key(|row| row.screen_y.abs_diff(position.y))?;
-        let x = position.x.clamp(self.viewport.x, self.viewport.right().saturating_sub(1));
+        let x = position
+            .x
+            .clamp(self.viewport.x, self.viewport.right().saturating_sub(1));
         Some(SelectionPoint {
             part_id: row.part_id.clone(),
             source_offset: source_offset_for_column(row, x, self.viewport.x),

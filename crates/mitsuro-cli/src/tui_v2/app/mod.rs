@@ -342,7 +342,7 @@ impl PreviewApp {
         if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
             return None;
         }
-        let suggestions = slash::suggestions(&self.state.composer.text());
+        let suggestions = slash::suggestions(self.state.composer.text());
         match key.code {
             KeyCode::Esc => {
                 self.state.composer.autocomplete_open = false;
@@ -383,7 +383,7 @@ impl PreviewApp {
         }
         let suggestions = file_search::suggestions(
             &self.project_entries,
-            &self.state.composer.text(),
+            self.state.composer.text(),
             self.state.composer.cursor_byte(),
         );
         match key.code {
@@ -1283,11 +1283,8 @@ impl PreviewApp {
             }
             Some(MouseResolution::OpenLink(url)) => {
                 self.state.mouse.clear_selection();
-                if webbrowser::open(&url).is_ok() {
-                    Redraw::None
-                } else {
-                    Redraw::None
-                }
+                let _ = webbrowser::open(&url);
+                Redraw::None
             }
             Some(MouseResolution::SelectionStart(point)) => {
                 // Click-drag selection: do not steal layout-heavy focus changes.
@@ -1416,16 +1413,10 @@ impl PreviewApp {
                 Redraw::None
             }
             Some(MouseResolution::Hover { position, link }) => {
-                let changed = self.state.mouse.position != Some(position)
-                    || self.state.mouse.hover_link != link;
                 self.state.mouse.position = Some(position);
                 self.state.mouse.hover_link = link;
                 // Hover never forces a layout pass.
-                if changed {
-                    Redraw::None
-                } else {
-                    Redraw::None
-                }
+                Redraw::None
             }
             Some(MouseResolution::EditSessionTitle) => {
                 self.start_title_edit();
@@ -1442,7 +1433,7 @@ impl PreviewApp {
 
     fn nudge_assist_selection(&mut self, forward: bool, steps: usize) {
         if self.state.composer.autocomplete_open {
-            let total = slash::suggestions(&self.state.composer.text()).len();
+            let total = slash::suggestions(self.state.composer.text()).len();
             if total == 0 {
                 return;
             }
@@ -1456,7 +1447,7 @@ impl PreviewApp {
         if self.state.composer.file_search_open {
             let total = file_search::suggestions(
                 &self.project_entries,
-                &self.state.composer.text(),
+                self.state.composer.text(),
                 self.state.composer.cursor_byte(),
             )
             .len();
@@ -1478,7 +1469,7 @@ impl PreviewApp {
             return;
         };
         if self.state.composer.autocomplete_open {
-            let suggestions = slash::suggestions(&self.state.composer.text());
+            let suggestions = slash::suggestions(self.state.composer.text());
             let selected = self.state.composer.autocomplete_selected;
             if let Some(index) = crate::tui_v2::components::slash_autocomplete::index_at_y(
                 area,
@@ -1496,7 +1487,7 @@ impl PreviewApp {
         if self.state.composer.file_search_open {
             let matches = file_search::suggestions(
                 &self.project_entries,
-                &self.state.composer.text(),
+                self.state.composer.text(),
                 self.state.composer.cursor_byte(),
             );
             let selected = self.state.composer.file_search_selected;
@@ -1708,14 +1699,12 @@ impl PreviewApp {
                 }
             }
         } else {
-            let path = std::path::PathBuf::from(
-                if inner.starts_with("~/") {
-                    dirs_next_home().map(|home| home.join(inner.trim_start_matches("~/")))
-                } else {
-                    None
-                }
-                .unwrap_or_else(|| std::path::PathBuf::from(&inner)),
-            );
+            let path = if inner.starts_with("~/") {
+                dirs_next_home().map(|home| home.join(inner.trim_start_matches("~/")))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| std::path::PathBuf::from(&inner));
             attachment_preview_for_path(&path, &inner)
         };
         self.load_attachment_image(&preview);
@@ -1820,11 +1809,11 @@ impl PreviewApp {
                     height: area.height.saturating_sub(4).max(1),
                 };
                 let total = if self.state.composer.autocomplete_open {
-                    slash::suggestions(&self.state.composer.text()).len()
+                    slash::suggestions(self.state.composer.text()).len()
                 } else if self.state.composer.file_search_open {
                     file_search::suggestions(
                         &self.project_entries,
-                        &self.state.composer.text(),
+                        self.state.composer.text(),
                         self.state.composer.cursor_byte(),
                     )
                     .len()
@@ -3122,7 +3111,7 @@ impl PreviewApp {
             .try_into()
             .unwrap_or(u16::MAX);
         // Field grows with content up to 4 content rows (+ borders in layout).
-        let composer_content_rows = u16::from(composer_total_rows).clamp(1, 4);
+        let composer_content_rows = composer_total_rows.clamp(1, 4);
         let transcript_width = crate::tui_v2::layout::responsive::compose_route(
             frame.area(),
             inspector_requested,
@@ -3195,14 +3184,14 @@ impl PreviewApp {
             composer_total_rows,
             composer_fullscreen: self.state.composer.fullscreen,
             composer_autocomplete_rows: if self.state.composer.autocomplete_open {
-                crate::tui_v2::input::slash::suggestions(&self.state.composer.text())
+                crate::tui_v2::input::slash::suggestions(self.state.composer.text())
                     .len()
                     .try_into()
                     .unwrap_or(u16::MAX)
             } else if self.state.composer.file_search_open {
                 file_search::suggestions(
                     &self.project_entries,
-                    &self.state.composer.text(),
+                    self.state.composer.text(),
                     self.state.composer.cursor_byte(),
                 )
                 .len()
@@ -3852,8 +3841,7 @@ fn decision_dock_height(pending: Option<&PendingInteraction>) -> u16 {
             u16::try_from(max_options)
                 .unwrap_or(u16::MAX)
                 .saturating_add(4) // border×2 + question + footer
-                .min(12)
-                .max(5)
+                .clamp(5, 12)
         }
         None => 0,
     }

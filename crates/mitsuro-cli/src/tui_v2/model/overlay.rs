@@ -26,7 +26,9 @@ pub enum OverlayKind {
     PlanGoal,
     Processes,
     ExtensionsCenter,
-    FileArtifactInspector { part_id: PartId },
+    FileArtifactInspector {
+        part_id: PartId,
+    },
     /// Composer bracket attachment preview (file path, clipboard image, etc.).
     AttachmentPreview,
 }

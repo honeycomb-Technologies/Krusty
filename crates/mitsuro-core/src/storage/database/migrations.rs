@@ -2900,13 +2900,8 @@ impl Database {
             // Disable FKs for table rebuilds (sessions is widely referenced).
             hive_tx.pragma_update(None, "foreign_keys", "OFF")?;
 
-            Self::rebuild_table_with_sql_rewrite(
-                &hive_tx,
-                "sessions",
-                &["'mako'"],
-                &["'hive'"],
-            )
-            .context("Migration 55: rebuild sessions CHECK for hive")?;
+            Self::rebuild_table_with_sql_rewrite(&hive_tx, "sessions", &["'mako'"], &["'hive'"])
+                .context("Migration 55: rebuild sessions CHECK for hive")?;
             if Self::table_exists(&hive_tx, "agent_memories") {
                 Self::rebuild_table_with_sql_rewrite(
                     &hive_tx,
@@ -2925,7 +2920,6 @@ impl Database {
             )?;
             hive_tx.commit()?;
         }
-
 
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;

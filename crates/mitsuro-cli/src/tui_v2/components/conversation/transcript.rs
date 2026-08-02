@@ -139,9 +139,19 @@ fn apply_selection_highlight(
     let (mut a, mut b, start_off, end_off) = match (start_idx, end_idx) {
         (Some(s), Some(e)) => {
             if s <= e {
-                (s, e, selection.start.source_offset, selection.end.source_offset)
+                (
+                    s,
+                    e,
+                    selection.start.source_offset,
+                    selection.end.source_offset,
+                )
             } else {
-                (e, s, selection.end.source_offset, selection.start.source_offset)
+                (
+                    e,
+                    s,
+                    selection.end.source_offset,
+                    selection.start.source_offset,
+                )
             }
         }
         _ => return,
@@ -157,10 +167,7 @@ fn apply_selection_highlight(
             row.source.start
         };
         let hi = if index == b {
-            end_off
-                .saturating_add(1)
-                .min(row.source.end)
-                .max(lo)
+            end_off.saturating_add(1).min(row.source.end).max(lo)
         } else {
             row.source.end
         };
@@ -189,10 +196,7 @@ fn apply_selection_highlight(
     let _ = (&mut a, &mut b);
 }
 
-fn column_for_offset(
-    row: &crate::tui_v2::layout::snapshot::SelectionRow,
-    offset: usize,
-) -> usize {
+fn column_for_offset(row: &crate::tui_v2::layout::snapshot::SelectionRow, offset: usize) -> usize {
     if row.column_offsets.is_empty() {
         return offset.saturating_sub(row.source.start);
     }
@@ -296,12 +300,8 @@ fn render_part(
 }
 
 fn clip_row_range(clip_rows: &std::ops::Range<u32>, len: usize) -> std::ops::Range<usize> {
-    let end = usize::try_from(clip_rows.end)
-        .unwrap_or(len)
-        .min(len);
-    let start = usize::try_from(clip_rows.start)
-        .unwrap_or(end)
-        .min(end);
+    let end = usize::try_from(clip_rows.end).unwrap_or(len).min(len);
+    let start = usize::try_from(clip_rows.start).unwrap_or(end).min(end);
     start..end
 }
 
@@ -500,7 +500,10 @@ fn render_user_bubble(
     let horizontal_chrome = 2u16.saturating_add(USER_BUBBLE_SIDE_PAD.saturating_mul(2));
     let bubble_width = u16::try_from(content_width.saturating_add(usize::from(horizontal_chrome)))
         .unwrap_or(area.width)
-        .clamp(horizontal_chrome.saturating_add(1), area.width.max(horizontal_chrome.saturating_add(1)));
+        .clamp(
+            horizontal_chrome.saturating_add(1),
+            area.width.max(horizontal_chrome.saturating_add(1)),
+        );
     let bubble_x = area
         .x
         .saturating_add(area.width.saturating_sub(bubble_width));

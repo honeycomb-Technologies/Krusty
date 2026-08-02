@@ -778,7 +778,7 @@ impl RuntimeServices {
         let db_path = paths::config_dir().join("mitsuro.db");
 
         // Prefer durable workflow Goal + steps (canonical plan surface).
-        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path.clone()) {
+        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path) {
             if let Ok(Some(snapshot)) = manager.get_snapshot(session_id) {
                 let completed_steps = snapshot
                     .steps

@@ -92,7 +92,11 @@ impl AssistChrome<'_> {
             frame.render_widget(
                 Paragraph::new(self.hints)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(theme.foreground_muted).bg(theme.surface)),
+                    .style(
+                        Style::default()
+                            .fg(theme.foreground_muted)
+                            .bg(theme.surface),
+                    ),
                 hints_area,
             );
         }

@@ -11,10 +11,7 @@ use ratatui::{
 use crate::tui_v2::{
     app::state::UiState,
     components::{
-        primitive::{
-            assist_chrome::AssistChrome,
-            list_window::visible_range,
-        },
+        primitive::{assist_chrome::AssistChrome, list_window::visible_range},
         scrollbars,
     },
     input::slash,
@@ -23,7 +20,7 @@ use crate::tui_v2::{
 };
 
 pub fn render(frame: &mut Frame, area: Rect, state: &UiState, theme: SemanticTheme) {
-    let suggestions = slash::suggestions(&state.composer.text());
+    let suggestions = slash::suggestions(state.composer.text());
     if suggestions.is_empty() || area.is_empty() {
         return;
     }
@@ -51,7 +48,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UiState, theme: SemanticThe
     } else {
         chrome.body
     };
-    let window = visible_range(suggestions.len(), selected, usize::from(list_area.height.max(1)));
+    let window = visible_range(
+        suggestions.len(),
+        selected,
+        usize::from(list_area.height.max(1)),
+    );
     let pointer = if state.capability.glyph_mode == GlyphMode::Ascii {
         "> "
     } else {

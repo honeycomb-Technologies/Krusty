@@ -12,9 +12,7 @@ use ratatui::{
 };
 use ratatui_image::{protocol::StatefulProtocol, Resize, StatefulImage};
 
-use crate::tui_v2::{
-    app::state::AttachmentPreview, presentation::theme::SemanticTheme,
-};
+use crate::tui_v2::{app::state::AttachmentPreview, presentation::theme::SemanticTheme};
 
 pub fn render(
     frame: &mut Frame,
@@ -37,14 +35,12 @@ pub fn render(
         .split(area);
 
     let header = vec![
-        Line::from(vec![
-            Span::styled(
-                preview.title.as_str(),
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            preview.title.as_str(),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::styled(
             format!("{}  ·  {}", preview.kind_label, preview.detail),
             Style::default().fg(theme.foreground_muted),

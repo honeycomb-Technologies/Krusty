@@ -101,9 +101,7 @@ pub fn compose_route(
         (
             Rect::new(body.x, body.y, primary_width, body.height),
             Some(Rect::new(
-                body.x
-                    .saturating_add(primary_width)
-                    .saturating_add(channel),
+                body.x.saturating_add(primary_width).saturating_add(channel),
                 body.y,
                 inspector_width,
                 body.height,
@@ -137,11 +135,7 @@ pub fn transcript_column(primary: Rect) -> Rect {
 /// stream → channel → dock spacing is controlled by [`INSPECTOR_GAP`].
 pub fn transcript_column_with_dock(primary: Rect, dock_open: bool) -> Rect {
     let left = TRANSCRIPT_SIDE_GUTTER;
-    let right = if dock_open {
-        0
-    } else {
-        TRANSCRIPT_SIDE_GUTTER
-    };
+    let right = if dock_open { 0 } else { TRANSCRIPT_SIDE_GUTTER };
     let width = primary
         .width
         .saturating_sub(left.saturating_add(right))
@@ -231,7 +225,10 @@ mod tests {
         // dock channel owns the separation.
         assert_eq!(
             transcript.width,
-            geometry.primary.width.saturating_sub(TRANSCRIPT_SIDE_GUTTER)
+            geometry
+                .primary
+                .width
+                .saturating_sub(TRANSCRIPT_SIDE_GUTTER)
         );
         assert_eq!(transcript.right(), geometry.primary.right());
         assert!(transcript.right() < inspector.x);
