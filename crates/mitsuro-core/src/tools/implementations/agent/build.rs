@@ -6,21 +6,23 @@ use uuid::Uuid;
 
 use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
-    build_context::SharedBuildContext, AgentCapability, AgentProgress, AgentProgressStatus,
-    DelegatedProcessArtifact, SubAgentPool, SubAgentTask,
+    build_context::SharedBuildContext, AgentCapability, AgentProgress, DelegatedProcessArtifact,
+    SubAgentPool, SubAgentResult, SubAgentTask, SubAgentTermination,
 };
 use crate::agent::{AgentCancellation, DelegatedRunStage};
 use crate::storage::{
-    Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
-    ProjectSettings,
+    DelegatedRunCreateOutcome, DelegatedRunLease, DelegatedRunRole, DelegatedRunScope,
+    DelegatedRunStartInput, ProjectSettings,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
 
 use super::{
-    background_started_result, build_confidence, build_coverage_gap_notice,
-    build_investigation_summary, classify_build_outcome, notify_child_completion,
-    open_delegated_run_store, AgentTool, Params,
+    agent_progress_for_terminal_stage, background_started_result, build_confidence,
+    build_coverage_gap_notice, build_investigation_summary, classify_build_outcome,
+    delegated_persistence_error, delegated_workspace_scope, existing_continuation_error,
+    notify_child_completion, open_delegated_run_store, persist_background_delegated_artifact,
+    persist_delegated_artifact, AgentTool, Params,
 };
 
 fn deduplicate_background_processes(processes: &mut Vec<DelegatedProcessArtifact>) {
@@ -85,19 +87,70 @@ fn active_process_handoff_summary(processes: &[DelegatedProcessArtifact]) -> Opt
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuildResultCounts {
+    complete: usize,
+    degraded: usize,
+    cancelled: usize,
+    usable: usize,
+    failed: usize,
+}
+
+fn is_complete_build_result(result: &SubAgentResult) -> bool {
+    result.termination == SubAgentTermination::Completed && result.has_usable_evidence()
+}
+
+fn is_degraded_build_result(result: &SubAgentResult) -> bool {
+    result.termination.is_degraded_interruption() && result.has_usable_evidence()
+}
+
+fn is_cancelled_build_result(result: &SubAgentResult) -> bool {
+    result.termination == SubAgentTermination::Cancelled
+}
+
+fn build_result_counts(results: &[SubAgentResult]) -> BuildResultCounts {
+    let complete = results
+        .iter()
+        .filter(|result| is_complete_build_result(result))
+        .count();
+    let degraded = results
+        .iter()
+        .filter(|result| is_degraded_build_result(result))
+        .count();
+    let cancelled = results
+        .iter()
+        .filter(|result| is_cancelled_build_result(result))
+        .count();
+    let usable = complete.saturating_add(degraded);
+
+    BuildResultCounts {
+        complete,
+        degraded,
+        cancelled,
+        usable,
+        failed: results
+            .len()
+            .saturating_sub(usable.saturating_add(cancelled)),
+    }
+}
+
 fn classify_build_outcome_with_handoff(
     results_len: usize,
-    failed_builders: usize,
+    incomplete_builders: usize,
     modified_files: usize,
     has_active_process_handoff: bool,
 ) -> &'static str {
     if modified_files > 0 {
-        return classify_build_outcome(results_len, failed_builders, modified_files);
+        return classify_build_outcome(results_len, incomplete_builders, modified_files);
     }
-    if results_len > 0 && failed_builders == 0 && has_active_process_handoff {
-        return "success";
+    if results_len > 0 && has_active_process_handoff {
+        return if incomplete_builders == 0 {
+            "success"
+        } else {
+            "partial"
+        };
     }
-    classify_build_outcome(results_len, failed_builders, modified_files)
+    classify_build_outcome(results_len, incomplete_builders, modified_files)
 }
 
 fn build_confidence_with_handoff(
@@ -118,6 +171,8 @@ fn build_confidence_with_handoff(
 
 fn build_summary_with_handoff(
     successful_builders: usize,
+    degraded_builders: usize,
+    cancelled_builders: usize,
     failed_builders: usize,
     modified_files: usize,
     lines_added: usize,
@@ -126,6 +181,8 @@ fn build_summary_with_handoff(
 ) -> String {
     let build_summary = build_investigation_summary(
         successful_builders,
+        degraded_builders,
+        cancelled_builders,
         failed_builders,
         modified_files,
         lines_added,
@@ -155,6 +212,16 @@ impl AgentTool {
         }
 
         let client = self.resolve_client(ctx);
+        let workspace_scope = match delegated_workspace_scope(
+            ctx.project_dir
+                .as_deref()
+                .expect("build checked project directory"),
+        ) {
+            Ok(scope) => scope,
+            Err(error) => {
+                return ToolResult::error_with_code("invalid_project_workspace", error);
+            }
+        };
 
         // Create shared build context
         let context = Arc::new(SharedBuildContext::new());
@@ -194,9 +261,29 @@ impl AgentTool {
             capabilities.contains(&AgentCapability::Write),
             capabilities.contains(&AgentCapability::Execute),
         )
+        .with_supervised_approval(ctx.supervised_approval_granted)
         .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
-        let delegated_store = open_delegated_run_store(ctx);
-        let mut target_scope = Vec::new();
+        let mut delegated_lease = open_delegated_run_store(ctx).map(DelegatedRunLease::new);
+        let background = params.run_in_background.unwrap_or(false);
+        if background && ctx.db_path.is_none() {
+            return ToolResult::error_with_code(
+                "agent_persistence_error",
+                "Background build was not started because this session has no durable database.",
+            );
+        }
+        if background && delegated_lease.is_none() {
+            return ToolResult::error_with_code(
+                "agent_persistence_error",
+                "Background build was not started because its delegated-run database could not be opened.",
+            );
+        }
+        if background && ctx.session_id.is_none() {
+            return ToolResult::error_with_code(
+                "agent_persistence_error",
+                "Background build was not started because it has no durable parent session.",
+            );
+        }
+        let mut target_scope = vec![workspace_scope];
         let parent_name = params.name.as_deref().unwrap_or("child");
         let project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
@@ -301,26 +388,56 @@ impl AgentTool {
             tasks.push(task);
         }
 
-        if let (Some(store), Some(session_id)) = (delegated_store.as_ref(), ctx.session_id.as_ref())
+        let durable_run_started = if let (Some(lease), Some(session_id)) =
+            (delegated_lease.as_mut(), ctx.session_id.as_ref())
         {
-            if let Err(err) = store.create_run_with_child_contract(
-                &DelegatedRunStartInput {
-                    delegated_run_id: delegated_run_id.clone(),
-                    parent_session_id: session_id.clone(),
-                    parent_tool_call_id: ctx.tool_use_id.clone(),
-                    role: DelegatedRunRole::Build,
-                    stage: DelegatedRunStage::Created,
-                    provider: Some(client.provider_id().to_string()),
-                    model: Some(client.config().model.clone()),
-                    resumable: true,
-                    resumed_from_run_id: params.resumed_from_run_id.clone(),
-                    target_scope,
-                },
-                Some(parent_name),
-                &capabilities,
-            ) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated build run start");
+            let start = DelegatedRunStartInput {
+                delegated_run_id: delegated_run_id.clone(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: ctx.tool_use_id.clone(),
+                role: DelegatedRunRole::Build,
+                stage: DelegatedRunStage::Created,
+                provider: Some(client.provider_id().to_string()),
+                model: Some(client.config().model.clone()),
+                resumable: true,
+                resumed_from_run_id: params.resumed_from_run_id.clone(),
+                target_scope,
+            };
+            let create = if background {
+                lease.create_background_run_with_child_contract(
+                    &start,
+                    Some(parent_name),
+                    &capabilities,
+                )
+            } else {
+                lease.create_run_with_child_contract(&start, Some(parent_name), &capabilities)
+            };
+            match create {
+                Ok(DelegatedRunCreateOutcome::Created) => {}
+                Ok(DelegatedRunCreateOutcome::ExistingContinuation {
+                    delegated_run_id,
+                    resumed_from_run_id,
+                }) => {
+                    return existing_continuation_error(&resumed_from_run_id, &delegated_run_id);
+                }
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated build was not started because its durable run record could not be created: {error}"
+                        ),
+                    );
+                }
             }
+            true
+        } else {
+            false
+        };
+        if background && !durable_run_started {
+            return ToolResult::error_with_code(
+                "agent_persistence_error",
+                "Background build was not started because durable run creation was unavailable.",
+            );
         }
 
         info!("Agent tool (build): Created {} builder tasks", tasks.len());
@@ -329,28 +446,38 @@ impl AgentTool {
         }
 
         // Create one cancellation root and one broadcast mailbox per background run.
-        let background = params.run_in_background.unwrap_or(false);
-        let pool_cancellation = if background {
-            let run_cancellation = self.cancellation.child_token();
-            let first_mailbox = self.runtime.register(
-                delegated_run_id.clone(),
-                params.name.as_deref().unwrap_or("build"),
-                run_cancellation.clone(),
-            );
-            for (index, task) in tasks.iter_mut().enumerate() {
-                let mailbox = if index == 0 {
-                    first_mailbox.clone()
-                } else {
-                    self.runtime
-                        .subscribe(&delegated_run_id)
-                        .expect("registered build runtime")
-                };
-                *task = task.clone().with_mailbox(mailbox);
-            }
-            AgentCancellation::from_token(run_cancellation)
-        } else {
-            self.cancellation.clone()
-        };
+        let (pool_cancellation, background_runtime_registration, background_host_cancellation) =
+            if background {
+                let run_cancellation = self.cancellation.child_token();
+                let (first_mailbox, runtime_registration) = self.runtime.register_guarded(
+                    delegated_run_id.clone(),
+                    params.name.as_deref().unwrap_or("build"),
+                    ctx.session_id.clone(),
+                    run_cancellation.clone(),
+                );
+                for (index, task) in tasks.iter_mut().enumerate() {
+                    let mailbox = if index == 0 {
+                        first_mailbox.clone()
+                    } else {
+                        self.runtime
+                            .subscribe(&delegated_run_id)
+                            .expect("registered build runtime")
+                    };
+                    *task = task.clone().with_mailbox(mailbox);
+                }
+                (
+                    AgentCancellation::from_token(run_cancellation.clone()),
+                    Some(runtime_registration),
+                    Some(run_cancellation),
+                )
+            } else {
+                let cancellation = ctx
+                    .execution_cancellation
+                    .clone()
+                    .map(AgentCancellation::from_token)
+                    .unwrap_or_else(|| self.cancellation.clone());
+                (cancellation, None, None)
+            };
 
         // Create pool and execute with build context
         let mut pool = SubAgentPool::new(client, pool_cancellation)
@@ -375,10 +502,31 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_process_registry = ctx.process_registry.clone();
             let bg_process_owner_id = ctx.user_id.clone();
+            let mut bg_runtime_registration = background_runtime_registration
+                .expect("background build registered live runtime ownership");
             let progress_tx = ctx.agent_progress_tx.clone();
             let bg_runtime = self.runtime.clone();
+            let mut bg_run_lease = delegated_lease
+                .take()
+                .expect("background build start has an armed durable lease");
+            let bg_host_heartbeat = match bg_run_lease.start_background_host_heartbeat(
+                &bg_delegated_run_id,
+                background_host_cancellation
+                    .expect("background build has an execution cancellation token"),
+            ) {
+                Ok(heartbeat) => heartbeat,
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Background build was not started because its durable host lease could not start: {error}"
+                        ),
+                    );
+                }
+            };
 
             tokio::spawn(async move {
+                let _bg_host_heartbeat = bg_host_heartbeat;
                 // Keep a clone for the completion event after execute_builders consumes the tx
                 let completion_tx = progress_tx.clone();
 
@@ -405,14 +553,28 @@ impl AgentTool {
                 let mut total_turns = 0;
                 let mut total_duration_ms = 0u64;
                 let mut errors: Vec<String> = Vec::new();
+                let mut degradations: Vec<String> = Vec::new();
+                let mut cancellations: Vec<String> = Vec::new();
                 let mut builders = Vec::new();
                 let mut background_processes = Vec::new();
 
                 for result in &results {
                     builders.push(result.evidence_json());
                     background_processes.extend(result.background_processes.iter().cloned());
-                    if let Some(err) = &result.error {
-                        errors.push(format!("{}: {}", result.task_id, err));
+                    if is_cancelled_build_result(result) {
+                        cancellations.push(format!("{}: cancelled", result.task_id));
+                    } else if is_degraded_build_result(result) {
+                        degradations.push(format!(
+                            "{}: {}",
+                            result.task_id,
+                            result.outcome_reason()
+                        ));
+                    } else if !is_complete_build_result(result) {
+                        errors.push(format!(
+                            "{}: {}",
+                            result.task_id,
+                            result.error.as_deref().unwrap_or(result.outcome_reason())
+                        ));
                     }
                     all_files.extend(result.files_examined.clone());
                     total_turns += result.turns_used;
@@ -427,39 +589,59 @@ impl AgentTool {
                     }
                 }
 
-                let failed_builders = errors.len();
-                let successful_builders = results.len().saturating_sub(failed_builders);
+                let counts = build_result_counts(&results);
+                let incomplete_builders = counts
+                    .degraded
+                    .saturating_add(counts.cancelled)
+                    .saturating_add(counts.failed);
                 let process_handoff = active_process_handoff_summary(&background_processes);
-                let outcome = classify_build_outcome_with_handoff(
-                    results.len(),
-                    failed_builders,
-                    stats.files_modified,
-                    process_handoff.is_some(),
-                );
+                let outcome = if counts.cancelled > 0 {
+                    "cancelled"
+                } else {
+                    classify_build_outcome_with_handoff(
+                        results.len(),
+                        incomplete_builders,
+                        stats.files_modified,
+                        process_handoff.is_some(),
+                    )
+                };
                 let confidence = build_confidence_with_handoff(
-                    failed_builders,
+                    incomplete_builders,
                     stats.files_modified,
                     process_handoff.is_some(),
                 );
-                let outcome_reason = if stats.files_modified > 0 {
-                    if failed_builders == 0 {
+                let outcome_reason = if counts.cancelled > 0 {
+                    "cancelled"
+                } else if stats.files_modified > 0 {
+                    if incomplete_builders == 0 {
                         "file_modifications"
                     } else {
                         "mixed"
                     }
-                } else if process_handoff.is_some() && failed_builders == 0 {
+                } else if process_handoff.is_some() && incomplete_builders == 0 {
                     "active_process_handoff_readiness_unverified"
+                } else if process_handoff.is_some() {
+                    "partial_process_handoff"
                 } else {
                     "no_usable_evidence"
                 };
                 let investigation_summary = build_summary_with_handoff(
-                    successful_builders,
-                    failed_builders,
+                    counts.complete,
+                    counts.degraded,
+                    counts.cancelled,
+                    counts.failed,
                     stats.files_modified,
                     stats.lines_added,
                     stats.lines_removed,
                     process_handoff.as_deref(),
                 );
+                let coverage_issues = errors
+                    .iter()
+                    .chain(degradations.iter())
+                    .chain(cancellations.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let coverage_gap_notice = build_coverage_gap_notice(&coverage_issues);
 
                 let payload = json!({
                     "delegated_run_id": bg_delegated_run_id,
@@ -472,8 +654,12 @@ impl AgentTool {
                     "outcome_reason": outcome_reason,
                     "confidence": confidence,
                     "builder_count": results.len(),
-                    "successful_agents": successful_builders,
-                    "failed_agents": failed_builders,
+                    "agent_count": results.len(),
+                    "successful_agents": counts.complete,
+                    "usable_agents": counts.usable,
+                    "degraded_agents": counts.degraded,
+                    "cancelled_agents": counts.cancelled,
+                    "failed_agents": counts.failed,
                     "total_turns": total_turns,
                     "total_duration_ms": total_duration_ms,
                     "files_examined": unique_files,
@@ -482,89 +668,91 @@ impl AgentTool {
                     "lines_added": stats.lines_added,
                     "lines_removed": stats.lines_removed,
                     "files_modified": stats.files_modified,
+                    "coverage_gap_notice": coverage_gap_notice,
+                    "degradations": degradations,
+                    "cancellations": cancellations,
                     "errors": errors,
                     "delegation_policy": bg_delegation_policy.audit_json(),
                 });
 
-                if let Some(ref db_path) = bg_db_path {
-                    match Database::new(db_path) {
-                        Ok(db) => {
-                            let store = DelegatedRunStore::new(db);
-                            let final_stage = match outcome {
-                                "success" => DelegatedRunStage::Complete,
-                                "partial" => DelegatedRunStage::Degraded,
-                                _ => DelegatedRunStage::Failed,
-                            };
-                            if let Err(err) = store.finalize_run(
+                let final_stage = match outcome {
+                    "success" => DelegatedRunStage::Complete,
+                    "partial" => DelegatedRunStage::Degraded,
+                    "cancelled" => DelegatedRunStage::Cancelled,
+                    _ => DelegatedRunStage::Failed,
+                };
+                let finalization = persist_background_delegated_artifact(
+                    &bg_run_lease,
+                    &bg_delegated_run_id,
+                    final_stage,
+                    &payload,
+                    &investigation_summary,
+                    true,
+                );
+
+                match finalization {
+                    Ok(authoritative) => {
+                        bg_run_lease.disarm(&bg_delegated_run_id);
+                        let build_success = authoritative.stage == DelegatedRunStage::Complete;
+                        let authoritative_summary = authoritative
+                            .human_review
+                            .as_deref()
+                            .unwrap_or(&investigation_summary);
+                        if let Some(ref tx) = completion_tx {
+                            let (status, current_action) =
+                                agent_progress_for_terminal_stage(authoritative.stage);
+                            if tx
+                                .send(AgentProgress {
+                                    delegated_run_id: Some(bg_delegated_run_id.clone()),
+                                    task_id: bg_child_name.clone(),
+                                    name: bg_child_name.clone(),
+                                    identity: None,
+                                    status,
+                                    tool_count: 0,
+                                    tokens: 0,
+                                    current_action,
+                                    completion_summary: Some(authoritative_summary.to_string()),
+                                    lines_added: stats.lines_added,
+                                    lines_removed: stats.lines_removed,
+                                    completed_plan_task: None,
+                                })
+                                .is_err()
+                            {
+                                debug!("Background build progress channel disconnected (parent returned)");
+                            }
+                        }
+                        if authoritative.stage != DelegatedRunStage::Cancelled {
+                            if let Err(error) = notify_child_completion(
+                                &bg_runtime,
+                                bg_db_path.as_deref(),
+                                bg_session_id.as_deref(),
+                                bg_user_id.as_deref(),
+                                bg_workspace_root.as_deref(),
                                 &bg_delegated_run_id,
-                                final_stage,
-                                &payload,
-                                Some(&investigation_summary),
-                                failed_builders > 0,
+                                &bg_child_name,
+                                build_success,
+                                authoritative_summary,
                             ) {
                                 warn!(
                                     delegated_run_id = %bg_delegated_run_id,
-                                    error = %err,
-                                    "Background build: failed to persist final artifact"
+                                    %error,
+                                    "Failed to queue background child completion"
                                 );
+                                let _ = bg_runtime
+                                    .request_completion_reconciliation(bg_delegated_run_id.clone());
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                delegated_run_id = %bg_delegated_run_id,
-                                error = %e,
-                                "Failed to open database for background build finalization"
-                            );
-                        }
+                        bg_runtime_registration.finish(build_success);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            delegated_run_id = %bg_delegated_run_id,
+                            %error,
+                            "Suppressing background build completion because terminal finalization was not authoritative"
+                        );
+                        // Guard Drop schedules abnormal durable reconciliation.
                     }
                 }
-
-                // Emit completion event so the parent sees the result
-                let build_success = outcome == "success";
-                if let Some(ref tx) = completion_tx {
-                    let status = if build_success {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    };
-                    if tx
-                        .send(AgentProgress {
-                            delegated_run_id: Some(bg_delegated_run_id.clone()),
-                            task_id: bg_child_name.clone(),
-                            name: bg_child_name.clone(),
-                            identity: None,
-                            status,
-                            tool_count: 0,
-                            tokens: 0,
-                            current_action: None,
-                            completion_summary: Some(investigation_summary.clone()),
-                            lines_added: stats.lines_added,
-                            lines_removed: stats.lines_removed,
-                            completed_plan_task: None,
-                        })
-                        .is_err()
-                    {
-                        debug!("Background build progress channel disconnected (parent returned)");
-                    }
-                }
-                if let Err(error) = notify_child_completion(
-                    &bg_runtime,
-                    bg_db_path.as_deref(),
-                    bg_session_id.as_deref(),
-                    bg_user_id.as_deref(),
-                    bg_workspace_root.as_deref(),
-                    &bg_delegated_run_id,
-                    &bg_child_name,
-                    build_success,
-                    &investigation_summary,
-                ) {
-                    warn!(
-                        delegated_run_id = %bg_delegated_run_id,
-                        %error,
-                        "Failed to queue background child completion"
-                    );
-                }
-                bg_runtime.finish(&bg_delegated_run_id, build_success);
             });
 
             return background_started_result(
@@ -607,6 +795,8 @@ impl AgentTool {
         let mut total_turns = 0;
         let mut total_duration_ms = 0u64;
         let mut errors: Vec<String> = Vec::new();
+        let mut degradations: Vec<String> = Vec::new();
+        let mut cancellations: Vec<String> = Vec::new();
         let mut builders = Vec::new();
         let mut background_processes = Vec::new();
 
@@ -614,8 +804,16 @@ impl AgentTool {
             builders.push(result.evidence_json());
             background_processes.extend(result.background_processes.iter().cloned());
 
-            if let Some(err) = &result.error {
-                errors.push(format!("{}: {}", result.task_id, err));
+            if is_cancelled_build_result(result) {
+                cancellations.push(format!("{}: cancelled", result.task_id));
+            } else if is_degraded_build_result(result) {
+                degradations.push(format!("{}: {}", result.task_id, result.outcome_reason()));
+            } else if !is_complete_build_result(result) {
+                errors.push(format!(
+                    "{}: {}",
+                    result.task_id,
+                    result.error.as_deref().unwrap_or(result.outcome_reason())
+                ));
             }
 
             all_files.extend(result.files_examined.clone());
@@ -639,40 +837,59 @@ impl AgentTool {
             stats.lines_removed,
             stats.files_modified,
         );
-        let failed_builders = errors.len();
-        let successful_builders = results.len().saturating_sub(failed_builders);
+        let counts = build_result_counts(&results);
+        let incomplete_builders = counts
+            .degraded
+            .saturating_add(counts.cancelled)
+            .saturating_add(counts.failed);
         let process_handoff = active_process_handoff_summary(&background_processes);
-        let outcome = classify_build_outcome_with_handoff(
-            results.len(),
-            failed_builders,
-            stats.files_modified,
-            process_handoff.is_some(),
-        );
+        let outcome = if counts.cancelled > 0 {
+            "cancelled"
+        } else {
+            classify_build_outcome_with_handoff(
+                results.len(),
+                incomplete_builders,
+                stats.files_modified,
+                process_handoff.is_some(),
+            )
+        };
         let confidence = build_confidence_with_handoff(
-            failed_builders,
+            incomplete_builders,
             stats.files_modified,
             process_handoff.is_some(),
         );
-        let outcome_reason = if stats.files_modified > 0 {
-            if failed_builders == 0 {
+        let outcome_reason = if counts.cancelled > 0 {
+            "cancelled"
+        } else if stats.files_modified > 0 {
+            if incomplete_builders == 0 {
                 "file_modifications"
             } else {
                 "mixed"
             }
-        } else if process_handoff.is_some() && failed_builders == 0 {
+        } else if process_handoff.is_some() && incomplete_builders == 0 {
             "active_process_handoff_readiness_unverified"
+        } else if process_handoff.is_some() {
+            "partial_process_handoff"
         } else {
             "no_usable_evidence"
         };
         let investigation_summary = build_summary_with_handoff(
-            successful_builders,
-            failed_builders,
+            counts.complete,
+            counts.degraded,
+            counts.cancelled,
+            counts.failed,
             stats.files_modified,
             stats.lines_added,
             stats.lines_removed,
             process_handoff.as_deref(),
         );
-        let coverage_gap_notice = build_coverage_gap_notice(&errors);
+        let coverage_issues = errors
+            .iter()
+            .chain(degradations.iter())
+            .chain(cancellations.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let coverage_gap_notice = build_coverage_gap_notice(&coverage_issues);
 
         let high_contention_files = stats
             .high_contention_files
@@ -694,10 +911,11 @@ impl AgentTool {
             "outcome_reason": outcome_reason,
             "builder_count": results.len(),
             "agent_count": results.len(),
-            "successful_agents": successful_builders,
-            "usable_agents": successful_builders,
-            "degraded_agents": 0,
-            "failed_agents": failed_builders,
+            "successful_agents": counts.complete,
+            "usable_agents": counts.usable,
+            "degraded_agents": counts.degraded,
+            "cancelled_agents": counts.cancelled,
+            "failed_agents": counts.failed,
             "total_turns": total_turns,
             "total_duration_ms": total_duration_ms,
             "paths_examined": unique_files,
@@ -712,28 +930,72 @@ impl AgentTool {
             "total_lock_wait_ms": stats.total_lock_wait_ms,
             "high_contention_files": high_contention_files,
             "coverage_gap_notice": coverage_gap_notice,
+            "degradations": degradations,
+            "cancellations": cancellations,
             "errors": errors,
             "delegation_policy": delegation_policy.audit_json(),
         });
 
-        if let Some(store) = delegated_store.as_ref() {
+        if durable_run_started {
+            let lease = delegated_lease
+                .as_mut()
+                .expect("durable build start has an open store");
             let final_stage = match outcome {
                 "success" => DelegatedRunStage::Complete,
                 "partial" => DelegatedRunStage::Degraded,
+                "cancelled" => DelegatedRunStage::Cancelled,
                 _ => DelegatedRunStage::Failed,
             };
-            if let Err(err) = store.finalize_run(
+            let authoritative = match persist_delegated_artifact(
+                lease,
                 &delegated_run_id,
                 final_stage,
                 &payload,
-                Some(&investigation_summary),
-                failed_builders > 0,
+                &investigation_summary,
+                true,
             ) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated build run final artifact");
+                Ok(authoritative) => authoritative,
+                Err(error) => {
+                    return delegated_persistence_error(&delegated_run_id, payload, &error);
+                }
+            };
+            lease.disarm(&delegated_run_id);
+            // Individual builders finish before the aggregate artifact does.
+            // Re-emit one authoritative aggregate boundary after persistence
+            // so the foreground card cannot be stranded in Running.
+            if let Some(ref tx) = ctx.agent_progress_tx {
+                let (status, current_action) =
+                    agent_progress_for_terminal_stage(authoritative.stage);
+                let _ = tx.send(AgentProgress {
+                    delegated_run_id: Some(delegated_run_id.clone()),
+                    task_id: parent_name.to_string(),
+                    name: parent_name.to_string(),
+                    identity: None,
+                    status,
+                    tool_count: 0,
+                    tokens: 0,
+                    current_action,
+                    completion_summary: Some(
+                        authoritative
+                            .human_review
+                            .unwrap_or_else(|| investigation_summary.clone()),
+                    ),
+                    lines_added: stats.lines_added,
+                    lines_removed: stats.lines_removed,
+                    completed_plan_task: None,
+                });
             }
         }
 
-        ToolResult::success_data(payload)
+        let warnings = if durable_run_started {
+            Vec::new()
+        } else {
+            vec![
+                "This synchronous delegated build ran without a durable delegated-run record."
+                    .to_string(),
+            ]
+        };
+        ToolResult::success_data_with(payload, warnings, None, None)
     }
 }
 
@@ -741,13 +1003,85 @@ impl AgentTool {
 mod tests {
     use std::time::Duration;
 
-    use crate::agent::subagent::DelegatedProcessArtifact;
+    use crate::agent::subagent::{
+        DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult,
+        SubAgentTermination,
+    };
     use crate::process::ProcessRegistry;
 
     use super::{
-        active_process_handoff_summary, build_confidence_with_handoff,
-        classify_build_outcome_with_handoff, revalidate_background_processes,
+        active_process_handoff_summary, build_confidence_with_handoff, build_result_counts,
+        classify_build_outcome_with_handoff, revalidate_background_processes, BuildResultCounts,
     };
+
+    fn result_with_termination(
+        id: &str,
+        termination: SubAgentTermination,
+        success: bool,
+        with_evidence: bool,
+    ) -> SubAgentResult {
+        let mut evidence = DelegatedEvidenceSummary::default();
+        if with_evidence {
+            evidence.record_attempt();
+            evidence.record_success(DelegatedEvidenceKind::Mutation);
+        }
+        SubAgentResult {
+            task_id: id.to_string(),
+            agent_name: id.to_string(),
+            delegated_run_id: Some("run-build-counts".to_string()),
+            success,
+            output: format!("{id} result"),
+            files_examined: if with_evidence {
+                vec![format!("{id}.rs")]
+            } else {
+                Vec::new()
+            },
+            duration_ms: 1,
+            turns_used: 1,
+            error: if termination == SubAgentTermination::Completed {
+                None
+            } else {
+                Some(format!("{termination:?}"))
+            },
+            termination,
+            policy_violations: Vec::new(),
+            evidence,
+            background_processes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn aggregate_counts_distinguish_complete_degraded_cancelled_and_failed_results() {
+        let results = vec![
+            result_with_termination("complete", SubAgentTermination::Completed, true, true),
+            result_with_termination(
+                "interrupted",
+                SubAgentTermination::ProviderTimeout,
+                false,
+                true,
+            ),
+            result_with_termination("loop-guarded", SubAgentTermination::LoopGuard, false, true),
+            result_with_termination("failed", SubAgentTermination::Failed, false, false),
+            result_with_termination("cancelled", SubAgentTermination::Cancelled, false, true),
+            // A model success label without usable evidence is not completion proof.
+            result_with_termination("unproven", SubAgentTermination::Completed, true, false),
+        ];
+
+        assert_eq!(
+            build_result_counts(&results),
+            BuildResultCounts {
+                complete: 1,
+                degraded: 2,
+                cancelled: 1,
+                usable: 3,
+                failed: 2,
+            }
+        );
+        assert_eq!(
+            classify_build_outcome_with_handoff(3, 1, 0, true),
+            "partial"
+        );
+    }
 
     fn captured_process(process_id: &str, endpoint_hints: Vec<String>) -> DelegatedProcessArtifact {
         DelegatedProcessArtifact {

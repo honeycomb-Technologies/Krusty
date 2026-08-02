@@ -4,13 +4,13 @@ use tempfile::TempDir;
 
 use crate::storage::database::Database;
 
-use super::create_test_db;
+use super::{create_test_db, seed_legacy_delegated_runs_schema};
 
 #[test]
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 53, "Expected current schema version to be 53");
+    assert_eq!(version, 54, "Expected current schema version to be 54");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 53, "Expected final schema version");
+    assert_eq!(version, 54, "Expected final schema version");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn concurrent_process_initialization_serializes_migrations() {
             .join()
             .expect("database initializer thread should not panic")
             .expect("concurrent database initialization should succeed");
-        assert_eq!(version, 53);
+        assert_eq!(version, 54);
     }
 }
 
@@ -101,20 +101,22 @@ fn privacy_migration_releases_exclusive_lock_while_first_handle_stays_open() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("privacy-lock-release.db");
 
-    let seed = Database::open_migration_fixture(&db_path, 43)
-        .expect("create a complete schema-43 privacy fixture");
+    let seed = Database::new(&db_path).expect("create current database");
+    seed.conn()
+        .execute("DELETE FROM schema_version WHERE version >= 44", [])
+        .expect("rewind to physical privacy checkpoint");
     drop(seed);
 
     let first = Database::new(&db_path).expect("complete privacy migration");
-    assert_eq!(first.get_schema_version(), 53);
+    assert_eq!(first.get_schema_version(), 54);
 
     // Keep the migration-winning handle alive. A locking-mode restore without
     // a subsequent database access retains SQLite's exclusive lock and makes
     // this second independently supervised process time out.
     let second = Database::new(&db_path)
         .expect("second process should open while migration winner remains alive");
-    assert_eq!(second.get_schema_version(), 53);
-    assert_eq!(first.get_schema_version(), 53);
+    assert_eq!(second.get_schema_version(), 54);
+    assert_eq!(first.get_schema_version(), 54);
 }
 
 #[test]
@@ -122,12 +124,12 @@ fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("privacy-busy-peer.db");
 
-    let seed = Database::open_migration_fixture(&db_path, 43)
-        .expect("create a complete schema-43 privacy fixture");
+    let seed = Database::new(&db_path).expect("create current database");
     seed.conn()
         .execute_batch(
             "CREATE TABLE privacy_busy_probe (value INTEGER NOT NULL);
              INSERT INTO privacy_busy_probe VALUES (1);
+             DELETE FROM schema_version WHERE version >= 44;
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .expect("rewind and checkpoint fixture");
@@ -174,7 +176,7 @@ fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
         .expect("release peer snapshot");
     drop(reader);
     let recovered = Database::new(&db_path).expect("retry privacy migration after peer release");
-    assert_eq!(recovered.get_schema_version(), 53);
+    assert_eq!(recovered.get_schema_version(), 54);
 }
 
 #[test]
@@ -219,11 +221,11 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
         ) VALUES ('checkpoint', 'session', 1, '[1]', 'old history', '[]', CURRENT_TIMESTAMP);"#,
     )
     .expect("seed schema");
+    seed_legacy_delegated_runs_schema(&conn);
     drop(conn);
 
-    let db = Database::open_migration_fixture(&db_path, 49)
-        .expect("migrate the minimal schema 32 fixture through legacy migration 49");
-    assert_eq!(db.get_schema_version(), 49);
+    let db = Database::new(&db_path).expect("migrate db");
+    assert_eq!(db.get_schema_version(), 54);
 
     let flush_count: i64 = db
         .conn()
@@ -289,11 +291,11 @@ fn migration_34_backfills_provider_call_classification() {
         );"#,
     )
     .expect("seed schema");
+    seed_legacy_delegated_runs_schema(&conn);
     drop(conn);
 
-    let db = Database::open_migration_fixture(&db_path, 49)
-        .expect("migrate the minimal schema 33 fixture through legacy migration 49");
-    assert_eq!(db.get_schema_version(), 49);
+    let db = Database::new(&db_path).expect("migrate db");
+    assert_eq!(db.get_schema_version(), 54);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -307,23 +309,23 @@ fn migration_34_backfills_provider_call_classification() {
 }
 
 #[test]
-fn migrations_35_through_44_create_hive_backend_contracts() {
+fn migrations_35_through_44_create_mako_backend_contracts() {
     let (db, _temp) = create_test_db();
     let expected_tables = [
-        "hive_profiles",
-        "hive_profile_documents",
-        "hive_controllers",
-        "hive_schedules",
-        "hive_schedule_occurrences",
-        "hive_runs",
-        "hive_run_attempts",
-        "hive_daemon_leases",
-        "hive_idempotency_keys",
-        "hive_controller_events",
-        "hive_control_outbox",
+        "mako_profiles",
+        "mako_profile_documents",
+        "mako_controllers",
+        "mako_schedules",
+        "mako_schedule_occurrences",
+        "mako_runs",
+        "mako_run_attempts",
+        "mako_daemon_leases",
+        "mako_idempotency_keys",
+        "mako_controller_events",
+        "mako_control_outbox",
         "conversation_episodes",
-        "hive_learning_runs",
-        "hive_learning_candidates",
+        "mako_learning_runs",
+        "mako_learning_candidates",
         "agent_memory_revisions",
         "knowledge_snapshots",
     ];
@@ -368,11 +370,11 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
             VALUES ('snapshot', 'project', 'Current Snapshot', 'generated', '/repo');"#,
     )
     .expect("seed legacy memories");
+    seed_legacy_delegated_runs_schema(&conn);
     drop(conn);
 
-    let db = Database::open_migration_fixture(&db_path, 49)
-        .expect("migrate the minimal schema 38 fixture through legacy migration 49");
-    assert_eq!(db.get_schema_version(), 49);
+    let db = Database::new(&db_path).expect("migrate legacy memories");
+    assert_eq!(db.get_schema_version(), 54);
 
     let fact_metadata: (String, String, f64) = db
         .conn()
@@ -416,18 +418,17 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
 }
 
 #[test]
-fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
-    const SENTINEL: &str = "HIVE_LEGACY_SECRET_SENTINEL_43";
+fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
+    const SENTINEL: &str = "MAKO_LEGACY_SECRET_SENTINEL_43";
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("legacy-hive-privacy.db");
-    let db = Database::open_migration_fixture(&db_path, 42)
-        .expect("create a complete pre-redaction schema-42 fixture");
+    let db_path = temp_dir.path().join("legacy-mako-privacy.db");
+    let db = Database::new(&db_path).expect("create current database");
     db.conn()
         .execute_batch(
             "INSERT INTO sessions (
                  id, title, created_at, updated_at, model, session_type
              ) VALUES (
-                 'session-privacy', 'Hive', '2026-07-17T00:00:00.000000Z',
+                 'session-privacy', 'Mako', '2026-07-17T00:00:00.000000Z',
                  '2026-07-17T00:00:00.000000Z', 'test:model', 'mako'
              );
              INSERT INTO mako_controllers (
@@ -532,6 +533,9 @@ fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
             ],
         )
         .expect("seed raw outbox copies");
+    db.conn()
+        .execute("DELETE FROM schema_version WHERE version >= 43", [])
+        .expect("rewind to migration 42");
     drop(db);
 
     let raw_fixture_contains_secret = [
@@ -552,12 +556,12 @@ fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
     );
 
     let migrated = Database::new(&db_path).expect("apply privacy migration");
-    assert_eq!(migrated.get_schema_version(), 53);
+    assert_eq!(migrated.get_schema_version(), 54);
     let event_payloads: String = migrated
         .conn()
         .query_row(
             "SELECT group_concat(payload_json, '|')
-               FROM hive_controller_events
+               FROM mako_controller_events
               WHERE controller_id = 'controller-privacy'",
             [],
             |row| row.get(0),
@@ -567,7 +571,7 @@ fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
     let approval_payload: String = migrated
         .conn()
         .query_row(
-            "SELECT payload_json FROM hive_controller_events
+            "SELECT payload_json FROM mako_controller_events
               WHERE controller_id = 'controller-privacy' AND sequence = 2",
             [],
             |row| row.get(0),
@@ -580,10 +584,10 @@ fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
     assert_eq!(approval_payload["arguments_redacted"], true);
 
     for sql in [
-        "SELECT COALESCE(last_error, '') || COALESCE(last_stop_reason, '') || COALESCE(outcome_json, '') FROM hive_runs WHERE id = 'run-privacy'",
-        "SELECT COALESCE(error, '') || COALESCE(stop_reason, '') FROM hive_run_attempts WHERE id = 'attempt-privacy'",
-        "SELECT COALESCE(last_error, '') FROM hive_runtime_state WHERE session_id = 'session-privacy'",
-        "SELECT COALESCE(last_error, '') || payload_json FROM hive_control_outbox WHERE id = 'outbox-privacy'",
+        "SELECT COALESCE(last_error, '') || COALESCE(last_stop_reason, '') || COALESCE(outcome_json, '') FROM mako_runs WHERE id = 'run-privacy'",
+        "SELECT COALESCE(error, '') || COALESCE(stop_reason, '') FROM mako_run_attempts WHERE id = 'attempt-privacy'",
+        "SELECT COALESCE(last_error, '') FROM mako_runtime_state WHERE session_id = 'session-privacy'",
+        "SELECT COALESCE(last_error, '') || payload_json FROM mako_control_outbox WHERE id = 'outbox-privacy'",
     ] {
         let durable_copy: String = migrated
             .conn()
@@ -612,11 +616,10 @@ fn migration_43_redacts_legacy_hive_payloads_and_physically_erases_secrets() {
 
 #[test]
 fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
-    const SENTINEL: &str = "HIVE_CRASH_WINDOW_SECRET_SENTINEL_44";
+    const SENTINEL: &str = "MAKO_CRASH_WINDOW_SECRET_SENTINEL_44";
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("hive-privacy-crash-window.db");
-    let db = Database::open_migration_fixture(&db_path, 43)
-        .expect("create a complete logical-redaction schema-43 fixture");
+    let db_path = temp_dir.path().join("mako-privacy-crash-window.db");
+    let db = Database::new(&db_path).expect("create current database");
 
     // Model a process that committed migration 43's logical redaction and
     // then died before VACUUM and the schema-44 completion checkpoint. A
@@ -635,6 +638,7 @@ fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
     db.conn()
         .execute_batch(
             "DROP TABLE privacy_crash_probe;
+             DELETE FROM schema_version WHERE version >= 44;
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .expect("leave logical migration checkpoint at 43");
@@ -649,7 +653,7 @@ fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
     );
 
     let recovered = Database::new(&db_path).expect("resume physical privacy cleanup");
-    assert_eq!(recovered.get_schema_version(), 53);
+    assert_eq!(recovered.get_schema_version(), 54);
     drop(recovered);
 
     for path in [

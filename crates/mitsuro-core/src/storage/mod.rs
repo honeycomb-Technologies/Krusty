@@ -57,8 +57,9 @@ pub use compaction::{CompactionSegmentRecord, CompactionStore};
 pub use credentials::CredentialStore;
 pub use database::{Database, SharedDatabase};
 pub use delegated_runs::{
-    normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunRecord, DelegatedRunRole,
-    DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
+    normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunCreateOutcome, DelegatedRunLease,
+    DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
+    DelegatedRunStartInput, DelegatedRunStore, DelegatedRunSummary,
 };
 pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
 pub use expo_push_devices::{ExpoPushDevice, ExpoPushDeviceRegistration, ExpoPushDeviceStore};

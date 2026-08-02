@@ -23,15 +23,62 @@ fn empty_pinch_context(parent_session_id: &str) -> PinchContext {
 
 #[test]
 fn session_creation_supports_legacy_required_provider_columns() {
-    let (db, _temp) = create_test_db();
-    db.conn()
-        .execute_batch(
-            "ALTER TABLE sessions
-                 ADD COLUMN provider TEXT NOT NULL DEFAULT 'legacy';
-             ALTER TABLE sessions ADD COLUMN metadata TEXT;",
-        )
-        .expect("add deprecated required session columns");
-    let manager = SessionManager::new(db);
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("legacy.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("legacy db");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);
+         INSERT INTO schema_version (version, applied_at) VALUES (33, CURRENT_TIMESTAMP);
+         CREATE TABLE sessions (
+             id TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             provider TEXT NOT NULL,
+             model TEXT NOT NULL,
+             metadata TEXT,
+             working_dir TEXT,
+             project_dir TEXT,
+             workspace_mode TEXT NOT NULL DEFAULT 'neutral',
+             session_type TEXT NOT NULL DEFAULT 'code',
+             user_id TEXT,
+             target_branch TEXT,
+             permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+         );
+         CREATE TABLE delegated_runs (
+             delegated_run_id TEXT PRIMARY KEY,
+             parent_session_id TEXT NOT NULL,
+             parent_tool_call_id TEXT,
+             role TEXT NOT NULL
+                 CHECK (role IN ('explore', 'build', 'planner', 'verifier')),
+             stage TEXT NOT NULL
+                 CHECK (stage IN ('created', 'running', 'synthesizing', 'complete', 'degraded', 'failed', 'cancelled')),
+             provider TEXT,
+             model TEXT,
+             resumable INTEGER NOT NULL DEFAULT 0,
+             resumed_from_run_id TEXT,
+             target_scope_key TEXT NOT NULL,
+             target_scope_json TEXT NOT NULL,
+             snapshot_json TEXT,
+             artifact_json TEXT,
+             human_review TEXT,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             completed_at TEXT,
+             FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+         );
+         CREATE INDEX idx_delegated_runs_session_updated
+             ON delegated_runs(parent_session_id, updated_at DESC);
+         CREATE INDEX idx_delegated_runs_session_scope
+             ON delegated_runs(parent_session_id, role, target_scope_key, updated_at DESC);
+         CREATE INDEX idx_delegated_runs_parent_tool
+             ON delegated_runs(parent_tool_call_id);",
+    )
+    .expect("legacy schema");
+    drop(conn);
+
+    let manager =
+        SessionManager::new(crate::storage::Database::new(&db_path).expect("open legacy database"));
     let session_id = manager
         .create_session("Legacy Session", None, Some("/tmp"))
         .expect("legacy-compatible session insert");
@@ -45,7 +92,7 @@ fn session_creation_supports_legacy_required_provider_columns() {
         )
         .expect("legacy row");
 
-    assert_eq!(provider, "mitsuro");
+    assert_eq!(provider, "krusty");
     assert!(model.is_empty());
 }
 
@@ -93,7 +140,7 @@ fn create_linked_session_preserves_workspace_contract() {
             WorkspaceMode::Created,
             Some(user_id),
             Some("feature/mobile-intent"),
-            SessionType::Hive,
+            SessionType::Mako,
         )
         .expect("Failed to create parent session");
     let pinch_ctx = empty_pinch_context(&parent_session_id);
@@ -115,7 +162,7 @@ fn create_linked_session_preserves_workspace_contract() {
         .expect("Failed to load child session")
         .expect("Child session should exist");
 
-    assert_eq!(child_session.session_type, SessionType::Hive);
+    assert_eq!(child_session.session_type, SessionType::Mako);
     assert_eq!(child_session.working_dir.as_deref(), Some("/tmp/worktree"));
     assert_eq!(
         child_session.project_dir.as_deref(),

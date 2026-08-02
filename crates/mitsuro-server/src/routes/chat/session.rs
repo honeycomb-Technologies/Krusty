@@ -8,9 +8,9 @@ use mitsuro_core::ai::client::{AiClient, CallOptions};
 use mitsuro_core::ai::models::{ModelKey, ModelLookupError, ModelMetadata, ProjectModelRef};
 use mitsuro_core::ai::providers::ProviderId;
 use mitsuro_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
-use mitsuro_core::plan::PlanManager;
+use mitsuro_core::plan::{has_active_workflow_or_plan, PlanManager};
 use mitsuro_core::storage::{
-    Database, HiveRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
+    Database, MakoRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
     WorkspaceMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
@@ -48,7 +48,7 @@ pub(super) struct ChatSessionContext {
     pub(super) session_type: SessionType,
     pub(super) permission_mode: PermissionMode,
     pub(super) execution_tool_allowlist: Option<std::collections::HashSet<String>>,
-    pub(super) hive_crew_slug: Option<String>,
+    pub(super) mako_crew_slug: Option<String>,
     pub(super) user_id: Option<String>,
     pub(super) guard: OwnedMutexGuard<()>,
 }
@@ -154,7 +154,7 @@ pub(super) async fn prepare_chat_route_session(
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
             let session = load_owned_session(&sm, id, user)?;
-            if session.session_type == SessionType::Hive && req.target_branch.is_some() {
+            if session.session_type == SessionType::Mako && req.target_branch.is_some() {
                 return Err(AppError::Conflict(
                     "Hive target branches are background-service-owned and cannot be changed through /chat"
                         .into(),
@@ -167,7 +167,7 @@ pub(super) async fn prepare_chat_route_session(
             Ok(PreparedChatRouteSession {
                 session_id: id.to_string(),
                 is_first_message: messages.is_empty(),
-                pending_model_update: (session.session_type != SessionType::Hive)
+                pending_model_update: (session.session_type != SessionType::Mako)
                     .then(|| {
                         requested_model
                             .persisted()
@@ -460,7 +460,7 @@ async fn legacy_model_selection(
 ) -> Result<ChatModelSelection, AppError> {
     match state.model_registry.resolve_legacy_key(model_id).await {
         Ok(key) => exact_model_selection(state, &key).await,
-        // Preserve the legacy MITSURO_PROVIDER + custom-slug bootstrap path.
+        // Preserve the legacy KRUSTY_PROVIDER + custom-slug bootstrap path.
         // It remains conservative and cannot claim catalog capabilities.
         Err(ModelLookupError::NotFound { .. }) => {
             Ok(ChatModelSelection::legacy(model_id.to_string()))
@@ -739,11 +739,7 @@ pub(super) async fn setup_chat_session_with_guard(
     }
 
     let effective_work_mode = effective_session_work_mode(state, &session);
-    let has_active_plan = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|manager| manager.get_active_plan(session_id).ok())
-        .flatten()
-        .is_some();
+    let has_active_plan = has_active_workflow_or_plan(state.db_path.as_path(), session_id);
     let guard = match preacquired_guard {
         Some(guard) => guard,
         None => state
@@ -821,8 +817,8 @@ pub(super) async fn setup_chat_session_with_guard(
         fast_mode_format,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt()),
-            SessionType::Hive => system_prompt_for_session(SessionType::Hive),
-            SessionType::Code => None, // uses default Mitsuro coding assistant prompt
+            SessionType::Mako => system_prompt_for_session(SessionType::Mako),
+            SessionType::Code => None, // uses default Krusty coding assistant prompt
         },
         ..Default::default()
     };
@@ -830,8 +826,8 @@ pub(super) async fn setup_chat_session_with_guard(
         apply_thinking_config(effective_thinking_level, &mut options);
     }
 
-    let hive_runtime = if session.session_type == SessionType::Hive {
-        HiveRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
+    let mako_runtime = if session.session_type == SessionType::Mako {
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
     } else {
         None
     };
@@ -848,7 +844,7 @@ pub(super) async fn setup_chat_session_with_guard(
         session_type: session.session_type,
         permission_mode: session.permission_mode,
         execution_tool_allowlist: None,
-        hive_crew_slug: hive_runtime.and_then(|runtime| runtime.crew_slug),
+        mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,
     })
@@ -874,11 +870,7 @@ pub(super) async fn refresh_chat_code_tool_surface(
         .or(Some(ctx.working_dir.as_path()))
         .map(ProjectSettings::load)
         .unwrap_or_default();
-    let has_active_plan = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|manager| manager.get_active_plan(&ctx.session_id).ok())
-        .flatten()
-        .is_some();
+    let has_active_plan = has_active_workflow_or_plan(state.db_path.as_path(), &ctx.session_id);
     let tools = filter_code_tools_for_mode(
         state.tool_registry.get_ai_tools_all().await,
         permission_mode,

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
 import {
-	MitsuroApiError,
-	MitsuroClient,
+	KrustyApiError,
+	KrustyClient,
 	type ChatRequest,
 	type ModelKey,
 	type ModelsResponse,
@@ -15,10 +15,10 @@ const exactGrokKey: ModelKey = {
 	api_format: "open_ai_responses",
 };
 
-describe("MitsuroClient request errors", () => {
+describe("KrustyClient request errors", () => {
 	it("preserves HTTP status and response body in a typed error", async () => {
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () =>
 				new Response(JSON.stringify({ error: "Session missing not found" }), {
 					status: 404,
@@ -30,8 +30,8 @@ describe("MitsuroClient request errors", () => {
 			await client.getSession("missing");
 			throw new Error("expected request to fail");
 		} catch (error) {
-			expect(error).toBeInstanceOf(MitsuroApiError);
-			const apiError = error as MitsuroApiError;
+			expect(error).toBeInstanceOf(KrustyApiError);
+			const apiError = error as KrustyApiError;
 			expect(apiError.status).toBe(404);
 			expect(apiError.responseBody).toContain("Session missing not found");
 			expect(apiError.message).toBe("API 404: Session missing not found");
@@ -39,8 +39,8 @@ describe("MitsuroClient request errors", () => {
 	});
 
 	it("preserves a 402 limit response for the visible provider error path", async () => {
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () =>
 				new Response(
 					JSON.stringify({ error: "Grok Build usage balance exhausted" }),
@@ -58,7 +58,27 @@ describe("MitsuroClient request errors", () => {
 	});
 });
 
-describe("MitsuroClient content-free request diagnostics", () => {
+describe("KrustyClient content-free request diagnostics", () => {
+	it("requests delegated history only for full session hydration", async () => {
+		const urls: string[] = [];
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async (input) => {
+				urls.push(String(input));
+				return Response.json({});
+			},
+		});
+
+		await client.getSessionState("session-id");
+		await client.getSessionState("session-id", {
+			includeDelegatedHistory: true,
+		});
+
+		expect(new URL(urls[0] as string).search).toBe("");
+		expect(new URL(urls[1] as string).searchParams.get("include_delegated_history"))
+			.toBe("true");
+	});
+
 	it("reports a sanitized route family and terminal timing", async () => {
 		const events: Array<{
 			name: string;
@@ -66,8 +86,8 @@ describe("MitsuroClient content-free request diagnostics", () => {
 			durationMs?: number;
 			code?: string;
 		}> = [];
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () => Response.json({
 				id: "session-private-id",
 				messages: [],
@@ -88,8 +108,8 @@ describe("MitsuroClient content-free request diagnostics", () => {
 
 	it("separates privacy-safe session request families without identifiers", async () => {
 		const names: string[] = [];
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async (input) => {
 				const path = new URL(String(input)).pathname;
 				if (path === "/sessions") return Response.json([]);
@@ -121,16 +141,16 @@ describe("MitsuroClient content-free request diagnostics", () => {
 
 	it("separates HTTP and transport failures without response content", async () => {
 		const httpEvents: Array<{ outcome: string; code?: string }> = [];
-		const httpClient = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const httpClient = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () => new Response("private provider detail", { status: 503 }),
 			requestObserver: (event) => httpEvents.push(event),
 		});
-		await expect(httpClient.getModels()).rejects.toBeInstanceOf(MitsuroApiError);
+		await expect(httpClient.getModels()).rejects.toBeInstanceOf(KrustyApiError);
 
 		const networkEvents: Array<{ outcome: string; code?: string }> = [];
-		const networkClient = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const networkClient = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () => {
 				throw new TypeError("private network detail");
 			},
@@ -153,8 +173,8 @@ describe("MitsuroClient content-free request diagnostics", () => {
 	it("uses the configured native fetch implementation for health checks", async () => {
 		let requestUrl = "";
 		const events: string[] = [];
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async (input) => {
 				requestUrl = String(input);
 				return new Response(null, { status: 204 });
@@ -164,7 +184,7 @@ describe("MitsuroClient content-free request diagnostics", () => {
 		});
 
 		expect(await client.checkHealth()).toBe(true);
-		expect(requestUrl).toBe("http://mitsuro.test/health");
+		expect(requestUrl).toBe("http://krusty.test/health");
 		expect(events).toEqual([
 			"api.health:start:",
 			"api.health:complete:http.2xx",
@@ -172,8 +192,8 @@ describe("MitsuroClient content-free request diagnostics", () => {
 	});
 
 	it("cannot let a diagnostics observer change request behavior", async () => {
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: async () => Response.json({
 				models: [],
 				default_model: null,
@@ -187,26 +207,26 @@ describe("MitsuroClient content-free request diagnostics", () => {
 	});
 });
 
-describe("MitsuroClient provider-aware model identity", () => {
-	it("sends the exact key and legacy model mirror when dispatching Hive", async () => {
+describe("KrustyClient provider-aware model identity", () => {
+	it("sends the exact key and legacy model mirror when dispatching Mako", async () => {
 		let requestUrl = "";
 		let requestInit: RequestInit | undefined;
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: (async (input, init) => {
 				requestUrl = String(input);
 				requestInit = init;
-				return Response.json({ session_id: "hive-1", status: "started" });
+				return Response.json({ session_id: "mako-1", status: "started" });
 			}) as typeof fetch,
 		});
 
-		await client.dispatchHive("Audit this project", {
+		await client.dispatchMako("Audit this project", {
 			model: exactGrokKey.model_id,
 			modelKey: exactGrokKey,
 			projectDir: "/work/project",
 		});
 
-		expect(requestUrl).toBe("http://mitsuro.test/api/hive/dispatch");
+		expect(requestUrl).toBe("http://krusty.test/api/mako/dispatch");
 		expect(requestInit?.method).toBe("POST");
 		expect(JSON.parse(String(requestInit?.body))).toEqual({
 			task: "Audit this project",
@@ -216,18 +236,17 @@ describe("MitsuroClient provider-aware model identity", () => {
 		});
 	});
 
-	it("keeps legacy Hive dispatches compatible by omitting model_key", async () => {
+	it("keeps legacy Mako dispatches compatible by omitting model_key", async () => {
 		let body: unknown;
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
-			hiveTransport: "canonical",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: (async (_input, init) => {
 				body = JSON.parse(String(init?.body));
-				return Response.json({ session_id: "hive-legacy", status: "started" });
+				return Response.json({ session_id: "mako-legacy", status: "started" });
 			}) as typeof fetch,
 		});
 
-		await client.dispatchHive("Continue", { model: "grok-4.5" });
+		await client.dispatchMako("Continue", { model: "grok-4.5" });
 
 		expect(body).toEqual({ task: "Continue", model: "grok-4.5" });
 	});
@@ -239,8 +258,8 @@ describe("MitsuroClient provider-aware model identity", () => {
 			default_model: exactGrokKey.model_id,
 			default_model_key: exactGrokKey,
 		};
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: (async (input, init) => {
 				requests.push({
 					url: String(input),
@@ -256,7 +275,7 @@ describe("MitsuroClient provider-aware model identity", () => {
 		const models = await client.getModels();
 
 		expect(requests[0]).toEqual({
-			url: "http://mitsuro.test/api/models/current",
+			url: "http://krusty.test/api/models/current",
 			body: { model: "grok-4.5", model_key: exactGrokKey },
 		});
 		expect(models.default_model_key).toEqual(exactGrokKey);
@@ -275,11 +294,11 @@ describe("MitsuroClient provider-aware model identity", () => {
 	});
 });
 
-describe("MitsuroClient Hive schedules", () => {
+describe("KrustyClient Mako schedules", () => {
 	it("uses a strong quoted revision for schedule status mutations", async () => {
 		let requestInit: RequestInit | undefined;
-		const client = new MitsuroClient({
-			baseUrl: "http://mitsuro.test",
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
 			fetchImpl: (async (_input, init) => {
 				requestInit = init;
 				return Response.json({
@@ -290,7 +309,7 @@ describe("MitsuroClient Hive schedules", () => {
 			}) as typeof fetch,
 		});
 
-		await client.pauseHiveSchedule("session-1", "schedule-1", 7);
+		await client.pauseMakoSchedule("session-1", "schedule-1", 7);
 
 		expect(requestInit?.method).toBe("POST");
 		expect((requestInit?.headers as Record<string, string>)["If-Match"]).toBe(

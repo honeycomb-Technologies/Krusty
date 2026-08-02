@@ -10,7 +10,11 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 
 use mitsuro_core::agent::loop_events::LoopStopReason;
-use mitsuro_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
+use mitsuro_core::agent::subagent::{AgentProgress, AgentProgressStatus};
+use mitsuro_core::agent::{
+    AgentCancellation, DelegatedProgressEvent, DelegatedRunStage as CoreDelegatedRunStage,
+    DelegatedToolKind as CoreDelegatedToolKind, LoopEvent, LoopInput, UserHookManager,
+};
 use mitsuro_core::ai::models::{
     create_model_registry, ApiFormat, ModelAuthScope, ModelKey, ModelMetadata,
 };
@@ -21,17 +25,18 @@ use mitsuro_core::process::ProcessRegistry;
 use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, Preferences, RecoveryDecision,
+    Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
+    PartialAssistantState, PendingInteractionSnapshot, Preferences, RecoveryDecision,
     RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState, SessionType, WorkspaceMode,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::SessionManager;
 
-use super::interactions::{resolve_pending_hive_run, PendingHiveInteraction};
+use super::interactions::{resolve_pending_mako_run, PendingMakoInteraction};
 use super::{
     build_user_content, chat, deliver_steering_with_rollover, forward_loop_event,
-    prepare_chat_contract_for_test, run_orchestrator_event_bridge, select_model_for_chat_request,
-    setup_chat_session, steer, tool_approval, RequestedModel,
+    prepare_chat_contract_for_test, run_delegated_progress_bridge, run_orchestrator_event_bridge,
+    select_model_for_chat_request, setup_chat_session, steer, tool_approval, RequestedModel,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -42,7 +47,7 @@ fn create_test_state() -> (AppState, PathBuf) {
     let temp_dir =
         std::env::temp_dir().join(format!("mitsuro-server-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-    let db_path = temp_dir.join("mitsuro.db");
+    let db_path = temp_dir.join("krusty.db");
     Database::new(&db_path).expect("database should initialize");
     let working_dir = temp_dir.join("workspace");
     std::fs::create_dir_all(&working_dir).expect("workspace should exist");
@@ -75,7 +80,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-            hive_runtime: crate::hive_runtime::HiveRuntimeManager::new(),
+            mako_runtime: crate::hive_runtime::MakoRuntimeManager::new(),
         },
         temp_dir,
     )
@@ -98,35 +103,88 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
     })
 }
 
+fn test_delegated_progress(
+    session_id: &str,
+    delegated_run_id: &str,
+    tool_call_id: &str,
+    task_id: &str,
+    stage: CoreDelegatedRunStage,
+    status: AgentProgressStatus,
+    tool_count: usize,
+) -> DelegatedProgressEvent {
+    DelegatedProgressEvent {
+        delegated_run_id: delegated_run_id.to_string(),
+        parent_session_id: session_id.to_string(),
+        tool_call_id: tool_call_id.to_string(),
+        kind: CoreDelegatedToolKind::Build,
+        stage,
+        progress: AgentProgress {
+            delegated_run_id: Some(delegated_run_id.to_string()),
+            task_id: task_id.to_string(),
+            name: task_id.to_string(),
+            status,
+            tool_count,
+            current_action: Some("working".to_string()),
+            ..AgentProgress::default()
+        },
+    }
+}
+
+fn create_test_delegated_run(
+    state: &AppState,
+    session_id: &str,
+    delegated_run_id: &str,
+    tool_call_id: &str,
+) {
+    DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"))
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: delegated_run_id.to_string(),
+            parent_session_id: session_id.to_string(),
+            parent_tool_call_id: Some(tool_call_id.to_string()),
+            role: DelegatedRunRole::Build,
+            stage: CoreDelegatedRunStage::Created,
+            provider: Some("test".to_string()),
+            model: Some("test:model".to_string()),
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![DelegatedRunScope {
+                label: "workspace".to_string(),
+                path: ".".to_string(),
+                kind: "workspace".to_string(),
+            }],
+        })
+        .expect("delegated run should create");
+}
+
 #[tokio::test]
-async fn pending_hive_resolution_uses_durable_run_ids_not_trace_run_ids() {
+async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
     let (state, _temp_dir) = create_test_state();
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     let session_id = session_manager
         .create_session_for_user_with_config(
-            "Hive pending identity",
+            "Mako pending identity",
             Some("test:model"),
             Some("/work"),
             Some("/work"),
             WorkspaceMode::Selected,
             None,
             None,
-            SessionType::Hive,
+            SessionType::Mako,
         )
         .expect("session should create");
     let now = chrono::Utc::now().to_rfc3339();
     let db = Database::new(&state.db_path).expect("database should open");
     db.conn()
         .execute_batch(&format!(
-            "INSERT INTO hive_controllers (
+            "INSERT INTO mako_controllers (
                 id, scope_key, session_id, status, timezone, max_concurrent_runs,
                 created_at, updated_at
              ) VALUES (
                 'controller-1', 'session:{session_id}', '{session_id}', 'active', 'UTC', 1,
                 '{now}', '{now}'
              );
-             INSERT INTO hive_runs (
+             INSERT INTO mako_runs (
                 id, controller_id, session_id, kind, objective, config_json, status,
                 priority, available_at, attempt_count, max_attempts, created_at, updated_at
              ) VALUES (
@@ -138,7 +196,7 @@ async fn pending_hive_resolution_uses_durable_run_ids_not_trace_run_ids() {
         .expect("durable run should insert");
     db.conn()
         .execute(
-            "INSERT INTO hive_controller_events (
+            "INSERT INTO mako_controller_events (
                 controller_id, sequence, event_type, run_id, payload_json, created_at
              ) VALUES ('controller-1', 1, 'agentic_event', 'durable-run-1', ?1, ?2)",
             (
@@ -168,19 +226,19 @@ async fn pending_hive_resolution_uses_durable_run_ids_not_trace_run_ids() {
         .expect("diagnostic trace should insert");
 
     assert!(matches!(
-        resolve_pending_hive_run(
+        resolve_pending_mako_run(
             &state,
             &session_id,
             "tool-1",
             None,
-            PendingHiveInteraction::ToolApproval,
+            PendingMakoInteraction::ToolApproval,
         ),
         Ok(run_id) if run_id == "durable-run-1"
     ));
 
     db.conn()
         .execute(
-            "INSERT INTO hive_controller_events (
+            "INSERT INTO mako_controller_events (
                 controller_id, sequence, event_type, run_id, payload_json, created_at
              ) VALUES ('controller-1', 2, 'tool_approval_queued', 'durable-run-1', ?1, ?2)",
             (
@@ -190,36 +248,36 @@ async fn pending_hive_resolution_uses_durable_run_ids_not_trace_run_ids() {
         )
         .expect("durable settlement should insert");
     assert!(matches!(
-        resolve_pending_hive_run(
+        resolve_pending_mako_run(
             &state,
             &session_id,
             "tool-1",
             None,
-            PendingHiveInteraction::ToolApproval,
+            PendingMakoInteraction::ToolApproval,
         ),
         Err(AppError::Conflict(_))
     ));
 }
 
 #[tokio::test]
-async fn chat_rejects_hive_creation_and_daemon_owned_metadata_overrides() {
+async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
     let (state, _temp_dir) = create_test_state();
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     let session_id = session_manager
         .create_session_for_user_with_config(
-            "Daemon Hive",
+            "Daemon Mako",
             Some("test:model"),
             Some("/work"),
             Some("/work"),
             WorkspaceMode::Selected,
             None,
             None,
-            SessionType::Hive,
+            SessionType::Mako,
         )
         .expect("session should create");
 
-    let new_hive = chat(
+    let new_mako = chat(
         State(state.clone()),
         None,
         HeaderMap::new(),
@@ -231,7 +289,7 @@ async fn chat_rejects_hive_creation_and_daemon_owned_metadata_overrides() {
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
             target_branch: None,
-            session_type: Some(SessionType::Hive),
+            session_type: Some(SessionType::Mako),
             model: Some("test:model".into()),
             model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -243,7 +301,7 @@ async fn chat_rejects_hive_creation_and_daemon_owned_metadata_overrides() {
         }),
     )
     .await;
-    assert!(matches!(new_hive, Err(AppError::Conflict(_))));
+    assert!(matches!(new_mako, Err(AppError::Conflict(_))));
 
     let override_attempt = chat(
         State(state),
@@ -660,7 +718,7 @@ async fn new_empty_session_uses_project_model_before_user_preference_and_persist
     create_test_user(&state, "alice");
     let user_root = temp_dir.join("alice-home");
     let project_dir = user_root.join("project");
-    std::fs::create_dir_all(project_dir.join(".mitsuro"))
+    std::fs::create_dir_all(project_dir.join(".krusty"))
         .expect("project settings directory should exist");
 
     let mut preferred = model(
@@ -695,7 +753,7 @@ async fn new_empty_session_uses_project_model_before_user_preference_and_persist
     .set_current_model_key(&preferred_key)
     .expect("preference should persist");
     std::fs::write(
-        project_dir.join(".mitsuro/settings.json"),
+        project_dir.join(".krusty/settings.json"),
         serde_json::to_vec_pretty(&serde_json::json!({ "model": project_key.clone() }))
             .expect("settings should serialize"),
     )
@@ -740,7 +798,7 @@ async fn explicit_then_persisted_session_model_precede_project_model() {
     create_test_user(&state, "alice");
     let user_root = temp_dir.join("alice-home");
     let project_dir = user_root.join("project");
-    std::fs::create_dir_all(project_dir.join(".mitsuro"))
+    std::fs::create_dir_all(project_dir.join(".krusty"))
         .expect("project settings directory should exist");
 
     let persisted = model(
@@ -778,7 +836,7 @@ async fn explicit_then_persisted_session_model_precede_project_model() {
         credentials.set(ProviderId::OpenRouter, "router-test-key".to_string());
     }
     std::fs::write(
-        project_dir.join(".mitsuro/settings.json"),
+        project_dir.join(".krusty/settings.json"),
         serde_json::to_vec_pretty(&serde_json::json!({ "model": project_key.clone() }))
             .expect("settings should serialize"),
     )
@@ -1244,6 +1302,7 @@ async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
         None,
         Some("alice".to_string()),
         Arc::clone(&state.db_path),
+        Arc::new(Mutex::new(true)),
     ));
 
     event_tx
@@ -1296,6 +1355,674 @@ async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
 
     bridge.await.expect("bridge should finish");
     assert!(state.session_inputs.read().await.get(&session_id).is_none());
+}
+
+#[tokio::test]
+async fn delegated_progress_survives_sse_disconnect_until_durable_terminal_state() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Delegated progress", None, None, None)
+        .expect("session should create");
+    let delegated_run_id = "delegated-run-live";
+    let tool_call_id = "tool-agent-live";
+    create_test_delegated_run(&state, &session_id, delegated_run_id, tool_call_id);
+
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(8);
+    let bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::new(Mutex::new(true)),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+
+    // One builder completing is not terminal for a parallel build while the
+    // durable aggregate remains active. The client must receive a running run
+    // with a completed component, not a prematurely completed tool card.
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            delegated_run_id,
+            tool_call_id,
+            "builder-a",
+            CoreDelegatedRunStage::Complete,
+            AgentProgressStatus::Complete,
+            3,
+        ))
+        .expect("component progress should send");
+    let first_sse = timeout(Duration::from_secs(1), sse_rx.recv())
+        .await
+        .expect("delegated progress should reach SSE")
+        .expect("SSE sender should remain open")
+        .expect("SSE event should serialize");
+    let first_sse = format!("{first_sse:?}");
+    assert!(first_sse.contains("delegated_progress"));
+    assert!(first_sse.contains("running"));
+    {
+        let state_snapshot = state.delegated_state.read().await;
+        let tool = state_snapshot
+            .get(&session_id)
+            .and_then(|tools| tools.first())
+            .expect("live delegated snapshot should exist");
+        assert!(matches!(
+            tool.stage,
+            crate::types::DelegatedRunStage::Running
+        ));
+        assert!(matches!(
+            tool.agents.first().map(|agent| agent.status),
+            Some(crate::types::DelegatedProgressStatus::Complete)
+        ));
+    }
+
+    // The progress worker keeps only a weak SSE sender. Ending the parent SSE
+    // therefore closes the response immediately without cancelling detached
+    // child state tracking.
+    drop(sse_tx);
+    assert!(matches!(
+        timeout(Duration::from_secs(1), sse_rx.recv()).await,
+        Ok(None)
+    ));
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            delegated_run_id,
+            tool_call_id,
+            "builder-b",
+            CoreDelegatedRunStage::Running,
+            AgentProgressStatus::Running,
+            4,
+        ))
+        .expect("detached progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let updated = state
+                .delegated_state
+                .read()
+                .await
+                .get(&session_id)
+                .and_then(|tools| tools.first())
+                .is_some_and(|tool| {
+                    tool.agents
+                        .iter()
+                        .any(|agent| agent.task_id == "builder-b" && agent.tool_count == 4)
+                });
+            if updated {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("live state should update after SSE disconnect");
+
+    DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"))
+        .finalize_run(
+            delegated_run_id,
+            CoreDelegatedRunStage::Degraded,
+            &serde_json::json!({
+                "delegated_run_id": delegated_run_id,
+                "outcome": "partial",
+            }),
+            Some("Partial evidence retained"),
+            true,
+        )
+        .expect("durable terminal state should persist");
+    let mut terminal = test_delegated_progress(
+        &session_id,
+        delegated_run_id,
+        tool_call_id,
+        "builder-b",
+        CoreDelegatedRunStage::Failed,
+        AgentProgressStatus::Failed,
+        4,
+    );
+    terminal.progress.current_action = Some("degraded".to_string());
+    progress_tx
+        .send(terminal)
+        .expect("terminal delegated progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state
+                .delegated_state
+                .read()
+                .await
+                .get(&session_id)
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durably terminal run should leave live snapshots");
+
+    drop(progress_tx);
+    bridge
+        .await
+        .expect("delegated progress bridge should finish");
+}
+
+#[tokio::test]
+async fn foreground_finish_closes_sse_while_detached_progress_keeps_updating_state() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Detached progress", None, None, None)
+        .expect("session should create");
+    create_test_delegated_run(&state, &session_id, "run-detached", "tool-detached");
+
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(8);
+    let sse_open = Arc::new(Mutex::new(true));
+    let progress_bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::clone(&sse_open),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+    let foreground_bridge = tokio::spawn(run_orchestrator_event_bridge(
+        event_rx,
+        sse_tx,
+        session_id.clone(),
+        Arc::clone(&state.session_inputs),
+        None,
+        None,
+        None,
+        Arc::clone(&state.db_path),
+        Arc::clone(&sse_open),
+    ));
+
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            "run-detached",
+            "tool-detached",
+            "builder",
+            CoreDelegatedRunStage::Running,
+            AgentProgressStatus::Running,
+            1,
+        ))
+        .expect("initial delegated progress should send");
+    let live = timeout(Duration::from_secs(1), sse_rx.recv())
+        .await
+        .expect("live progress should arrive")
+        .expect("SSE should be open")
+        .expect("SSE event should serialize");
+    assert!(format!("{live:?}").contains("delegated_progress"));
+
+    event_tx
+        .send(LoopEvent::Finished {
+            session_id: session_id.clone(),
+            stop_reason: LoopStopReason::Completed,
+        })
+        .expect("foreground finish should send");
+    let finish = timeout(Duration::from_secs(1), sse_rx.recv())
+        .await
+        .expect("finish should arrive")
+        .expect("SSE should remain open through finish")
+        .expect("finish event should serialize");
+    assert!(format!("{finish:?}").contains("finish"));
+    foreground_bridge
+        .await
+        .expect("foreground event bridge should finish");
+    assert!(state.session_inputs.read().await.get(&session_id).is_none());
+    assert!(matches!(
+        timeout(Duration::from_secs(1), sse_rx.recv()).await,
+        Ok(None)
+    ));
+
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            "run-detached",
+            "tool-detached",
+            "builder",
+            CoreDelegatedRunStage::Running,
+            AgentProgressStatus::Running,
+            7,
+        ))
+        .expect("late detached progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let updated = state
+                .delegated_state
+                .read()
+                .await
+                .get(&session_id)
+                .and_then(|tools| tools.first())
+                .and_then(|tool| tool.agents.first())
+                .is_some_and(|agent| agent.tool_count == 7);
+            if updated {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached progress should remain live after foreground finish");
+
+    drop(progress_tx);
+    progress_bridge
+        .await
+        .expect("detached progress bridge should finish");
+}
+
+#[tokio::test]
+async fn terminal_delegated_progress_survives_full_sse_buffer_with_lag_signal() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Terminal progress", None, None, None)
+        .expect("session should create");
+    let delegated_run_id = "run-terminal-buffer";
+    let tool_call_id = "tool-terminal-buffer";
+    create_test_delegated_run(&state, &session_id, delegated_run_id, tool_call_id);
+
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::new(Mutex::new(true)),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+    let mut loop_skipped = 0;
+    assert!(
+        forward_loop_event(
+            &sse_tx,
+            &session_id,
+            LoopEvent::TextDelta {
+                delta: "occupy queue".to_string(),
+            },
+            &mut loop_skipped,
+        )
+        .await
+    );
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            delegated_run_id,
+            tool_call_id,
+            "builder",
+            CoreDelegatedRunStage::Running,
+            AgentProgressStatus::Running,
+            2,
+        ))
+        .expect("droppable progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot_persisted = DelegatedRunStore::new(
+                Database::new(&state.db_path).expect("database should open"),
+            )
+            .get_run(delegated_run_id)
+            .expect("delegated run should load")
+            .and_then(|run| run.snapshot)
+            .is_some();
+            if snapshot_persisted {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("active progress snapshot should persist");
+
+    DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"))
+        .finalize_run(
+            delegated_run_id,
+            CoreDelegatedRunStage::Degraded,
+            &serde_json::json!({"outcome": "partial"}),
+            Some("Retained partial evidence"),
+            true,
+        )
+        .expect("terminal state should persist");
+    let mut terminal = test_delegated_progress(
+        &session_id,
+        delegated_run_id,
+        tool_call_id,
+        "builder",
+        CoreDelegatedRunStage::Failed,
+        AgentProgressStatus::Failed,
+        2,
+    );
+    terminal.progress.current_action = Some("degraded".to_string());
+    progress_tx
+        .send(terminal)
+        .expect("terminal progress should send");
+
+    let occupied = sse_rx.recv().await.unwrap().unwrap();
+    assert!(format!("{occupied:?}").contains("text_delta"));
+    let lagged = sse_rx.recv().await.unwrap().unwrap();
+    assert!(format!("{lagged:?}").contains("lagged"));
+    let terminal = sse_rx.recv().await.unwrap().unwrap();
+    let terminal = format!("{terminal:?}");
+    assert!(terminal.contains("delegated_progress"));
+    assert!(terminal.contains("degraded"));
+
+    drop(progress_tx);
+    drop(sse_tx);
+    bridge
+        .await
+        .expect("delegated progress bridge should finish");
+}
+
+#[tokio::test]
+async fn full_undrained_sse_does_not_hold_foreground_finish_or_session_input_open() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Bounded delegated SSE", None, None, None)
+        .expect("session should create");
+    create_test_delegated_run(&state, &session_id, "run-no-drain", "tool-no-drain");
+    DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"))
+        .finalize_run(
+            "run-no-drain",
+            CoreDelegatedRunStage::Complete,
+            &serde_json::json!({"outcome": "success"}),
+            Some("complete"),
+            true,
+        )
+        .expect("terminal state should persist");
+
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(1);
+    let mut loop_skipped = 0;
+    assert!(
+        forward_loop_event(
+            &sse_tx,
+            &session_id,
+            LoopEvent::TextDelta {
+                delta: "occupy without draining".to_string(),
+            },
+            &mut loop_skipped,
+        )
+        .await
+    );
+    let sse_open = Arc::new(Mutex::new(true));
+    let progress_bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::clone(&sse_open),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+    let foreground_bridge = tokio::spawn(run_orchestrator_event_bridge(
+        event_rx,
+        sse_tx,
+        session_id.clone(),
+        Arc::clone(&state.session_inputs),
+        None,
+        None,
+        None,
+        Arc::clone(&state.db_path),
+        Arc::clone(&sse_open),
+    ));
+
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            "run-no-drain",
+            "tool-no-drain",
+            "builder",
+            CoreDelegatedRunStage::Complete,
+            AgentProgressStatus::Complete,
+            1,
+        ))
+        .expect("terminal delegated progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if sse_open.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal progress should enter bounded delivery");
+
+    event_tx
+        .send(LoopEvent::Finished {
+            session_id: session_id.clone(),
+            stop_reason: LoopStopReason::Completed,
+        })
+        .expect("finish should send");
+    timeout(Duration::from_secs(1), foreground_bridge)
+        .await
+        .expect("foreground finish must not wait forever for an undrained client")
+        .expect("foreground bridge should join");
+    assert!(state.session_inputs.read().await.get(&session_id).is_none());
+
+    let occupied = sse_rx.recv().await.unwrap().unwrap();
+    assert!(format!("{occupied:?}").contains("text_delta"));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), sse_rx.recv()).await,
+        Ok(None)
+    ));
+    drop(progress_tx);
+    progress_bridge
+        .await
+        .expect("progress bridge should finish");
+}
+
+#[tokio::test]
+async fn required_error_then_finish_does_not_hold_undrained_sse_or_session_input_open() {
+    let (state, _temp_dir) = create_test_state();
+    let session_id = "session-error-no-drain".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(1);
+    let mut skipped_events = 0;
+    assert!(
+        forward_loop_event(
+            &sse_tx,
+            &session_id,
+            LoopEvent::TextDelta {
+                delta: "occupy without draining".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+
+    let sse_open = Arc::new(Mutex::new(true));
+    let bridge = tokio::spawn(run_orchestrator_event_bridge(
+        event_rx,
+        sse_tx,
+        session_id.clone(),
+        Arc::clone(&state.session_inputs),
+        None,
+        None,
+        None,
+        Arc::clone(&state.db_path),
+        Arc::clone(&sse_open),
+    ));
+
+    event_tx
+        .send(LoopEvent::Error {
+            error: "provider failed".to_string(),
+        })
+        .expect("error should send");
+    event_tx
+        .send(LoopEvent::Finished {
+            session_id: session_id.clone(),
+            stop_reason: LoopStopReason::ProviderError,
+        })
+        .expect("finish should send");
+
+    timeout(Duration::from_secs(1), bridge)
+        .await
+        .expect("required events must not wait forever for an undrained client")
+        .expect("foreground bridge should join");
+    assert!(state.session_inputs.read().await.get(&session_id).is_none());
+    assert!(!*sse_open.lock().await);
+
+    let occupied = sse_rx.recv().await.unwrap().unwrap();
+    assert!(format!("{occupied:?}").contains("text_delta"));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), sse_rx.recv()).await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn delegated_progress_channel_closure_cleans_only_its_live_snapshots() {
+    let (state, _temp_dir) = create_test_state();
+    let session_id = "session-progress-cleanup".to_string();
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, _sse_rx) = mpsc::channel(2);
+    state.delegated_state.write().await.insert(
+        session_id.clone(),
+        vec![crate::types::DelegatedToolStateResponse {
+            delegated_run_id: "unrelated-run".to_string(),
+            tool_call_id: "unrelated-tool".to_string(),
+            kind: crate::types::DelegatedToolKind::Explore,
+            stage: crate::types::DelegatedRunStage::Running,
+            parent_session_id: Some(session_id.clone()),
+            agents: Vec::new(),
+        }],
+    );
+    let bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::new(Mutex::new(true)),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            "run-to-clean",
+            "tool-to-clean",
+            "builder",
+            CoreDelegatedRunStage::Running,
+            AgentProgressStatus::Running,
+            1,
+        ))
+        .expect("progress should send");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if state
+                .delegated_state
+                .read()
+                .await
+                .get(&session_id)
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("live snapshot should be inserted");
+
+    drop(progress_tx);
+    bridge
+        .await
+        .expect("delegated progress bridge should finish");
+    let retained = state.delegated_state.read().await;
+    let retained = retained
+        .get(&session_id)
+        .expect("unrelated snapshot should remain");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].delegated_run_id, "unrelated-run");
+}
+
+#[tokio::test]
+async fn delegated_progress_rejects_foreign_session_and_durable_tool_ownership() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Owned progress", None, None, None)
+        .expect("session should create");
+    create_test_delegated_run(&state, &session_id, "owned-run", "owned-tool");
+    DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"))
+        .finalize_run(
+            "owned-run",
+            CoreDelegatedRunStage::Complete,
+            &serde_json::json!({"outcome": "success"}),
+            Some("complete"),
+            true,
+        )
+        .expect("terminal state should persist");
+
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let (sse_tx, mut sse_rx) = mpsc::channel(4);
+    let bridge = tokio::spawn(run_delegated_progress_bridge(
+        progress_rx,
+        sse_tx.downgrade(),
+        Arc::new(Mutex::new(true)),
+        session_id.clone(),
+        Arc::clone(&state.delegated_state),
+        Arc::clone(&state.db_path),
+    ));
+
+    let mut foreign_session = test_delegated_progress(
+        &session_id,
+        "foreign-run",
+        "foreign-tool",
+        "foreign",
+        CoreDelegatedRunStage::Running,
+        AgentProgressStatus::Running,
+        1,
+    );
+    foreign_session.parent_session_id = "different-session".to_string();
+    progress_tx
+        .send(foreign_session)
+        .expect("foreign-session event should enter bridge");
+    progress_tx
+        .send(test_delegated_progress(
+            &session_id,
+            "owned-run",
+            "wrong-tool",
+            "foreign-tool",
+            CoreDelegatedRunStage::Complete,
+            AgentProgressStatus::Complete,
+            1,
+        ))
+        .expect("wrong-tool event should enter bridge");
+    drop(progress_tx);
+    bridge.await.expect("progress bridge should finish");
+
+    assert!(state.delegated_state.read().await.is_empty());
+    assert!(matches!(sse_rx.try_recv(), Err(TryRecvError::Empty)));
+    drop(sse_tx);
 }
 
 #[tokio::test]

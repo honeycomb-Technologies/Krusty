@@ -155,9 +155,16 @@ impl LoopGuard {
 }
 
 /// Parent-only pressure toward delegation after sustained, successful
-/// observation across multiple repository areas. This is deliberately a
-/// nudge, not a guard: small/local work never has to delegate, and the model
-/// can always synthesize when the evidence is already sufficient.
+/// observation across multiple repository areas. Small/local work never has
+/// to delegate. Broad work gets one model-visible checkpoint; if the parent
+/// ignores it and performs another observation-only turn, the caller gets a
+/// bounded landing diagnostic instead of allowing open-ended archaeology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DelegationCheckpoint {
+    Nudge(String),
+    Land(String),
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DelegationNudgeTracker {
     consecutive_observation_turns: usize,
@@ -178,7 +185,7 @@ impl DelegationNudgeTracker {
         &mut self,
         tool_calls: &[AiToolCall],
         tool_results: &[Content],
-    ) -> Option<String> {
+    ) -> Option<DelegationCheckpoint> {
         if tool_calls.is_empty()
             || !tool_calls
                 .iter()
@@ -203,19 +210,26 @@ impl DelegationNudgeTracker {
             self.observed_areas.extend(observation_areas(call));
         }
 
-        if self.nudged
-            || self.consecutive_observation_turns < DELEGATION_NUDGE_TURN_THRESHOLD
+        if self.nudged {
+            return Some(DelegationCheckpoint::Land(format!(
+                "Broad parent-only observation continued after the delegation checkpoint for {} consecutive turns across {} repository areas. Synthesize the evidence already gathered now. If a later turn needs more substantial investigation, delegate one precise bounded child instead of continuing parent-side archaeology.",
+                self.consecutive_observation_turns,
+                self.observed_areas.len(),
+            )));
+        }
+
+        if self.consecutive_observation_turns < DELEGATION_NUDGE_TURN_THRESHOLD
             || self.observed_areas.len() < DELEGATION_NUDGE_AREA_THRESHOLD
         {
             return None;
         }
 
         self.nudged = true;
-        Some(format!(
-            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, start one named `agent` child with precise bounded instructions and `run_in_background=true`, then continue independent work. If the evidence is already sufficient or the remaining work is small, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
+        Some(DelegationCheckpoint::Nudge(format!(
+            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, start one named `agent` child with precise bounded instructions. Set `run_in_background=true` only when that field is available on the current Agent tool surface; in that case, continue independent work while the child runs. Otherwise run the named child in the foreground and use its result before continuing. If the evidence is already sufficient or the remaining work is small, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
             self.consecutive_observation_turns,
             self.observed_areas.len(),
-        ))
+        )))
     }
 
     fn reset_sequence(&mut self) {
@@ -864,8 +878,14 @@ mod tests {
                 assert!(nudge.is_none());
             } else {
                 let nudge = nudge.expect("broad sustained observation should nudge");
+                let DelegationCheckpoint::Nudge(nudge) = nudge else {
+                    panic!("first broad checkpoint must be a nudge");
+                };
                 assert!(nudge.contains("named `agent` child"));
-                assert!(nudge.contains("run_in_background=true"));
+                assert!(
+                    nudge.contains("`run_in_background=true` only when that field is available")
+                );
+                assert!(nudge.contains("run the named child in the foreground"));
             }
         }
 
@@ -874,9 +894,14 @@ mod tests {
             "read",
             json!({"file_path": "docs/architecture.md"}),
         )];
-        assert!(tracker
+        let landing = tracker
             .record_turn(&calls, &[result("read-4", "observed", false)])
-            .is_none());
+            .expect("ignoring the checkpoint must converge");
+        let DelegationCheckpoint::Land(diagnostic) = landing else {
+            panic!("second broad checkpoint must land");
+        };
+        assert!(diagnostic.contains("Synthesize the evidence"));
+        assert!(diagnostic.contains("delegate one precise bounded child"));
     }
 
     #[test]

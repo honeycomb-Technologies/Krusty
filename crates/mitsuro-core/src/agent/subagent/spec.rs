@@ -103,6 +103,9 @@ impl AgentSpec {
             return Err("Agent spawn requires a non-empty prompt/objective".to_string());
         }
 
+        let has_legacy_identity = profile
+            .or(legacy_agent_type)
+            .is_some_and(is_legacy_unnamed_profile);
         let profile = match (profile.map(str::trim), legacy_agent_type.map(str::trim)) {
             (Some(profile), Some(legacy)) if !profile.eq_ignore_ascii_case(legacy) => {
                 return Err(format!(
@@ -134,20 +137,26 @@ impl AgentSpec {
         }
         // Name is the parent-chosen identity for status/completion. Prefer
         // explicit name over legacy profile labels.
-        let task_name = task_name
+        let explicit_task_name = task_name
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                if matches!(
-                    profile.as_str(),
-                    "child" | "general" | "explore" | "plan" | "verify" | "build" | "default"
-                ) {
-                    "child".to_string()
-                } else {
-                    profile.clone()
-                }
-            });
+            .map(ToString::to_string);
+        if explicit_task_name.is_none() && !has_legacy_identity {
+            return Err(
+                "Agent spawn requires a non-empty name. Legacy profile/agent_type calls may omit it during compatibility replay."
+                    .to_string(),
+            );
+        }
+        let task_name = explicit_task_name.unwrap_or_else(|| {
+            if matches!(
+                profile.as_str(),
+                "child" | "general" | "explore" | "plan" | "verify" | "build" | "default"
+            ) {
+                "child".to_string()
+            } else {
+                profile.clone()
+            }
+        });
         if task_name.len() > 96 {
             return Err("Agent task_name must be 96 characters or fewer".to_string());
         }
@@ -203,6 +212,13 @@ impl AgentSpec {
     }
 }
 
+fn is_legacy_unnamed_profile(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "explore" | "build" | "worker" | "plan" | "verify"
+    )
+}
+
 fn preset_capabilities(profile: &str) -> BTreeSet<AgentCapability> {
     match profile {
         // Legacy build/worker implied the old builder surface, including
@@ -239,13 +255,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_child_is_agnostic_and_read_only() {
-        let spec = AgentSpec::resolve(None, None, None, "audit", None, None, &[], None, None, None)
-            .unwrap();
-        assert_eq!(spec.profile, "child");
+    fn new_child_requires_parent_chosen_name() {
+        let error =
+            AgentSpec::resolve(None, None, None, "audit", None, None, &[], None, None, None)
+                .unwrap_err();
+        assert!(error.contains("requires a non-empty name"));
+    }
+
+    #[test]
+    fn legacy_profile_may_supply_compatibility_name() {
+        let spec = AgentSpec::resolve(
+            Some("explore"),
+            None,
+            None,
+            "audit",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spec.profile, "explore");
         assert_eq!(spec.task_name, "child");
         assert_eq!(spec.execution_profile(), AgentExecutionProfile::Explore);
         assert_eq!(spec.parent_context_turns(), Some(10));
+    }
+
+    #[test]
+    fn generic_or_custom_profile_does_not_bypass_required_name() {
+        for profile in ["child", "default", "security-audit"] {
+            let error = AgentSpec::resolve(
+                Some(profile),
+                None,
+                None,
+                "audit",
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("requires a non-empty name"),
+                "{profile}: {error}"
+            );
+        }
     }
 
     #[test]

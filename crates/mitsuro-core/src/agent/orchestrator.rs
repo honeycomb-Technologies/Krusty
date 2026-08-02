@@ -39,11 +39,12 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, HiveProfileSnapshot, PartialAssistantState, PendingInteractionSnapshot,
-    ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
+    Database, DelegatedRunRecord, DelegatedRunStore, MakoProfileSnapshot, PartialAssistantState,
+    PendingInteractionSnapshot, ProjectSettings, RecoveryStatus, SessionManager, SessionType,
+    WorkMode,
 };
 use crate::tools::registry::{
-    agent_call_is_research, agent_call_requests_write, effective_tool_call,
+    agent_call_action, agent_call_is_research, agent_call_requests_write, effective_tool_call,
 };
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
@@ -66,9 +67,10 @@ use super::context_ledger::ContextLedger;
 use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopInputInbox, LoopStopReason};
-use super::progress::{DelegationNudgeTracker, LoopGuard};
+use super::progress::{DelegationCheckpoint, DelegationNudgeTracker, LoopGuard};
 use super::state::{RunBudget, RunBudgetResolution};
 use super::stream;
+use super::subagent::AgentCapability;
 use super::DelegatedProgressEvent;
 
 use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
@@ -81,7 +83,8 @@ use self::recovery::{
     continuation_recovery_message,
 };
 use self::title::maybe_generate_title;
-use self::tool_surface::{advertised_names, has_active_plan, ModeAwareToolSurface};
+use self::tool_surface::{advertised_names, ModeAwareToolSurface};
+use crate::plan::has_active_workflow_or_plan;
 
 const EMPTY_COMPLETION_RECOVERY_INSTRUCTION: &str = "[EMPTY RESPONSE RECOVERY]\nThe previous model completion contained no user-visible text or tool call. Continue the same turn from the existing conversation and provide the response requested by the user now, or make a necessary new tool call. Do not repeat a completed tool call merely because the prior completion was empty, and do not mention this recovery instruction.";
 const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
@@ -379,11 +382,114 @@ fn record_active_goal_tokens(
     ))
 }
 
-fn is_research_action(call: &AiToolCall) -> bool {
-    matches!(
+fn is_research_action(
+    call: &AiToolCall,
+    tool_results: &[Content],
+    delegated_store: Option<&DelegatedRunStore>,
+    session_id: &str,
+) -> bool {
+    if matches!(
         call.name.as_str(),
         "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch"
-    ) || (call.name == "agent" && agent_call_is_research(&call.arguments))
+    ) {
+        return true;
+    }
+    if call.name != "agent" {
+        return false;
+    }
+
+    let action = agent_call_action(&call.arguments);
+    let source_run_id = call
+        .arguments
+        .get("delegated_run_id")
+        .and_then(serde_json::Value::as_str);
+    let returned_run_id = successful_agent_result_run_id(&call.id, tool_results);
+    let returned_run = returned_run_id
+        .as_deref()
+        .and_then(|run_id| load_owned_delegated_run(delegated_store, run_id, session_id))
+        .filter(|record| {
+            record
+                .parent_tool_call_id
+                .as_deref()
+                .is_none_or(|parent_tool_call_id| parent_tool_call_id == call.id)
+        });
+
+    match action {
+        // Prefer the durable child contract over request labels. Static request
+        // classification remains the fallback for a failed spawn that never
+        // produced a durable run.
+        "spawn" => returned_run
+            .as_ref()
+            .map(delegated_run_is_research)
+            .unwrap_or_else(|| agent_call_is_research(&call.arguments)),
+        // Resume restores its capability ceiling from storage, so a bare resume
+        // cannot be classified from the top-level arguments. Prefer the newly
+        // created continuation, then the source contract if the attempt failed
+        // before creating one.
+        "resume" => returned_run
+            .as_ref()
+            .map(delegated_run_is_research)
+            .or_else(|| {
+                source_run_id
+                    .and_then(|run_id| {
+                        load_owned_delegated_run(delegated_store, run_id, session_id)
+                    })
+                    .as_ref()
+                    .map(delegated_run_is_research)
+            })
+            .unwrap_or(false),
+        // A live followup only writes to an existing mailbox and is not a new
+        // research action. A terminal followup returns a different run id after
+        // it has been converted into a real Spawn; classify that durable child.
+        "followup" if returned_run_id.as_deref() != source_run_id => returned_run
+            .as_ref()
+            .map(delegated_run_is_research)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn successful_agent_result_run_id(tool_call_id: &str, tool_results: &[Content]) -> Option<String> {
+    tool_results.iter().find_map(|result| {
+        let Content::ToolResult {
+            tool_use_id,
+            output,
+            is_error,
+        } = result
+        else {
+            return None;
+        };
+        if tool_use_id != tool_call_id
+            || is_error.unwrap_or(false)
+            || output
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let result = output.get("result").unwrap_or(output);
+        let payload = result.get("data").unwrap_or(result);
+        payload
+            .get("delegated_run_id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+    })
+}
+
+fn load_owned_delegated_run(
+    delegated_store: Option<&DelegatedRunStore>,
+    delegated_run_id: &str,
+    session_id: &str,
+) -> Option<DelegatedRunRecord> {
+    delegated_store
+        .and_then(|store| store.get_run(delegated_run_id).ok().flatten())
+        .filter(|record| record.parent_session_id == session_id)
+}
+
+fn delegated_run_is_research(record: &DelegatedRunRecord) -> bool {
+    let capabilities = record.effective_capabilities();
+    capabilities.contains(&AgentCapability::Read) && !capabilities.contains(&AgentCapability::Write)
 }
 
 fn tool_batch_made_material_progress(tool_results: &[Content]) -> bool {
@@ -442,9 +548,9 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) session_id: String,
     pub(crate) working_dir: PathBuf,
     pub(crate) project_dir: Option<PathBuf>,
-    pub(crate) hive_crew_slug: Option<String>,
-    /// Database-owned Hive identity frozen once at run start.
-    pub(crate) hive_profile: Option<Arc<HiveProfileSnapshot>>,
+    pub(crate) mako_crew_slug: Option<String>,
+    /// Database-owned Mako identity frozen once at run start.
+    pub(crate) mako_profile: Option<Arc<MakoProfileSnapshot>>,
     pub(crate) session_type: SessionType,
     pub(crate) permission_mode: PermissionMode,
     /// Optional explicit per-turn execution capability. `None` preserves the
@@ -473,8 +579,8 @@ impl Default for OrchestratorConfig {
             session_id: String::new(),
             working_dir: PathBuf::new(),
             project_dir: None,
-            hive_crew_slug: None,
-            hive_profile: None,
+            mako_crew_slug: None,
+            mako_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             execution_tool_allowlist: None,
@@ -542,7 +648,7 @@ fn session_type_name(session_type: SessionType) -> &'static str {
     match session_type {
         SessionType::Chat => "chat",
         SessionType::Code => "code",
-        SessionType::Hive => "hive",
+        SessionType::Mako => "mako",
     }
 }
 
@@ -552,15 +658,15 @@ fn inject_runtime_context(
     session_id: &str,
     working_dir: &Path,
     project_dir: Option<&Path>,
-    hive_crew_slug: Option<&str>,
-    hive_profile: Option<&HiveProfileSnapshot>,
+    mako_crew_slug: Option<&str>,
+    mako_profile: Option<&MakoProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context_with_hive_profile(
+    context::inject_context_with_mako_profile(
         conversation,
         db_path,
         session_id,
@@ -570,9 +676,9 @@ fn inject_runtime_context(
         skills_manager,
         model,
         Some(session_type_name(session_type)),
-        hive_crew_slug,
+        mako_crew_slug,
         user_id,
-        hive_profile,
+        mako_profile,
     )
 }
 
@@ -660,8 +766,8 @@ impl AgenticOrchestrator {
             session_id,
             working_dir,
             project_dir,
-            hive_crew_slug,
-            hive_profile,
+            mako_crew_slug,
+            mako_profile,
             session_type,
             permission_mode,
             execution_tool_allowlist,
@@ -674,7 +780,7 @@ impl AgenticOrchestrator {
             delegated_progress_tx,
         } = self.config;
 
-        // Load per-project settings from .mitsuro/settings.json
+        // Load per-project settings from .krusty/settings.json
         let project_settings =
             ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
 
@@ -705,7 +811,7 @@ impl AgenticOrchestrator {
             ai_client.as_ref(),
             permission_mode,
             work_mode,
-            has_active_plan(&db_path, &session_id),
+            has_active_workflow_or_plan(&db_path, &session_id),
             project_settings
                 .disabled_tools
                 .as_deref()
@@ -896,8 +1002,8 @@ impl AgenticOrchestrator {
                 &session_id,
                 &working_dir,
                 project_dir.as_deref(),
-                hive_crew_slug.as_deref(),
-                hive_profile.as_deref(),
+                mako_crew_slug.as_deref(),
+                mako_profile.as_deref(),
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
@@ -1416,7 +1522,7 @@ impl AgenticOrchestrator {
             // completed tool call or polluting canonical conversation history.
             empty_completion_recovery_pending = false;
             let empty_completion =
-                if loop_guard_landing.is_some() || session_type == SessionType::Hive {
+                if loop_guard_landing.is_some() || session_type == SessionType::Mako {
                     EmptyCompletionAction::None
                 } else {
                     empty_completion_action(
@@ -1859,7 +1965,7 @@ impl AgenticOrchestrator {
                 ai_client.as_ref(),
                 permission_mode,
                 work_mode,
-                has_active_plan(&db_path, &session_id),
+                has_active_workflow_or_plan(&db_path, &session_id),
                 project_settings
                     .disabled_tools
                     .as_deref()
@@ -1867,12 +1973,20 @@ impl AgenticOrchestrator {
                 execution_tool_allowlist.as_ref(),
             );
             let tool_results = tool_batch.results;
+            let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
             goal_tool_call_count = goal_tool_call_count.saturating_add(result.tool_calls.len());
             goal_research_action_count = goal_research_action_count.saturating_add(
                 result
                     .tool_calls
                     .iter()
-                    .filter(|call| is_research_action(call))
+                    .filter(|call| {
+                        is_research_action(
+                            call,
+                            &tool_results,
+                            delegated_store.as_ref(),
+                            &session_id,
+                        )
+                    })
                     .count(),
             );
 
@@ -1908,7 +2022,7 @@ impl AgenticOrchestrator {
                 .as_ref()
                 .and_then(|telemetry| telemetry.replan_instruction())
                 .map(ToString::to_string);
-            let terminal_loop_landing = fail_diagnostic
+            let guard_loop_landing = fail_diagnostic
                 .as_ref()
                 .or(explore_diagnostic.as_ref())
                 .or(read_only_loop_diagnostic.as_ref())
@@ -1926,9 +2040,25 @@ impl AgenticOrchestrator {
                             block_goal: false,
                         })
                 });
-            let delegation_nudge_instruction = delegation_nudge_tracker
-                .record_turn(&result.tool_calls, &tool_results)
-                .filter(|_| terminal_loop_landing.is_none());
+            let delegation_checkpoint = guard_loop_landing
+                .is_none()
+                .then(|| delegation_nudge_tracker.record_turn(&result.tool_calls, &tool_results));
+            let delegation_nudge_instruction =
+                match delegation_checkpoint.as_ref().and_then(Option::as_ref) {
+                    Some(DelegationCheckpoint::Nudge(instruction)) => Some(instruction.clone()),
+                    Some(DelegationCheckpoint::Land(_)) | None => None,
+                };
+            let terminal_loop_landing = guard_loop_landing.or_else(|| {
+                match delegation_checkpoint.flatten() {
+                    Some(DelegationCheckpoint::Land(diagnostic)) => Some(LoopGuardLanding {
+                        diagnostic,
+                        // This is convergence pressure, not evidence that an
+                        // active Goal itself is blocked.
+                        block_goal: false,
+                    }),
+                    Some(DelegationCheckpoint::Nudge(_)) | None => None,
+                }
+            });
             let blocker_fingerprint = terminal_loop_landing
                 .as_ref()
                 .filter(|landing| landing.block_goal)
@@ -2496,6 +2626,7 @@ async fn apply_in_place_compaction(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
 
     use super::effective_context_window_for_runtime;
@@ -2503,6 +2634,7 @@ mod tests {
     use super::ensure_active_goal_attempt_for_run;
     use super::inject_pending_steering;
     use super::inject_runtime_context;
+    use super::is_research_action;
     use super::message_builder::finalize_explore_only_turn;
     use super::no_tool_completion_should_continue;
     use super::provider_options_for_turn;
@@ -2520,10 +2652,15 @@ mod tests {
         is_stale_compaction_snapshot_error, mpsc, reload_persisted_conversation, ContextLedger,
     };
     use crate::agent::loop_events::{LoopInput, LoopInputInbox, LoopStopReason};
+    use crate::agent::subagent::AgentCapability;
+    use crate::agent::DelegatedRunStage;
     use crate::ai::client::CallOptions;
     use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
-    use crate::storage::{Database, ProjectSettings, SessionManager, SessionType, WorkMode};
+    use crate::storage::{
+        Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
+        ProjectSettings, SessionManager, SessionType, WorkMode,
+    };
     use crate::tools::registry::PermissionMode;
     use crate::workflow::{
         AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, GoalStatus,
@@ -2533,6 +2670,179 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    fn seed_research_accounting_run(
+        store: &DelegatedRunStore,
+        session_id: &str,
+        delegated_run_id: &str,
+        parent_tool_call_id: &str,
+        role: DelegatedRunRole,
+        stage: DelegatedRunStage,
+        capabilities: BTreeSet<AgentCapability>,
+    ) -> anyhow::Result<()> {
+        store.create_run_with_child_contract(
+            &DelegatedRunStartInput {
+                delegated_run_id: delegated_run_id.to_string(),
+                parent_session_id: session_id.to_string(),
+                parent_tool_call_id: Some(parent_tool_call_id.to_string()),
+                role,
+                stage,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "workspace".to_string(),
+                    path: ".".to_string(),
+                    kind: "workspace".to_string(),
+                }],
+            },
+            Some(delegated_run_id),
+            &capabilities,
+        )?;
+        Ok(())
+    }
+
+    fn successful_agent_result(
+        tool_call_id: &str,
+        delegated_run_id: &str,
+        status: &str,
+    ) -> Content {
+        Content::ToolResult {
+            tool_use_id: tool_call_id.to_string(),
+            output: json!({
+                "tool": "agent",
+                "is_error": false,
+                "result": {
+                    "status": status,
+                    "delegated_run_id": delegated_run_id,
+                }
+            }),
+            is_error: None,
+        }
+    }
+
+    #[test]
+    fn research_accounting_uses_durable_resume_and_followup_contracts() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("delegated-research-accounting.db");
+        let sessions = SessionManager::new(Database::new(&db_path)?);
+        let session_id =
+            sessions.create_session("research accounting", Some("test-model"), None)?;
+        drop(sessions);
+        let store = DelegatedRunStore::new(Database::new(&db_path)?);
+
+        seed_research_accounting_run(
+            &store,
+            &session_id,
+            "read-source",
+            "original-read-call",
+            DelegatedRunRole::Explore,
+            DelegatedRunStage::Complete,
+            BTreeSet::from([AgentCapability::Read]),
+        )?;
+        seed_research_accounting_run(
+            &store,
+            &session_id,
+            "write-source",
+            "original-write-call",
+            DelegatedRunRole::Build,
+            DelegatedRunStage::Complete,
+            BTreeSet::from([AgentCapability::Read, AgentCapability::Write]),
+        )?;
+        seed_research_accounting_run(
+            &store,
+            &session_id,
+            "read-continuation",
+            "terminal-followup-read",
+            DelegatedRunRole::Explore,
+            DelegatedRunStage::Created,
+            BTreeSet::from([AgentCapability::Read]),
+        )?;
+        seed_research_accounting_run(
+            &store,
+            &session_id,
+            "write-continuation",
+            "terminal-followup-write",
+            DelegatedRunRole::Build,
+            DelegatedRunStage::Created,
+            BTreeSet::from([AgentCapability::Read, AgentCapability::Write]),
+        )?;
+
+        let bare_read_resume = AiToolCall {
+            id: "resume-read".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "resume", "delegated_run_id": "read-source"}),
+        };
+        assert!(is_research_action(
+            &bare_read_resume,
+            &[],
+            Some(&store),
+            &session_id
+        ));
+
+        let bare_write_resume = AiToolCall {
+            id: "resume-write".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "resume", "delegated_run_id": "write-source"}),
+        };
+        assert!(!is_research_action(
+            &bare_write_resume,
+            &[],
+            Some(&store),
+            &session_id
+        ));
+
+        let live_followup = AiToolCall {
+            id: "live-followup".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "followup", "delegated_run_id": "read-source"}),
+        };
+        assert!(!is_research_action(
+            &live_followup,
+            &[successful_agent_result(
+                "live-followup",
+                "read-source",
+                "queued"
+            )],
+            Some(&store),
+            &session_id
+        ));
+
+        let terminal_read_followup = AiToolCall {
+            id: "terminal-followup-read".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "followup", "delegated_run_id": "read-source"}),
+        };
+        assert!(is_research_action(
+            &terminal_read_followup,
+            &[successful_agent_result(
+                "terminal-followup-read",
+                "read-continuation",
+                "background_started"
+            )],
+            Some(&store),
+            &session_id
+        ));
+
+        let terminal_write_followup = AiToolCall {
+            id: "terminal-followup-write".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "followup", "delegated_run_id": "write-source"}),
+        };
+        assert!(!is_research_action(
+            &terminal_write_followup,
+            &[successful_agent_result(
+                "terminal-followup-write",
+                "write-continuation",
+                "background_started"
+            )],
+            Some(&store),
+            &session_id
+        ));
+
+        Ok(())
+    }
 
     #[test]
     fn stale_compaction_snapshot_can_reload_canonical_transcript() -> anyhow::Result<()> {
@@ -2706,7 +3016,7 @@ mod tests {
     fn durable_steering_promotes_once_after_the_completed_assistant_message() -> anyhow::Result<()>
     {
         let temp = TempDir::new()?;
-        let db_path = temp.path().join("mitsuro.db");
+        let db_path = temp.path().join("krusty.db");
         let manager = SessionManager::new(Database::new(&db_path)?);
         let session_id = manager.create_session("steering", Some("test-model"), None)?;
         let initial_user = ModelMessage {
@@ -2788,7 +3098,7 @@ mod tests {
     fn externally_persisted_user_message_is_injected_without_duplicate_history(
     ) -> anyhow::Result<()> {
         let temp = TempDir::new()?;
-        let db_path = temp.path().join("mitsuro.db");
+        let db_path = temp.path().join("krusty.db");
         let manager = SessionManager::new(Database::new(&db_path)?);
         let session_id = manager.create_session("persisted input", Some("test-model"), None)?;
         let initial_user = ModelMessage {
@@ -3219,12 +3529,12 @@ mod tests {
     }
 
     #[test]
-    fn inject_runtime_context_applies_hive_session_identity() -> anyhow::Result<()> {
+    fn inject_runtime_context_applies_mako_session_identity() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
         let repo = temp.path();
         fs::create_dir_all(repo.join(".git"))?;
         fs::write(repo.join("AGENTS.md"), "repo instructions")?;
-        fs::write(repo.join("HIVE.md"), "Always Swimming.")?;
+        fs::write(repo.join("MAKO.md"), "Always Swimming.")?;
 
         let skills = RwLock::new(SkillsManager::with_defaults(repo));
         let conversation = vec![ModelMessage {
@@ -3233,9 +3543,9 @@ mod tests {
                 text: "hello".to_string(),
             }],
         }];
-        let db_path = repo.join("mitsuro.db");
+        let db_path = repo.join("krusty.db");
 
-        let hive_injected = inject_runtime_context(
+        let mako_injected = inject_runtime_context(
             &conversation,
             &db_path,
             "session-id",
@@ -3246,7 +3556,7 @@ mod tests {
             WorkMode::Build,
             &skills,
             None,
-            SessionType::Hive,
+            SessionType::Mako,
             None,
         );
         let code_injected = inject_runtime_context(
@@ -3264,17 +3574,17 @@ mod tests {
             None,
         );
 
-        assert!(hive_injected.iter().any(|message| {
+        assert!(mako_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
                 Content::Text { text }
-                    if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]") && text.contains("Always Swimming.")
+                    if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]") && text.contains("Always Swimming.")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
+                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
             )
         }));
         Ok(())

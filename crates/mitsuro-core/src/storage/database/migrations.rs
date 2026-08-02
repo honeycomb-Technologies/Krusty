@@ -5,25 +5,6 @@ use tracing::{debug, info};
 use super::{Database, SCHEMA_VERSION};
 
 impl Database {
-    /// Open an existing migration fixture and advance it only to `target_version`.
-    ///
-    /// Historical unit fixtures intentionally contain just the table exercised
-    /// by one migration. They must not be passed through every later production
-    /// migration, whose input contract is the complete schema for that version.
-    #[cfg(test)]
-    pub(crate) fn open_migration_fixture(
-        path: &std::path::Path,
-        target_version: i32,
-    ) -> Result<Self> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(30))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        let database = Self { conn };
-        database.run_migrations_to(target_version)?;
-        Ok(database)
-    }
-
     /// Get the current schema version from database
     #[cfg(test)]
     pub(crate) fn get_schema_version(&self) -> i32 {
@@ -74,113 +55,6 @@ impl Database {
         .is_ok()
     }
 
-    /// Rebuild notification token tables only to replace machine-owned schema
-    /// defaults. Existing bundle identifiers are copied byte-for-byte so old
-    /// installed clients retain their valid APNs topics during the bridge.
-    fn rebuild_mobile_identity_defaults(tx: &rusqlite::Transaction<'_>) -> Result<()> {
-        if Self::table_exists(tx, "apns_devices") {
-            let before: i64 =
-                tx.query_row("SELECT COUNT(*) FROM apns_devices", [], |row| row.get(0))?;
-            tx.execute_batch(
-                r#"
-                DROP INDEX IF EXISTS idx_apns_devices_user;
-                ALTER TABLE apns_devices RENAME TO legacy_apns_devices_v53;
-                CREATE TABLE apns_devices (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT,
-                    device_token TEXT NOT NULL UNIQUE,
-                    bundle_id TEXT NOT NULL DEFAULT 'io.mitsuro.mobile',
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    last_used_at TEXT,
-                    last_success_at TEXT,
-                    last_failure_at TEXT,
-                    last_failure_reason TEXT,
-                    failure_count INTEGER NOT NULL DEFAULT 0,
-                    notification_level TEXT NOT NULL DEFAULT 'important'
-                        CHECK (notification_level IN ('all', 'important', 'silent')),
-                    environment TEXT NOT NULL DEFAULT 'production'
-                        CHECK (environment IN ('sandbox', 'production')),
-                    last_registered_at TEXT,
-                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
-                );
-                INSERT INTO apns_devices (
-                    id, user_id, device_token, bundle_id, created_at, last_used_at,
-                    last_success_at, last_failure_at, last_failure_reason, failure_count,
-                    notification_level, environment, last_registered_at, enabled
-                )
-                SELECT
-                    id, user_id, device_token, bundle_id, created_at, last_used_at,
-                    last_success_at, last_failure_at, last_failure_reason, failure_count,
-                    notification_level, environment, last_registered_at, enabled
-                FROM legacy_apns_devices_v53;
-                DROP TABLE legacy_apns_devices_v53;
-                CREATE INDEX idx_apns_devices_user ON apns_devices(user_id);
-                "#,
-            )?;
-            let after: i64 =
-                tx.query_row("SELECT COUNT(*) FROM apns_devices", [], |row| row.get(0))?;
-            ensure!(
-                before == after,
-                "Migration 53: APNs device row parity failed"
-            );
-        }
-
-        if Self::table_exists(tx, "live_activity_tokens") {
-            let before: i64 =
-                tx.query_row("SELECT COUNT(*) FROM live_activity_tokens", [], |row| {
-                    row.get(0)
-                })?;
-            tx.execute_batch(
-                r#"
-                DROP INDEX IF EXISTS idx_live_activity_tokens_session_active;
-                DROP INDEX IF EXISTS idx_live_activity_tokens_user;
-                ALTER TABLE live_activity_tokens RENAME TO legacy_live_activity_tokens_v53;
-                CREATE TABLE live_activity_tokens (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT,
-                    session_id TEXT NOT NULL,
-                    push_token TEXT NOT NULL UNIQUE,
-                    bundle_id TEXT NOT NULL DEFAULT 'io.mitsuro.mobile',
-                    environment TEXT NOT NULL DEFAULT 'production'
-                        CHECK (environment IN ('sandbox', 'production')),
-                    content_state_json TEXT NOT NULL DEFAULT '{}'
-                        CHECK (json_valid(content_state_json)),
-                    started_at_ms INTEGER NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-                );
-                INSERT INTO live_activity_tokens (
-                    id, user_id, session_id, push_token, bundle_id, environment,
-                    content_state_json, started_at_ms, active, created_at,
-                    updated_at, ended_at
-                )
-                SELECT
-                    id, user_id, session_id, push_token, bundle_id, environment,
-                    content_state_json, started_at_ms, active, created_at,
-                    updated_at, ended_at
-                FROM legacy_live_activity_tokens_v53;
-                DROP TABLE legacy_live_activity_tokens_v53;
-                CREATE INDEX idx_live_activity_tokens_session_active
-                    ON live_activity_tokens(session_id, active);
-                CREATE INDEX idx_live_activity_tokens_user
-                    ON live_activity_tokens(user_id);
-                "#,
-            )?;
-            let after: i64 =
-                tx.query_row("SELECT COUNT(*) FROM live_activity_tokens", [], |row| {
-                    row.get(0)
-                })?;
-            ensure!(
-                before == after,
-                "Migration 53: Live Activity token row parity failed"
-            );
-        }
-        Ok(())
-    }
-
     fn checkpoint_wal_without_busy_readers(&self, phase: &str) -> Result<()> {
         let (busy, log_frames, checkpointed_frames) = self
             .conn
@@ -191,10 +65,10 @@ impl Database {
                     row.get::<_, i64>(2)?,
                 ))
             })
-            .with_context(|| format!("{phase} legacy Hive privacy WAL checkpoint"))?;
+            .with_context(|| format!("{phase} Mako privacy WAL checkpoint"))?;
         ensure!(
             busy == 0,
-            "{phase} legacy Hive privacy WAL checkpoint was busy (log_frames={log_frames}, checkpointed_frames={checkpointed_frames})"
+            "{phase} Mako privacy WAL checkpoint was busy (log_frames={log_frames}, checkpointed_frames={checkpointed_frames})"
         );
         Ok(())
     }
@@ -206,23 +80,19 @@ impl Database {
     fn restore_normal_locking_after_privacy_migration(&self) -> Result<()> {
         self.conn
             .pragma_update(None, "locking_mode", "NORMAL")
-            .context("restoring normal SQLite locking after legacy Hive privacy migration")?;
+            .context("restoring normal SQLite locking after Mako privacy migration")?;
         self.conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_version",
                 [],
                 |row| row.get::<_, i32>(0),
             )
-            .context("releasing exclusive SQLite lock after legacy Hive privacy migration")?;
+            .context("releasing exclusive SQLite lock after Mako privacy migration")?;
         Ok(())
     }
 
     /// Run database migrations incrementally
     pub(crate) fn run_migrations(&self) -> Result<()> {
-        self.run_migrations_to(SCHEMA_VERSION)
-    }
-
-    fn run_migrations_to(&self, target_version: i32) -> Result<()> {
         // The steady-state path is read-only. Runtime stores open short-lived
         // connections frequently, so do not acquire the global SQLite writer
         // lock once this process has observed the target schema.
@@ -234,7 +104,7 @@ impl Database {
                 |row| row.get::<_, i32>(0),
             )
             .ok();
-        if observed_version.is_some_and(|version| version >= target_version) {
+        if observed_version.is_some_and(|version| version >= SCHEMA_VERSION) {
             return Ok(());
         }
 
@@ -247,13 +117,13 @@ impl Database {
         if privacy_cleanup_requested {
             self.conn
                 .pragma_update(None, "secure_delete", "ON")
-                .context("enabling secure deletion for legacy Hive privacy migration")?;
+                .context("enabling secure deletion for Mako privacy migration")?;
             self.conn
                 .pragma_update(None, "locking_mode", "EXCLUSIVE")
-                .context("reserving exclusive access for legacy Hive privacy migration")?;
+                .context("reserving exclusive access for Mako privacy migration")?;
         }
 
-        // The HTTP process and the independently supervised legacy Hive daemon can
+        // The HTTP process and the independently supervised Mako daemon can
         // open the same database at the same time. Acquire the SQLite write
         // reservation before reading the version so a waiter observes every
         // migration committed by the process that won the startup race.
@@ -276,7 +146,7 @@ impl Database {
             .context("reading database schema version under migration lock")?;
         debug!(
             "Database schema version: {} (target: {})",
-            current_version, target_version
+            current_version, SCHEMA_VERSION
         );
 
         // A missing version table and a transient read blocked by another
@@ -290,14 +160,14 @@ impl Database {
             tx.commit()?;
             self.conn
                 .pragma_update(None, "secure_delete", "ON")
-                .context("enabling secure deletion for legacy Hive privacy migration")?;
+                .context("enabling secure deletion for Mako privacy migration")?;
             self.conn
                 .pragma_update(None, "locking_mode", "EXCLUSIVE")
-                .context("reserving exclusive access for legacy Hive privacy migration")?;
+                .context("reserving exclusive access for Mako privacy migration")?;
             return self.run_migrations();
         }
 
-        if current_version >= target_version {
+        if current_version >= SCHEMA_VERSION {
             tx.commit()?;
             if privacy_cleanup_requested {
                 self.restore_normal_locking_after_privacy_migration()?;
@@ -869,7 +739,7 @@ impl Database {
             self.set_schema_version_tx(&tx, 19)?;
         }
 
-        // Migration 20: Autonomous tasks for legacy Hive agent coordination
+        // Migration 20: Autonomous tasks for Mako agent coordination
         if current_version < 20 {
             info!("Running migration 20: Autonomous tasks");
             tx.execute_batch(
@@ -1075,9 +945,9 @@ impl Database {
             self.set_schema_version_tx(&tx, 26)?;
         }
 
-        // Migration 27: Persisted legacy Hive runtime state
+        // Migration 27: Persisted Mako runtime state
         if current_version < 27 {
-            info!("Running migration 27: legacy Hive runtime state");
+            info!("Running migration 27: Mako runtime state");
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS mako_runtime_state (
                     session_id TEXT PRIMARY KEY,
@@ -1096,13 +966,13 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_mako_runtime_state_next_wake
                     ON mako_runtime_state(next_wake_at);",
             )
-            .context("Migration 27: legacy Hive runtime state")?;
+            .context("Migration 27: Mako runtime state")?;
             self.set_schema_version_tx(&tx, 27)?;
         }
 
-        // Migration 28: Persisted legacy Hive run priority
+        // Migration 28: Persisted Mako run priority
         if current_version < 28 {
-            info!("Running migration 28: legacy Hive run priority");
+            info!("Running migration 28: Mako run priority");
             if !Self::column_exists(&tx, "mako_runtime_state", "priority") {
                 tx.execute_batch(
                     "ALTER TABLE mako_runtime_state
@@ -1112,9 +982,9 @@ impl Database {
             self.set_schema_version_tx(&tx, 28)?;
         }
 
-        // Migration 29: Persisted legacy Hive crew assignment
+        // Migration 29: Persisted Mako crew assignment
         if current_version < 29 {
-            info!("Running migration 29: legacy Hive crew assignment");
+            info!("Running migration 29: Mako crew assignment");
             if !Self::column_exists(&tx, "mako_runtime_state", "crew_slug") {
                 tx.execute_batch(
                     "ALTER TABLE mako_runtime_state
@@ -1124,9 +994,9 @@ impl Database {
             self.set_schema_version_tx(&tx, 29)?;
         }
 
-        // Migration 30: Persisted legacy Hive attention item state
+        // Migration 30: Persisted Mako attention item state
         if current_version < 30 {
-            info!("Running migration 30: legacy Hive attention state");
+            info!("Running migration 30: Mako attention state");
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS mako_attention_state (
                     user_scope TEXT NOT NULL DEFAULT '',
@@ -1139,7 +1009,7 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_mako_attention_state_user_scope
                     ON mako_attention_state(user_scope);",
             )
-            .context("Migration 30: legacy Hive attention state")?;
+            .context("Migration 30: Mako attention state")?;
             self.set_schema_version_tx(&tx, 30)?;
         }
 
@@ -1244,9 +1114,9 @@ impl Database {
             self.set_schema_version_tx(&tx, 34)?;
         }
 
-        // Migration 35: Database-owned, revisioned legacy Hive identity profiles.
+        // Migration 35: Database-owned, revisioned Mako identity profiles.
         if current_version < 35 {
-            info!("Running migration 35: legacy Hive identity profiles");
+            info!("Running migration 35: Mako identity profiles");
             tx.execute_batch(
                 r#"
                 CREATE TABLE mako_profiles (
@@ -1291,13 +1161,13 @@ impl Database {
                 );
                 "#,
             )
-            .context("Migration 35: legacy Hive identity profiles")?;
+            .context("Migration 35: Mako identity profiles")?;
             self.set_schema_version_tx(&tx, 35)?;
         }
 
-        // Migration 36: Durable legacy Hive controllers, schedules, runs, leases, and event journal.
+        // Migration 36: Durable Mako controllers, schedules, runs, leases, and event journal.
         if current_version < 36 {
-            info!("Running migration 36: Durable legacy Hive scheduler");
+            info!("Running migration 36: Durable Mako scheduler");
             tx.execute_batch(
                 r#"
                 CREATE TABLE mako_controllers (
@@ -1483,13 +1353,13 @@ impl Database {
                     ON mako_controller_events(controller_id, sequence);
                 "#,
             )
-            .context("Migration 36: Durable legacy Hive scheduler")?;
+            .context("Migration 36: Durable Mako scheduler")?;
             self.set_schema_version_tx(&tx, 36)?;
         }
 
         // Migration 37: Owned cross-session episodic recall with a bounded FTS index.
         if current_version < 37 {
-            info!("Running migration 37: legacy Hive episodic recall");
+            info!("Running migration 37: Mako episodic recall");
             tx.execute_batch(
                 r#"
                 CREATE TABLE conversation_episodes (
@@ -1529,13 +1399,13 @@ impl Database {
                 END;
                 "#,
             )
-            .context("Migration 37: legacy Hive episodic recall")?;
+            .context("Migration 37: Mako episodic recall")?;
             self.set_schema_version_tx(&tx, 37)?;
         }
 
         // Migration 38: Governed post-turn learning proposals and reviewer checkpoints.
         if current_version < 38 {
-            info!("Running migration 38: Governed legacy Hive learning");
+            info!("Running migration 38: Governed Mako learning");
             tx.execute_batch(
                 r#"
                 CREATE TABLE mako_learning_runs (
@@ -1579,13 +1449,13 @@ impl Database {
                     ON mako_learning_candidates(project_dir, status);
                 "#,
             )
-            .context("Migration 38: Governed legacy Hive learning")?;
+            .context("Migration 38: Governed Mako learning")?;
             self.set_schema_version_tx(&tx, 38)?;
         }
 
         // Migration 39: Canonical, provenance-aware memory and derived knowledge snapshots.
         if current_version < 39 {
-            info!("Running migration 39: Canonical legacy Hive memory");
+            info!("Running migration 39: Canonical Mako memory");
 
             // Memory storage historically initialized lazily. Creating the
             // legacy columns first keeps this migration valid for databases
@@ -1773,15 +1643,15 @@ impl Database {
             self.set_schema_version_tx(&tx, 39)?;
         }
 
-        // Migration 40: Make every durable legacy Hive run transition produce an
+        // Migration 40: Make every durable Mako run transition produce an
         // authoritative replay event in the same SQLite transaction. Runtime
         // publishers may crash after commit; subscribers can still recover the
         // event from this journal.
-        if current_version < 40 && target_version >= 40 {
-            info!("Running migration 40: Atomic legacy Hive run transition journal");
+        if current_version < 40 {
+            info!("Running migration 40: Atomic Mako run transition journal");
             // Some legacy/specialized databases advance the shared schema
-            // version without materializing the optional legacy Hive tables. Keep
-            // their upgrade valid; any database with the legacy Hive contract gets
+            // version without materializing the optional Mako tables. Keep
+            // their upgrade valid; any database with the Mako contract gets
             // the trigger atomically with the version bump.
             if Self::table_exists(&tx, "mako_runs")
                 && Self::table_exists(&tx, "mako_controller_events")
@@ -1832,7 +1702,7 @@ impl Database {
                 END;
                 "#,
                 )
-                .context("Migration 40: atomic legacy Hive run transition journal")?;
+                .context("Migration 40: atomic Mako run transition journal")?;
             }
             self.set_schema_version_tx(&tx, 40)?;
         }
@@ -1841,8 +1711,8 @@ impl Database {
         // scheduled objective delivery. Tool approval decisions must survive
         // daemon restarts and host registration races; the scheduler delivers
         // this outbox only while holding its current process-generation fence.
-        if current_version < 41 && target_version >= 41 {
-            info!("Running migration 41: Durable legacy Hive control outbox");
+        if current_version < 41 {
+            info!("Running migration 41: Durable Mako control outbox");
             if Self::table_exists(&tx, "mako_controllers")
                 && Self::table_exists(&tx, "sessions")
                 && Self::table_exists(&tx, "mako_runs")
@@ -1880,19 +1750,19 @@ impl Database {
                     ON mako_control_outbox(status, available_at, created_at);
                 "#,
                 )
-                .context("Migration 41: durable legacy Hive control outbox")?;
+                .context("Migration 41: durable Mako control outbox")?;
             }
             self.set_schema_version_tx(&tx, 41)?;
         }
 
-        // Migration 42: Repair the atomic legacy Hive transition journal for
+        // Migration 42: Repair the atomic Mako transition journal for
         // controllers whose event stream is still empty. The original
         // trigger selected its next sequence from existing event rows, which
         // produced no INSERT candidate at all when there was no prior row.
         // Use a scalar subquery instead so the first status transition is
         // journaled in the same transaction as the run update.
-        if current_version < 42 && target_version >= 42 {
-            info!("Running migration 42: Complete atomic legacy Hive transition journal");
+        if current_version < 42 {
+            info!("Running migration 42: Complete atomic Mako transition journal");
             if Self::table_exists(&tx, "mako_runs")
                 && Self::table_exists(&tx, "mako_controller_events")
             {
@@ -1943,17 +1813,17 @@ impl Database {
                 END;
                 "#,
                 )
-                .context("Migration 42: complete atomic legacy Hive transition journal")?;
+                .context("Migration 42: complete atomic Mako transition journal")?;
             }
             self.set_schema_version_tx(&tx, 42)?;
         }
 
-        // Migration 43: Replace legacy Hive execution payloads with a
+        // Migration 43: Replace legacy Mako execution payloads with a
         // minimal allow-listed replay form. Earlier builds journaled raw
         // reasoning, provider signatures, tool arguments/results, web
         // bodies, and error copies. Those values are not a durable contract.
-        if current_version < 43 && target_version >= 43 {
-            info!("Running migration 43: Redact legacy Hive execution journal");
+        if current_version < 43 {
+            info!("Running migration 43: Redact legacy Mako execution journal");
             if Self::table_exists(&tx, "mako_controller_events")
                 && Self::column_exists(&tx, "mako_controller_events", "payload_json")
             {
@@ -2078,7 +1948,7 @@ impl Database {
                        END;
                     "#,
                 )
-                .context("Migration 43: redact legacy Hive controller events")?;
+                .context("Migration 43: redact legacy Mako controller events")?;
             }
 
             if Self::table_exists(&tx, "mako_runs") {
@@ -2251,7 +2121,7 @@ impl Database {
                     END;
                     "#,
                 )
-                .context("Migration 43: install privacy-safe legacy Hive transition journal")?;
+                .context("Migration 43: install privacy-safe Mako transition journal")?;
             }
             self.set_schema_version_tx(&tx, 43)?;
         }
@@ -2265,7 +2135,7 @@ impl Database {
             self.checkpoint_wal_without_busy_readers("pre-VACUUM")?;
             self.conn
                 .execute_batch("VACUUM;")
-                .context("physically erasing legacy Hive journal payloads")?;
+                .context("physically erasing legacy Mako journal payloads")?;
             self.checkpoint_wal_without_busy_readers("post-VACUUM")?;
         }
 
@@ -2273,18 +2143,15 @@ impl Database {
         // process that dies after migration 43 commits but before this insert
         // leaves the database at 43; the next opener repeats the idempotent
         // checkpoint/VACUUM and only then advances to 44.
-        if target_version >= 44 {
-            let finalize_tx =
-                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-                    .context("acquiring legacy Hive privacy-cleanup checkpoint lock")?;
-            finalize_tx
-                .execute(
-                    "INSERT OR IGNORE INTO schema_version (version) VALUES (44)",
-                    [],
-                )
-                .context("recording completed legacy Hive privacy cleanup")?;
-            finalize_tx.commit()?;
-        }
+        let finalize_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("acquiring Mako privacy-cleanup checkpoint lock")?;
+        finalize_tx
+            .execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (44)",
+                [],
+            )
+            .context("recording completed Mako privacy cleanup")?;
+        finalize_tx.commit()?;
 
         // Migration 45: provider-aware model identity on sessions.
         //
@@ -2292,7 +2159,7 @@ impl Database {
         // exact provider/auth/transport key and catalog revision alongside it.
         // Existing rows intentionally remain NULL: guessing a provider from a
         // bare slug would recreate the ambiguity this migration removes.
-        if current_version < 45 && target_version >= 45 {
+        if current_version < 45 {
             info!("Running migration 45: provider-aware session model identity");
             let model_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
                 .context("acquiring provider-aware model migration lock")?;
@@ -2317,39 +2184,36 @@ impl Database {
             model_tx.commit()?;
         }
 
-        // Migration 46: provider-aware model identity on durable legacy Hive schedules.
+        // Migration 46: provider-aware model identity on durable Mako schedules.
         //
         // Scheduled occurrences must retain the same provider/auth/transport
         // selection as the request that created them. Existing bare-model rows
         // remain NULL and use the ambiguity-rejecting legacy execution path.
-        if current_version < 46 && target_version >= 46 {
-            info!("Running migration 46: provider-aware legacy Hive schedule model identity");
-            let legacy_hive_model_tx =
+        if current_version < 46 {
+            info!("Running migration 46: provider-aware Mako schedule model identity");
+            let mako_model_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-                    .context("acquiring legacy Hive model identity migration lock")?;
-            if Self::table_exists(&legacy_hive_model_tx, "mako_schedules") {
-                if !Self::column_exists(&legacy_hive_model_tx, "mako_schedules", "model_key_json") {
-                    legacy_hive_model_tx
+                    .context("acquiring Mako model identity migration lock")?;
+            if Self::table_exists(&mako_model_tx, "mako_schedules") {
+                if !Self::column_exists(&mako_model_tx, "mako_schedules", "model_key_json") {
+                    mako_model_tx
                         .execute_batch("ALTER TABLE mako_schedules ADD COLUMN model_key_json TEXT;")
-                        .context("Migration 46: add legacy Hive schedule model key")?;
+                        .context("Migration 46: add Mako schedule model key")?;
                 }
-                if !Self::column_exists(
-                    &legacy_hive_model_tx,
-                    "mako_schedules",
-                    "model_catalog_revision",
-                ) {
-                    legacy_hive_model_tx
+                if !Self::column_exists(&mako_model_tx, "mako_schedules", "model_catalog_revision")
+                {
+                    mako_model_tx
                         .execute_batch(
                             "ALTER TABLE mako_schedules ADD COLUMN model_catalog_revision TEXT;",
                         )
-                        .context("Migration 46: add legacy Hive schedule model catalog revision")?;
+                        .context("Migration 46: add Mako schedule model catalog revision")?;
                 }
             }
-            legacy_hive_model_tx.execute(
+            mako_model_tx.execute(
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (46)",
                 [],
             )?;
-            legacy_hive_model_tx.commit()?;
+            mako_model_tx.commit()?;
         }
 
         // Migration 47: Canonical Goal/Plan workflow state.
@@ -2358,7 +2222,7 @@ impl Database {
         // rollback surface. Executable workflow state is normalized, revisioned,
         // and append-journaled so reconnects, concurrent clients, and automatic
         // continuation all observe the same durable contract.
-        if current_version < 47 && target_version >= 47 {
+        if current_version < 47 {
             info!("Running migration 47: canonical Goal and Plan workflow");
             let workflow_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2582,7 +2446,7 @@ impl Database {
         // acceptance. Notification intents form a durable outbox, Expo tokens
         // cover Android delivery, and ActivityKit tokens are scoped to the
         // session whose Live Activity they update.
-        if current_version < 48 && target_version >= 48 {
+        if current_version < 48 {
             info!("Running migration 48: mobile notification lifecycle");
             let notification_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2702,7 +2566,7 @@ impl Database {
         // Payloads are operational metadata only; prompts, responses, file
         // contents, terminal output, credentials, and raw URLs are forbidden
         // by the HTTP contract before these rows are written.
-        if current_version < 49 && target_version >= 49 {
+        if current_version < 49 {
             info!("Running migration 49: mobile performance diagnostics");
             let diagnostics_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2778,7 +2642,7 @@ impl Database {
         // completion event after promotion. Keep a compact session-scoped
         // receipt for enqueue-once callers; ordinary interactive and process
         // steering retain their existing queue semantics.
-        if current_version < 50 && target_version >= 50 {
+        if current_version < 50 {
             info!("Running migration 50: durable steering idempotency receipts");
             let steering_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2806,7 +2670,7 @@ impl Database {
         // Migration 51: persist the parent-chosen identity and exact child
         // capability contract so durable resume does not reconstruct access
         // from a presentation-oriented legacy role.
-        if current_version < 51 && target_version >= 51 {
+        if current_version < 51 {
             info!("Running migration 51: delegated child contracts");
             let delegated_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2831,9 +2695,8 @@ impl Database {
         // Migration 52: one durable descendant may claim a delegated run as
         // its continuation origin. A separate claim table lets older databases
         // retain historical duplicate rows while making every new claim
-        // atomic across concurrent SQLite connections. This migration shipped
-        // before the identity cutover and is present in deployed legacy roots.
-        if current_version < 52 && target_version >= 52 {
+        // atomic across concurrent SQLite connections.
+        if current_version < 52 {
             info!("Running migration 52: unique delegated continuation claims");
             let continuation_tx =
                 Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
@@ -2866,315 +2729,63 @@ impl Database {
             continuation_tx.commit()?;
         }
 
-        // Migration 53: canonical Mitsuro/Hive storage identity.
-        //
-        // Migrations 1-51 intentionally remain byte-for-byte compatible with
-        // old databases. Version 52 is deployed as the delegated-continuation
-        // claim migration above, so it must never be reused as the identity
-        // cutover gate. This v53 bridge renames the
-        // durable Hive tables, rebuilds the CHECK-constrained tables, and
-        // validates parity before publishing the new version. The old
-        // spellings below are therefore an isolated upgrader contract, not
-        // current schema.
-        if current_version < 53 && target_version >= 53 {
-            info!("Running migration 53: canonical Mitsuro/Hive storage identity");
-            let identity_tx =
-                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-                    .context("acquiring identity migration lock")?;
-
-            let table_pairs = [
-                ("mako_attention_state", "hive_attention_state"),
-                ("mako_control_outbox", "hive_control_outbox"),
-                ("mako_controller_events", "hive_controller_events"),
-                ("mako_controllers", "hive_controllers"),
-                ("mako_crew_documents", "hive_crew_documents"),
-                ("mako_crew_profiles", "hive_crew_profiles"),
-                ("mako_daemon_leases", "hive_daemon_leases"),
-                ("mako_idempotency_keys", "hive_idempotency_keys"),
-                ("mako_learning_candidates", "hive_learning_candidates"),
-                ("mako_learning_runs", "hive_learning_runs"),
-                ("mako_profile_documents", "hive_profile_documents"),
-                ("mako_profiles", "hive_profiles"),
-                ("mako_run_attempts", "hive_run_attempts"),
-                ("mako_runs", "hive_runs"),
-                ("mako_runtime_state", "hive_runtime_state"),
-                ("mako_schedule_occurrences", "hive_schedule_occurrences"),
-                ("mako_schedules", "hive_schedules"),
-            ];
-            let mut row_parity = Vec::with_capacity(table_pairs.len());
-            for (old, canonical) in table_pairs {
-                let old_exists = Self::table_exists(&identity_tx, old);
-                let canonical_exists = Self::table_exists(&identity_tx, canonical);
-                ensure!(
-                    !(old_exists && canonical_exists),
-                    "Migration 53: both legacy table {old} and canonical table {canonical} exist"
-                );
-                if old_exists {
-                    let before: i64 = identity_tx.query_row(
-                        &format!("SELECT COUNT(*) FROM {old}"),
-                        [],
-                        |row| row.get(0),
-                    )?;
-                    identity_tx
-                        .execute_batch(&format!("ALTER TABLE {old} RENAME TO {canonical};"))?;
-                    row_parity.push((canonical, before));
-                }
-            }
-
-            if Self::table_exists(&identity_tx, "sessions") {
-                let before: i64 =
-                    identity_tx.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
-                if !Self::column_exists(&identity_tx, "sessions", "legacy_session_type_v53") {
-                    identity_tx.execute_batch(
-                            "ALTER TABLE sessions RENAME COLUMN session_type TO legacy_session_type_v53;
-                             ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'code'
-                                 CHECK (session_type IN ('chat', 'code', 'hive'));
-                             UPDATE sessions
-                                SET session_type = CASE legacy_session_type_v53
-                                    WHEN 'mako' THEN 'hive'
-                                    ELSE legacy_session_type_v53
-                                END;
-                             DROP INDEX IF EXISTS idx_sessions_session_type;
-                             CREATE INDEX idx_sessions_session_type ON sessions(session_type);
-                             ALTER TABLE sessions DROP COLUMN legacy_session_type_v53;",
-                        )?;
-                }
-                let after: i64 =
-                    identity_tx.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
-                ensure!(before == after, "Migration 53: sessions row parity failed");
-            }
-
-            if Self::table_exists(&identity_tx, "agent_memories") {
-                let before: i64 =
-                    identity_tx
-                        .query_row("SELECT COUNT(*) FROM agent_memories", [], |row| row.get(0))?;
-                if !Self::column_exists(&identity_tx, "agent_memories", "legacy_namespace_v53") {
-                    identity_tx.execute_batch(
-                            "ALTER TABLE agent_memories RENAME COLUMN namespace TO legacy_namespace_v53;
-                             ALTER TABLE agent_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'shared'
-                                 CHECK (namespace IN ('shared', 'hive', 'crew'));
-                             UPDATE agent_memories
-                                SET namespace = CASE legacy_namespace_v53
-                                    WHEN 'mako' THEN 'hive'
-                                    ELSE legacy_namespace_v53
-                                END;
-                             DROP INDEX IF EXISTS idx_agent_memories_active_scope;
-                             DROP INDEX IF EXISTS idx_agent_memories_active_canonical;
-                             CREATE INDEX idx_agent_memories_active_scope
-                                 ON agent_memories(status, user_id, project_dir, namespace, namespace_id);
-                             CREATE UNIQUE INDEX idx_agent_memories_active_canonical
-                                 ON agent_memories(
-                                     COALESCE(user_id, ''), COALESCE(project_dir, ''), namespace,
-                                     COALESCE(namespace_id, ''), canonical_key
-                                 )
-                                 WHERE status = 'active' AND canonical_key IS NOT NULL;
-                             ALTER TABLE agent_memories DROP COLUMN legacy_namespace_v53;",
-                        )?;
-                }
-                let after: i64 =
-                    identity_tx
-                        .query_row("SELECT COUNT(*) FROM agent_memories", [], |row| row.get(0))?;
-                ensure!(
-                    before == after,
-                    "Migration 53: agent_memories row parity failed"
-                );
-            }
-
-            identity_tx.execute_batch(
-                r#"
-                    DROP TRIGGER IF EXISTS mako_runs_transition_event;
-                    DROP INDEX IF EXISTS idx_mako_runtime_state_status;
-                    DROP INDEX IF EXISTS idx_mako_runtime_state_next_wake;
-                    DROP INDEX IF EXISTS idx_mako_attention_state_user_scope;
-                    DROP INDEX IF EXISTS idx_mako_profiles_user;
-                    DROP INDEX IF EXISTS idx_mako_controllers_user;
-                    DROP INDEX IF EXISTS idx_mako_controllers_status;
-                    DROP INDEX IF EXISTS idx_mako_schedules_due;
-                    DROP INDEX IF EXISTS idx_mako_schedules_controller;
-                    DROP INDEX IF EXISTS idx_mako_runs_claim;
-                    DROP INDEX IF EXISTS idx_mako_runs_controller_status;
-                    DROP INDEX IF EXISTS idx_mako_runs_concurrency;
-                    DROP INDEX IF EXISTS idx_mako_runs_lease_expiry;
-                    DROP INDEX IF EXISTS idx_mako_runs_session;
-                    DROP INDEX IF EXISTS idx_mako_run_attempts_run;
-                    DROP INDEX IF EXISTS idx_mako_idempotency_expiry;
-                    DROP INDEX IF EXISTS idx_mako_controller_events_dedupe;
-                    DROP INDEX IF EXISTS idx_mako_controller_events_replay;
-                    DROP INDEX IF EXISTS idx_mako_learning_candidates_owner_status;
-                    DROP INDEX IF EXISTS idx_mako_learning_candidates_project;
-                    DROP INDEX IF EXISTS idx_mako_control_outbox_pending;
-                    "#,
-            )?;
-
-            if Self::table_exists(&identity_tx, "hive_runtime_state") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_runtime_state_status ON hive_runtime_state(status);
-                         CREATE INDEX IF NOT EXISTS idx_hive_runtime_state_next_wake ON hive_runtime_state(next_wake_at);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_attention_state") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_attention_state_user_scope ON hive_attention_state(user_scope);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_profiles") {
-                identity_tx.execute_batch(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_profiles_user ON hive_profiles(user_id) WHERE user_id IS NOT NULL;",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_controllers") {
-                identity_tx.execute_batch(
-                    "CREATE INDEX IF NOT EXISTS idx_hive_controllers_user ON hive_controllers(user_id);
-                         CREATE INDEX IF NOT EXISTS idx_hive_controllers_status ON hive_controllers(status);",
-                )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_schedules") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_schedules_due ON hive_schedules(status, next_fire_at);
-                         CREATE INDEX IF NOT EXISTS idx_hive_schedules_controller ON hive_schedules(controller_id, status);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_runs") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_runs_claim ON hive_runs(status, available_at, priority DESC, created_at);
-                         CREATE INDEX IF NOT EXISTS idx_hive_runs_controller_status ON hive_runs(controller_id, status);
-                         CREATE INDEX IF NOT EXISTS idx_hive_runs_concurrency ON hive_runs(concurrency_key, status) WHERE concurrency_key IS NOT NULL;
-                         CREATE INDEX IF NOT EXISTS idx_hive_runs_lease_expiry ON hive_runs(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
-                         CREATE INDEX IF NOT EXISTS idx_hive_runs_session ON hive_runs(session_id);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_run_attempts") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_run_attempts_run ON hive_run_attempts(run_id, attempt_no);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_idempotency_keys") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_idempotency_expiry ON hive_idempotency_keys(expires_at);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_controller_events") {
-                identity_tx.execute_batch(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_controller_events_dedupe ON hive_controller_events(controller_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
-                         CREATE INDEX IF NOT EXISTS idx_hive_controller_events_replay ON hive_controller_events(controller_id, sequence);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_learning_candidates") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_learning_candidates_owner_status ON hive_learning_candidates(user_id, status, created_at DESC);
-                         CREATE INDEX IF NOT EXISTS idx_hive_learning_candidates_project ON hive_learning_candidates(project_dir, status);",
-                    )?;
-            }
-            if Self::table_exists(&identity_tx, "hive_control_outbox") {
-                identity_tx.execute_batch(
-                        "CREATE INDEX IF NOT EXISTS idx_hive_control_outbox_pending ON hive_control_outbox(status, available_at, created_at);",
-                    )?;
-            }
-
-            if Self::table_exists(&identity_tx, "hive_runs")
-                && Self::table_exists(&identity_tx, "hive_controller_events")
-            {
-                identity_tx.execute_batch(
-                        r#"
-                        CREATE TRIGGER IF NOT EXISTS hive_runs_transition_event
-                        AFTER UPDATE OF status ON hive_runs
-                        WHEN OLD.status <> NEW.status
-                        BEGIN
-                            INSERT OR IGNORE INTO hive_controller_events (
-                                controller_id, sequence, event_type, run_id, schedule_id,
-                                dedupe_key, payload_json, created_at
-                            ) VALUES (
-                                NEW.controller_id,
-                                (SELECT COALESCE(MAX(sequence), 0) + 1
-                                 FROM hive_controller_events
-                                 WHERE controller_id = NEW.controller_id),
-                                CASE
-                                    WHEN NEW.status = 'queued' AND OLD.status = 'leased'
-                                        THEN 'run_lease_requeued'
-                                    WHEN NEW.status = 'queued' THEN 'run_requeued'
-                                    WHEN NEW.status = 'leased' THEN 'run_leased'
-                                    WHEN NEW.status = 'running' THEN 'run_started'
-                                    WHEN NEW.status = 'sleeping' THEN 'run_sleeping'
-                                    WHEN NEW.status = 'retry_wait' THEN 'run_retry_scheduled'
-                                    WHEN NEW.status = 'awaiting_input' THEN 'run_awaiting_input'
-                                    WHEN NEW.status = 'recovery_required' THEN 'recovery_required'
-                                    WHEN NEW.status = 'succeeded' THEN 'run_completed'
-                                    WHEN NEW.status = 'failed' THEN 'run_failed'
-                                    WHEN NEW.status = 'cancelled' THEN 'run_cancelled'
-                                    WHEN NEW.status = 'dead_letter' THEN 'run_dead_lettered'
-                                    ELSE 'run_state_changed'
-                                END,
-                                NEW.id,
-                                NEW.schedule_id,
-                                'transition:' || NEW.id || ':' || NEW.attempt_count || ':' || NEW.status,
-                                json_object(
-                                    'run_id', NEW.id,
-                                    'status', NEW.status,
-                                    'previous_status', OLD.status,
-                                    'attempt', NEW.attempt_count,
-                                    'has_stop_reason', NEW.last_stop_reason IS NOT NULL,
-                                    'has_error', NEW.last_error IS NOT NULL,
-                                    'redacted', json('true')
-                                ),
-                                NEW.updated_at
-                            );
-                        END;
-                        "#,
-                    )?;
-            }
-
-            for (canonical, before) in row_parity {
-                let after: i64 = identity_tx.query_row(
-                    &format!("SELECT COUNT(*) FROM {canonical}"),
+        // Migration 53: persist background parent-wake intent before a child
+        // begins. Terminal artifacts and pending steering are separate durable
+        // writes; this flag lets server startup reconcile the crash window
+        // between them without mistaking foreground delegated runs for work
+        // that promised an autonomous parent continuation.
+        if current_version < 53 {
+            info!("Running migration 53: delegated background wake intent");
+            let wake_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegated wake-intent migration lock")?;
+            if !Self::column_exists(&wake_tx, "delegated_runs", "wake_parent") {
+                wake_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 0 CHECK (wake_parent IN (0, 1))",
                     [],
-                    |row| row.get(0),
                 )?;
-                ensure!(
-                    before == after,
-                    "Migration 53: row parity failed for {canonical}: {before} != {after}"
-                );
             }
-
-            Self::rebuild_mobile_identity_defaults(&identity_tx)?;
-
-            // Known machine-owned preference discriminator. User-authored
-            // titles, messages, reports, and memories are never rewritten.
-            identity_tx.execute(
-                "UPDATE user_preferences
-                        SET value = 'mitsuro'
-                      WHERE key = 'theme' AND value = 'krusty'",
+            wake_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegated_runs_unqueued_wake
+                    ON delegated_runs(wake_parent, stage, completed_at);",
+            )?;
+            wake_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (53)",
                 [],
             )?;
+            wake_tx.commit()?;
+        }
 
-            identity_tx.execute_batch(
-                r#"
-                    CREATE TABLE IF NOT EXISTS identity_migration_receipts (
-                        migration TEXT PRIMARY KEY,
-                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    );
-                    INSERT OR IGNORE INTO identity_migration_receipts (migration)
-                        VALUES ('mitsuro-hive-v1');
-                    INSERT OR IGNORE INTO schema_version (version) VALUES (53);
-                    "#,
+        // Migration 54: fence server-hosted background Agent execution with a
+        // renewable process-owner lease. New launches persist both fields
+        // before execution. Existing non-terminal rows remain NULL on purpose:
+        // a mixed-version peer may still own them and cannot renew this new
+        // contract, so inventing an expiry during migration would be unsafe.
+        if current_version < 54 {
+            info!("Running migration 54: delegated background host leases");
+            let host_lease_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegated host-lease migration lock")?;
+            if !Self::column_exists(&host_lease_tx, "delegated_runs", "host_owner_id") {
+                host_lease_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN host_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&host_lease_tx, "delegated_runs", "host_lease_expires_at_ms") {
+                host_lease_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN host_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            host_lease_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegated_runs_expired_host_lease
+                    ON delegated_runs(wake_parent, stage, host_lease_expires_at_ms);",
             )?;
-            identity_tx.commit()?;
-
-            let quick_check: String = self
-                .conn
-                .query_row("PRAGMA quick_check", [], |row| row.get(0))
-                .context("Migration 53: SQLite quick_check")?;
-            ensure!(
-                quick_check == "ok",
-                "Migration 53: SQLite quick_check failed: {quick_check}"
-            );
-            let mut foreign_keys = self
-                .conn
-                .prepare("PRAGMA foreign_key_check")
-                .context("Migration 53: prepare foreign_key_check")?;
-            ensure!(
-                foreign_keys.query([])?.next()?.is_none(),
-                "Migration 53: foreign_key_check reported a violation"
-            );
+            host_lease_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (54)",
+                [],
+            )?;
+            host_lease_tx.commit()?;
         }
 
         if privacy_cleanup_requested {
@@ -3234,520 +2845,5 @@ mod privacy_checkpoint_tests {
         database
             .checkpoint_wal_without_busy_readers("released-reader")
             .expect("checkpoint should succeed after reader release");
-    }
-}
-
-#[cfg(test)]
-mod identity_migration_tests {
-    use super::*;
-    use rusqlite::Connection;
-
-    fn database_at(path: &std::path::Path, target: i32) -> Database {
-        let connection = Connection::open(path).expect("open fixture database");
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .expect("enable WAL");
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .expect("enable foreign keys");
-        let database = Database { conn: connection };
-        database
-            .run_migrations_to(target)
-            .expect("migrate fixture database");
-        database
-    }
-
-    fn assert_canonical_identity_schema(database: &Database) {
-        let old_objects: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE (type IN ('table', 'index', 'trigger'))
-                   AND (name LIKE 'mako_%' OR name LIKE 'idx_mako_%')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count old objects");
-        assert_eq!(old_objects, 0);
-
-        let old_sql: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE lower(COALESCE(sql, '')) LIKE '%mako%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count deprecated schema SQL");
-        assert_eq!(old_sql, 0);
-
-        let old_product_defaults: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE lower(COALESCE(sql, '')) LIKE '%io.krusty.mobile%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count deprecated product defaults");
-        assert_eq!(old_product_defaults, 0);
-        for table in ["apns_devices", "live_activity_tokens"] {
-            let default: String = database
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT dflt_value FROM pragma_table_info('{table}') WHERE name = 'bundle_id'"
-                    ),
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("canonical bundle default");
-            assert_eq!(default, "'io.mitsuro.mobile'", "{table} bundle default");
-        }
-
-        for (table, old_column) in [
-            ("sessions", "legacy_session_type_v53"),
-            ("agent_memories", "legacy_namespace_v53"),
-        ] {
-            let count: i64 = database
-                .conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
-                    [old_column],
-                    |row| row.get(0),
-                )
-                .expect("count transitional identity columns");
-            assert_eq!(count, 0, "{table}.{old_column} must not survive v53");
-        }
-
-        let hive_tables: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name LIKE 'hive_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count Hive tables");
-        assert_eq!(hive_tables, 17);
-
-        let hive_indexes: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index' AND name LIKE 'idx_hive_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count Hive indexes");
-        assert_eq!(hive_indexes, 20);
-
-        let hive_triggers: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'trigger' AND name = 'hive_runs_transition_event'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count Hive trigger");
-        assert_eq!(hive_triggers, 1);
-
-        let quick_check: String = database
-            .conn
-            .query_row("PRAGMA quick_check", [], |row| row.get(0))
-            .expect("quick check");
-        assert_eq!(quick_check, "ok");
-        let violations: i64 = database
-            .conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .expect("foreign key check");
-        assert_eq!(violations, 0);
-    }
-
-    #[test]
-    fn fresh_database_uses_only_canonical_hive_schema() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let database = Database::new(&temp.path().join("fresh.db")).expect("fresh database");
-        assert_eq!(database.get_schema_version(), 53);
-        assert_canonical_identity_schema(&database);
-    }
-
-    #[test]
-    fn complete_version_45_schema_reaches_canonical_version_53() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("complete-version-45.db");
-        let database = database_at(&path, 45);
-        assert_eq!(database.get_schema_version(), 45);
-        let legacy_tables: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name LIKE 'mako_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count complete legacy Hive tables");
-        assert_eq!(legacy_tables, 17);
-
-        database
-            .run_migrations_to(53)
-            .expect("migrate complete version 45 schema through canonical cutover");
-        assert_eq!(database.get_schema_version(), 53);
-        assert_canonical_identity_schema(&database);
-    }
-
-    #[test]
-    fn deployed_version_52_with_legacy_identity_runs_the_fresh_v53_cutover() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("deployed-version-52.db");
-        let database = database_at(&path, 51);
-        database
-            .conn
-            .execute_batch(
-                r#"
-                INSERT INTO sessions (id, title, created_at, updated_at)
-                VALUES ('continuation-parent', 'Parent', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
-                INSERT INTO delegated_runs (
-                    delegated_run_id, parent_session_id, role, stage, resumable,
-                    resumed_from_run_id, target_scope_key, target_scope_json,
-                    created_at, updated_at
-                ) VALUES (
-                    'continuation-origin', 'continuation-parent', 'explore', 'complete', 1,
-                    NULL, 'project', '[]',
-                    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
-                );
-                INSERT INTO delegated_runs (
-                    delegated_run_id, parent_session_id, role, stage, resumable,
-                    resumed_from_run_id, target_scope_key, target_scope_json,
-                    created_at, updated_at
-                ) VALUES (
-                    'continuation-later', 'continuation-parent', 'explore', 'complete', 1,
-                    'continuation-origin', 'project', '[]',
-                    '2026-08-01T00:02:00Z', '2026-08-01T00:02:00Z'
-                );
-                INSERT INTO delegated_runs (
-                    delegated_run_id, parent_session_id, role, stage, resumable,
-                    resumed_from_run_id, target_scope_key, target_scope_json,
-                    created_at, updated_at
-                ) VALUES (
-                    'continuation-first', 'continuation-parent', 'explore', 'complete', 1,
-                    'continuation-origin', 'project', '[]',
-                    '2026-08-01T00:01:00Z', '2026-08-01T00:01:00Z'
-                );
-                "#,
-            )
-            .expect("seed pre-v52 continuation history");
-        database
-            .run_migrations_to(52)
-            .expect("apply deployed continuation migration");
-        let continuation_claim: String = database
-            .conn
-            .query_row(
-                "SELECT delegated_run_id FROM delegated_run_continuations
-                 WHERE resumed_from_run_id = 'continuation-origin'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read deterministic continuation claim");
-        assert_eq!(continuation_claim, "continuation-first");
-        for index in 0..8 {
-            database
-                .conn
-                .execute(
-                    "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
-                     VALUES (?1, 'Legacy Hive', 'now', 'now', 'mako')",
-                    [format!("legacy-v52-session-{index}")],
-                )
-                .expect("seed deployed legacy session");
-        }
-        database
-            .conn
-            .execute(
-                "INSERT INTO mako_runtime_state (session_id, status)
-                 VALUES ('legacy-v52-session-0', 'idle')",
-                [],
-            )
-            .expect("seed deployed runtime state");
-        database
-            .conn
-            .execute(
-                "INSERT INTO mako_attention_state (user_scope, item_id)
-                 VALUES ('legacy-v52-user', 'legacy-v52-item')",
-                [],
-            )
-            .expect("seed deployed attention state");
-
-        let legacy_tables: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name LIKE 'mako_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count deployed legacy tables");
-        let canonical_tables: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name LIKE 'hive_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count pre-cutover canonical tables");
-        assert_eq!(
-            (
-                database.get_schema_version(),
-                legacy_tables,
-                canonical_tables
-            ),
-            (52, 17, 0)
-        );
-
-        database
-            .run_migrations_to(53)
-            .expect("run fresh identity migration after deployed v52");
-        assert_eq!(database.get_schema_version(), 53);
-        assert_canonical_identity_schema(&database);
-        let canonical_sessions: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE session_type = 'hive'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count canonical Hive sessions");
-        let runtime_rows: i64 = database
-            .conn
-            .query_row("SELECT COUNT(*) FROM hive_runtime_state", [], |row| {
-                row.get(0)
-            })
-            .expect("runtime parity");
-        let attention_rows: i64 = database
-            .conn
-            .query_row("SELECT COUNT(*) FROM hive_attention_state", [], |row| {
-                row.get(0)
-            })
-            .expect("attention parity");
-        assert_eq!(
-            (canonical_sessions, runtime_rows, attention_rows),
-            (8, 1, 1)
-        );
-        let preserved_claim: String = database
-            .conn
-            .query_row(
-                "SELECT delegated_run_id FROM delegated_run_continuations
-                 WHERE resumed_from_run_id = 'continuation-origin'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read preserved continuation claim");
-        assert_eq!(preserved_claim, "continuation-first");
-        let duplicate_claim = database.conn.execute(
-            "INSERT INTO delegated_run_continuations
-                (resumed_from_run_id, delegated_run_id, created_at)
-             VALUES ('continuation-origin', 'continuation-later', '2026-08-01T00:03:00Z')",
-            [],
-        );
-        assert!(duplicate_claim.is_err(), "v52 uniqueness must survive v53");
-    }
-
-    #[test]
-    fn version_51_rows_and_discriminators_survive_identity_migration() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("version-51.db");
-        let database = database_at(&path, 51);
-        database
-            .conn
-            .execute(
-                "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
-                 VALUES ('session-1', 'Hive', 'now', 'now', 'mako')",
-                [],
-            )
-            .expect("seed old session");
-        database
-            .conn
-            .execute(
-                "INSERT INTO mako_runtime_state (session_id, status)
-                 VALUES ('session-1', 'idle')",
-                [],
-            )
-            .expect("seed old runtime state");
-        database
-            .conn
-            .execute(
-                "INSERT INTO mako_attention_state (user_scope, item_id)
-                 VALUES ('user-1', 'item-1')",
-                [],
-            )
-            .expect("seed old attention state");
-        database
-            .conn
-            .execute(
-                "INSERT INTO agent_memories
-                    (id, memory_type, title, content, namespace)
-                 VALUES ('memory-1', 'project', 'Title', 'Body', 'mako')",
-                [],
-            )
-            .expect("seed old memory");
-        database
-            .conn
-            .execute(
-                "INSERT INTO user_preferences (key, value, updated_at)
-                 VALUES ('theme', 'krusty', 0)",
-                [],
-            )
-            .expect("seed old theme preference");
-        database
-            .conn
-            .execute(
-                "INSERT INTO apns_devices (id, user_id, device_token, bundle_id)
-                 VALUES ('device-1', 'user-1', 'device-token-1', 'io.krusty.mobile')",
-                [],
-            )
-            .expect("seed old APNs bundle");
-        database
-            .conn
-            .execute(
-                "INSERT INTO live_activity_tokens (
-                    id, user_id, session_id, push_token, bundle_id, environment,
-                    content_state_json, started_at_ms, active, created_at, updated_at
-                 ) VALUES (
-                    'activity-1', 'user-1', 'session-1', 'activity-token-1',
-                    'io.krusty.mobile', 'production', '{}', 1, 1, 'now', 'now'
-                 )",
-                [],
-            )
-            .expect("seed old Live Activity bundle");
-
-        database.run_migrations_to(53).expect("identity migration");
-        assert_canonical_identity_schema(&database);
-
-        let session_type: String = database
-            .conn
-            .query_row(
-                "SELECT session_type FROM sessions WHERE id = 'session-1'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read canonical session type");
-        assert_eq!(session_type, "hive");
-        let namespace: String = database
-            .conn
-            .query_row(
-                "SELECT namespace FROM agent_memories WHERE id = 'memory-1'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read canonical namespace");
-        assert_eq!(namespace, "hive");
-        let runtime_rows: i64 = database
-            .conn
-            .query_row("SELECT COUNT(*) FROM hive_runtime_state", [], |row| {
-                row.get(0)
-            })
-            .expect("runtime row parity");
-        let attention_rows: i64 = database
-            .conn
-            .query_row("SELECT COUNT(*) FROM hive_attention_state", [], |row| {
-                row.get(0)
-            })
-            .expect("attention row parity");
-        assert_eq!((runtime_rows, attention_rows), (1, 1));
-        let theme: String = database
-            .conn
-            .query_row(
-                "SELECT value FROM user_preferences WHERE key = 'theme'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read canonical theme");
-        assert_eq!(theme, "mitsuro");
-        let preserved_bundles: (String, String) = database
-            .conn
-            .query_row(
-                "SELECT d.bundle_id, l.bundle_id
-                   FROM apns_devices d CROSS JOIN live_activity_tokens l
-                  WHERE d.id = 'device-1' AND l.id = 'activity-1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("preserved installed-client bundle values");
-        assert_eq!(
-            preserved_bundles,
-            (
-                "io.krusty.mobile".to_string(),
-                "io.krusty.mobile".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn version_49_backup_advances_through_50_51_and_identity_migration() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("version-49.db");
-        let database = database_at(&path, 49);
-        assert_eq!(database.get_schema_version(), 49);
-        database
-            .conn
-            .execute(
-                "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
-                 VALUES ('session-49', 'Hive', 'now', 'now', 'mako')",
-                [],
-            )
-            .expect("seed old session");
-        database
-            .conn
-            .execute(
-                "INSERT INTO mako_runtime_state (session_id, status)
-                 VALUES ('session-49', 'idle')",
-                [],
-            )
-            .expect("seed old runtime state");
-        database
-            .conn
-            .execute(
-                "INSERT INTO agent_memories
-                    (id, memory_type, title, content, namespace)
-                 VALUES ('memory-49', 'project', 'Title', 'Body', 'mako')",
-                [],
-            )
-            .expect("seed old memory");
-
-        database.run_migrations_to(53).expect("migrate v49 backup");
-        assert_eq!(database.get_schema_version(), 53);
-        assert_canonical_identity_schema(&database);
-        let versions: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_version WHERE version IN (50, 51, 52, 53)",
-                [],
-                |row| row.get(0),
-            )
-            .expect("intermediate versions");
-        assert_eq!(versions, 4);
-        let values: (String, String) = database
-            .conn
-            .query_row(
-                "SELECT s.session_type, m.namespace
-                   FROM sessions s CROSS JOIN agent_memories m
-                  WHERE s.id = 'session-49' AND m.id = 'memory-49'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("canonical discriminators");
-        assert_eq!(values, ("hive".to_string(), "hive".to_string()));
-        let runtime_rows: i64 = database
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM hive_runtime_state WHERE session_id = 'session-49'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("runtime row");
-        assert_eq!(runtime_rows, 1);
     }
 }

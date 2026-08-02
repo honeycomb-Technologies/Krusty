@@ -1538,7 +1538,7 @@ fn inject_context_includes_recent_delegated_run_guidance() {
 }
 
 #[test]
-fn inject_context_adds_balanced_delegation_contract_for_code_sessions() {
+fn inject_context_adds_orchestrator_contract_for_code_sessions() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
     fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1568,8 +1568,9 @@ fn inject_context_adds_balanced_delegation_contract_for_code_sessions() {
         matches!(
             &message.content[0],
             Content::Text { text }
-                if text.contains("[DELEGATION MODE: BALANCED]")
-                    && text.contains("simple, tightly coupled, or sequential")
+                if text.contains("[DELEGATION MODE: ORCHESTRATOR]")
+                    && text.contains("coordinate through focused agents early")
+                    && text.contains("do not delegate trivial actions")
         )
     }));
 }

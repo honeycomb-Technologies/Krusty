@@ -2,12 +2,10 @@ use std::collections::HashSet;
 
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::types::AiTool;
-use crate::plan::PlanManager;
 use crate::storage::WorkMode;
 use crate::tools::registry::{
     MutationToolSurface, PermissionMode, ToolRegistry, ToolRequestPolicy,
 };
-use crate::workflow::{GoalStatus, PlanRevisionStatus, WorkflowManager};
 
 use super::super::run_spec::apply_execution_tool_allowlist;
 
@@ -75,41 +73,6 @@ impl ModeAwareToolSurface {
         *options = ai_client.canonical_call_options(&ai_client.config().model, options);
         *advertised_tool_names = advertised_names(options);
     }
-}
-
-pub(super) fn has_active_plan(db_path: &std::path::Path, session_id: &str) -> bool {
-    match WorkflowManager::new(db_path.to_path_buf())
-        .and_then(|manager| manager.get_snapshot(session_id))
-    {
-        Ok(Some(snapshot)) if snapshot.goal.status == GoalStatus::Active => {
-            return snapshot.plan_revision.is_some_and(|plan| {
-                matches!(
-                    plan.status,
-                    PlanRevisionStatus::Active | PlanRevisionStatus::Completed
-                )
-            });
-        }
-        Ok(Some(_)) | Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                session_id,
-                %error,
-                "Failed to resolve canonical workflow while refreshing the tool surface"
-            );
-        }
-    }
-
-    PlanManager::new(db_path.to_path_buf())
-        .and_then(|manager| manager.get_active_plan(session_id))
-        .map(|plan| plan.is_some())
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                session_id,
-                %error,
-                "Failed to resolve active plan while refreshing the tool surface"
-            );
-            false
-        })
 }
 
 pub(super) fn advertised_names(options: &CallOptions) -> HashSet<String> {

@@ -13,11 +13,14 @@ use crate::agent::progress::LoopGuard;
 use crate::agent::RunProvenance;
 use crate::ai::client::AiClient;
 use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
+use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
 use crate::tools::ToolResult;
 
+use super::super::lifecycle::AgentMailboxFinish;
 use super::super::types::{
-    parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedProcessArtifact,
-    SubAgentResult, SubAgentTask,
+    parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedEvidenceKind,
+    DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult, SubAgentTask,
+    SubAgentTermination,
 };
 use super::api::{call_subagent_api, parse_response, parse_response_usage};
 use super::config::AgentConfig;
@@ -31,6 +34,189 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
+const LOOP_GUARD_LANDING_FALLBACK: &str =
+    "The delegated loop stopped after repeated work without enough new semantic progress.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceCompletionDecision {
+    Ready,
+    RequestEvidence,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaxTokensLandingDecision {
+    NotApplicable,
+    RetryConciseLanding,
+    TerminalIncomplete,
+}
+
+fn response_requires_tool_execution(
+    tool_calls: &[super::super::types::ToolCall],
+    _stop_reason: &str,
+) -> bool {
+    // Structured calls are executable intent. Provider stop reasons are only
+    // meaningful when no call is present; contradictory `end_turn` metadata
+    // must never discard a call that already crossed the normalized boundary.
+    !tool_calls.is_empty()
+}
+
+fn max_tokens_landing_decision(
+    tool_calls: &[super::super::types::ToolCall],
+    stop_reason: &str,
+    retry_attempted: bool,
+    turn_available: bool,
+) -> MaxTokensLandingDecision {
+    if !tool_calls.is_empty() || stop_reason != "max_tokens" {
+        MaxTokensLandingDecision::NotApplicable
+    } else if !retry_attempted && turn_available {
+        MaxTokensLandingDecision::RetryConciseLanding
+    } else {
+        MaxTokensLandingDecision::TerminalIncomplete
+    }
+}
+
+fn evidence_completion_decision(
+    evidence: &DelegatedEvidenceSummary,
+    correction_requested: bool,
+    has_effective_tools: bool,
+) -> EvidenceCompletionDecision {
+    if evidence.has_canonical_evidence() {
+        EvidenceCompletionDecision::Ready
+    } else if correction_requested || !has_effective_tools {
+        EvidenceCompletionDecision::Reject
+    } else {
+        EvidenceCompletionDecision::RequestEvidence
+    }
+}
+
+fn enforce_canonical_evidence(mut result: SubAgentResult) -> SubAgentResult {
+    if result.success && !result.evidence.has_canonical_evidence() {
+        result.success = false;
+        result.termination = SubAgentTermination::Failed;
+        result.error =
+            Some("Delegated child completed without canonical tool evidence".to_string());
+    }
+    result
+}
+
+fn loop_guard_landing_instruction(diagnostic: &str) -> String {
+    format!(
+        "[LOOP GUARD LANDING]\n{diagnostic}\n\nThis is the one bounded synthesis turn. No tools are available. Using only evidence already gathered, return a concise report to the parent with established findings, paths or changes, unresolved gaps, and the materially different direction needed to continue. Do not request or describe another tool call."
+    )
+}
+
+fn loop_guard_landing_output(
+    provider_output: &str,
+    diagnostic: &str,
+    files_examined: &[String],
+) -> String {
+    let mut output = if provider_output.trim().is_empty() {
+        LOOP_GUARD_LANDING_FALLBACK.to_string()
+    } else {
+        provider_output.trim().to_string()
+    };
+    if !files_examined.is_empty() && provider_output.trim().is_empty() {
+        output.push_str("\n\nEvidence paths retained: ");
+        output.push_str(
+            &files_examined
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    output.push_str("\n\n[DELEGATED LOOP GUARD]\n");
+    output.push_str(diagnostic.trim());
+    output
+}
+
+fn tool_surface_for_turn(
+    tools: &[AiTool],
+    loop_guard_landing: bool,
+    max_tokens_landing: bool,
+) -> &[AiTool] {
+    if loop_guard_landing || max_tokens_landing {
+        &[]
+    } else {
+        tools
+    }
+}
+
+fn delegated_evidence_kind(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<DelegatedEvidenceKind> {
+    let (effective_name, effective_input) = effective_tool_call(tool_name, input);
+    if effective_name == "tool_search" {
+        return None;
+    }
+    if effective_name == "bash" {
+        return Some(DelegatedEvidenceKind::Execution);
+    }
+
+    match tool_policy_for_call(effective_name, effective_input).category {
+        ToolCategory::ReadOnly => Some(DelegatedEvidenceKind::Observation),
+        ToolCategory::Write => Some(DelegatedEvidenceKind::Mutation),
+        ToolCategory::Interactive => None,
+    }
+}
+
+fn tool_call_requires_completion_shield(tool_name: &str, input: &serde_json::Value) -> bool {
+    let (effective_name, effective_input) = effective_tool_call(tool_name, input);
+    matches!(
+        tool_policy_for_call(effective_name, effective_input).category,
+        ToolCategory::Write
+    ) && effective_name != "bash"
+}
+
+fn append_parent_messages(messages: &mut Vec<ModelMessage>, parent_messages: Vec<String>) {
+    for message in parent_messages {
+        messages.push(ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: format!("[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"),
+            }],
+        });
+    }
+}
+
+fn append_late_mailbox_continuation(
+    messages: &mut Vec<ModelMessage>,
+    assistant_text: &[String],
+    parent_messages: Vec<String>,
+) {
+    if !assistant_text.is_empty() {
+        messages.push(ModelMessage {
+            role: Role::Assistant,
+            content: assistant_text
+                .iter()
+                .map(|text| Content::Text { text: text.clone() })
+                .collect(),
+        });
+    }
+    append_parent_messages(messages, parent_messages);
+}
+
+fn retain_unconsumed_parent_messages(output: &mut String, parent_messages: Vec<String>) {
+    if parent_messages.is_empty() {
+        return;
+    }
+
+    if !output.trim().is_empty() {
+        output.push_str("\n\n");
+    }
+    output.push_str("[UNCONSUMED PARENT STEERING]\n");
+    for message in parent_messages {
+        output.push_str("- ");
+        output.push_str(message.trim());
+        output.push('\n');
+    }
+    output.push_str(
+        "The child reached a non-continuable terminal boundary before applying this steering. Preserve it when resuming or synthesizing.\n[/UNCONSUMED PARENT STEERING]",
+    );
+}
 
 fn hash_cache_scope_component(hasher: &mut Sha256, label: &str, value: &[u8]) {
     hasher.update(label.len().to_be_bytes());
@@ -249,7 +435,12 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
     let mut background_processes = Vec::new();
+    let mut evidence = DelegatedEvidenceSummary::default();
+    let mut canonical_evidence_correction_requested = false;
+    let mut max_tokens_landing_retry_attempted = false;
+    let mut max_tokens_landing_pending = false;
     let mut loop_guard = LoopGuard::new();
+    let mut loop_guard_landing: Option<String> = None;
     let mut overflow_compact_retry_attempted = false;
     let mut last_dynamic_context: Option<String> = None;
 
@@ -292,8 +483,26 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         config,
     );
 
-    loop {
-        if cancellation.is_cancelled() {
+    macro_rules! seal_terminal_mailbox {
+        () => {{
+            if let Some(mailbox) = task.mailbox.as_ref() {
+                let _ = mailbox.seal_for_terminal();
+            }
+        }};
+    }
+
+    macro_rules! preserve_terminal_mailbox {
+        () => {{
+            if let Some(mailbox) = task.mailbox.as_ref() {
+                let parent_messages = mailbox.seal_for_terminal();
+                retain_unconsumed_parent_messages(&mut final_output, parent_messages);
+            }
+        }};
+    }
+
+    macro_rules! return_cancelled {
+        () => {{
+            seal_terminal_mailbox!();
             info!(task_id = %task_id, "Agent cancelled");
             send_progress(
                 AgentProgressStatus::Failed,
@@ -309,14 +518,42 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 agent_name: task_name.clone(),
                 delegated_run_id: task.delegated_run_id.clone(),
                 success: false,
-                output: String::new(),
-                files_examined,
+                output: final_output.clone(),
+                files_examined: files_examined.clone(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 turns_used: turns,
                 error: Some("Cancelled".to_string()),
-                policy_violations,
+                termination: SubAgentTermination::Cancelled,
+                policy_violations: policy_violations.clone(),
+                evidence: evidence.clone(),
                 background_processes: background_processes.clone(),
             };
+        }};
+    }
+
+    macro_rules! seal_terminal_or_continue {
+        ($assistant_text:expr) => {{
+            if let Some(mailbox) = task.mailbox.as_ref() {
+                match mailbox.drain_or_seal_for_finish() {
+                    AgentMailboxFinish::Continue(parent_messages) => {
+                        append_late_mailbox_continuation(
+                            &mut messages,
+                            $assistant_text,
+                            parent_messages,
+                        );
+                        loop_guard.reset_for_steering();
+                        continue;
+                    }
+                    AgentMailboxFinish::Cancelled => return_cancelled!(),
+                    AgentMailboxFinish::WorkerFinished | AgentMailboxFinish::LastWorkerSealed => {}
+                }
+            }
+        }};
+    }
+
+    loop {
+        if cancellation.is_cancelled() {
+            return_cancelled!();
         }
 
         let max_turns_budget = delegated_turn_budget(task);
@@ -324,50 +561,50 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             let parent_messages = mailbox.drain();
             if !parent_messages.is_empty() {
                 loop_guard.reset_for_steering();
+                loop_guard_landing = None;
+                max_tokens_landing_pending = false;
             }
-            for message in parent_messages {
-                messages.push(ModelMessage {
-                    role: Role::User,
-                    content: vec![Content::Text {
-                        text: format!("[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"),
-                    }],
-                });
-            }
+            append_parent_messages(&mut messages, parent_messages);
         }
 
-        if let Some(max_turns) = max_turns_budget {
-            if turns >= max_turns {
-                warn!(
-                    task_id = %task_id,
-                    turns = turns,
-                    max_turns = max_turns,
-                    "Sub-agent exceeded max turns"
-                );
-                send_progress(
-                    AgentProgressStatus::Failed,
-                    "max turns reached",
-                    total_tool_calls,
-                    estimated_tokens,
-                    None,
-                    config,
-                );
-                config.cleanup();
-                return SubAgentResult {
-                    task_id,
-                    agent_name: task_name.clone(),
-                    delegated_run_id: task.delegated_run_id.clone(),
-                    success: false,
-                    output: final_output,
-                    files_examined,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    turns_used: turns,
-                    error: Some(format!(
-                        "Sub-agent exceeded configured turn budget ({})",
-                        max_turns
-                    )),
-                    policy_violations,
-                    background_processes: background_processes.clone(),
-                };
+        if loop_guard_landing.is_none() && !max_tokens_landing_pending {
+            if let Some(max_turns) = max_turns_budget {
+                if turns >= max_turns {
+                    preserve_terminal_mailbox!();
+                    warn!(
+                        task_id = %task_id,
+                        turns = turns,
+                        max_turns = max_turns,
+                        "Sub-agent exceeded max turns"
+                    );
+                    send_progress(
+                        AgentProgressStatus::Failed,
+                        "max turns reached",
+                        total_tool_calls,
+                        estimated_tokens,
+                        None,
+                        config,
+                    );
+                    config.cleanup();
+                    return SubAgentResult {
+                        task_id,
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: false,
+                        output: final_output,
+                        files_examined: files_examined.clone(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: Some(format!(
+                            "Sub-agent exceeded configured turn budget ({})",
+                            max_turns
+                        )),
+                        termination: SubAgentTermination::Failed,
+                        policy_violations: policy_violations.clone(),
+                        evidence: evidence.clone(),
+                        background_processes: background_processes.clone(),
+                    };
+                }
             }
         }
         turns += 1;
@@ -388,12 +625,17 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         }
 
         let system_prompt = config.system_prompt(turns);
+        let tools_for_turn = tool_surface_for_turn(
+            &ai_tools,
+            loop_guard_landing.is_some(),
+            max_tokens_landing_pending,
+        );
         let prompt_cache_scope = delegated_prompt_cache_scope(
             task,
             client.provider_id().storage_key(),
             model,
             &system_prompt,
-            &ai_tools,
+            tools_for_turn,
         );
 
         let thinking_action = if total_tool_calls > 0 {
@@ -416,18 +658,23 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             model,
             &system_prompt,
             &messages,
-            &ai_tools,
+            tools_for_turn,
             config.max_tokens(),
             task.thinking_enabled,
             &transport_session_id,
             prompt_cache_scope.as_deref(),
         );
 
-        let api_result = tokio::time::timeout(config.api_call_timeout(), api_future).await;
+        let api_result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            result = tokio::time::timeout(config.api_call_timeout(), api_future) => Some(result),
+        };
         let (provider_outcome, provider_usage) = match &api_result {
-            Ok(Ok(response)) => ("completed", parse_response_usage(response)),
-            Ok(Err(_)) => ("error", None),
-            Err(_) => ("timeout", None),
+            Some(Ok(Ok(response))) => ("completed", parse_response_usage(response)),
+            Some(Ok(Err(_))) => ("error", None),
+            Some(Err(_)) => ("timeout", None),
+            None => ("cancelled", None),
         };
         if let Some(trace) = task.provider_call_trace.as_ref() {
             trace
@@ -445,10 +692,19 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 .await;
         }
 
+        let Some(api_result) = api_result else {
+            return_cancelled!();
+        };
+        if cancellation.is_cancelled() {
+            return_cancelled!();
+        }
+
         let response = match api_result {
             Ok(Ok(r)) => r,
             Ok(Err(e))
-                if !overflow_compact_retry_attempted
+                if loop_guard_landing.is_none()
+                    && !max_tokens_landing_pending
+                    && !overflow_compact_retry_attempted
                     && is_context_overflow_error(&e.to_string())
                     && compact_delegated_history(
                         &mut messages,
@@ -474,6 +730,42 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 continue;
             }
             Ok(Err(e)) => {
+                if let Some(diagnostic) = loop_guard_landing.take() {
+                    preserve_terminal_mailbox!();
+                    let output =
+                        loop_guard_landing_output(&final_output, &diagnostic, &files_examined);
+                    send_progress(
+                        AgentProgressStatus::Failed,
+                        if evidence.has_canonical_evidence() {
+                            "degraded loop guard landing"
+                        } else {
+                            "loop guard landing failed"
+                        },
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&output),
+                        config,
+                    );
+                    config.cleanup();
+                    return SubAgentResult {
+                        task_id,
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: false,
+                        output,
+                        files_examined,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: Some(format!(
+                            "{diagnostic} The bounded synthesis landing failed: {e}"
+                        )),
+                        termination: SubAgentTermination::LoopGuard,
+                        policy_violations,
+                        evidence: evidence.clone(),
+                        background_processes: background_processes.clone(),
+                    };
+                }
+                preserve_terminal_mailbox!();
                 send_progress(
                     AgentProgressStatus::Failed,
                     "error",
@@ -488,16 +780,53 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     agent_name: task_name.clone(),
                     delegated_run_id: task.delegated_run_id.clone(),
                     success: false,
-                    output: String::new(),
+                    output: final_output,
                     files_examined,
                     duration_ms: start.elapsed().as_millis() as u64,
                     turns_used: turns,
                     error: Some(e.to_string()),
+                    termination: SubAgentTermination::Failed,
                     policy_violations,
+                    evidence: evidence.clone(),
                     background_processes: background_processes.clone(),
                 };
             }
             Err(_) => {
+                if let Some(diagnostic) = loop_guard_landing.take() {
+                    preserve_terminal_mailbox!();
+                    let output =
+                        loop_guard_landing_output(&final_output, &diagnostic, &files_examined);
+                    send_progress(
+                        AgentProgressStatus::Failed,
+                        if evidence.has_canonical_evidence() {
+                            "degraded loop guard landing"
+                        } else {
+                            "loop guard landing failed"
+                        },
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&output),
+                        config,
+                    );
+                    config.cleanup();
+                    return SubAgentResult {
+                        task_id,
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: false,
+                        output,
+                        files_examined,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: Some(format!(
+                            "{diagnostic} The bounded synthesis landing timed out."
+                        )),
+                        termination: SubAgentTermination::LoopGuard,
+                        policy_violations,
+                        evidence: evidence.clone(),
+                        background_processes: background_processes.clone(),
+                    };
+                }
                 warn!(
                     task_id = %task_id,
                     turn = turns,
@@ -506,15 +835,11 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     "Sub-agent API call timed out"
                 );
                 let output = timeout_partial_output(&final_output, &files_examined);
-                let has_evidence = !files_examined.is_empty();
+                seal_terminal_or_continue!(&[] as &[String]);
                 send_progress(
-                    if has_evidence {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    },
-                    if has_evidence {
-                        "timeout (partial)"
+                    AgentProgressStatus::Failed,
+                    if evidence.has_canonical_evidence() {
+                        "timeout (partial evidence retained)"
                     } else {
                         "timeout"
                     },
@@ -528,21 +853,19 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     task_id,
                     agent_name: task_name.clone(),
                     delegated_run_id: task.delegated_run_id.clone(),
-                    success: has_evidence,
+                    success: false,
                     output,
                     files_examined,
                     duration_ms: start.elapsed().as_millis() as u64,
                     turns_used: turns,
-                    error: if has_evidence {
-                        None
-                    } else {
-                        Some(format!(
-                            "API call timed out after {}s on turn {}",
-                            config.api_call_timeout().as_secs(),
-                            turns
-                        ))
-                    },
+                    error: Some(format!(
+                        "API call timed out after {}s on turn {}",
+                        config.api_call_timeout().as_secs(),
+                        turns
+                    )),
+                    termination: SubAgentTermination::ProviderTimeout,
                     policy_violations,
+                    evidence: evidence.clone(),
                     background_processes: background_processes.clone(),
                 };
             }
@@ -554,8 +877,168 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
         let (text_parts, tool_calls, stop_reason) = parse_response(&response);
 
+        if cancellation.is_cancelled() {
+            return_cancelled!();
+        }
+
         if !text_parts.is_empty() {
             final_output = text_parts.join("\n");
+        }
+
+        // A semantic guard gets exactly one tool-free landing call. Never
+        // execute a hallucinated call from that response, and never silently
+        // publish a clean completion: canonical evidence is a degraded result;
+        // no evidence is a truthful failure.
+        if let Some(diagnostic) = loop_guard_landing.take() {
+            final_output = loop_guard_landing_output(&final_output, &diagnostic, &files_examined);
+            seal_terminal_or_continue!(&text_parts);
+            let has_evidence = evidence.has_canonical_evidence();
+            send_progress(
+                AgentProgressStatus::Failed,
+                if has_evidence {
+                    "degraded loop guard landing"
+                } else {
+                    "loop guard landing failed"
+                },
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: false,
+                output: final_output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: Some(diagnostic),
+                termination: SubAgentTermination::LoopGuard,
+                policy_violations,
+                evidence: evidence.clone(),
+                background_processes: background_processes.clone(),
+            };
+        }
+
+        // The concise max-token retry is also a bounded, tool-free landing.
+        // A provider that still emits a structured call cannot reopen work
+        // after the landing boundary; retain the partial response instead.
+        if max_tokens_landing_pending {
+            max_tokens_landing_pending = false;
+            if stop_reason == "max_tokens" || !tool_calls.is_empty() {
+                seal_terminal_or_continue!(&text_parts);
+                let has_evidence = evidence.has_canonical_evidence();
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    if has_evidence {
+                        "output limit reached (partial evidence retained)"
+                    } else {
+                        "output limit reached"
+                    },
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(
+                        "Provider output remained incomplete after one bounded tool-free landing"
+                            .to_string(),
+                    ),
+                    termination: SubAgentTermination::ProviderMaxTokens,
+                    policy_violations,
+                    evidence: evidence.clone(),
+                    background_processes: background_processes.clone(),
+                };
+            }
+        }
+
+        let landing_turn_available = max_turns_budget
+            .map(|max_turns| turns < max_turns)
+            .unwrap_or(true);
+        match max_tokens_landing_decision(
+            &tool_calls,
+            &stop_reason,
+            max_tokens_landing_retry_attempted,
+            landing_turn_available,
+        ) {
+            MaxTokensLandingDecision::NotApplicable => {}
+            MaxTokensLandingDecision::RetryConciseLanding => {
+                max_tokens_landing_retry_attempted = true;
+                max_tokens_landing_pending = true;
+                if !text_parts.is_empty() {
+                    messages.push(ModelMessage {
+                        role: Role::Assistant,
+                        content: text_parts
+                            .iter()
+                            .map(|text| Content::Text { text: text.clone() })
+                            .collect(),
+                    });
+                }
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: "Your previous response hit the provider output limit and is incomplete. Using only evidence already gathered, return one concise final answer now. Do not call more tools. State what is established and any remaining gap; omit repeated detail."
+                            .to_string(),
+                    }],
+                });
+                send_progress(
+                    AgentProgressStatus::Running,
+                    "landing truncated response concisely",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                continue;
+            }
+            MaxTokensLandingDecision::TerminalIncomplete => {
+                seal_terminal_or_continue!(&text_parts);
+                let has_evidence = evidence.has_canonical_evidence();
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    if has_evidence {
+                        "output limit reached (partial evidence retained)"
+                    } else {
+                        "output limit reached"
+                    },
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(
+                        "Provider output reached the token limit before a complete final answer"
+                            .to_string(),
+                    ),
+                    termination: SubAgentTermination::ProviderMaxTokens,
+                    policy_violations,
+                    evidence: evidence.clone(),
+                    background_processes: background_processes.clone(),
+                };
+            }
         }
 
         if config.use_explorer_heuristics()
@@ -564,6 +1047,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             && text_claims_tool_empty(&final_output)
         {
             if tool_truth_corrections >= 1 {
+                preserve_terminal_mailbox!();
                 send_progress(
                     AgentProgressStatus::Failed,
                     "misread tool output",
@@ -586,7 +1070,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         "Misread successful tool output after correction; delegated exploration is no longer trustworthy"
                             .to_string(),
                     ),
+                    termination: SubAgentTermination::Failed,
                     policy_violations,
+                    evidence: evidence.clone(),
                     background_processes: background_processes.clone(),
                 };
             }
@@ -609,7 +1095,63 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             continue;
         }
 
-        if tool_calls.is_empty() || stop_reason == "end_turn" {
+        if !response_requires_tool_execution(&tool_calls, &stop_reason) {
+            match evidence_completion_decision(
+                &evidence,
+                canonical_evidence_correction_requested,
+                !ai_tools.is_empty(),
+            ) {
+                EvidenceCompletionDecision::Ready => {}
+                EvidenceCompletionDecision::RequestEvidence => {
+                    canonical_evidence_correction_requested = true;
+                    messages.push(ModelMessage {
+                        role: Role::User,
+                        content: vec![Content::Text {
+                            text: "You have not gathered canonical evidence from the governed tool surface yet. Before finishing, use at least one available tool that directly supports the assigned objective, then report only what that tool result establishes. Do not claim completion from prose alone."
+                                .to_string(),
+                        }],
+                    });
+                    send_progress(
+                        AgentProgressStatus::Running,
+                        "requiring canonical tool evidence",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    continue;
+                }
+                EvidenceCompletionDecision::Reject => {
+                    seal_terminal_or_continue!(&text_parts);
+                    send_progress(
+                        AgentProgressStatus::Failed,
+                        "no canonical tool evidence",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    config.cleanup();
+                    return SubAgentResult {
+                        task_id,
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: false,
+                        output: final_output,
+                        files_examined: files_examined.clone(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: Some(
+                            "Delegated child completed without canonical tool evidence".to_string(),
+                        ),
+                        termination: SubAgentTermination::Failed,
+                        policy_violations: policy_violations.clone(),
+                        evidence: evidence.clone(),
+                        background_processes: background_processes.clone(),
+                    };
+                }
+            }
+
             if config.use_explorer_heuristics() && delegated_is_explore(task) {
                 let missing_report = parse_explore_report(&final_output).is_none();
 
@@ -657,12 +1199,14 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 agent_name: task_name.clone(),
                 delegated_run_id: task.delegated_run_id.clone(),
                 success: true,
-                output: final_output,
-                files_examined,
+                output: final_output.clone(),
+                files_examined: files_examined.clone(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 turns_used: turns,
                 error: None,
-                policy_violations,
+                termination: SubAgentTermination::Completed,
+                policy_violations: policy_violations.clone(),
+                evidence: evidence.clone(),
                 background_processes: background_processes.clone(),
             };
             let result = if config.use_explorer_heuristics() {
@@ -670,6 +1214,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             } else {
                 raw_result
             };
+            let result = enforce_canonical_evidence(result);
+            seal_terminal_or_continue!(&text_parts);
             info!(
                 task_id = %result.task_id,
                 turns = turns,
@@ -710,22 +1256,25 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         {
             let synthesized =
                 synthesized_explorer_output(&task.name, &final_output, &files_examined);
-            let result = normalize_explorer_result(
+            let result = enforce_canonical_evidence(normalize_explorer_result(
                 SubAgentResult {
                     task_id: task_id.clone(),
                     agent_name: task_name.clone(),
                     delegated_run_id: task.delegated_run_id.clone(),
                     success: true,
                     output: synthesized,
-                    files_examined,
+                    files_examined: files_examined.clone(),
                     duration_ms: start.elapsed().as_millis() as u64,
                     turns_used: turns,
                     error: None,
-                    policy_violations,
+                    termination: SubAgentTermination::Completed,
+                    policy_violations: policy_violations.clone(),
+                    evidence: evidence.clone(),
                     background_processes: background_processes.clone(),
                 },
                 task,
-            );
+            ));
+            seal_terminal_or_continue!(&text_parts);
             send_progress(
                 if result.success {
                     AgentProgressStatus::Complete
@@ -770,7 +1319,11 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         let mut cycle_positive_evidence = false;
 
         for tc in &tool_calls {
+            if cancellation.is_cancelled() {
+                return_cancelled!();
+            }
             total_tool_calls += 1;
+            evidence.record_attempt();
             if let Some(policy) = task.delegation_policy.as_ref() {
                 if let Err(reason) = policy.authorize_tool_call(&tc.name, &tc.input, ctx.plan_mode)
                 {
@@ -793,6 +1346,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     });
 
                     if policy_violations.len() >= MAX_DELEGATED_POLICY_VIOLATIONS {
+                        preserve_terminal_mailbox!();
                         send_progress(
                             AgentProgressStatus::Failed,
                             "delegated policy blocked repeated tool calls",
@@ -815,12 +1369,18 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                                 "Delegated policy containment triggered after repeated blocked tool attempts"
                                     .to_string(),
                             ),
+                            termination: SubAgentTermination::Failed,
                             policy_violations,
+                            evidence: evidence.clone(),
                             background_processes: background_processes.clone(),
                         };
                     }
                     continue;
                 }
+            }
+
+            if cancellation.is_cancelled() {
+                return_cancelled!();
             }
 
             last_action = config.format_action(&tc.name, &tc.input);
@@ -833,7 +1393,22 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 config,
             );
 
-            let result = config.execute_tool(&tc.name, tc.input.clone(), &ctx).await;
+            // Once a filesystem mutation is dispatched, dropping its future
+            // cannot prove that no mutation occurred: a write or multi-file
+            // patch may have committed before its result is assembled. Bash is
+            // the deliberate exception: its process-group drop guard is the
+            // bounded quiescence mechanism, so interruption must drop that
+            // future instead of waiting for the command timeout. Read-only work
+            // remains promptly cancellable as well.
+            let result = if tool_call_requires_completion_shield(&tc.name, &tc.input) {
+                config.execute_tool(&tc.name, tc.input.clone(), &ctx).await
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return_cancelled!(),
+                    result = config.execute_tool(&tc.name, tc.input.clone(), &ctx) => result,
+                }
+            };
 
             let (output, is_error) = match result {
                 Some(r) => {
@@ -846,6 +1421,12 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 }
                 None => (format!("Unknown tool: {}", tc.name), true),
             };
+
+            if !is_error {
+                if let Some(kind) = delegated_evidence_kind(&tc.name, &tc.input) {
+                    evidence.record_success(kind);
+                }
+            }
 
             if tool_result_has_positive_evidence(&tc.name, &output, is_error) {
                 cycle_positive_evidence = true;
@@ -873,6 +1454,10 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 output: build_history_tool_result(&tc.name, &output, is_error),
                 is_error: Some(is_error),
             });
+        }
+
+        if cancellation.is_cancelled() {
+            return_cancelled!();
         }
 
         let progress_calls = tool_calls
@@ -925,17 +1510,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             } else {
                 format!("{}\n\n{}", final_output.trim(), completion)
             };
-            send_progress(
-                AgentProgressStatus::Complete,
-                "validated",
-                total_tool_calls,
-                estimated_tokens,
-                completion_summary_preview(&output),
-                config,
-            );
-            config.cleanup();
-            return SubAgentResult {
-                task_id,
+            seal_terminal_or_continue!(&[] as &[String]);
+            let result = enforce_canonical_evidence(SubAgentResult {
+                task_id: task_id.clone(),
                 agent_name: task_name.clone(),
                 delegated_run_id: task.delegated_run_id.clone(),
                 success: true,
@@ -944,39 +1521,53 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 duration_ms: start.elapsed().as_millis() as u64,
                 turns_used: turns,
                 error: None,
+                termination: SubAgentTermination::Completed,
                 policy_violations,
+                evidence: evidence.clone(),
                 background_processes: background_processes.clone(),
-            };
+            });
+            send_progress(
+                if result.success {
+                    AgentProgressStatus::Complete
+                } else {
+                    AgentProgressStatus::Failed
+                },
+                if result.success {
+                    "validated"
+                } else {
+                    "no canonical tool evidence"
+                },
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&result.output),
+                config,
+            );
+            config.cleanup();
+            return result;
         }
         if let Some(diagnostic) = guard_diagnostic {
             warn!(
                 task_id = %task_id,
                 turns,
                 diagnostic = %diagnostic,
-                "Delegated semantic progress guard stopped the run"
+                "Delegated semantic progress guard entered one bounded synthesis landing"
             );
+            messages.push(ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: loop_guard_landing_instruction(&diagnostic),
+                }],
+            });
+            loop_guard_landing = Some(diagnostic);
             send_progress(
-                AgentProgressStatus::Failed,
-                "no semantic progress",
+                AgentProgressStatus::Running,
+                "synthesizing guarded evidence",
                 total_tool_calls,
                 estimated_tokens,
                 completion_summary_preview(&final_output),
                 config,
             );
-            config.cleanup();
-            return SubAgentResult {
-                task_id,
-                agent_name: task_name.clone(),
-                delegated_run_id: task.delegated_run_id.clone(),
-                success: false,
-                output: final_output,
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: Some(diagnostic),
-                policy_violations,
-                background_processes: background_processes.clone(),
-            };
+            continue;
         }
         last_cycle_positive_evidence = cycle_positive_evidence;
 
@@ -1014,22 +1605,25 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
                 let synthesized =
                     synthesized_explorer_output(&task.name, &final_output, &files_examined);
-                let result = normalize_explorer_result(
+                let result = enforce_canonical_evidence(normalize_explorer_result(
                     SubAgentResult {
                         task_id: task_id.clone(),
                         agent_name: task_name.clone(),
                         delegated_run_id: task.delegated_run_id.clone(),
                         success: true,
                         output: synthesized,
-                        files_examined,
+                        files_examined: files_examined.clone(),
                         duration_ms: start.elapsed().as_millis() as u64,
                         turns_used: turns,
                         error: None,
-                        policy_violations,
+                        termination: SubAgentTermination::Completed,
+                        policy_violations: policy_violations.clone(),
+                        evidence: evidence.clone(),
                         background_processes: background_processes.clone(),
                     },
                     task,
-                );
+                ));
+                seal_terminal_or_continue!(&[] as &[String]);
                 send_progress(
                     if result.success {
                         AgentProgressStatus::Complete
@@ -1096,6 +1690,184 @@ mod tests {
             }),
             prompt: None,
         }]
+    }
+
+    #[test]
+    fn nonempty_tool_calls_outrank_a_contradictory_end_turn_reason() {
+        let calls = vec![super::super::super::types::ToolCall {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: json!({"file_path": "src/lib.rs"}),
+        }];
+
+        assert!(response_requires_tool_execution(&calls, "end_turn"));
+        assert!(!response_requires_tool_execution(&[], "end_turn"));
+    }
+
+    #[test]
+    fn no_call_max_tokens_gets_exactly_one_available_landing_retry() {
+        assert_eq!(
+            max_tokens_landing_decision(&[], "max_tokens", false, true),
+            MaxTokensLandingDecision::RetryConciseLanding
+        );
+        assert_eq!(
+            max_tokens_landing_decision(&[], "max_tokens", true, true),
+            MaxTokensLandingDecision::TerminalIncomplete
+        );
+        assert_eq!(
+            max_tokens_landing_decision(&[], "max_tokens", false, false),
+            MaxTokensLandingDecision::TerminalIncomplete
+        );
+    }
+
+    #[test]
+    fn every_bounded_landing_removes_the_tool_surface() {
+        let tools = cache_scope_tools();
+
+        assert_eq!(tool_surface_for_turn(&tools, false, false).len(), 1);
+        assert!(tool_surface_for_turn(&tools, true, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, true).is_empty());
+    }
+
+    #[test]
+    fn max_tokens_never_suppresses_structured_tool_calls() {
+        let calls = vec![super::super::super::types::ToolCall {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: json!({"file_path": "src/lib.rs"}),
+        }];
+
+        assert_eq!(
+            max_tokens_landing_decision(&calls, "max_tokens", false, true),
+            MaxTokensLandingDecision::NotApplicable
+        );
+        assert!(response_requires_tool_execution(&calls, "max_tokens"));
+    }
+
+    #[test]
+    fn writes_are_shielded_but_bash_uses_its_process_group_drop_guard() {
+        assert!(tool_call_requires_completion_shield(
+            "write",
+            &json!({"file_path": "src/lib.rs", "content": "changed"})
+        ));
+        assert!(tool_call_requires_completion_shield(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch"})
+        ));
+        assert!(!tool_call_requires_completion_shield(
+            "bash",
+            &json!({"command": "cargo test"})
+        ));
+        assert!(tool_call_requires_completion_shield(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {"file_path": "src/lib.rs", "content": "changed"}
+            })
+        ));
+        assert!(!tool_call_requires_completion_shield(
+            "read",
+            &json!({"file_path": "src/lib.rs"})
+        ));
+    }
+
+    #[test]
+    fn loop_guard_landing_is_tool_free_and_retains_truthful_diagnostic() {
+        let output = loop_guard_landing_output(
+            "Found the durable race and isolated it to the lease handoff.",
+            "Stopping exploration loop after repeated evidence.",
+            &["src/lease.rs".to_string()],
+        );
+        let instruction =
+            loop_guard_landing_instruction("Stopping exploration loop after repeated evidence.");
+
+        assert!(instruction.contains("one bounded synthesis turn"));
+        assert!(instruction.contains("No tools are available"));
+        assert!(output.contains("Found the durable race"));
+        assert!(output.contains("[DELEGATED LOOP GUARD]"));
+        assert!(output.contains("Stopping exploration loop"));
+    }
+
+    #[test]
+    fn noncontinuable_terminal_retains_accepted_parent_steering_for_resume() {
+        let mut output = "evidence gathered".to_string();
+        retain_unconsumed_parent_messages(
+            &mut output,
+            vec!["verify the migration edge case".to_string()],
+        );
+
+        assert!(output.contains("[UNCONSUMED PARENT STEERING]"));
+        assert!(output.contains("verify the migration edge case"));
+        assert!(output.contains("Preserve it when resuming or synthesizing"));
+    }
+
+    #[test]
+    fn zero_evidence_gets_one_bounded_correction_then_rejects() {
+        let evidence = DelegatedEvidenceSummary::default();
+
+        assert_eq!(
+            evidence_completion_decision(&evidence, false, true),
+            EvidenceCompletionDecision::RequestEvidence
+        );
+        assert_eq!(
+            evidence_completion_decision(&evidence, true, true),
+            EvidenceCompletionDecision::Reject
+        );
+        assert_eq!(
+            evidence_completion_decision(&evidence, false, false),
+            EvidenceCompletionDecision::Reject
+        );
+    }
+
+    #[test]
+    fn successful_authorized_capability_categories_satisfy_evidence_gate() {
+        for (tool, input, expected) in [
+            (
+                "read",
+                json!({"file_path": "src/lib.rs"}),
+                DelegatedEvidenceKind::Observation,
+            ),
+            (
+                "apply_patch",
+                json!({"patch": "*** Begin Patch"}),
+                DelegatedEvidenceKind::Mutation,
+            ),
+            (
+                "bash",
+                json!({"command": "cargo test"}),
+                DelegatedEvidenceKind::Execution,
+            ),
+        ] {
+            assert_eq!(delegated_evidence_kind(tool, &input), Some(expected));
+        }
+        assert_eq!(
+            delegated_evidence_kind("tool_search", &json!({"action": "search"})),
+            None
+        );
+        assert_eq!(
+            delegated_evidence_kind(
+                "tool_search",
+                &json!({
+                    "action": "execute",
+                    "tool": "bash",
+                    "arguments": {"command": "cargo test"}
+                })
+            ),
+            Some(DelegatedEvidenceKind::Execution)
+        );
+        assert_eq!(
+            delegated_evidence_kind("agent", &json!({"action": "spawn", "agent_type": "build"})),
+            Some(DelegatedEvidenceKind::Mutation)
+        );
+
+        let mut evidence = DelegatedEvidenceSummary::default();
+        evidence.record_attempt();
+        evidence.record_success(DelegatedEvidenceKind::Observation);
+        assert_eq!(
+            evidence_completion_decision(&evidence, false, true),
+            EvidenceCompletionDecision::Ready
+        );
     }
 
     #[test]

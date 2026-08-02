@@ -1,11 +1,11 @@
 use mitsuro_core::ai::models::ModelKey;
 use mitsuro_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, PendingInteractionSnapshot,
-    RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
-    WorkMode, WorkspaceMode,
+    DelegatedRunRecord, DelegatedRunScope, DelegatedRunSummary, PartialAssistantState,
+    PendingInteractionSnapshot, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
+    SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
@@ -62,9 +62,7 @@ where
 mod tests {
     use serde_json::json;
 
-    use super::{SessionTypeResponse, UpdateSessionRequest};
-    use crate::legacy_identity::SessionWireFormat;
-    use mitsuro_core::storage::SessionType;
+    use super::UpdateSessionRequest;
 
     #[test]
     fn update_session_request_accepts_null_target_branch_clear() {
@@ -88,25 +86,6 @@ mod tests {
                 .as_ref()
                 .and_then(|branch| branch.as_deref()),
             Some("feature/mobile-continuation")
-        );
-    }
-
-    #[test]
-    fn generic_session_type_projection_is_typed_and_negotiated() {
-        let legacy = SessionTypeResponse::new(SessionType::Hive, SessionWireFormat::Legacy);
-        let canonical = SessionTypeResponse::new(SessionType::Hive, SessionWireFormat::Canonical);
-        assert_eq!(serde_json::to_value(legacy).expect("legacy wire"), "mako");
-        assert_eq!(
-            serde_json::to_value(canonical).expect("canonical wire"),
-            "hive"
-        );
-        assert_eq!(
-            serde_json::to_value(SessionTypeResponse::new(
-                SessionType::Code,
-                SessionWireFormat::Legacy
-            ))
-            .expect("code wire"),
-            "code"
         );
     }
 }
@@ -152,7 +131,7 @@ pub struct SessionResponse {
     pub working_dir: Option<String>,
     pub project_dir: Option<String>,
     pub workspace_mode: WorkspaceMode,
-    pub session_type: SessionTypeResponse,
+    pub session_type: SessionType,
     pub mode: WorkMode,
     pub model: Option<String>,
     pub model_key: Option<ModelKey>,
@@ -161,46 +140,8 @@ pub struct SessionResponse {
     pub permission_mode: PermissionMode,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SessionTypeResponse {
-    value: SessionType,
-    wire_format: crate::legacy_identity::SessionWireFormat,
-}
-
-impl SessionTypeResponse {
-    fn new(value: SessionType, wire_format: crate::legacy_identity::SessionWireFormat) -> Self {
-        Self { value, wire_format }
-    }
-}
-
-impl Serialize for SessionTypeResponse {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let value = match (self.value, self.wire_format) {
-            (SessionType::Hive, crate::legacy_identity::SessionWireFormat::Legacy) => {
-                crate::legacy_identity::HIVE_SESSION_TYPE
-            }
-            (SessionType::Hive, crate::legacy_identity::SessionWireFormat::Canonical) => "hive",
-            (SessionType::Chat, _) => "chat",
-            (SessionType::Code, _) => "code",
-        };
-        serializer.serialize_str(value)
-    }
-}
-
-impl PartialEq<SessionType> for SessionTypeResponse {
-    fn eq(&self, other: &SessionType) -> bool {
-        self.value == *other
-    }
-}
-
-impl SessionResponse {
-    pub(crate) fn from_session(
-        s: SessionInfo,
-        wire_format: crate::legacy_identity::SessionWireFormat,
-    ) -> Self {
+impl From<SessionInfo> for SessionResponse {
+    fn from(s: SessionInfo) -> Self {
         Self {
             id: s.id,
             title: s.title,
@@ -210,7 +151,7 @@ impl SessionResponse {
             working_dir: s.working_dir,
             project_dir: s.project_dir,
             workspace_mode: s.workspace_mode,
-            session_type: SessionTypeResponse::new(s.session_type, wire_format),
+            session_type: s.session_type,
             mode: s.work_mode,
             model: s.model,
             model_key: s.model_key,
@@ -254,6 +195,10 @@ pub struct SessionStateResponse {
     pub delegated_tools: Vec<DelegatedToolStateResponse>,
     /// Recent persisted delegated runs for this session.
     pub recent_delegated_runs: Vec<DelegatedRunResponse>,
+    /// Compact newest-run index for delegated tool calls in the hydrated
+    /// transcript. Unlike recent_delegated_runs, these rows never carry large
+    /// snapshots or artifacts.
+    pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
 }
@@ -280,6 +225,57 @@ pub struct DelegatedToolStateResponse {
     pub stage: DelegatedRunStage,
     pub parent_session_id: Option<String>,
     pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+impl DelegatedToolStateResponse {
+    pub(crate) fn from_active_durable_snapshot(record: &DelegatedRunRecord) -> Option<Self> {
+        if !matches!(
+            record.stage,
+            mitsuro_core::agent::DelegatedRunStage::Created
+                | mitsuro_core::agent::DelegatedRunStage::Running
+                | mitsuro_core::agent::DelegatedRunStage::Synthesizing
+        ) {
+            return None;
+        }
+        let tool_call_id = record.parent_tool_call_id.clone()?;
+        let snapshot = record.snapshot.as_ref()?;
+        let status = |status: &str| match status {
+            "complete" => DelegatedProgressStatus::Complete,
+            "degraded" => DelegatedProgressStatus::Degraded,
+            "cancelled" => DelegatedProgressStatus::Cancelled,
+            "failed" => DelegatedProgressStatus::Failed,
+            _ => DelegatedProgressStatus::Running,
+        };
+
+        Some(Self {
+            delegated_run_id: record.delegated_run_id.clone(),
+            tool_call_id,
+            kind: match record.role {
+                mitsuro_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                mitsuro_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                mitsuro_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                mitsuro_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: DelegatedRunStage::from(record.stage),
+            parent_session_id: Some(record.parent_session_id.clone()),
+            agents: snapshot
+                .agents
+                .iter()
+                .map(|agent| DelegatedAgentStateResponse {
+                    task_id: agent.task_id.clone(),
+                    agent_name: agent.agent_name.clone(),
+                    status: status(&agent.status),
+                    tool_count: agent.tool_count,
+                    tokens: agent.tokens,
+                    current_action: agent.current_action.clone(),
+                    completion_summary: agent.completion_summary.clone(),
+                    lines_added: agent.lines_added,
+                    lines_removed: agent.lines_removed,
+                    completed_plan_task: agent.completed_plan_task.clone(),
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -315,6 +311,45 @@ pub struct DelegatedRunResponse {
     pub human_review: Option<String>,
     pub artifact: Option<Value>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunSummaryResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub child_name: Option<String>,
+    pub capabilities: Vec<String>,
+    pub updated_at: String,
+}
+
+impl From<DelegatedRunSummary> for DelegatedRunSummaryResponse {
+    fn from(value: DelegatedRunSummary) -> Self {
+        let capabilities = value
+            .effective_capabilities()
+            .into_iter()
+            .map(|capability| match capability {
+                mitsuro_core::agent::subagent::AgentCapability::Read => "read".to_string(),
+                mitsuro_core::agent::subagent::AgentCapability::Write => "write".to_string(),
+                mitsuro_core::agent::subagent::AgentCapability::Execute => "execute".to_string(),
+            })
+            .collect();
+        Self {
+            delegated_run_id: value.delegated_run_id,
+            parent_tool_call_id: value.parent_tool_call_id,
+            kind: match value.role {
+                mitsuro_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                mitsuro_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                mitsuro_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                mitsuro_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: DelegatedRunStage::from(value.stage),
+            child_name: value.child_name,
+            capabilities,
+            updated_at: value.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 impl From<DelegatedRunRecord> for DelegatedRunResponse {

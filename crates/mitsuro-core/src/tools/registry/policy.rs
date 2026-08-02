@@ -269,6 +269,16 @@ impl ToolPolicy {
         }
     }
 
+    const fn read_only_without_retry_with_timeout(timeout_override: Duration) -> Self {
+        Self {
+            category: ToolCategory::ReadOnly,
+            requires_supervised_approval: false,
+            retry_timeout_once: false,
+            allowed_in_plan_mode: true,
+            timeout_override: Some(timeout_override),
+        }
+    }
+
     const fn interactive() -> Self {
         Self {
             category: ToolCategory::Interactive,
@@ -358,6 +368,12 @@ pub enum DelegationSurface {
 pub struct DelegationPolicy {
     pub surface: DelegationSurface,
     pub inherited_permission_mode: PermissionMode,
+    /// The parent explicitly approved the outer delegated run and its declared
+    /// capability ceiling. This is deliberately run-scoped: it does not change
+    /// the session's permission mode or authorize tools outside the immutable
+    /// child allowlist.
+    #[serde(default)]
+    pub supervised_approval_granted: bool,
     pub max_turns: Option<usize>,
     pub read_only_only: bool,
     pub bash_allowed: bool,
@@ -376,6 +392,7 @@ impl DelegationPolicy {
         Self {
             surface: DelegationSurface::SubagentExplore,
             inherited_permission_mode,
+            supervised_approval_granted: false,
             max_turns,
             read_only_only: true,
             bash_allowed: false,
@@ -390,6 +407,7 @@ impl DelegationPolicy {
         Self {
             surface: DelegationSurface::SubagentBuild,
             inherited_permission_mode,
+            supervised_approval_granted: false,
             max_turns,
             read_only_only: false,
             bash_allowed: false,
@@ -404,6 +422,7 @@ impl DelegationPolicy {
         Self {
             surface: DelegationSurface::SubagentPlan,
             inherited_permission_mode,
+            supervised_approval_granted: false,
             max_turns,
             read_only_only: true,
             bash_allowed: false,
@@ -418,6 +437,7 @@ impl DelegationPolicy {
         Self {
             surface: DelegationSurface::SubagentVerify,
             inherited_permission_mode,
+            supervised_approval_granted: false,
             max_turns,
             read_only_only: true,
             bash_allowed: true,
@@ -495,6 +515,13 @@ impl DelegationPolicy {
                 None => parent_allowlist.iter().cloned().collect(),
             });
         }
+        self
+    }
+
+    /// Carry the result of the parent Agent-tool approval into the child
+    /// governance contract. The capability allowlist remains the hard ceiling.
+    pub fn with_supervised_approval(mut self, granted: bool) -> Self {
+        self.supervised_approval_granted = granted;
         self
     }
 
@@ -580,6 +607,7 @@ impl DelegationPolicy {
         }
         if self.inherited_permission_mode == PermissionMode::Supervised
             && policy.requires_supervised_approval
+            && !self.supervised_approval_granted
         {
             return Err(format!(
                 "Delegated policy blocked tool '{}': supervised parent requires approval for write-capable tools",
@@ -611,6 +639,7 @@ impl DelegationPolicy {
         serde_json::json!({
             "surface": self.surface_name(),
             "permission_mode": self.inherited_permission_mode,
+            "supervised_approval_granted": self.supervised_approval_granted,
             "max_turns": self.max_turns,
             "read_only_only": self.read_only_only,
             "bash_allowed": self.bash_allowed,
@@ -690,13 +719,22 @@ fn tool_search_policy(params: &Value) -> ToolPolicy {
 
 fn agent_tool_policy(params: &Value) -> ToolPolicy {
     match agent_call_action(params) {
-        "message" | "followup" | "interrupt" => ToolPolicy::interactive(),
+        "message" | "interrupt" => ToolPolicy::interactive(),
+        // A followup steers a live child when one exists, but the same call
+        // resumes a terminal child as a new run. Authorize the maximum side
+        // effect of the wrapper so a write-capable durable contract cannot be
+        // restarted through an approval-free interactive call.
+        "followup" => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
         "list" | "status" | "wait" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
         "resume" => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
         _ if agent_call_requests_write(params) => {
             ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT)
         }
-        _ => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        // A read-capable spawn is read-only with respect to the workspace, but
+        // it creates a durable run and starts provider work. Retrying it after
+        // the outer timeout would create a second child after the first run's
+        // lease has been cancelled, so run-start calls are non-retryable.
+        _ => ToolPolicy::read_only_without_retry_with_timeout(DELEGATED_TOOL_TIMEOUT),
     }
 }
 
@@ -708,7 +746,22 @@ pub fn agent_call_action(params: &Value) -> &str {
 }
 
 pub fn agent_call_starts_run(params: &Value) -> bool {
+    // A terminal followup may resume internally, but a live followup is only
+    // mailbox steering. Keep definite run accounting separate from the
+    // conservative write authorization applied to every followup.
     matches!(agent_call_action(params), "spawn" | "resume")
+}
+
+/// Whether an Agent call needs the delegated-progress execution bridge.
+///
+/// Unlike `agent_call_starts_run`, this is intentionally conservative: a
+/// followup can be mailbox-only for a live child or become a new durable run
+/// after the tool resolves the referenced record. Installing a progress sender
+/// for both cases is harmless; the executor decides whether to detach that
+/// sender from the returned result, once it knows whether a background run was
+/// actually started.
+pub fn agent_call_may_start_run(params: &Value) -> bool {
+    matches!(agent_call_action(params), "spawn" | "resume" | "followup")
 }
 
 pub fn agent_call_requests_write(params: &Value) -> bool {
@@ -720,11 +773,15 @@ pub fn agent_call_requests_write(params: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some()
     {
-        return agent_call_has_capability(params, "write");
+        return agent_call_has_capability(params, "write")
+            || agent_call_has_capability(params, "execute");
     }
-    ["profile", "agent_type"]
-        .iter()
-        .any(|field| params.get(field).and_then(Value::as_str) == Some("build"))
+    ["profile", "agent_type"].iter().any(|field| {
+        matches!(
+            params.get(field).and_then(Value::as_str),
+            Some("build" | "worker" | "verify")
+        )
+    })
 }
 
 pub fn agent_call_execution_profile(params: &Value) -> &'static str {
@@ -773,12 +830,18 @@ pub fn agent_call_is_research(params: &Value) -> bool {
             && !agent_call_has_capability(params, "write");
     }
 
-    matches!(
+    // A bare durable resume restores capabilities from storage after top-level
+    // authorization, so its research/write nature cannot be inferred here.
+    if agent_call_action(params) == "resume" {
+        return false;
+    }
+
+    !matches!(
         params
             .get("profile")
             .and_then(Value::as_str)
             .or_else(|| params.get("agent_type").and_then(Value::as_str)),
-        Some("explore" | "plan" | "verify")
+        Some("build" | "worker")
     )
 }
 
@@ -797,7 +860,7 @@ fn agent_call_has_capability(params: &Value, expected: &str) -> bool {
 /// Resolve the canonical policy for a tool name.
 pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
-        "agent" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        "agent" => ToolPolicy::read_only_without_retry_with_timeout(DELEGATED_TOOL_TIMEOUT),
         "read"
         | "glob"
         | "grep"

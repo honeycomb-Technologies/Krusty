@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::loop_events::LoopEvent;
 use crate::agent::subagent::AgentProgress;
@@ -122,6 +123,10 @@ pub struct ToolContext {
     pub mcp_manager: Option<Arc<McpManager>>,
     /// Optional per-call timeout override
     pub timeout: Option<Duration>,
+    /// Cancellation scoped to this exact dispatched tool call. Delegated
+    /// runtimes use this instead of the process-global compatibility token so
+    /// cancelling one parent session cannot affect another session's child.
+    pub execution_cancellation: Option<CancellationToken>,
     /// Channel for streaming output (used by bash tool)
     pub output_tx: Option<mpsc::UnboundedSender<ToolOutputChunk>>,
     /// Tool use ID for streaming output
@@ -140,6 +145,10 @@ pub struct ToolContext {
     pub git_identity: Option<GitIdentity>,
     /// Parent execution permission mode inherited into delegated surfaces.
     pub permission_mode: PermissionMode,
+    /// Whether the supervised parent explicitly approved this exact outer tool
+    /// dispatch. Delegated tools use it to authorize only the capabilities
+    /// declared by that approved call.
+    pub supervised_approval_granted: bool,
     /// Optional delegated sub-agent turn budget inherited from parent config.
     pub subagent_max_turns: Option<usize>,
     /// Optional delegated execution policy contract for downstream calls.
@@ -175,6 +184,7 @@ impl Default for ToolContext {
             skills_manager: None,
             mcp_manager: None,
             timeout: None,
+            execution_cancellation: None,
             output_tx: None,
             tool_use_id: None,
             plan_mode: false,
@@ -184,6 +194,7 @@ impl Default for ToolContext {
             ai_client: None,
             git_identity: None,
             permission_mode: PermissionMode::default(),
+            supervised_approval_granted: false,
             subagent_max_turns: None,
             delegation_policy: None,
             execution_tool_allowlist: None,
@@ -278,6 +289,18 @@ impl ToolContext {
     /// Add MCP manager to context
     pub fn with_mcp_manager(mut self, mcp_manager: Arc<McpManager>) -> Self {
         self.mcp_manager = Some(mcp_manager);
+        self
+    }
+
+    /// Attach cancellation scoped to this exact tool dispatch.
+    pub fn with_execution_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.execution_cancellation = Some(cancellation);
+        self
+    }
+
+    /// Record approval for this exact dispatched tool call.
+    pub fn with_supervised_approval(mut self, granted: bool) -> Self {
+        self.supervised_approval_granted = granted;
         self
     }
 

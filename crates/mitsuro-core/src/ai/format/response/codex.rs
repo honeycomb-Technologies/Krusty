@@ -8,6 +8,7 @@ use serde_json::Value;
 pub fn normalize_codex_response(response: &Value) -> Value {
     let mut content: Vec<Value> = vec![];
     let mut stop_reason = "end_turn";
+    let mut has_tool_calls = false;
 
     if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
         for item in output {
@@ -46,6 +47,7 @@ pub fn normalize_codex_response(response: &Value) -> Value {
                         "name": name,
                         "input": input
                     }));
+                    has_tool_calls = true;
                     stop_reason = "tool_use";
                 }
                 _ => {}
@@ -55,7 +57,7 @@ pub fn normalize_codex_response(response: &Value) -> Value {
 
     if let Some(status) = response.get("status").and_then(|s| s.as_str()) {
         match status {
-            "completed" => stop_reason = "end_turn",
+            "completed" if !has_tool_calls => stop_reason = "end_turn",
             "incomplete" => {
                 if let Some(reason) = response
                     .get("incomplete_details")
@@ -75,4 +77,54 @@ pub fn normalize_codex_response(response: &Value) -> Value {
         "stop_reason": stop_reason,
         "model": response.get("model").cloned().unwrap_or(Value::Null)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::normalize_codex_response;
+
+    #[test]
+    fn completed_response_with_function_call_preserves_tool_use_reason() {
+        let normalized = normalize_codex_response(&json!({
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "read",
+                "arguments": "{\"file_path\":\"src/lib.rs\"}"
+            }]
+        }));
+
+        assert_eq!(normalized["stop_reason"], "tool_use");
+        assert_eq!(normalized["content"][0]["type"], "tool_use");
+        assert_eq!(normalized["content"][0]["name"], "read");
+    }
+
+    #[test]
+    fn completed_text_only_response_is_an_end_turn() {
+        let normalized = normalize_codex_response(&json!({
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "done"}]
+            }]
+        }));
+
+        assert_eq!(normalized["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn incomplete_response_without_calls_preserves_max_token_reason() {
+        let normalized = normalize_codex_response(&json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": []
+        }));
+
+        assert_eq!(normalized["stop_reason"], "max_tokens");
+    }
 }

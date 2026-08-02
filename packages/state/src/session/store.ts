@@ -216,7 +216,7 @@ export function createSessionStore(
           state: prefetchedServerState,
         })
       : client.getSessionState
-        ? client.getSessionState(sessionId).then(
+        ? client.getSessionState(sessionId, { includeDelegatedHistory: true }).then(
             (state) => ({ ok: true, state }),
             () => ({ ok: false, state: null }),
           )
@@ -254,6 +254,7 @@ export function createSessionStore(
       live_partial_assistant: null,
       delegated_tools: [],
       recent_delegated_runs: [],
+      delegated_run_summaries: [],
     });
     while (lastKnownServerState.size > MAX_LAST_KNOWN_SERVER_STATE) {
       const oldest = lastKnownServerState.keys().next().value;
@@ -1060,7 +1061,9 @@ export function createSessionStore(
               && client.getSessionState
             ) {
               try {
-                const softState = await client.getSessionState(sessionId);
+                const softState = await client.getSessionState(sessionId, {
+                  includeDelegatedHistory: true,
+                });
                 if (
                   selectionGeneration !== sessionSelectionGeneration
                   || get().sessionId !== sessionId
@@ -1184,6 +1187,7 @@ export function createSessionStore(
                   ),
                   serverState?.delegated_tools,
                   serverState?.recent_delegated_runs,
+                  serverState?.delegated_run_summaries,
                 );
 
                 set((s) => {

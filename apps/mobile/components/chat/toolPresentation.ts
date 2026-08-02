@@ -379,12 +379,18 @@ function buildMeta(
     const capabilityLabel = capabilities.length > 0
       ? capabilities.map((capability) => capability.toLowerCase()).join(" + ")
       : undefined;
+    const delegatedStateLabel = delegated?.stage === "degraded"
+      || delegated?.stage === "cancelled"
+      ? delegated.stage
+      : delegated?.outcome ?? delegated?.stage;
     return [
       capabilityLabel,
-      delegated?.outcome ?? delegated?.stage,
+      delegatedStateLabel,
       delegated?.agentCount !== undefined
         ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? "" : "s"}`
         : undefined,
+      delegated?.degradedAgents ? `${delegated.degradedAgents} degraded` : undefined,
+      delegated?.cancelledAgents ? `${delegated.cancelledAgents} cancelled` : undefined,
       delegated?.failedAgents ? `${delegated.failedAgents} failed` : undefined,
       delegated?.filesExaminedCount !== undefined
         ? `${delegated.filesExaminedCount} paths`

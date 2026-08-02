@@ -250,7 +250,7 @@ fn pending_steering_is_hidden_survives_replacement_and_promotes_once_at_end() {
 }
 
 #[test]
-fn enqueue_once_rejects_duplicate_completion_before_and_after_promotion() {
+fn enqueue_once_rejects_duplicate_steering_before_and_after_promotion() {
     let (db, _temp) = create_test_db();
     let store = MessageStore::new(&db);
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -262,21 +262,21 @@ fn enqueue_once_rejects_duplicate_completion_before_and_after_promotion() {
             rusqlite::params![session_id, "Test", now, now],
         )
         .expect("Failed to create session");
-    let content = r#"[{"type":"text","text":"child finished"}]"#;
+    let content = r#"[{"type":"text","text":"durable follow-up"}]"#;
 
     assert!(store
-        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
-        .expect("first completion should enqueue"));
+        .queue_pending_steering_once(&session_id, "durable-steer-1", content)
+        .expect("first steering input should enqueue"));
     assert!(!store
-        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
-        .expect("duplicate pending completion should be idempotent"));
+        .queue_pending_steering_once(&session_id, "durable-steer-1", content)
+        .expect("duplicate pending steering should be idempotent"));
     assert!(store
-        .promote_pending_steering(&session_id, "child-wake-run-1")
-        .expect("completion should promote")
+        .promote_pending_steering(&session_id, "durable-steer-1")
+        .expect("steering should promote")
         .is_some());
     assert!(!store
-        .queue_pending_steering_once(&session_id, "child-wake-run-1", content)
-        .expect("duplicate promoted completion should remain idempotent"));
+        .queue_pending_steering_once(&session_id, "durable-steer-1", content)
+        .expect("duplicate promoted steering should remain idempotent"));
 
     let canonical = store
         .load_session_messages(&session_id)
@@ -284,11 +284,63 @@ fn enqueue_once_rejects_duplicate_completion_before_and_after_promotion() {
     assert_eq!(
         canonical
             .iter()
-            .filter(|(_, message)| message.contains("child finished"))
+            .filter(|(_, message)| message.contains("durable follow-up"))
             .count(),
         1,
-        "one completion event must produce exactly one canonical user message"
+        "one durable input must produce exactly one canonical user message"
     );
+}
+
+#[test]
+fn orphan_recovery_promotes_ordinary_steering_but_never_reserved_child_wakes() {
+    let (db, _temp) = create_test_db();
+    let store = MessageStore::new(&db);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, "Test", now, now],
+        )
+        .expect("Failed to create session");
+
+    store
+        .queue_pending_steering(
+            &session_id,
+            "child-wake-foreign-run",
+            r#"[{"type":"text","text":"foreign child result"}]"#,
+        )
+        .expect("child completion fixture should stage");
+    store
+        .queue_pending_steering(
+            &session_id,
+            "steer-1",
+            r#"[{"type":"text","text":"legitimate follow-up"}]"#,
+        )
+        .expect("ordinary steering should stage");
+
+    assert_eq!(
+        store
+            .promote_orphaned_pending_steering(&session_id)
+            .expect("ordinary orphan recovery should succeed"),
+        1
+    );
+    assert!(store
+        .has_pending_steering(&session_id, "child-wake-foreign-run")
+        .expect("reserved child wake should remain non-canonical"));
+    assert!(store
+        .promote_pending_steering(&session_id, "child-wake-foreign-run")
+        .expect_err("generic promotion must reject the reserved child-wake namespace")
+        .to_string()
+        .contains("workspace-authorized promotion"));
+
+    let canonical = store
+        .load_session_messages(&session_id)
+        .expect("canonical history should load");
+    assert_eq!(canonical.len(), 1);
+    assert!(canonical[0].1.contains("legitimate follow-up"));
+    assert!(!canonical[0].1.contains("foreign child result"));
 }
 
 #[test]

@@ -71,6 +71,7 @@ fn test_tool_policy_contracts() {
 
     let delegated_read_policy = tool_policy("agent");
     assert_eq!(delegated_read_policy.category, ToolCategory::ReadOnly);
+    assert!(!delegated_read_policy.retry_timeout_once);
     assert_eq!(
         delegated_read_policy.timeout_override,
         Some(DELEGATED_TOOL_TIMEOUT)
@@ -104,6 +105,7 @@ fn test_tool_policy_contracts() {
     let agent_explore_policy = tool_policy_for_call("agent", &json!({ "agent_type": "explore" }));
     assert_eq!(agent_explore_policy.category, ToolCategory::ReadOnly);
     assert!(!agent_explore_policy.requires_supervised_approval);
+    assert!(!agent_explore_policy.retry_timeout_once);
     assert!(agent_explore_policy.allowed_in_plan_mode);
 
     let custom_read_policy = tool_policy_for_call("agent", &json!({ "profile": "security-audit" }));
@@ -117,20 +119,38 @@ fn test_tool_policy_contracts() {
     assert_eq!(custom_write_policy.category, ToolCategory::Write);
     assert!(custom_write_policy.requires_supervised_approval);
 
+    let execute_policy = tool_policy_for_call(
+        "agent",
+        &json!({ "name": "validator", "capabilities": ["execute"] }),
+    );
+    assert_eq!(execute_policy.category, ToolCategory::Write);
+    assert!(execute_policy.requires_supervised_approval);
+    assert!(!execute_policy.allowed_in_plan_mode);
+
     for action in ["list", "status", "wait"] {
         let policy = tool_policy_for_call("agent", &json!({ "action": action }));
         assert_eq!(policy.category, ToolCategory::ReadOnly, "{action}");
+        assert!(policy.retry_timeout_once, "{action}");
         assert!(!agent_call_starts_run(&json!({ "action": action })));
     }
-    for action in ["message", "followup", "interrupt"] {
+    for action in ["message", "interrupt"] {
         let policy = tool_policy_for_call("agent", &json!({ "action": action }));
         assert_eq!(policy.category, ToolCategory::Interactive, "{action}");
         assert!(!policy.requires_supervised_approval);
     }
+    let followup_policy = tool_policy_for_call("agent", &json!({ "action": "followup" }));
+    assert_eq!(followup_policy.category, ToolCategory::Write);
+    assert!(followup_policy.requires_supervised_approval);
+    assert!(!followup_policy.retry_timeout_once);
+    assert!(!followup_policy.allowed_in_plan_mode);
+    assert!(!agent_call_starts_run(&json!({ "action": "followup" })));
+    assert!(agent_call_may_start_run(&json!({ "action": "followup" })));
     let resume_policy = tool_policy_for_call("agent", &json!({ "action": "resume" }));
     assert_eq!(resume_policy.category, ToolCategory::Write);
     assert!(resume_policy.requires_supervised_approval);
+    assert!(!resume_policy.retry_timeout_once);
     assert!(agent_call_starts_run(&json!({ "action": "resume" })));
+    assert!(agent_call_may_start_run(&json!({ "action": "resume" })));
 
     let deferred_read_policy = tool_policy_for_call(
         "tool_search",
@@ -188,7 +208,34 @@ fn test_tool_policy_contracts() {
             PermissionMode::Supervised,
             true,
         ),
-        ToolAuthorization::Execute
+        ToolAuthorization::BlockedInPlanMode
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "name": "validator", "capabilities": ["execute"] }),
+            PermissionMode::Supervised,
+            false,
+        ),
+        ToolAuthorization::RequiresApproval
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "action": "followup", "delegated_run_id": "run-build" }),
+            PermissionMode::Supervised,
+            false,
+        ),
+        ToolAuthorization::RequiresApproval
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "action": "followup", "delegated_run_id": "run-build" }),
+            PermissionMode::Autonomous,
+            true,
+        ),
+        ToolAuthorization::BlockedInPlanMode
     );
 }
 
@@ -514,7 +561,37 @@ fn research_accounting_prefers_capabilities_with_legacy_fallback() {
         "instructions": "edit",
         "capabilities": ["read", "write"]
     })));
+    assert!(!agent_call_is_research(&json!({
+        "name": "validator",
+        "instructions": "test",
+        "capabilities": ["execute"]
+    })));
     assert!(agent_call_is_research(&json!({"agent_type": "verify"})));
+    assert!(agent_call_is_research(&json!({
+        "name": "audit",
+        "instructions": "inspect"
+    })));
+    assert!(!agent_call_is_research(&json!({
+        "action": "resume",
+        "delegated_run_id": "run-1"
+    })));
+}
+
+#[test]
+fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
+    let write_child = json!({
+        "profile": "verify",
+        "capabilities": ["read", "write"]
+    });
+    assert_eq!(agent_call_execution_profile(&write_child), "build");
+    assert!(agent_call_requests_write(&write_child));
+
+    let execute_only = json!({
+        "profile": "build",
+        "capabilities": ["execute"]
+    });
+    assert_eq!(agent_call_execution_profile(&execute_only), "explore");
+    assert!(agent_call_requests_write(&execute_only));
 }
 
 #[test]
@@ -538,6 +615,21 @@ fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
 fn delegated_build_policy_blocks_supervised_write_without_approval_path() {
     let policy = DelegationPolicy::for_subagent_build(PermissionMode::Supervised, Some(10));
     assert!(policy.authorize_tool("read", false).is_ok());
+    assert!(policy.authorize_tool("write", false).is_err());
+}
+
+#[test]
+fn delegated_policy_accepts_only_the_approved_capability_ceiling() {
+    let policy = DelegationPolicy::for_subagent_child(
+        PermissionMode::Supervised,
+        Some(10),
+        false,
+        false,
+        true,
+    )
+    .with_supervised_approval(true);
+
+    assert!(policy.authorize_tool("bash", false).is_ok());
     assert!(policy.authorize_tool("write", false).is_err());
 }
 
@@ -760,6 +852,56 @@ struct TestTool;
 
 struct SlowBashLifecycleTool;
 
+struct LeaseHoldingTool {
+    db_path: PathBuf,
+}
+
+#[async_trait]
+impl Tool for LeaseHoldingTool {
+    fn name(&self) -> &str {
+        "lease_holding_test"
+    }
+
+    fn description(&self) -> &str {
+        "test durable delegated-run cancellation on registry timeout"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+        use crate::agent::DelegatedRunStage;
+        use crate::storage::{
+            Database, DelegatedRunLease, DelegatedRunRole, DelegatedRunScope,
+            DelegatedRunStartInput, DelegatedRunStore,
+        };
+
+        let store = DelegatedRunStore::new(Database::new(&self.db_path).expect("lease database"));
+        let mut lease = DelegatedRunLease::new(store);
+        lease
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: "registry-timeout-run".to_string(),
+                parent_session_id: "registry-timeout-session".to_string(),
+                parent_tool_call_id: Some("registry-timeout-call".to_string()),
+                role: DelegatedRunRole::Explore,
+                stage: DelegatedRunStage::Running,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "workspace".to_string(),
+                    path: ".".to_string(),
+                    kind: "workspace".to_string(),
+                }],
+            })
+            .expect("create timeout run");
+        std::future::pending::<()>().await;
+        ToolResult::success("unreachable")
+    }
+}
+
 #[async_trait]
 impl Tool for SlowBashLifecycleTool {
     fn name(&self) -> &str {
@@ -875,6 +1017,54 @@ async fn registry_short_bash_timeout_leaves_room_for_inner_cleanup() {
 
     assert!(!result.is_error, "{}", result.output);
     assert_eq!(result.output, "cleanup complete");
+}
+
+#[tokio::test]
+async fn registry_timeout_drops_lease_and_cancels_durable_run() {
+    use crate::agent::DelegatedRunStage;
+    use crate::storage::{Database, DelegatedRunStore};
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("registry-timeout.db");
+    let db = Database::new(&db_path).expect("timeout database");
+    let now = chrono::Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["registry-timeout-session", "Registry Timeout", now, now],
+        )
+        .expect("seed parent session");
+    drop(db);
+
+    let registry = ToolRegistry::with_default_timeout(std::time::Duration::from_millis(1));
+    registry
+        .register(Arc::new(LeaseHoldingTool {
+            db_path: db_path.clone(),
+        }))
+        .await;
+
+    let result = registry
+        .execute("lease_holding_test", json!({}), &create_test_context())
+        .await
+        .expect("lease test tool should be registered");
+    assert!(result.is_error);
+    assert_eq!(
+        serde_json::from_str::<Value>(&result.output).unwrap()["error"]["code"],
+        "timeout"
+    );
+
+    let store = DelegatedRunStore::new(Database::new(&db_path).expect("reopen timeout database"));
+    let record = store
+        .get_run("registry-timeout-run")
+        .expect("load timed-out run")
+        .expect("timed-out run exists");
+    assert_eq!(record.stage, DelegatedRunStage::Cancelled);
+    assert_eq!(
+        record.artifact.unwrap()["outcome_reason"],
+        "caller_aborted_before_terminal"
+    );
 }
 
 #[test]

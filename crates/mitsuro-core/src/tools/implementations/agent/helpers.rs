@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::{ensure, Context};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -8,7 +9,8 @@ use crate::agent::subagent::{AgentProgress, AgentProgressStatus, SubAgentResult}
 use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::{
-    Database, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore, SessionManager,
+    Database, DelegatedRunLease, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore,
+    SessionManager,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
@@ -45,7 +47,7 @@ pub(super) fn notify_child_completion(
     user_id: Option<&str>,
     workspace_root: Option<&Path>,
     delegated_run_id: &str,
-    name: &str,
+    _name: &str,
     success: bool,
     summary: &str,
 ) -> anyhow::Result<bool> {
@@ -55,54 +57,109 @@ pub(super) fn notify_child_completion(
     let Some(session_id) = session_id else {
         anyhow::bail!("background child completion has no parent session");
     };
-    let pending_id = format!("child-wake-{delegated_run_id}");
-    let content = child_completion_content(name, delegated_run_id, success, summary);
-    let content_json = serde_json::to_string(&content)?;
-    let queued = SessionManager::new(Database::new(db_path)?).queue_pending_steering_once(
-        session_id,
-        &pending_id,
-        &content_json,
+    let delegated = DelegatedRunStore::new(Database::new(db_path)?)
+        .get_run(delegated_run_id)?
+        .with_context(|| {
+            format!("background child completion references unknown run '{delegated_run_id}'")
+        })?;
+    ensure!(
+        delegated.parent_session_id == session_id,
+        "background child completion run belongs to a different parent session"
+    );
+    ensure!(
+        delegated.should_wake_parent(),
+        "background child completion cannot publish authoritative stage {:?}",
+        delegated.stage
+    );
+    let durable_workspaces = delegated
+        .target_scope
+        .iter()
+        .filter(|scope| scope.kind == "workspace")
+        .collect::<Vec<_>>();
+    let [durable_workspace] = durable_workspaces.as_slice() else {
+        anyhow::bail!("background child completion has no unique durable launch workspace");
+    };
+    let durable_workspace_root = PathBuf::from(&durable_workspace.path)
+        .canonicalize()
+        .context("canonicalizing durable child launch workspace")?;
+    let supplied_workspace_root = workspace_root
+        .context("background child completion has no captured workspace authority")?
+        .canonicalize()
+        .context("canonicalizing captured child workspace authority")?;
+    ensure!(
+        durable_workspace_root.starts_with(&supplied_workspace_root),
+        "background child completion launch workspace escapes captured workspace authority"
+    );
+    let event = crate::agent::subagent::ChildCompletionEvent::from_durable_run(
+        &delegated,
+        user_id.map(ToOwned::to_owned),
     )?;
+    let authoritative_success = event.success;
+    ensure!(
+        success == authoritative_success,
+        "background child completion outcome disagrees with durable stage {:?}",
+        delegated.stage
+    );
+    let authoritative_summary = delegated
+        .human_review
+        .as_deref()
+        .context("background child completion has no durable review summary")?;
+    ensure!(
+        summary == authoritative_summary,
+        "background child completion summary disagrees with its durable result"
+    );
+
+    let pending_id = event.pending_id.clone();
+    let content_json = serde_json::to_string(&event.content)?;
+    let session_manager = SessionManager::new(Database::new(db_path)?);
+    let queued =
+        session_manager.queue_pending_steering_once(session_id, &pending_id, &content_json)?;
     if !queued {
+        let Some(durable_content_json) =
+            session_manager.load_pending_steering(session_id, &pending_id)?
+        else {
+            debug!(
+                session_id,
+                delegated_run_id, pending_id, "Child completion was already promoted"
+            );
+            return Ok(false);
+        };
+        ensure!(
+            durable_content_json == content_json,
+            "existing durable child completion content does not match the authoritative result"
+        );
         debug!(
             session_id,
-            delegated_run_id, pending_id, "Ignored duplicate child completion notification"
+            delegated_run_id,
+            pending_id,
+            "Re-emitting wake for an existing pending child completion"
         );
-        return Ok(false);
     }
 
-    let event = crate::agent::subagent::ChildCompletionEvent {
-        session_id: Some(session_id.to_string()),
-        user_id: user_id.map(ToOwned::to_owned),
-        workspace_root: workspace_root.map(Path::to_path_buf),
-        pending_id,
-        content,
-        delegated_run_id: delegated_run_id.to_string(),
-        task_name: name.to_string(),
-        success,
-        summary: summary.to_string(),
-    };
     if let Err(event) = runtime.notify_completion(event) {
-        warn!(
-            session_id,
-            delegated_run_id = %event.delegated_run_id,
-            pending_id = %event.pending_id,
-            "Child completion is durable but no live completion listener accepted it"
-        );
+        let event = *event;
+        let pending_id = event.pending_id.clone();
+        let delegated_run_id = event.delegated_run_id;
+        match runtime.request_completion_reconciliation(delegated_run_id.clone()) {
+            Ok(()) => {
+                warn!(
+                    session_id,
+                    delegated_run_id,
+                    pending_id,
+                    "Live completion listener closed; scheduled durable child wake reconciliation"
+                );
+            }
+            Err(delegated_run_id) => {
+                warn!(
+                    session_id,
+                    delegated_run_id,
+                    pending_id,
+                    "Child completion is durable but no live wake listener accepted it; startup recovery must resume the parent"
+                );
+            }
+        }
     }
     Ok(true)
-}
-
-fn child_completion_content(
-    name: &str,
-    delegated_run_id: &str,
-    success: bool,
-    summary: &str,
-) -> Vec<Content> {
-    let body = format!(
-        "[CHILD AGENT COMPLETE]\nname: {name}\ndelegated_run_id: {delegated_run_id}\nsuccess: {success}\nsummary:\n{summary}\n\nContinue from this result. Do not re-poll status for this delegated_run_id unless you need more detail.\n"
-    );
-    vec![Content::Text { text: body }]
 }
 // ---------------------------------------------------------------------------
 // Helper functions (ported from explore.rs and build.rs)
@@ -119,8 +176,19 @@ pub(super) fn build_single_agent_artifact(
     result: &SubAgentResult,
     delegation_policy: &DelegationPolicy,
 ) -> SingleAgentArtifact {
-    let agent = result.evidence_json();
-    let review_summary = truncate_utf8(&result.output, 500).to_string();
+    let usable = result.has_usable_evidence();
+    let complete = result.success
+        && result.termination == crate::agent::subagent::SubAgentTermination::Completed
+        && usable;
+    let degraded = result.termination.is_degraded_interruption() && usable;
+    let cancelled = result.termination == crate::agent::subagent::SubAgentTermination::Cancelled;
+    let outcome_reason = result.outcome_reason();
+    let mut agent = result.evidence_json();
+    agent["success"] = json!(complete);
+    agent["usable_evidence"] = json!(usable);
+    agent["degraded_success"] = json!(degraded);
+    agent["outcome_reason"] = json!(outcome_reason);
+    let review_summary = bounded_review_summary(result);
     let payload = json!({
         "delegated_run_id": delegated_run_id,
         "findings": result.output,
@@ -130,14 +198,24 @@ pub(super) fn build_single_agent_artifact(
         "paths_examined_count": result.files_examined.len(),
         "duration_ms": result.duration_ms,
         "turns_used": result.turns_used,
-        "success": result.success,
-        "outcome": if result.success { "success" } else { "failed" },
-        "outcome_reason": if result.success { "usable_evidence" } else { "api_or_tool_error" },
+        "success": complete,
+        "outcome": if complete { "success" } else if degraded { "partial" } else if cancelled { "cancelled" } else { "failed" },
+        "outcome_reason": outcome_reason,
+        "termination": result.termination,
+        "next_action_hint": if complete {
+            "Synthesize and act on this delegated evidence. Do not repeat the same broad manual investigation."
+        } else if degraded {
+            "Continue from the retained evidence and close the interrupted provider response without repeating completed work."
+        } else if cancelled {
+            "The cancellation was acknowledged after in-flight governed work reached a quiescent boundary. Inspect retained evidence before deciding whether to resume."
+        } else {
+            "Report the child failure and choose a materially different next step."
+        },
         "agent_count": 1,
-        "successful_agents": if result.success { 1 } else { 0 },
-        "usable_agents": if result.success { 1 } else { 0 },
-        "degraded_agents": 0,
-        "failed_agents": if result.success { 0 } else { 1 },
+        "successful_agents": if complete { 1 } else { 0 },
+        "usable_agents": if usable { 1 } else { 0 },
+        "degraded_agents": if degraded { 1 } else { 0 },
+        "failed_agents": if complete || degraded || cancelled { 0 } else { 1 },
         "agents": [agent],
         "background_processes": result.background_processes,
         "delegation_policy": delegation_policy.audit_json(),
@@ -146,13 +224,46 @@ pub(super) fn build_single_agent_artifact(
     SingleAgentArtifact {
         payload,
         review_summary,
-        final_stage: single_agent_final_stage(result.success),
+        final_stage: single_agent_final_stage(complete, degraded, cancelled),
     }
 }
 
-pub(super) fn single_agent_final_stage(success: bool) -> DelegatedRunStage {
-    if success {
+fn bounded_review_summary(result: &SubAgentResult) -> String {
+    const MAX_BYTES: usize = 1_200;
+    const HEAD_BYTES: usize = 400;
+    const TAIL_BYTES: usize = 700;
+
+    let output = result.output.trim();
+    if output.is_empty() {
+        return result
+            .error
+            .clone()
+            .unwrap_or_else(|| "Delegated child produced no summary.".to_string());
+    }
+    if output.len() <= MAX_BYTES {
+        return output.to_string();
+    }
+
+    let head = truncate_utf8(output, HEAD_BYTES).trim_end();
+    let tail_start = output.len().saturating_sub(TAIL_BYTES);
+    let mut tail_start = tail_start;
+    while tail_start < output.len() && !output.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}\n…\n{}", output[tail_start..].trim_start())
+}
+
+pub(super) fn single_agent_final_stage(
+    complete: bool,
+    degraded: bool,
+    cancelled: bool,
+) -> DelegatedRunStage {
+    if complete {
         DelegatedRunStage::Complete
+    } else if degraded {
+        DelegatedRunStage::Degraded
+    } else if cancelled {
+        DelegatedRunStage::Cancelled
     } else {
         DelegatedRunStage::Failed
     }
@@ -164,49 +275,187 @@ pub(super) fn persist_single_agent_artifact(
     artifact: &SingleAgentArtifact,
     resumable: bool,
     error_message: &str,
-) {
-    if let Err(err) = store.finalize_run(
+) -> anyhow::Result<DelegatedRunRecord> {
+    persist_delegated_artifact(
+        store,
         delegated_run_id,
         artifact.final_stage,
         &artifact.payload,
-        Some(&artifact.review_summary),
+        &artifact.review_summary,
         resumable,
-    ) {
-        warn!(delegated_run_id = %delegated_run_id, error = %err, "{}", error_message);
-    }
+    )
+    .with_context(|| error_message.to_string())
 }
 
-pub(super) fn persist_single_agent_artifact_from_db_path(
-    db_path: &Path,
+pub(super) fn persist_background_single_agent_artifact(
+    lease: &DelegatedRunLease,
     delegated_run_id: &str,
     artifact: &SingleAgentArtifact,
     resumable: bool,
     agent_type: &str,
-) {
-    match Database::new(db_path) {
-        Ok(db) => {
-            let store = DelegatedRunStore::new(db);
-            let error_message = format!(
-                "Background {}: failed to persist final artifact",
-                agent_type
-            );
-            persist_single_agent_artifact(
-                &store,
-                delegated_run_id,
-                artifact,
-                resumable,
-                &error_message,
-            );
-        }
-        Err(err) => {
-            tracing::error!(
-                delegated_run_id = %delegated_run_id,
-                error = %err,
-                "Failed to open database for background {} finalization",
-                agent_type
-            );
-        }
-    }
+) -> anyhow::Result<DelegatedRunRecord> {
+    persist_background_delegated_artifact(
+        lease,
+        delegated_run_id,
+        artifact.final_stage,
+        &artifact.payload,
+        &artifact.review_summary,
+        resumable,
+    )
+    .with_context(|| format!("Background {agent_type}: failed to persist final artifact"))
+}
+
+pub(super) fn persist_background_delegated_artifact(
+    lease: &DelegatedRunLease,
+    delegated_run_id: &str,
+    final_stage: DelegatedRunStage,
+    payload: &Value,
+    review_summary: &str,
+    resumable: bool,
+) -> anyhow::Result<DelegatedRunRecord> {
+    ensure_terminal_stage(delegated_run_id, final_stage)?;
+    lease.finalize_background_run(
+        delegated_run_id,
+        final_stage,
+        payload,
+        Some(review_summary),
+        resumable,
+    )?;
+    reload_and_validate_delegated_artifact(
+        lease,
+        delegated_run_id,
+        final_stage,
+        payload,
+        review_summary,
+    )
+}
+
+/// Finalize a delegated result and reload the row that actually won. The
+/// storage layer intentionally returns `Ok(())` to every terminal contender
+/// once one winner is durable, so callers must not trust their stale in-memory
+/// outcome until this authoritative comparison passes.
+pub(super) fn persist_delegated_artifact(
+    store: &DelegatedRunStore,
+    delegated_run_id: &str,
+    final_stage: DelegatedRunStage,
+    payload: &Value,
+    review_summary: &str,
+    resumable: bool,
+) -> anyhow::Result<DelegatedRunRecord> {
+    ensure_terminal_stage(delegated_run_id, final_stage)?;
+    store.finalize_run(
+        delegated_run_id,
+        final_stage,
+        payload,
+        Some(review_summary),
+        resumable,
+    )?;
+    reload_and_validate_delegated_artifact(
+        store,
+        delegated_run_id,
+        final_stage,
+        payload,
+        review_summary,
+    )
+}
+
+fn ensure_terminal_stage(
+    delegated_run_id: &str,
+    final_stage: DelegatedRunStage,
+) -> anyhow::Result<()> {
+    ensure!(
+        matches!(
+            final_stage,
+            DelegatedRunStage::Complete
+                | DelegatedRunStage::Degraded
+                | DelegatedRunStage::Failed
+                | DelegatedRunStage::Cancelled
+        ),
+        "delegated run '{delegated_run_id}' cannot publish non-terminal stage {final_stage:?}"
+    );
+    Ok(())
+}
+
+fn reload_and_validate_delegated_artifact(
+    store: &DelegatedRunStore,
+    delegated_run_id: &str,
+    final_stage: DelegatedRunStage,
+    payload: &Value,
+    review_summary: &str,
+) -> anyhow::Result<DelegatedRunRecord> {
+    let record = store.get_run(delegated_run_id)?.with_context(|| {
+        format!("delegated run '{delegated_run_id}' disappeared after finalization")
+    })?;
+    ensure!(
+        record.stage == final_stage,
+        "delegated run '{delegated_run_id}' authoritative stage is {:?}, not {:?}",
+        record.stage,
+        final_stage
+    );
+    ensure!(
+        record.artifact.as_ref() == Some(payload),
+        "delegated run '{delegated_run_id}' authoritative artifact does not match the completed child"
+    );
+    ensure!(
+        record.human_review.as_deref() == Some(review_summary),
+        "delegated run '{delegated_run_id}' authoritative review does not match the completed child"
+    );
+    ensure!(
+        record.completed_at.is_some(),
+        "delegated run '{delegated_run_id}' has no durable completion timestamp"
+    );
+    Ok(record)
+}
+
+pub(super) fn delegated_persistence_error(
+    delegated_run_id: &str,
+    artifact: Value,
+    error: &anyhow::Error,
+) -> ToolResult {
+    ToolResult::error_with_details(
+        "agent_persistence_error",
+        format!(
+            "Delegated work produced a result, but its terminal state was not durably finalized: {error}"
+        ),
+        Some(json!({
+            "delegated_run_id": delegated_run_id,
+            "unpersisted_result": artifact,
+        })),
+        None,
+    )
+}
+
+pub(super) fn existing_continuation_error(
+    resumed_from_run_id: &str,
+    delegated_run_id: &str,
+) -> ToolResult {
+    ToolResult::error_with_details(
+        "agent_continuation_exists",
+        format!(
+            "Delegated run '{resumed_from_run_id}' already has durable continuation '{delegated_run_id}'; the duplicate continuation was not started."
+        ),
+        Some(json!({
+            "resumed_from_run_id": resumed_from_run_id,
+            "existing_delegated_run_id": delegated_run_id,
+        })),
+        None,
+    )
+}
+
+pub(super) fn agent_progress_for_terminal_stage(
+    stage: DelegatedRunStage,
+) -> (AgentProgressStatus, Option<String>) {
+    let status = if stage == DelegatedRunStage::Complete {
+        AgentProgressStatus::Complete
+    } else {
+        AgentProgressStatus::Failed
+    };
+    let current_action = match stage {
+        DelegatedRunStage::Degraded => Some("degraded".to_string()),
+        DelegatedRunStage::Cancelled => Some("cancelled".to_string()),
+        _ => None,
+    };
+    (status, current_action)
 }
 
 pub(super) fn emit_single_agent_completion(
@@ -214,14 +463,11 @@ pub(super) fn emit_single_agent_completion(
     delegated_run_id: &str,
     agent_type: &str,
     result: &SubAgentResult,
+    authoritative_stage: DelegatedRunStage,
     review_summary: &str,
 ) {
     if let Some(tx) = progress_tx {
-        let status = if result.success {
-            AgentProgressStatus::Complete
-        } else {
-            AgentProgressStatus::Failed
-        };
+        let (status, current_action) = agent_progress_for_terminal_stage(authoritative_stage);
         if tx
             .send(AgentProgress {
                 delegated_run_id: Some(delegated_run_id.to_string()),
@@ -231,7 +477,7 @@ pub(super) fn emit_single_agent_completion(
                 status,
                 tool_count: 0,
                 tokens: 0,
-                current_action: None,
+                current_action,
                 completion_summary: Some(review_summary.to_string()),
                 lines_added: 0,
                 lines_removed: 0,
@@ -323,6 +569,26 @@ pub(super) fn relative_label(path: &Path, project_dir: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+pub(super) fn delegated_workspace_scope(project_dir: &Path) -> Result<DelegatedRunScope, String> {
+    let canonical = project_dir.canonicalize().map_err(|error| {
+        format!(
+            "Could not resolve delegated launch workspace '{}': {error}",
+            project_dir.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "Delegated launch workspace '{}' is not a directory",
+            canonical.display()
+        ));
+    }
+    Ok(DelegatedRunScope {
+        label: "launch workspace".to_string(),
+        path: canonical.display().to_string(),
+        kind: "workspace".to_string(),
+    })
 }
 
 pub(super) fn delegated_scope(
@@ -516,6 +782,8 @@ pub(super) fn build_confidence(failed_agents: usize, modified_files: usize) -> &
 
 pub(super) fn build_investigation_summary(
     successful_builders: usize,
+    degraded_builders: usize,
+    cancelled_builders: usize,
     failed_builders: usize,
     modified_files: usize,
     lines_added: usize,
@@ -529,6 +797,18 @@ pub(super) fn build_investigation_summary(
         "Net code movement: +{} / -{} lines.",
         lines_added, lines_removed
     ));
+    if degraded_builders > 0 {
+        parts.push(format!(
+            "{} builders retained usable evidence but ended with an interrupted provider response; treat their output as partial.",
+            degraded_builders
+        ));
+    }
+    if cancelled_builders > 0 {
+        parts.push(format!(
+            "{} builders acknowledged cancellation at a quiescent boundary; inspect any retained mutation evidence before resuming.",
+            cancelled_builders
+        ));
+    }
     if failed_builders > 0 {
         parts.push(format!(
             "{} builders reported errors and should be reviewed before accepting the build output.",

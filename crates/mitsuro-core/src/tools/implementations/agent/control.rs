@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -7,7 +8,11 @@ use crate::agent::DelegatedRunStage;
 use crate::storage::{DelegatedRunRecord, DelegatedRunRole};
 use crate::tools::{ToolContext, ToolResult};
 
-use super::{open_delegated_run_store, AgentAction, AgentTool, Params};
+use super::{open_delegated_run_store, truncate_utf8, AgentAction, AgentTool, Params};
+
+const MAX_RESUME_EVIDENCE_CHARS: usize = 6_000;
+const MAX_RESUME_DETAIL_CHARS: usize = 2_000;
+const INTERRUPT_ACK_WAIT: Duration = Duration::from_secs(2);
 
 fn session_id(ctx: &ToolContext) -> Result<&str, ToolResult> {
     ctx.session_id.as_deref().ok_or_else(|| {
@@ -87,6 +92,7 @@ fn apply_persisted_child_contract(
     params: &mut Params,
     record: &DelegatedRunRecord,
     delegated_run_id: &str,
+    current_project_dir: Option<&Path>,
 ) -> Result<(), ToolResult> {
     let has_explicit_contract = !record.capabilities.is_empty();
     params.profile = Some(if has_explicit_contract {
@@ -114,8 +120,39 @@ fn apply_persisted_child_contract(
         });
     }
 
-    match record.target_scope.as_slice() {
-        [] => {
+    let origin_scopes = record
+        .target_scope
+        .iter()
+        .filter(|scope| scope.kind == "workspace")
+        .collect::<Vec<_>>();
+    let [origin_scope] = origin_scopes.as_slice() else {
+        return Err(ToolResult::error_with_code(
+            "agent_resume_workspace_invalid",
+            format!(
+                "Delegated run '{delegated_run_id}' has no unique persisted launch workspace and cannot be resumed safely. Spawn a new child instead."
+            ),
+        ));
+    };
+    validate_resume_workspace(current_project_dir, &origin_scope.path, delegated_run_id)?;
+
+    let target_scopes = record
+        .target_scope
+        .iter()
+        .filter(|scope| scope.kind != "workspace")
+        .collect::<Vec<_>>();
+    let components = target_scopes
+        .iter()
+        .filter(|scope| scope.kind == "component")
+        .map(|scope| scope.path.clone())
+        .collect::<Vec<_>>();
+    let primary_scopes = target_scopes
+        .iter()
+        .filter(|scope| scope.kind != "component")
+        .copied()
+        .collect::<Vec<_>>();
+
+    match (primary_scopes.as_slice(), components.as_slice()) {
+        ([], []) => {
             return Err(ToolResult::error_with_code(
                 "agent_resume_target_invalid",
                 format!(
@@ -123,45 +160,23 @@ fn apply_persisted_child_contract(
                 ),
             ));
         }
-        [scope] if scope.kind == "component" => {
-            return Err(ToolResult::error_with_code(
-                "agent_resume_target_invalid",
-                format!(
-                    "Delegated run '{delegated_run_id}' has a legacy single-component scope that cannot be reconstructed without widening it. Spawn a new child instead."
-                ),
-            ));
-        }
-        [scope] if matches!(scope.kind.as_str(), "directory" | "file") => {
+        ([scope], []) if matches!(scope.kind.as_str(), "directory" | "file") => {
             reject_conflicting_components(params, delegated_run_id)?;
-            if let Some(requested_scope) = params.scope.as_deref() {
-                if normalize_target(requested_scope) != normalize_target(&scope.path) {
-                    return Err(resume_target_conflict(delegated_run_id));
-                }
-            }
-            params.scope = if normalize_target(&scope.path).is_empty() {
-                None
-            } else {
-                Some(scope.path.clone())
-            };
+            restore_primary_scope(params, delegated_run_id, scope)?;
         }
-        [scope] if scope.kind == "project" => {
+        ([scope], []) if scope.kind == "project" => {
             reject_conflicting_components(params, delegated_run_id)?;
-            if params
-                .scope
-                .as_deref()
-                .is_some_and(|value| !normalize_target(value).is_empty())
-            {
-                return Err(resume_target_conflict(delegated_run_id));
-            }
-            params.scope = None;
+            restore_primary_scope(params, delegated_run_id, scope)?;
         }
-        scopes if scopes.iter().all(|scope| scope.kind == "component") => {
+        ([], components) if !components.is_empty() => {
             reject_conflicting_scope(params, delegated_run_id)?;
-            let components = scopes
-                .iter()
-                .map(|scope| scope.path.clone())
-                .collect::<Vec<_>>();
-            restore_exact_components(params, delegated_run_id, &components)?;
+            restore_exact_components(params, delegated_run_id, components)?;
+        }
+        ([scope], [component])
+            if matches!(scope.kind.as_str(), "directory" | "file" | "project") =>
+        {
+            restore_primary_scope(params, delegated_run_id, scope)?;
+            restore_exact_components(params, delegated_run_id, std::slice::from_ref(component))?;
         }
         _ => {
             return Err(ToolResult::error_with_code(
@@ -173,6 +188,67 @@ fn apply_persisted_child_contract(
         }
     }
 
+    Ok(())
+}
+
+fn validate_resume_workspace(
+    current_project_dir: Option<&Path>,
+    persisted_project_dir: &str,
+    delegated_run_id: &str,
+) -> Result<(), ToolResult> {
+    let current = current_project_dir.ok_or_else(|| {
+        ToolResult::error_with_code(
+            "agent_resume_workspace_required",
+            "Select the delegated run's original project before resuming it.",
+        )
+    })?;
+    let canonical_current = canonical_workspace(current).map_err(|error| {
+        ToolResult::error_with_code(
+            "agent_resume_workspace_invalid",
+            format!("Could not resolve the current project workspace: {error}"),
+        )
+    })?;
+    let canonical_persisted =
+        canonical_workspace(Path::new(persisted_project_dir)).map_err(|error| {
+            ToolResult::error_with_code(
+                "agent_resume_workspace_invalid",
+                format!(
+                    "Delegated run '{delegated_run_id}' launch workspace is unavailable: {error}"
+                ),
+            )
+        })?;
+    if canonical_current != canonical_persisted {
+        return Err(ToolResult::error_with_code(
+            "agent_resume_workspace_mismatch",
+            format!(
+                "Delegated run '{delegated_run_id}' belongs to '{}', but this session currently targets '{}'. Switch back to the original project or spawn a new child.",
+                canonical_persisted.display(),
+                canonical_current.display(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_workspace(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
+fn restore_primary_scope(
+    params: &mut Params,
+    delegated_run_id: &str,
+    scope: &crate::storage::DelegatedRunScope,
+) -> Result<(), ToolResult> {
+    if let Some(requested_scope) = params.scope.as_deref() {
+        if normalize_target(requested_scope) != normalize_target(&scope.path) {
+            return Err(resume_target_conflict(delegated_run_id));
+        }
+    }
+    params.scope = if normalize_target(&scope.path).is_empty() {
+        None
+    } else {
+        Some(scope.path.clone())
+    };
     Ok(())
 }
 
@@ -242,6 +318,87 @@ fn restore_exact_components(
     Ok(())
 }
 
+fn compact_durable_resume_evidence(record: &DelegatedRunRecord) -> String {
+    let mut lines = vec![format!(
+        "Prior delegated run: {} (stage: {:?})",
+        record.delegated_run_id, record.stage
+    )];
+    if let Some(review) = record
+        .human_review
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!(
+            "Human review: {}",
+            truncate_utf8(review, MAX_RESUME_DETAIL_CHARS)
+        ));
+    }
+    if let Some(artifact) = record.artifact.as_ref() {
+        let outcome = artifact
+            .get("outcome")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !outcome.is_empty() {
+            lines.push(format!("Outcome: {outcome}"));
+        }
+        if let Some(detail) = ["investigation_summary", "findings", "message"]
+            .iter()
+            .find_map(|key| artifact.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!(
+                "Evidence: {}",
+                truncate_utf8(detail, MAX_RESUME_DETAIL_CHARS)
+            ));
+        }
+        let paths = artifact
+            .get("paths_examined")
+            .or_else(|| artifact.get("files_examined"))
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .take(12)
+                    .map(|path| truncate_utf8(path, 240))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !paths.is_empty() {
+            lines.push(format!("Examined paths: {}", paths.join(", ")));
+        }
+        let errors = artifact
+            .get("errors")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .take(6)
+                    .map(|error| truncate_utf8(error, 400))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !errors.is_empty() {
+            lines.push(format!("Known errors: {}", errors.join("; ")));
+        }
+        if let Some(hint) = artifact
+            .get("next_action_hint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("Next action: {}", truncate_utf8(hint, 800)));
+        }
+    }
+    if lines.len() == 1 {
+        lines.push("No prior artifact was persisted.".to_string());
+    }
+    truncate_utf8(&lines.join("\n"), MAX_RESUME_EVIDENCE_CHARS).to_string()
+}
+
 impl AgentTool {
     async fn execute_resume_from_record(
         &self,
@@ -250,6 +407,14 @@ impl AgentTool {
         delegated_run_id: String,
         record: DelegatedRunRecord,
     ) -> ToolResult {
+        if self.runtime.contains(&delegated_run_id) {
+            return ToolResult::error_with_code(
+                "agent_run_still_live",
+                format!(
+                    "Delegated run '{delegated_run_id}' is still owned by this process. Send it a message, wait for completion, or interrupt it before resuming."
+                ),
+            );
+        }
         if !record.resumable {
             return ToolResult::error_with_code(
                 "agent_run_not_resumable",
@@ -257,11 +422,7 @@ impl AgentTool {
             );
         }
 
-        let prior_evidence = record
-            .artifact
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "No prior artifact was persisted.".to_string());
+        let prior_evidence = compact_durable_resume_evidence(&record);
         let requested_objective = params.prompt.trim();
         params.prompt = if requested_objective.is_empty() {
             format!(
@@ -274,9 +435,17 @@ impl AgentTool {
         };
         params.action = AgentAction::Spawn;
         params.delegated_run_id = None;
-        params.run_in_background = Some(params.run_in_background.unwrap_or(true));
-        if let Err(error) = apply_persisted_child_contract(&mut params, &record, &delegated_run_id)
-        {
+        params.run_in_background = Some(
+            params
+                .run_in_background
+                .unwrap_or_else(|| self.runtime.has_completion_listener()),
+        );
+        if let Err(error) = apply_persisted_child_contract(
+            &mut params,
+            &record,
+            &delegated_run_id,
+            ctx.project_dir.as_deref(),
+        ) {
             return error;
         }
         params.resumed_from_run_id = Some(delegated_run_id.clone());
@@ -308,7 +477,7 @@ impl AgentTool {
                 match store.list_runs_for_session(parent_session_id, limit) {
                     Ok(runs) => ToolResult::success_data(json!({
                         "runs": runs,
-                        "live": self.runtime.snapshots(),
+                        "live": self.runtime.snapshots_for_session(parent_session_id),
                     })),
                     Err(error) => {
                         ToolResult::error_with_code("agent_store_error", error.to_string())
@@ -382,10 +551,32 @@ impl AgentTool {
                     .runtime
                     .send_message(&delegated_run_id, message.clone())
                 {
-                    Ok(()) => ToolResult::success_data(json!({
-                        "status": "delivered",
-                        "delegated_run_id": delegated_run_id,
-                    })),
+                    Ok(()) => match load_owned_run(ctx, &delegated_run_id) {
+                        Ok(latest)
+                            if should_resume_terminal_followup(params.action, &latest) =>
+                        {
+                            params.prompt = message;
+                            self.execute_resume_from_record(
+                                params,
+                                ctx,
+                                delegated_run_id,
+                                latest,
+                            )
+                            .await
+                        }
+                        Ok(latest) if is_terminal(latest.stage) => ToolResult::error_with_code(
+                            "agent_not_live",
+                            format!(
+                                "Delegated run '{delegated_run_id}' completed while the message was being delivered. Use followup or resume to continue from its durable result."
+                            ),
+                        ),
+                        Ok(_) => ToolResult::success_data(json!({
+                            "status": "queued",
+                            "delivery": "accepted_by_live_mailbox",
+                            "delegated_run_id": delegated_run_id,
+                        })),
+                        Err(error) => error,
+                    },
                     Err(_) if should_resume_terminal_followup(params.action, &record) => {
                         params.prompt = message;
                         self.execute_resume_from_record(params, ctx, delegated_run_id, record)
@@ -410,28 +601,47 @@ impl AgentTool {
                     }));
                 }
                 if let Err(error) = self.runtime.cancel(&delegated_run_id) {
-                    return ToolResult::error_with_code("agent_not_live", error);
-                }
-                if let Some(store) = open_delegated_run_store(ctx) {
-                    let artifact = json!({
-                        "delegated_run_id": delegated_run_id,
-                        "outcome": "cancelled",
-                        "outcome_reason": "parent_interrupt",
-                    });
-                    if let Err(error) = store.finalize_run(
-                        &delegated_run_id,
-                        DelegatedRunStage::Cancelled,
-                        &artifact,
-                        Some("Cancelled by parent agent."),
-                        true,
-                    ) {
-                        return ToolResult::error_with_code("agent_store_error", error.to_string());
+                    match load_owned_run(ctx, &delegated_run_id) {
+                        Ok(winner) if is_terminal(winner.stage) => {
+                            return ToolResult::success_data(json!({
+                                "status": "already_terminal",
+                                "run": winner,
+                            }));
+                        }
+                        _ => return ToolResult::error_with_code("agent_not_live", error),
                     }
                 }
-                ToolResult::success_data(json!({
-                    "status": "cancelled",
-                    "delegated_run_id": delegated_run_id,
-                }))
+                // Cancellation is a request until the child reaches a
+                // quiescent boundary. In particular, a dispatched write may
+                // already have committed and must finish assembling its
+                // producer-owned result before the durable row can truthfully
+                // become terminal.
+                let started = Instant::now();
+                loop {
+                    match load_owned_run(ctx, &delegated_run_id) {
+                        Ok(winner) if winner.stage == DelegatedRunStage::Cancelled => {
+                            return ToolResult::success_data(json!({
+                                "status": "cancelled",
+                                "run": winner,
+                            }));
+                        }
+                        Ok(winner) if is_terminal(winner.stage) => {
+                            return ToolResult::success_data(json!({
+                                "status": "already_terminal",
+                                "run": winner,
+                            }));
+                        }
+                        Ok(running) if started.elapsed() >= INTERRUPT_ACK_WAIT => {
+                            return ToolResult::success_data(json!({
+                                "status": "cancellation_requested",
+                                "quiescent": false,
+                                "run": running,
+                            }));
+                        }
+                        Ok(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                        Err(error) => return error,
+                    }
+                }
             }
             AgentAction::Resume => {
                 let delegated_run_id = match required_run_id(&params) {
@@ -460,6 +670,8 @@ mod tests {
 
     fn ownership_fixture() -> (ToolContext, ToolContext, TempDir) {
         let temp = TempDir::new().expect("tempdir");
+        let project_dir = temp.path().join("project-a");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
         let db_path = temp.path().join("agent-control.db");
         let db = Database::new(&db_path).expect("database");
         let now = Utc::now().to_rfc3339();
@@ -482,22 +694,31 @@ mod tests {
                 model: None,
                 resumable: true,
                 resumed_from_run_id: None,
-                target_scope: vec![DelegatedRunScope {
-                    label: "project".to_string(),
-                    path: ".".to_string(),
-                    kind: "project".to_string(),
-                }],
+                target_scope: vec![
+                    DelegatedRunScope {
+                        label: "launch workspace".to_string(),
+                        path: project_dir.to_string_lossy().into_owned(),
+                        kind: "workspace".to_string(),
+                    },
+                    DelegatedRunScope {
+                        label: "project".to_string(),
+                        path: ".".to_string(),
+                        kind: "project".to_string(),
+                    },
+                ],
             })
             .expect("seed delegated run");
 
         let owner = ToolContext {
             session_id: Some("parent-a".to_string()),
             db_path: Some(db_path.clone()),
+            project_dir: Some(project_dir.clone()),
             ..Default::default()
         };
         let foreign = ToolContext {
             session_id: Some("parent-b".to_string()),
             db_path: Some(db_path),
+            project_dir: Some(project_dir),
             ..Default::default()
         };
         (owner, foreign, temp)
@@ -568,11 +789,23 @@ mod tests {
                     model: None,
                     resumable: true,
                     resumed_from_run_id: None,
-                    target_scope: vec![DelegatedRunScope {
-                        label: "project".to_string(),
-                        path: ".".to_string(),
-                        kind: "project".to_string(),
-                    }],
+                    target_scope: vec![
+                        DelegatedRunScope {
+                            label: "launch workspace".to_string(),
+                            path: owner
+                                .project_dir
+                                .as_ref()
+                                .expect("project dir")
+                                .to_string_lossy()
+                                .into_owned(),
+                            kind: "workspace".to_string(),
+                        },
+                        DelegatedRunScope {
+                            label: "project".to_string(),
+                            path: ".".to_string(),
+                            kind: "project".to_string(),
+                        },
+                    ],
                 },
                 Some("focused validator"),
                 &capabilities,
@@ -584,8 +817,13 @@ mod tests {
             .expect("run exists");
         let mut params = Params::default();
 
-        apply_persisted_child_contract(&mut params, &record, "run-exec")
-            .expect("persisted contract should restore");
+        apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-exec",
+            owner.project_dir.as_deref(),
+        )
+        .expect("persisted contract should restore");
 
         assert_eq!(params.profile.as_deref(), Some("child"));
         assert_eq!(params.name.as_deref(), Some("focused validator"));
@@ -598,23 +836,34 @@ mod tests {
     fn resume_restores_single_scope_and_rejects_retargeting() {
         let (owner, _foreign, _temp) = ownership_fixture();
         let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
-        record.target_scope = vec![DelegatedRunScope {
+        record.target_scope.truncate(1);
+        record.target_scope.push(DelegatedRunScope {
             label: "auth/mod.rs".to_string(),
             path: "src/auth/mod.rs".to_string(),
             kind: "file".to_string(),
-        }];
+        });
 
         let mut params = Params::default();
-        apply_persisted_child_contract(&mut params, &record, "run-owned")
-            .expect("file scope should restore");
+        apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect("file scope should restore");
         assert_eq!(params.scope.as_deref(), Some("src/auth/mod.rs"));
 
         let mut conflicting = Params {
             scope: Some("src/billing/mod.rs".to_string()),
             ..Params::default()
         };
-        let error = apply_persisted_child_contract(&mut conflicting, &record, "run-owned")
-            .expect_err("resume must reject a different target");
+        let error = apply_persisted_child_contract(
+            &mut conflicting,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect_err("resume must reject a different target");
         assert!(error.output.contains("agent_resume_target_conflict"));
     }
 
@@ -623,7 +872,8 @@ mod tests {
         let (owner, _foreign, _temp) = ownership_fixture();
         let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
         record.role = DelegatedRunRole::Build;
-        record.target_scope = vec![
+        record.target_scope.truncate(1);
+        record.target_scope.extend([
             DelegatedRunScope {
                 label: "api".to_string(),
                 path: "API component".to_string(),
@@ -634,11 +884,16 @@ mod tests {
                 path: "UI component".to_string(),
                 kind: "component".to_string(),
             },
-        ];
+        ]);
 
         let mut params = Params::default();
-        apply_persisted_child_contract(&mut params, &record, "run-owned")
-            .expect("components should restore");
+        apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect("components should restore");
         assert_eq!(
             params.components,
             Some(vec![
@@ -646,5 +901,93 @@ mod tests {
                 "UI component".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn resume_restores_unified_component_and_primary_scope_together() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
+        record.role = DelegatedRunRole::Build;
+        record.target_scope.truncate(1);
+        record.target_scope.extend([
+            DelegatedRunScope {
+                label: "auth".to_string(),
+                path: "src/auth".to_string(),
+                kind: "directory".to_string(),
+            },
+            DelegatedRunScope {
+                label: "token refresh".to_string(),
+                path: "Implement token refresh".to_string(),
+                kind: "component".to_string(),
+            },
+        ]);
+
+        let mut params = Params::default();
+        apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect("unified component contract should restore");
+        assert_eq!(params.scope.as_deref(), Some("src/auth"));
+        assert_eq!(
+            params.components,
+            Some(vec!["Implement token refresh".to_string()])
+        );
+    }
+
+    #[test]
+    fn resume_fails_closed_after_session_switches_projects() {
+        let (owner, _foreign, temp) = ownership_fixture();
+        let record = load_owned_run(&owner, "run-owned").expect("seed run");
+        let other_project = temp.path().join("project-b");
+        std::fs::create_dir_all(&other_project).expect("other project");
+        let mut params = Params::default();
+
+        let error =
+            apply_persisted_child_contract(&mut params, &record, "run-owned", Some(&other_project))
+                .expect_err("resume must remain bound to its launch project");
+        assert!(error.output.contains("agent_resume_workspace_mismatch"));
+    }
+
+    #[test]
+    fn legacy_run_without_workspace_identity_cannot_resume() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
+        record
+            .target_scope
+            .retain(|scope| scope.kind != "workspace");
+        let mut params = Params::default();
+
+        let error = apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect_err("legacy scope cannot prove its origin project");
+        assert!(error.output.contains("agent_resume_workspace_invalid"));
+    }
+
+    #[test]
+    fn durable_resume_evidence_is_bounded_and_drops_raw_builder_payloads() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
+        record.human_review = None;
+        record.artifact = Some(json!({
+            "outcome": "partial",
+            "findings": format!("useful prefix {}", "x".repeat(30_000)),
+            "paths_examined": ["src/lib.rs", "src/main.rs"],
+            "errors": ["one bounded failure"],
+            "next_action_hint": "Close the remaining validation gap.",
+            "builders": [{"raw_output": "RAW-BUILDER-SENTINEL"}]
+        }));
+
+        let evidence = compact_durable_resume_evidence(&record);
+        assert!(evidence.len() <= MAX_RESUME_EVIDENCE_CHARS);
+        assert!(evidence.contains("useful prefix"));
+        assert!(evidence.contains("Close the remaining validation gap"));
+        assert!(!evidence.contains("RAW-BUILDER-SENTINEL"));
     }
 }

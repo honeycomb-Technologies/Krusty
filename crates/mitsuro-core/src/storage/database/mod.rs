@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 53;
+const SCHEMA_VERSION: i32 = 54;
 
 /// Shared database handle for connection reuse
 ///
@@ -33,8 +33,8 @@ impl Database {
         let conn = Connection::open(path)?;
 
         // Apply contention policy before any pragma that may need a write
-        // lock. The server and Hive daemon commonly initialize together.
-        // Startup can legitimately overlap between the HTTP server, the Hive
+        // lock. The server and Mako daemon commonly initialize together.
+        // Startup can legitimately overlap between the HTTP server, the Mako
         // daemon, and short-lived clients. Give the migration winner enough
         // time to finish even on a busy developer or deployment host instead
         // of turning normal startup serialization into a transient failure.

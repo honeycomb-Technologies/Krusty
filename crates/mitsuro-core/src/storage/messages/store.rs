@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{ensure, Context, Result};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -6,6 +8,8 @@ use crate::storage::database::Database;
 use crate::storage::episodes::EpisodeStore;
 
 use super::model::StoredMessageRecord;
+
+const CHILD_WAKE_PENDING_PREFIX: &str = "child-wake-";
 
 pub struct MessageStore<'a> {
     db: &'a Database,
@@ -137,6 +141,36 @@ impl<'a> MessageStore<'a> {
         session_id: &str,
         pending_id: &str,
     ) -> Result<Option<String>> {
+        ensure!(
+            !pending_id.starts_with(CHILD_WAKE_PENDING_PREFIX),
+            "child completion steering requires workspace-authorized promotion"
+        );
+        self.promote_pending_steering_inner(session_id, pending_id, None)
+    }
+
+    /// Promote a child completion only while its durable launch workspace is
+    /// still the parent session's active project. The workspace comparison is
+    /// performed inside the same immediate transaction as canonicalization so
+    /// a concurrent project switch cannot race the authority check.
+    pub(crate) fn promote_pending_child_wake(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        launch_workspace: &Path,
+    ) -> Result<Option<String>> {
+        ensure!(
+            pending_id.starts_with(CHILD_WAKE_PENDING_PREFIX),
+            "workspace-authorized promotion is reserved for child completions"
+        );
+        self.promote_pending_steering_inner(session_id, pending_id, Some(launch_workspace))
+    }
+
+    fn promote_pending_steering_inner(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        launch_workspace: Option<&Path>,
+    ) -> Result<Option<String>> {
         let role = format!("pending_user:{pending_id}");
         let now = Utc::now().to_rfc3339();
         // Reserve the writer before reading the pending row. With a deferred
@@ -156,6 +190,43 @@ impl<'a> MessageStore<'a> {
             tx.commit()?;
             return Ok(None);
         };
+
+        if let Some(launch_workspace) = launch_workspace {
+            let (project_dir, working_dir, session_type) = tx
+                .query_row(
+                    "SELECT project_dir, working_dir, session_type
+                       FROM sessions
+                      WHERE id = ?1",
+                    [session_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .context("child completion parent session no longer exists")?;
+            ensure!(
+                matches!(session_type.as_str(), "chat" | "code"),
+                "child completion cannot promote into a Hive-owned session"
+            );
+            let current_workspace = project_dir
+                .as_deref()
+                .or(working_dir.as_deref())
+                .context("child completion parent session has no current project workspace")?;
+            let current_workspace = Path::new(current_workspace)
+                .canonicalize()
+                .context("canonicalizing child completion parent workspace")?;
+            let launch_workspace = launch_workspace
+                .canonicalize()
+                .context("canonicalizing child completion launch workspace")?;
+            ensure!(
+                current_workspace == launch_workspace,
+                "child completion parent session project no longer matches its durable launch workspace"
+            );
+        }
 
         tx.execute(
             "DELETE FROM messages WHERE session_id = ?1 AND role = ?2",
@@ -195,6 +266,9 @@ impl<'a> MessageStore<'a> {
     /// safe boundary. Callers must hold the session run lock. Pending messages
     /// are moved to the canonical tail because the interrupted run may have
     /// persisted its final assistant message after the steering was staged.
+    /// Child completions are intentionally excluded: they carry a durable
+    /// launch-workspace authority that ordinary chat recovery cannot approve.
+    /// The child-wake controller promotes them through the guarded path above.
     pub fn promote_orphaned_pending_steering(&self, session_id: &str) -> Result<usize> {
         let now = Utc::now().to_rfc3339();
         // This read-then-write sequence must reserve the writer up front; see
@@ -203,7 +277,9 @@ impl<'a> MessageStore<'a> {
         let pending = {
             let mut stmt = tx.prepare(
                 "SELECT content FROM messages
-                 WHERE session_id = ?1 AND role LIKE 'pending_user:%'
+                 WHERE session_id = ?1
+                   AND role LIKE 'pending_user:%'
+                   AND role NOT LIKE 'pending_user:child-wake-%'
                  ORDER BY id",
             )?;
             let rows = stmt.query_map([session_id], |row| row.get::<_, String>(0))?;
@@ -217,7 +293,9 @@ impl<'a> MessageStore<'a> {
 
         tx.execute(
             "DELETE FROM messages
-             WHERE session_id = ?1 AND role LIKE 'pending_user:%'",
+             WHERE session_id = ?1
+               AND role LIKE 'pending_user:%'
+               AND role NOT LIKE 'pending_user:child-wake-%'",
             [session_id],
         )?;
         let mut promoted = Vec::with_capacity(pending.len());

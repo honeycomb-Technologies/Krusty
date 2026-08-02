@@ -217,7 +217,7 @@ fn summarize_crew_runtime_merges_profile_tasks_and_delegated_runs() {
             parent_session_id: session_id.clone(),
             parent_tool_call_id: None,
             role: DelegatedRunRole::Verifier,
-            stage: DelegatedRunStage::Failed,
+            stage: DelegatedRunStage::Running,
             provider: None,
             model: None,
             resumable: false,
@@ -232,9 +232,9 @@ fn summarize_crew_runtime_merges_profile_tasks_and_delegated_runs() {
     delegated_store
         .update_snapshot(
             "run-2",
-            DelegatedRunStage::Failed,
+            DelegatedRunStage::Running,
             &DelegatedRunSnapshot {
-                stage: DelegatedRunStage::Failed,
+                stage: DelegatedRunStage::Running,
                 agents: vec![DelegatedRunAgentSnapshot {
                     task_id: "task-2".to_string(),
                     agent_name: "reviewer".to_string(),
@@ -248,6 +248,15 @@ fn summarize_crew_runtime_merges_profile_tasks_and_delegated_runs() {
                     completed_plan_task: None,
                 }],
             },
+        )
+        .unwrap();
+    delegated_store
+        .finalize_run(
+            "run-2",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"error": "verification failed"}),
+            Some("verification failed"),
+            false,
         )
         .unwrap();
 

@@ -38,3 +38,45 @@ Deno.test("agent presentation retains legacy agent_type fallback", () => {
 
   assertEquals(presentation.label, "verify", "legacy label must remain compatible");
 });
+
+Deno.test("delegated presentation preserves degraded and cancelled stage labels", () => {
+  const degraded = presentTool({
+    id: "tool-degraded",
+    name: "agent",
+    arguments: { capabilities: ["write"] },
+    status: "partial",
+    delegated: {
+      kind: "build",
+      stage: "degraded",
+      outcome: "partial",
+      agents: [],
+      filesExamined: [],
+      errors: [],
+    },
+  });
+  const cancelled = presentTool({
+    id: "tool-cancelled",
+    name: "agent",
+    arguments: { capabilities: ["execute"] },
+    status: "error",
+    delegated: {
+      kind: "verify",
+      stage: "cancelled",
+      outcome: "cancelled",
+      agents: [],
+      filesExamined: [],
+      errors: [],
+    },
+  });
+
+  assertEquals(
+    degraded.meta?.includes("degraded"),
+    true,
+    "degraded terminal state must not collapse to generic partial/success copy",
+  );
+  assertEquals(
+    cancelled.meta?.includes("cancelled"),
+    true,
+    "cancelled terminal state must not collapse to failed copy",
+  );
+});

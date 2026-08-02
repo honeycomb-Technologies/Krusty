@@ -15,6 +15,19 @@ use crate::error::AppError;
 use crate::types::{SessionStateResponse, SessionTraceResponse};
 use crate::AppState;
 
+const RECENT_DELEGATED_ARTIFACT_LIMIT: usize = 20;
+const DELEGATED_HYDRATION_SUMMARY_LIMIT: usize = 10_000;
+
+fn core_delegated_stage_is_terminal(stage: krusty_core::agent::DelegatedRunStage) -> bool {
+    matches!(
+        stage,
+        krusty_core::agent::DelegatedRunStage::Complete
+            | krusty_core::agent::DelegatedRunStage::Degraded
+            | krusty_core::agent::DelegatedRunStage::Failed
+            | krusty_core::agent::DelegatedRunStage::Cancelled
+    )
+}
+
 /// Query params for retrieving a session trace.
 #[derive(Debug, Deserialize)]
 pub(super) struct GetSessionTraceQuery {
@@ -22,6 +35,14 @@ pub(super) struct GetSessionTraceQuery {
     pub limit: Option<usize>,
     /// Return only events strictly after this persisted sequence.
     pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct GetSessionStateQuery {
+    /// Include the compact newest-run index used during full transcript
+    /// hydration. Polling callers omit it to keep the hot state endpoint small.
+    #[serde(default)]
+    pub include_delegated_history: bool,
 }
 
 /// Get session agent state
@@ -32,6 +53,7 @@ pub(super) async fn get_session_state(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    Query(query): Query<GetSessionStateQuery>,
 ) -> Result<Json<SessionStateResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
@@ -56,11 +78,69 @@ pub(super) async fn get_session_state(
         .get(&id)
         .cloned()
         .unwrap_or_default();
-    let recent_delegated_runs = DelegatedRunStore::new(Database::new(&state.db_path)?)
-        .list_runs_for_session(&id, 20)?
+    let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
+    let recent_records =
+        delegated_store.list_runs_for_session(&id, RECENT_DELEGATED_ARTIFACT_LIMIT)?;
+    let run_summaries = if query.include_delegated_history {
+        delegated_store.list_run_summaries_for_session(&id, DELEGATED_HYDRATION_SUMMARY_LIMIT)?
+    } else {
+        Vec::new()
+    };
+    let summaries_by_tool = run_summaries
+        .iter()
+        .map(|summary| (summary.parent_tool_call_id.as_str(), summary))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    // The process-local map is only a live optimization. A durable terminal
+    // row (or a newer continuation for the same tool call) always evicts a
+    // stale Running projection from reconnect state.
+    let mut delegated_tools = delegated_tools
         .into_iter()
-        .map(Into::into)
-        .collect();
+        .filter(|live| {
+            if let Some(summary) = summaries_by_tool.get(live.tool_call_id.as_str()) {
+                return summary.delegated_run_id == live.delegated_run_id
+                    && !core_delegated_stage_is_terminal(summary.stage);
+            }
+
+            match delegated_store.get_run(&live.delegated_run_id) {
+                Ok(Some(record)) => {
+                    record.parent_session_id == id
+                        && record.parent_tool_call_id.as_deref() == Some(live.tool_call_id.as_str())
+                        && !core_delegated_stage_is_terminal(record.stage)
+                }
+                Ok(None) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        delegated_run_id = %live.delegated_run_id,
+                        %error,
+                        "Could not reconcile live delegated snapshot with durable state"
+                    );
+                    true
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    for record in &recent_records {
+        let Some(snapshot) =
+            crate::types::DelegatedToolStateResponse::from_active_durable_snapshot(record)
+        else {
+            continue;
+        };
+        if summaries_by_tool
+            .get(snapshot.tool_call_id.as_str())
+            .is_some_and(|summary| summary.delegated_run_id != snapshot.delegated_run_id)
+        {
+            continue;
+        }
+        if !delegated_tools.iter().any(|live| {
+            live.delegated_run_id == snapshot.delegated_run_id
+                && live.tool_call_id == snapshot.tool_call_id
+        }) {
+            delegated_tools.push(snapshot);
+        }
+    }
+    let recent_delegated_runs = recent_records.into_iter().map(Into::into).collect();
+    let delegated_run_summaries = run_summaries.into_iter().map(Into::into).collect();
 
     Ok(Json(SessionStateResponse {
         id,
@@ -75,6 +155,7 @@ pub(super) async fn get_session_state(
         live_partial_assistant,
         delegated_tools,
         recent_delegated_runs,
+        delegated_run_summaries,
         last_event_sequence,
     }))
 }

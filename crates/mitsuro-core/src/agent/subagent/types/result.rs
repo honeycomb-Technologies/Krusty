@@ -3,6 +3,79 @@ use serde_json::{json, Value};
 
 use super::report::{parse_explore_report, summary_looks_non_substantive};
 
+/// Compact, provider-neutral proof that a delegated child actually exercised
+/// its governed capability surface. Raw tool output is intentionally excluded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedEvidenceSummary {
+    #[serde(default)]
+    pub attempted: usize,
+    #[serde(default)]
+    pub succeeded: usize,
+    #[serde(default)]
+    pub observations: usize,
+    #[serde(default)]
+    pub mutations: usize,
+    #[serde(default)]
+    pub executions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegatedEvidenceKind {
+    Observation,
+    Mutation,
+    Execution,
+}
+
+/// Provider-neutral reason the delegated loop stopped.
+///
+/// `Completed` is the serde default so results serialized before this field was
+/// introduced remain readable. Callers must still combine this value with
+/// `success` and retained evidence before publishing a durable terminal stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentTermination {
+    #[default]
+    Completed,
+    ProviderMaxTokens,
+    ProviderTimeout,
+    /// The semantic loop guard stopped repeated work after one bounded,
+    /// tool-free synthesis turn. Canonical evidence remains usable as a
+    /// degraded result; a guard with no evidence remains a failure.
+    LoopGuard,
+    Failed,
+    Cancelled,
+}
+
+impl SubAgentTermination {
+    pub fn is_provider_interruption(self) -> bool {
+        matches!(self, Self::ProviderMaxTokens | Self::ProviderTimeout)
+    }
+
+    pub fn is_degraded_interruption(self) -> bool {
+        self.is_provider_interruption() || self == Self::LoopGuard
+    }
+}
+
+impl DelegatedEvidenceSummary {
+    pub fn record_attempt(&mut self) {
+        self.attempted = self.attempted.saturating_add(1);
+    }
+
+    pub fn record_success(&mut self, kind: DelegatedEvidenceKind) {
+        self.succeeded = self.succeeded.saturating_add(1);
+        let counter = match kind {
+            DelegatedEvidenceKind::Observation => &mut self.observations,
+            DelegatedEvidenceKind::Mutation => &mut self.mutations,
+            DelegatedEvidenceKind::Execution => &mut self.executions,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    pub fn has_canonical_evidence(&self) -> bool {
+        self.succeeded > 0
+    }
+}
+
 /// Canonical background process handoff produced by a delegated agent tool
 /// call. This is collected from the successful Bash result itself rather than
 /// trusting the delegated model to repeat the handle in its prose summary.
@@ -26,6 +99,8 @@ pub struct ExploreEvidenceArtifact {
     pub usable_evidence: bool,
     pub degraded_success: bool,
     pub outcome_reason: String,
+    #[serde(default)]
+    pub termination: SubAgentTermination,
     pub summary: String,
     pub module_structure: Option<String>,
     pub structural_coverage: Option<String>,
@@ -47,6 +122,8 @@ pub struct ExploreEvidenceArtifact {
     pub error: Option<String>,
     pub policy_violations: Vec<String>,
     #[serde(default)]
+    pub evidence: DelegatedEvidenceSummary,
+    #[serde(default)]
     pub background_processes: Vec<DelegatedProcessArtifact>,
 }
 
@@ -62,7 +139,11 @@ pub struct SubAgentResult {
     pub duration_ms: u64,
     pub turns_used: usize,
     pub error: Option<String>,
+    #[serde(default)]
+    pub termination: SubAgentTermination,
     pub policy_violations: Vec<String>,
+    #[serde(default)]
+    pub evidence: DelegatedEvidenceSummary,
     #[serde(default)]
     pub background_processes: Vec<DelegatedProcessArtifact>,
 }
@@ -143,6 +224,7 @@ impl SubAgentResult {
             usable_evidence: self.has_usable_evidence(),
             degraded_success: self.is_degraded_success(),
             outcome_reason: self.outcome_reason().to_string(),
+            termination: self.termination,
             summary: self.brief_summary(),
             module_structure: report
                 .as_ref()
@@ -193,6 +275,7 @@ impl SubAgentResult {
             duration_ms: self.duration_ms,
             error: self.error.clone(),
             policy_violations: self.policy_violations.clone(),
+            evidence: self.evidence.clone(),
             background_processes: self.background_processes.clone(),
         }
     }
@@ -210,6 +293,7 @@ impl SubAgentResult {
                 "usable_evidence": self.has_usable_evidence(),
                 "degraded_success": self.is_degraded_success(),
                 "outcome_reason": self.outcome_reason(),
+                "termination": self.termination,
                 "summary": self.brief_summary(),
                 "module_structure": Option::<String>::None,
                 "structural_coverage": Some("low"),
@@ -230,17 +314,20 @@ impl SubAgentResult {
                 "duration_ms": self.duration_ms,
                 "error": self.error,
                 "policy_violations": self.policy_violations,
+                "evidence": self.evidence,
                 "background_processes": self.background_processes,
             })
         })
     }
 
-    pub fn has_usable_evidence(&self) -> bool {
-        if !self.success || self.error.is_some() {
-            return false;
+    /// Whether the result retains evidence that is useful to a parent or a
+    /// resumed run, independently of whether the child reached a clean end.
+    pub fn has_retained_evidence(&self) -> bool {
+        if !self.background_processes.is_empty() {
+            return true;
         }
 
-        if !self.background_processes.is_empty() {
+        if self.evidence.has_canonical_evidence() {
             return true;
         }
 
@@ -257,11 +344,34 @@ impl SubAgentResult {
         !self.files_examined.is_empty()
     }
 
+    /// Canonical evidence strong enough to publish an interrupted provider
+    /// response as a durable partial result. Merely attempting a path does not
+    /// qualify because failed reads may still populate `files_examined`.
+    pub fn has_partial_evidence(&self) -> bool {
+        self.evidence.has_canonical_evidence() || !self.background_processes.is_empty()
+    }
+
+    pub fn has_usable_evidence(&self) -> bool {
+        if self.termination.is_degraded_interruption() {
+            return self.has_partial_evidence();
+        }
+        self.success && self.error.is_none() && self.has_retained_evidence()
+    }
+
     pub fn is_degraded_success(&self) -> bool {
-        self.success && !self.has_usable_evidence()
+        (self.termination.is_degraded_interruption() && self.has_partial_evidence())
+            || (self.success && !self.has_usable_evidence())
     }
 
     pub fn outcome_reason(&self) -> &'static str {
+        match self.termination {
+            SubAgentTermination::ProviderMaxTokens => return "provider_max_tokens",
+            SubAgentTermination::ProviderTimeout => return "provider_timeout",
+            SubAgentTermination::LoopGuard => return "loop_guard",
+            SubAgentTermination::Cancelled => return "cancelled",
+            SubAgentTermination::Completed | SubAgentTermination::Failed => {}
+        }
+
         let error = self
             .error
             .as_deref()
@@ -270,6 +380,9 @@ impl SubAgentResult {
 
         if error.contains("misread successful tool output") {
             return "misread_tool_output";
+        }
+        if error.contains("canonical tool evidence") {
+            return "no_canonical_tool_evidence";
         }
         if error.contains("required structured explore report") {
             return "missing_structured_report";
@@ -346,7 +459,10 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{DelegatedProcessArtifact, SubAgentResult};
+    use super::{
+        DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult,
+        SubAgentTermination,
+    };
 
     fn base_result() -> SubAgentResult {
         SubAgentResult {
@@ -359,7 +475,9 @@ mod tests {
             duration_ms: 0,
             turns_used: 0,
             error: None,
+            termination: SubAgentTermination::Completed,
             policy_violations: Vec::new(),
+            evidence: DelegatedEvidenceSummary::default(),
             background_processes: Vec::new(),
         }
     }
@@ -373,6 +491,117 @@ mod tests {
 
         assert!(!result.has_usable_evidence());
         assert!(result.is_degraded_success());
+    }
+
+    #[test]
+    fn canonical_tool_evidence_is_compact_and_makes_a_success_usable() {
+        let mut result = base_result();
+        result.output = "Updated the requested source file.".to_string();
+        result.evidence.record_attempt();
+        result
+            .evidence
+            .record_success(DelegatedEvidenceKind::Mutation);
+
+        assert!(result.has_usable_evidence());
+        assert_eq!(result.outcome_reason(), "usable_evidence");
+        let artifact = result.evidence_json();
+        assert_eq!(artifact["evidence"]["attempted"], 1);
+        assert_eq!(artifact["evidence"]["succeeded"], 1);
+        assert_eq!(artifact["evidence"]["mutations"], 1);
+        assert!(artifact["evidence"].get("raw_output").is_none());
+    }
+
+    #[test]
+    fn legacy_serialized_result_defaults_missing_evidence_ledger() {
+        let result: SubAgentResult = serde_json::from_value(json!({
+            "task_id": "legacy",
+            "agent_name": "legacy",
+            "delegated_run_id": null,
+            "success": true,
+            "output": "legacy prose",
+            "files_examined": [],
+            "duration_ms": 1,
+            "turns_used": 1,
+            "error": null,
+            "policy_violations": [],
+            "background_processes": []
+        }))
+        .expect("legacy result should remain deserializable");
+
+        assert_eq!(result.evidence, DelegatedEvidenceSummary::default());
+        assert_eq!(result.termination, SubAgentTermination::Completed);
+        assert!(!result.has_usable_evidence());
+    }
+
+    #[test]
+    fn provider_interruption_retains_evidence_without_becoming_success() {
+        let mut result = base_result();
+        result.success = false;
+        result.error = Some("Provider output reached its token limit".to_string());
+        result.termination = SubAgentTermination::ProviderMaxTokens;
+        result
+            .evidence
+            .record_success(DelegatedEvidenceKind::Observation);
+
+        assert!(result.has_retained_evidence());
+        assert!(result.has_partial_evidence());
+        assert!(result.has_usable_evidence());
+        assert!(result.is_degraded_success());
+        assert_eq!(result.outcome_reason(), "provider_max_tokens");
+        assert_eq!(result.evidence_json()["termination"], "provider_max_tokens");
+    }
+
+    #[test]
+    fn provider_interruption_without_evidence_is_not_usable() {
+        let mut result = base_result();
+        result.success = false;
+        result.error = Some("Provider call timed out".to_string());
+        result.termination = SubAgentTermination::ProviderTimeout;
+
+        assert!(!result.has_retained_evidence());
+        assert!(!result.has_partial_evidence());
+        assert!(!result.has_usable_evidence());
+        assert!(!result.is_degraded_success());
+        assert_eq!(result.outcome_reason(), "provider_timeout");
+    }
+
+    #[test]
+    fn loop_guard_evidence_is_degraded_but_never_clean_completion() {
+        let mut result = base_result();
+        result.success = false;
+        result.error = Some("semantic loop guard".to_string());
+        result.termination = SubAgentTermination::LoopGuard;
+        result
+            .evidence
+            .record_success(DelegatedEvidenceKind::Observation);
+
+        assert!(result.has_usable_evidence());
+        assert!(result.is_degraded_success());
+        assert_eq!(result.outcome_reason(), "loop_guard");
+        assert_eq!(result.evidence_json()["termination"], "loop_guard");
+    }
+
+    #[test]
+    fn interrupted_provider_does_not_treat_attempted_paths_as_partial_evidence() {
+        let mut result = base_result();
+        result.success = false;
+        result.error = Some("Provider call timed out".to_string());
+        result.termination = SubAgentTermination::ProviderTimeout;
+        result.files_examined.push("missing.rs".to_string());
+
+        assert!(result.has_retained_evidence());
+        assert!(!result.has_partial_evidence());
+        assert!(!result.has_usable_evidence());
+    }
+
+    #[test]
+    fn missing_canonical_evidence_has_a_specific_outcome_reason() {
+        let mut result = base_result();
+        result.success = false;
+        result.error =
+            Some("Delegated child completed without canonical tool evidence".to_string());
+
+        assert_eq!(result.outcome_reason(), "no_canonical_tool_evidence");
     }
 
     #[test]

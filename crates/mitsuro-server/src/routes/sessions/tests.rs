@@ -2,17 +2,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
 use axum::extract::{Path, Query, State};
-use axum::http::{header::VARY, HeaderMap, Request, StatusCode};
-use axum::{Json, Router};
+use axum::Json;
 use chrono::Utc;
 use tokio::sync::{Mutex, RwLock};
-use tower::ServiceExt;
 
 use mitsuro_core::agent::loop_events::{LoopEvent, LoopStopReason};
 use mitsuro_core::agent::{
-    effective_context_window_for_runtime, AgentCancellation, LoopInput, UserHookManager,
+    effective_context_window_for_runtime, AgentCancellation,
+    DelegatedRunStage as CoreDelegatedRunStage, LoopInput, UserHookManager,
 };
 use mitsuro_core::ai::models::{
     create_model_registry, ApiFormat, ModelCatalogSource, ModelKey, ModelMetadata,
@@ -24,9 +22,11 @@ use mitsuro_core::process::ProcessRegistry;
 use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, PendingPlanTaskSnapshot,
-    RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall,
-    RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
+    Database, DelegatedRunAgentSnapshot, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
+    DelegatedRunStartInput, DelegatedRunStore, PartialAssistantState, PendingInteractionSnapshot,
+    PendingPlanTaskSnapshot, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+    RecoveryToolCall, RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType,
+    WorkspaceMode,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::workflow::{
@@ -46,7 +46,7 @@ fn create_test_state() -> (AppState, PathBuf) {
     let temp_dir =
         std::env::temp_dir().join(format!("mitsuro-server-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-    let db_path = temp_dir.join("mitsuro.db");
+    let db_path = temp_dir.join("krusty.db");
     Database::new(&db_path).expect("database should initialize");
     let working_dir = temp_dir.join("workspace");
     std::fs::create_dir_all(&working_dir).expect("workspace should exist");
@@ -79,7 +79,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-            hive_runtime: crate::hive_runtime::HiveRuntimeManager::new(),
+            mako_runtime: crate::hive_runtime::MakoRuntimeManager::new(),
         },
         temp_dir,
     )
@@ -260,22 +260,21 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
 }
 
 #[tokio::test]
-async fn generic_session_routes_reject_daemon_owned_hive_create_update_and_pinch() {
+async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let create = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
-            title: Some("Orphan Hive".into()),
+            title: Some("Orphan Mako".into()),
             model: Some("test:model".into()),
             model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
             target_branch: None,
-            session_type: Some(SessionType::Hive),
+            session_type: Some(SessionType::Mako),
             permission_mode: None,
         }),
     )
@@ -284,26 +283,25 @@ async fn generic_session_routes_reject_daemon_owned_hive_create_update_and_pinch
 
     let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     assert!(manager
-        .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Hive)
+        .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Mako)
         .expect("sessions should list")
         .is_empty());
     let session_id = manager
         .create_session_for_user_with_config(
-            "Daemon Hive",
+            "Daemon Mako",
             Some("test:model"),
             Some(state.working_dir.to_string_lossy().as_ref()),
             Some(state.working_dir.to_string_lossy().as_ref()),
             WorkspaceMode::Selected,
             Some("alice"),
             None,
-            SessionType::Hive,
+            SessionType::Mako,
         )
-        .expect("test Hive session should create");
+        .expect("test Mako session should create");
 
     let update = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(session_id.clone()),
         Json(UpdateSessionRequest {
             title: Some("Bypassed title".into()),
@@ -323,7 +321,6 @@ async fn generic_session_routes_reject_daemon_owned_hive_create_update_and_pinch
     let pinch = pinch_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(session_id.clone()),
         Json(PinchRequest {
             preservation_hints: None,
@@ -338,7 +335,7 @@ async fn generic_session_routes_reject_daemon_owned_hive_create_update_and_pinch
             .expect("session should load")
             .expect("session should exist")
             .title,
-        "Daemon Hive"
+        "Daemon Mako"
     );
 }
 
@@ -354,7 +351,6 @@ async fn session_create_persists_full_continuation_contract() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Continuation Contract".to_string()),
             model: Some("openai/gpt-5.5".to_string()),
@@ -412,7 +408,6 @@ async fn create_session_persists_user_ownership() {
     let result = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Owned Session".to_string()),
             model: None,
@@ -451,7 +446,6 @@ async fn create_session_resolves_relative_workspace_paths_within_user_root() {
     let (_, Json(created)) = create_session(
         State(state),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Relative Workspace".to_string()),
             model: None,
@@ -485,7 +479,6 @@ async fn create_session_accepts_fresh_absolute_workspace_path_with_existing_ance
     let (_, Json(created)) = create_session(
         State(state),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Fresh Workspace".to_string()),
             model: None,
@@ -516,7 +509,6 @@ async fn create_session_rejects_invalid_workspace_payloads() {
     let missing_project_dir = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Invalid Selected Workspace".to_string()),
             model: None,
@@ -545,7 +537,6 @@ async fn create_session_rejects_invalid_workspace_payloads() {
     let neutral_with_project = create_session(
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Invalid Neutral Workspace".to_string()),
             model: None,
@@ -590,7 +581,6 @@ async fn get_session_rejects_foreign_owner() {
     let result = get_session(
         State(state),
         Some(current_user("bob", std::path::Path::new("/tmp"))),
-        HeaderMap::new(),
         Path(session_id),
         Query(GetSessionQuery {
             limit: None,
@@ -741,7 +731,6 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
     let Json(response) = list_sessions(
         State(state),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Query(ListSessionsQuery {
             working_dir: Some("repo".to_string()),
         }),
@@ -754,76 +743,6 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
         response[0].working_dir.as_deref(),
         Some(repo_dir.to_string_lossy().as_ref())
     );
-}
-
-#[tokio::test]
-async fn generic_session_router_negotiates_hive_discriminator_and_always_varies_on_wire_version() {
-    let (state, _temp_dir) = create_test_state();
-    let session_manager =
-        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
-    session_manager
-        .create_session_for_user_with_config(
-            "Canonical Hive",
-            None,
-            Some(state.working_dir.to_string_lossy().as_ref()),
-            Some(state.working_dir.to_string_lossy().as_ref()),
-            WorkspaceMode::Selected,
-            None,
-            None,
-            SessionType::Hive,
-        )
-        .expect("Hive session should create");
-    let app = Router::new()
-        .nest("/api/sessions", super::router())
-        .with_state(state);
-
-    for (wire_version, expected_type) in [
-        (None, "mako"),
-        (Some("0"), "mako"),
-        (Some("1"), "mako"),
-        (Some("malformed"), "mako"),
-        (Some("2.0"), "mako"),
-        (Some("2"), "hive"),
-        (Some("3"), "hive"),
-        (Some("999"), "hive"),
-    ] {
-        let mut request = Request::builder().uri("/api/sessions");
-        if let Some(version) = wire_version {
-            request = request.header(crate::legacy_identity::SESSION_WIRE_VERSION_HEADER, version);
-        }
-        let response = app
-            .clone()
-            .oneshot(
-                request
-                    .extension(AuthenticatedUser::local())
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("session route response");
-        assert_eq!(response.status(), StatusCode::OK, "wire={wire_version:?}");
-        let vary = response
-            .headers()
-            .get_all(VARY)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(",");
-        assert!(
-            vary.split(',').any(|value| {
-                value.trim() == crate::legacy_identity::SESSION_WIRE_VERSION_HEADER
-            }),
-            "wire={wire_version:?}, vary={vary}"
-        );
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let sessions: serde_json::Value = serde_json::from_slice(&body).expect("session JSON");
-        assert_eq!(
-            sessions[0]["session_type"], expected_type,
-            "wire={wire_version:?}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -914,6 +833,7 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
         Path(session_id.clone()),
+        Query(state::GetSessionStateQuery::default()),
     )
     .await
     .unwrap_or_else(|_| panic!("session state should load"));
@@ -1062,6 +982,177 @@ async fn session_trace_after_sequence_applies_limit_without_changing_snapshot_me
 }
 
 #[tokio::test]
+async fn get_session_state_restores_active_delegated_snapshot_from_durable_run() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Durable delegated state", None, None, None)
+        .expect("session should create");
+    let store =
+        DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"));
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "durable-live-run".to_string(),
+            parent_session_id: session_id.clone(),
+            parent_tool_call_id: Some("tool-durable-live".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: CoreDelegatedRunStage::Created,
+            provider: Some("test".to_string()),
+            model: Some("test:model".to_string()),
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![DelegatedRunScope {
+                label: "workspace".to_string(),
+                path: ".".to_string(),
+                kind: "workspace".to_string(),
+            }],
+        })
+        .expect("delegated run should create");
+    store
+        .update_snapshot(
+            "durable-live-run",
+            CoreDelegatedRunStage::Running,
+            &DelegatedRunSnapshot {
+                stage: CoreDelegatedRunStage::Running,
+                agents: vec![DelegatedRunAgentSnapshot {
+                    task_id: "builder-a".to_string(),
+                    agent_name: "builder-a".to_string(),
+                    status: "degraded".to_string(),
+                    tool_count: 4,
+                    tokens: 120,
+                    current_action: Some("degraded".to_string()),
+                    completion_summary: Some("Partial evidence retained".to_string()),
+                    lines_added: 8,
+                    lines_removed: 2,
+                    completed_plan_task: None,
+                }],
+            },
+        )
+        .expect("live snapshot should persist");
+
+    // The in-memory map is intentionally empty, as it would be after a server
+    // restart. The session route must reconstruct active progress from the
+    // durable delegated run snapshot.
+    let Json(response) = get_session_state(
+        State(state),
+        None,
+        Path(session_id),
+        Query(state::GetSessionStateQuery::default()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+    assert_eq!(response.delegated_tools.len(), 1);
+    let snapshot = &response.delegated_tools[0];
+    assert_eq!(snapshot.delegated_run_id, "durable-live-run");
+    assert_eq!(snapshot.tool_call_id, "tool-durable-live");
+    assert!(matches!(
+        snapshot.stage,
+        crate::types::DelegatedRunStage::Running
+    ));
+    assert!(matches!(
+        snapshot.agents.first().map(|agent| agent.status),
+        Some(crate::types::DelegatedProgressStatus::Degraded)
+    ));
+}
+
+#[tokio::test]
+async fn get_session_state_evicts_stale_live_running_and_indexes_old_terminal_runs() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Canonical delegated state", None, None, None)
+        .expect("session should create");
+    let store =
+        DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"));
+
+    let create_run = |run_id: &str, tool_call_id: &str| {
+        store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: run_id.to_string(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: Some(tool_call_id.to_string()),
+                role: DelegatedRunRole::Build,
+                stage: CoreDelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "project".to_string(),
+                    path: ".".to_string(),
+                    kind: "project".to_string(),
+                }],
+            })
+            .expect("delegated run should create");
+        store
+            .finalize_run(
+                run_id,
+                CoreDelegatedRunStage::Complete,
+                &serde_json::json!({"outcome": "success"}),
+                Some("complete"),
+                true,
+            )
+            .expect("delegated run should finalize");
+    };
+
+    create_run("old-terminal-run", "old-terminal-tool");
+    Database::new(&state.db_path)
+        .expect("database should open")
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET updated_at = '2020-01-01T00:00:00Z'
+             WHERE delegated_run_id = 'old-terminal-run'",
+            [],
+        )
+        .expect("old run should age out of artifact window");
+    for index in 0..24 {
+        create_run(
+            &format!("newer-terminal-run-{index:02}"),
+            &format!("newer-terminal-tool-{index:02}"),
+        );
+    }
+
+    state.delegated_state.write().await.insert(
+        session_id.clone(),
+        vec![crate::types::DelegatedToolStateResponse {
+            delegated_run_id: "old-terminal-run".to_string(),
+            tool_call_id: "old-terminal-tool".to_string(),
+            kind: crate::types::DelegatedToolKind::Build,
+            stage: crate::types::DelegatedRunStage::Running,
+            parent_session_id: Some(session_id.clone()),
+            agents: Vec::new(),
+        }],
+    );
+
+    let Json(response) = get_session_state(
+        State(state),
+        None,
+        Path(session_id),
+        Query(state::GetSessionStateQuery {
+            include_delegated_history: true,
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+    assert!(response.delegated_tools.is_empty());
+    assert!(response
+        .recent_delegated_runs
+        .iter()
+        .all(|run| run.delegated_run_id != "old-terminal-run"));
+    let old_summary = response
+        .delegated_run_summaries
+        .iter()
+        .find(|summary| summary.delegated_run_id == "old-terminal-run")
+        .expect("compact hydration index should retain the old terminal run");
+    assert!(matches!(
+        old_summary.stage,
+        crate::types::DelegatedRunStage::Complete
+    ));
+}
+
+#[tokio::test]
 async fn get_session_state_exposes_awaiting_input_details_after_reload() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -1090,7 +1181,7 @@ async fn get_session_state_exposes_awaiting_input_details_after_reload() {
             &serde_json::json!({
                 "questions": [{
                     "header": "Choose deploy target",
-                    "question": "Which environment should Mitsuro continue against?",
+                    "question": "Which environment should Krusty continue against?",
                     "options": [{ "label": "staging", "description": "Safe validation" }],
                     "multi_select": false
                 }]
@@ -1133,6 +1224,7 @@ async fn get_session_state_exposes_awaiting_input_details_after_reload() {
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
         Path(session_id.clone()),
+        Query(state::GetSessionStateQuery::default()),
     )
     .await
     .unwrap_or_else(|_| panic!("session state should load"));
@@ -1316,7 +1408,6 @@ Status: in_progress
     let Json(response) = pinch_session(
         State(state.clone()),
         Some(current_user("alice", workspace)),
-        HeaderMap::new(),
         Path(session_id.clone()),
         Json(PinchRequest {
             preservation_hints: Some("Keep the route semantics intact.".to_string()),
@@ -1381,7 +1472,6 @@ async fn pinch_session_rejects_an_active_session_writer() {
     let result = pinch_session(
         State(state.clone()),
         Some(current_user("alice", workspace)),
-        HeaderMap::new(),
         Path(session_id.clone()),
         Json(PinchRequest {
             preservation_hints: None,
@@ -1430,7 +1520,6 @@ async fn pinch_session_resolves_legacy_relative_working_dir_against_user_home() 
     let Json(response) = pinch_session(
         State(state),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Path(session_id.clone()),
         Json(PinchRequest {
             preservation_hints: None,
@@ -1497,7 +1586,6 @@ async fn create_session_persists_exact_model_key_and_catalog_revision() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Exact model".to_string()),
             model: Some("shared-model".to_string()),
@@ -1539,7 +1627,6 @@ async fn session_routes_normalize_blank_model_input_to_none() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Whitespace Model".to_string()),
             model: Some("   ".to_string()),
@@ -1560,7 +1647,6 @@ async fn session_routes_normalize_blank_model_input_to_none() {
     let Json(updated) = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(created.id.clone()),
         Json(UpdateSessionRequest {
             title: None,
@@ -1582,7 +1668,6 @@ async fn session_routes_normalize_blank_model_input_to_none() {
     let Json(cleared) = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(created.id),
         Json(UpdateSessionRequest {
             title: None,
@@ -1612,7 +1697,6 @@ async fn session_routes_apply_workspace_updates() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Workspace Update".to_string()),
             model: None,
@@ -1631,7 +1715,6 @@ async fn session_routes_apply_workspace_updates() {
     let Json(updated) = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(created.id.clone()),
         Json(UpdateSessionRequest {
             title: None,
@@ -1661,7 +1744,6 @@ async fn session_routes_apply_workspace_updates() {
     let Json(neutral) = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Path(created.id),
         Json(UpdateSessionRequest {
             title: None,
@@ -1691,7 +1773,6 @@ async fn session_routes_reject_invalid_workspace_payloads() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Workspace Validation".to_string()),
             model: None,
@@ -1710,7 +1791,6 @@ async fn session_routes_reject_invalid_workspace_payloads() {
     let result = update_session(
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
-        HeaderMap::new(),
         Path(created.id),
         Json(UpdateSessionRequest {
             title: None,
@@ -1750,7 +1830,6 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
     let (_, Json(created)) = create_session(
         State(state.clone()),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Json(CreateSessionRequest {
             title: Some("Workspace Validation".to_string()),
             model: None,
@@ -1769,7 +1848,6 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
     let result = update_session(
         State(state),
         Some(current_user("alice", &user_root)),
-        HeaderMap::new(),
         Path(created.id),
         Json(UpdateSessionRequest {
             title: None,
