@@ -719,14 +719,68 @@ create_legacy_release() {
     atomic_symlink "$PREVIOUS_TARGET" "$CURRENT_LINK"
 }
 
+# Normalize a release pointer to the managed relative form:
+#   .mitsuro-releases/<id>
+# Accepts that relative form, or an absolute path under
+# $INSTALL_DIR/.mitsuro-releases/<id> (common after local/dev cuts).
+normalize_managed_release_pointer() {
+    pointer_target=$1
+    case "$pointer_target" in
+        .mitsuro-releases/*)
+            printf '%s\n' "$pointer_target"
+            return 0
+            ;;
+        "$INSTALL_DIR/.mitsuro-releases"/*)
+            relative_id=${pointer_target#"$INSTALL_DIR/.mitsuro-releases/"}
+            case "$relative_id" in
+                ""|*/*|..|*/../*|.*)
+                    return 1
+                    ;;
+            esac
+            printf '%s\n' ".mitsuro-releases/$relative_id"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+managed_symlink_is_replaceable() {
+    existing_target=$1
+    managed_target=$2
+    previous_managed_target=$3
+    alternate_previous_target=$4
+
+    [ "$existing_target" = "$managed_target" ] && return 0
+    [ -n "$previous_managed_target" ] && [ "$existing_target" = "$previous_managed_target" ] && return 0
+    [ -n "$alternate_previous_target" ] && [ "$existing_target" = "$alternate_previous_target" ] && return 0
+
+    case "$existing_target" in
+        .mitsuro-current/*|.mitsuro-releases/*)
+            return 0
+            ;;
+        "$INSTALL_DIR/.mitsuro-current"/*|"$INSTALL_DIR/.mitsuro-releases"/*)
+            return 0
+            ;;
+        "$LEGACY_CURRENT_BASENAME"/*|"$LEGACY_RELEASES_BASENAME"/*)
+            return 0
+            ;;
+        "$INSTALL_DIR/$LEGACY_CURRENT_BASENAME"/*|"$INSTALL_DIR/$LEGACY_RELEASES_BASENAME"/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 read_previous_release() {
     PREVIOUS_TARGET=""
     if [ -L "$CURRENT_LINK" ]; then
-        PREVIOUS_TARGET="$(readlink "$CURRENT_LINK")"
-        case "$PREVIOUS_TARGET" in
-            .mitsuro-releases/*) ;;
-            *) fail "Refusing unmanaged release pointer $CURRENT_LINK -> $PREVIOUS_TARGET."; return 1 ;;
-        esac
+        raw_previous_target="$(readlink "$CURRENT_LINK")"
+        if ! PREVIOUS_TARGET=$(normalize_managed_release_pointer "$raw_previous_target"); then
+            fail "Refusing unmanaged release pointer $CURRENT_LINK -> $raw_previous_target."
+            return 1
+        fi
         case "/$PREVIOUS_TARGET/" in
             */../*|*/./*) fail "Release pointer contains an unsafe path: $PREVIOUS_TARGET"; return 1 ;;
         esac
@@ -749,9 +803,11 @@ install_managed_link() {
 
     if [ -L "$managed_path" ]; then
         existing_target=$(readlink "$managed_path")
-        if [ "$existing_target" != "$managed_target" ] && \
-            { [ -z "$previous_managed_target" ] || [ "$existing_target" != "$previous_managed_target" ]; } && \
-            { [ -z "$alternate_previous_target" ] || [ "$existing_target" != "$alternate_previous_target" ]; }; then
+        if ! managed_symlink_is_replaceable \
+            "$existing_target" \
+            "$managed_target" \
+            "$previous_managed_target" \
+            "$alternate_previous_target"; then
             fail "Refusing to replace unmanaged symlink $managed_path."
             return 1
         fi
