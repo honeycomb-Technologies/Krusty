@@ -49,20 +49,6 @@ the Mitsuro server rather than split across client-only copies.
 - Extend the agent with skills, plugins, MCP servers, and local extensions.
 - Keep the server self-hosted and connect privately from your other devices.
 
-
-
-## Terminal
-
-The default CLI experience is the modern Mitsuro terminal UI:
-
-```bash
-mitsuro
-
-```
-
-The previous full-screen TUI is archived on git branch `archive/tui-v1-20260802`
-and is no longer the product default.
-
 ## Install
 
 Download the installer, inspect it if desired, and run it:
