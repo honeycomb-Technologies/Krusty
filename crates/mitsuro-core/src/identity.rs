@@ -1602,6 +1602,15 @@ fn inspect_linux_legacy_processes(
 
         let executable = match std::fs::read_link(process_dir.join("exe")) {
             Ok(path) => strip_deleted_proc_suffix(path),
+            // Kernel / manager processes for this uid can deny /proc/<pid>/exe
+            // (e.g. systemd --user). They are not Mitsuro and must not block
+            // offline identity migration.
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(libc::EACCES) =>
+            {
+                continue;
+            }
             Err(_error) if !process_dir.exists() => continue,
             Err(error) => {
                 return Err(io::Error::new(

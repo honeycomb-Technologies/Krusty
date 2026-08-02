@@ -197,43 +197,43 @@ content	crates/mitsuro-core/src/identity.rs	61	    pub const ACP_MODEL_KEY_PREFI
 content	crates/mitsuro-core/src/identity.rs	62	    pub const COMPACTION_SEGMENT_SCHEMA: &str = "krusty.compaction_segment.v1";
 content	crates/mitsuro-core/src/identity.rs	715	        || relative_path == Path::new("krusty.log")
 content	crates/mitsuro-core/src/identity.rs	716	        || relative_path == Path::new("krusty-desktop-server.log")
-content	crates/mitsuro-core/src/identity.rs	1708	        .any(|component| component.as_os_str() == std::ffi::OsStr::new(".krusty-releases"))
-content	crates/mitsuro-core/src/identity.rs	1715	            "krusty"
-content	crates/mitsuro-core/src/identity.rs	1716	                | "krusty.exe"
-content	crates/mitsuro-core/src/identity.rs	1717	                | "krusty-mako"
-content	crates/mitsuro-core/src/identity.rs	1718	                | "krusty-mako.exe"
-content	crates/mitsuro-core/src/identity.rs	1719	                | "krusty-desktop"
-content	crates/mitsuro-core/src/identity.rs	1720	                | "krusty-desktop.exe"
-content	crates/mitsuro-core/src/identity.rs	1721	                | "Krusty"
-content	crates/mitsuro-core/src/identity.rs	1722	                | "Krusty.exe"
-content	crates/mitsuro-core/src/identity.rs	1986	            Some("KRUSTY_MAKO_SOCKET")
-content	crates/mitsuro-core/src/identity.rs	1990	            Some("KRUSTY_PROVIDER")
-content	crates/mitsuro-core/src/identity.rs	2012	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
-content	crates/mitsuro-core/src/identity.rs	2056	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
-content	crates/mitsuro-core/src/identity.rs	2457	        std::fs::write(old.join("krusty.log"), "terminal runtime").expect("root terminal log");
-content	crates/mitsuro-core/src/identity.rs	2458	        std::fs::write(old.join("krusty-desktop-server.log"), "desktop runtime")
-content	crates/mitsuro-core/src/identity.rs	2473	        assert!(!receipt.canonical_root.join("krusty.log").exists());
-content	crates/mitsuro-core/src/identity.rs	2476	            .join("krusty-desktop-server.log")
-content	crates/mitsuro-core/src/identity.rs	2509	        assert!(old.join("krusty.log").is_file());
-content	crates/mitsuro-core/src/identity.rs	2510	        assert!(old.join("krusty-desktop-server.log").is_file());
-content	crates/mitsuro-core/src/identity.rs	2562	        std::fs::write(backups.join("krusty-before.db"), "before").expect("old recovery snapshot");
-content	crates/mitsuro-core/src/identity.rs	2563	        std::fs::write(old.join("krusty.log"), "before").expect("root terminal log");
-content	crates/mitsuro-core/src/identity.rs	2564	        std::fs::write(old.join("krusty-desktop-server.log"), "before").expect("root desktop log");
-content	crates/mitsuro-core/src/identity.rs	2569	        std::fs::write(backups.join("krusty-after.db"), "after").expect("new recovery snapshot");
-content	crates/mitsuro-core/src/identity.rs	2570	        std::fs::write(old.join("krusty.log"), "after").expect("changed root terminal log");
-content	crates/mitsuro-core/src/identity.rs	2571	        std::fs::write(old.join("krusty-desktop-server.log"), "after")
-content	crates/mitsuro-core/src/identity.rs	2678	        assert!(guidance.contains("`krusty migrate-identity --confirm-offline`"));
-content	crates/mitsuro-core/src/identity.rs	2765	        for executable in ["/opt/archive/krusty", "/opt/current/mitsuro-hive"] {
-content	crates/mitsuro-core/src/identity.rs	2807	        seed_fake_linux_process(&legacy_proc, 101, 4242, Path::new("/opt/archive/krusty"));
-content	crates/mitsuro-core/src/identity.rs	2826	            Path::new("/opt/tools/mako-analysis-helper"),
-content	crates/mitsuro-core/src/identity.rs	2872	            "/opt/krusty",
-content	crates/mitsuro-core/src/identity.rs	2873	            "/opt/krusty-mako",
-content	crates/mitsuro-core/src/identity.rs	2876	            "/srv/.krusty-releases/0.9.20/random-name",
-content	crates/mitsuro-core/src/identity.rs	2882	            "/opt/mako-analysis-helper",
-content	crates/mitsuro-core/src/identity.rs	2883	            "/opt/krusty-helper",
-content	crates/mitsuro-core/src/identity.rs	2884	            "/srv/not-.krusty-releases/random-name",
-content	crates/mitsuro-core/src/identity.rs	2894	            Path::new("/opt/krusty"),
-content	crates/mitsuro-core/src/identity.rs	2906	            Path::new("/opt/krusty"),
+content	crates/mitsuro-core/src/identity.rs	1717	        .any(|component| component.as_os_str() == std::ffi::OsStr::new(".krusty-releases"))
+content	crates/mitsuro-core/src/identity.rs	1724	            "krusty"
+content	crates/mitsuro-core/src/identity.rs	1725	                | "krusty.exe"
+content	crates/mitsuro-core/src/identity.rs	1726	                | "krusty-mako"
+content	crates/mitsuro-core/src/identity.rs	1727	                | "krusty-mako.exe"
+content	crates/mitsuro-core/src/identity.rs	1728	                | "krusty-desktop"
+content	crates/mitsuro-core/src/identity.rs	1729	                | "krusty-desktop.exe"
+content	crates/mitsuro-core/src/identity.rs	1730	                | "Krusty"
+content	crates/mitsuro-core/src/identity.rs	1731	                | "Krusty.exe"
+content	crates/mitsuro-core/src/identity.rs	1995	            Some("KRUSTY_MAKO_SOCKET")
+content	crates/mitsuro-core/src/identity.rs	1999	            Some("KRUSTY_PROVIDER")
+content	crates/mitsuro-core/src/identity.rs	2021	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
+content	crates/mitsuro-core/src/identity.rs	2065	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
+content	crates/mitsuro-core/src/identity.rs	2466	        std::fs::write(old.join("krusty.log"), "terminal runtime").expect("root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2467	        std::fs::write(old.join("krusty-desktop-server.log"), "desktop runtime")
+content	crates/mitsuro-core/src/identity.rs	2482	        assert!(!receipt.canonical_root.join("krusty.log").exists());
+content	crates/mitsuro-core/src/identity.rs	2485	            .join("krusty-desktop-server.log")
+content	crates/mitsuro-core/src/identity.rs	2518	        assert!(old.join("krusty.log").is_file());
+content	crates/mitsuro-core/src/identity.rs	2519	        assert!(old.join("krusty-desktop-server.log").is_file());
+content	crates/mitsuro-core/src/identity.rs	2571	        std::fs::write(backups.join("krusty-before.db"), "before").expect("old recovery snapshot");
+content	crates/mitsuro-core/src/identity.rs	2572	        std::fs::write(old.join("krusty.log"), "before").expect("root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2573	        std::fs::write(old.join("krusty-desktop-server.log"), "before").expect("root desktop log");
+content	crates/mitsuro-core/src/identity.rs	2578	        std::fs::write(backups.join("krusty-after.db"), "after").expect("new recovery snapshot");
+content	crates/mitsuro-core/src/identity.rs	2579	        std::fs::write(old.join("krusty.log"), "after").expect("changed root terminal log");
+content	crates/mitsuro-core/src/identity.rs	2580	        std::fs::write(old.join("krusty-desktop-server.log"), "after")
+content	crates/mitsuro-core/src/identity.rs	2687	        assert!(guidance.contains("`krusty migrate-identity --confirm-offline`"));
+content	crates/mitsuro-core/src/identity.rs	2774	        for executable in ["/opt/archive/krusty", "/opt/current/mitsuro-hive"] {
+content	crates/mitsuro-core/src/identity.rs	2816	        seed_fake_linux_process(&legacy_proc, 101, 4242, Path::new("/opt/archive/krusty"));
+content	crates/mitsuro-core/src/identity.rs	2835	            Path::new("/opt/tools/mako-analysis-helper"),
+content	crates/mitsuro-core/src/identity.rs	2881	            "/opt/krusty",
+content	crates/mitsuro-core/src/identity.rs	2882	            "/opt/krusty-mako",
+content	crates/mitsuro-core/src/identity.rs	2885	            "/srv/.krusty-releases/0.9.20/random-name",
+content	crates/mitsuro-core/src/identity.rs	2891	            "/opt/mako-analysis-helper",
+content	crates/mitsuro-core/src/identity.rs	2892	            "/opt/krusty-helper",
+content	crates/mitsuro-core/src/identity.rs	2893	            "/srv/not-.krusty-releases/random-name",
+content	crates/mitsuro-core/src/identity.rs	2903	            Path::new("/opt/krusty"),
+content	crates/mitsuro-core/src/identity.rs	2915	            Path::new("/opt/krusty"),
 content	crates/mitsuro-core/src/plugins/manager/package.rs	385	    #[serde(default, alias = "krusty")]
 content	crates/mitsuro-core/src/plugins/signing.rs	10	const LEGACY_RELEASE_ENVELOPE_V1_DOMAIN: &[u8] = b"krusty-plugin-release-envelope-v1\0";
 content	crates/mitsuro-core/src/plugins/signing.rs	148	            r#"{{"manifest_version":1,"id":"signed.plugin","name":"Signed Plugin","version":"1.0.0","publisher":"signed.publisher","description":null,"runtime":"wasm","entry_component":"plugin.wasm","render_capabilities":[],"requested_permissions":{{"fs_read":false,"fs_write":false,"network":false,"process":false}},"release":{{"url":"https://plugins.example/plugin.wasm","sha256":"{}","signature":"","signing_key_id":"release-key","signature_scheme":"manifest-envelope-v1"}},"compat":{{"krusty_min":"0.7.0","krusty_max":null}}}}"#,
