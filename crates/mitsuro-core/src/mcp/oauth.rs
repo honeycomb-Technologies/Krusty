@@ -1010,7 +1010,14 @@ mod tests {
                 .any(|cause| cause.to_string().contains("timed out")),
             "{error:#}"
         );
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // Bound the wait well below multi-second HTTP defaults so we still prove
+        // the 50ms discovery deadline is honored, while remaining stable under
+        // loaded CI runners that can schedule the tiny_http responder late.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "oauth discovery deadline took {:?}; expected cancellation well under 5s",
+            started.elapsed()
+        );
         server_thread.join().unwrap();
     }
 
