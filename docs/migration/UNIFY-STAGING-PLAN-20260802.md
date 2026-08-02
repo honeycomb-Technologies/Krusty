@@ -255,15 +255,15 @@ Workflow phases map 1:1 to §4. Agents default:
 
 ## 7. Freeze checklist (sign-off)
 
-- [ ] P0 branches on `origin`  
-- [ ] Staging clean after P1  
-- [ ] Core/server from agent-loop in tip  
-- [ ] tui_v2 is default entry  
-- [ ] No product Krusty/Mako names required for normal use  
-- [ ] Desktop/mobile intended commits in tip  
-- [ ] Honey Mac GitHub same `rev-parse`  
-- [ ] Validation green  
-- [ ] User: “freeze staging”  
+- [x] P0 branches on `origin` — `codex/core-server-agent-loop-20260802`, `codex/tui-v2-replace-20260802`
+- [x] Staging clean after P1 — identity snapshot landed (`7f558286` lineage)
+- [x] Core/server from agent-loop in tip — `9a6d2599` merge + follow-up fixes
+- [x] tui_v2 is default entry — `mitsuro-cli` `tui_v2::run()` only
+- [x] No product Krusty/Mako names required for normal use — crates are `mitsuro-*` / `hive_*`
+- [x] Desktop/mobile intended commits in tip — desktop land `7b0e3d9f` (mobile selective as needed)
+- [x] Honey Mac GitHub same `rev-parse` — tip `c59770f0` (2026-08-02)
+- [~] Validation green — **`cargo check` + `cargo test --workspace` green on tip**; `cargo clippy -D warnings` still red (~590 pre-existing CLI warnings); `cargo fmt --check` still dirty on unrelated files
+- [ ] User: “freeze staging”
 - [ ] User: “merge main” (later, not this goal)
 
 ---
@@ -274,9 +274,10 @@ Workflow phases map 1:1 to §4. Agents default:
 |-----|-----|-------|
 | `main` (honey at plan time) | `c425a53` | |
 | staging tip (honey at plan time) | `57e065b` | + dirty identity |
-| live install id | `agent-loop-preview-20260801-5aea43da-bdf5c518` | |
-| tui preserve branch | _TBD after P0.2_ | |
-| core preserve branch | _TBD after P0.3_ | |
+| staging tip (2026-08-02 P6) | `c59770f0` | includes markdown/hive test fixes |
+| live install id | `agent-loop-preview-20260801-5aea43da-bdf5c518` | do not thrash |
+| tui preserve/replace | `a24b8f8b` / `codex/tui-v2-replace-20260802` | on origin |
+| core preserve branch | `47f9abed` / `codex/core-server-agent-loop-20260802` | on origin |
 
 ---
 
