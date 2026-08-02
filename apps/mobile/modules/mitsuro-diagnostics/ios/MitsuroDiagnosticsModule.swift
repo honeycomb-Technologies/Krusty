@@ -652,46 +652,48 @@ private func milliseconds(_ date: Date) -> Int64 {
   Int64((date.timeIntervalSince1970 * 1_000).rounded())
 }
 
+// Shared definition used by MitsuroDiagnostics and the KrustyDiagnostics
+// compatibility bridge. Must use ModuleDefinitionBuilder (not ModuleDefinition
+// initializer) — the ModuleDefinition init is internal in expo-modules-core 55.
+@ModuleDefinitionBuilder
 func mitsuroDiagnosticsDefinition(moduleName: String) -> ModuleDefinition {
-  ModuleDefinition {
-    Name(moduleName)
+  Name(moduleName)
 
-    OnCreate {
-      MitsuroMetricKitCollector.shared.start()
-    }
+  OnCreate {
+    MitsuroMetricKitCollector.shared.start()
+  }
 
-    OnDestroy {
-      MitsuroMetricKitCollector.shared.stop()
-    }
+  OnDestroy {
+    MitsuroMetricKitCollector.shared.stop()
+  }
 
-    Function("isMetricKitAvailable") { () -> Bool in
-      true
-    }
+  Function("isMetricKitAvailable") { () -> Bool in
+    true
+  }
 
-    Function("getBuildNumber") { () -> String? in
-      Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-    }
+  Function("getBuildNumber") { () -> String? in
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+  }
 
-    Function("beginPerformanceSpan") { (spanId: Int, name: String) -> Void in
-      MitsuroPerformanceSignposts.shared.begin(spanId: spanId, name: name)
-    }
+  Function("beginPerformanceSpan") { (spanId: Int, name: String) -> Void in
+    MitsuroPerformanceSignposts.shared.begin(spanId: spanId, name: name)
+  }
 
-    Function("endPerformanceSpan") { (spanId: Int, name: String) -> Void in
-      MitsuroPerformanceSignposts.shared.end(spanId: spanId, name: name)
-    }
+  Function("endPerformanceSpan") { (spanId: Int, name: String) -> Void in
+    MitsuroPerformanceSignposts.shared.end(spanId: spanId, name: name)
+  }
 
-    Function("recordJsHotPathProbe") { (payload: String) -> Void in
-      guard payload.utf8.count <= 2_048 else { return }
-      NSLog("[MitsuroJSHotPath] %@", payload)
-    }
+  Function("recordJsHotPathProbe") { (payload: String) -> Void in
+    guard payload.utf8.count <= 2_048 else { return }
+    NSLog("[MitsuroJSHotPath] %@", payload)
+  }
 
-    AsyncFunction("listMetricKitPayloads") { () -> [NativeMetricPayloadRecord] in
-      MitsuroMetricKitCollector.shared.list()
-    }
+  AsyncFunction("listMetricKitPayloads") { () -> [NativeMetricPayloadRecord] in
+    MitsuroMetricKitCollector.shared.list()
+  }
 
-    AsyncFunction("acknowledgeMetricKitPayloads") { (ids: [String]) -> Void in
-      MitsuroMetricKitCollector.shared.acknowledge(ids)
-    }
+  AsyncFunction("acknowledgeMetricKitPayloads") { (ids: [String]) -> Void in
+    MitsuroMetricKitCollector.shared.acknowledge(ids)
   }
 }
 
