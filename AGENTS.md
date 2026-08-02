@@ -309,3 +309,13 @@ Key runtime dependencies (check `Cargo.toml` for versions):
 - rusqlite (database)
 - reqwest (HTTP client)
 - wasmtime (WASM extensions)
+
+## Staging tip policy (unify)
+
+All new product work intended for the next coordinated release starts from
+`codex/release-staging-20260801` on `honeycomb-Technologies/Mitsuro`.
+
+- Treat that branch tip as the only authority for multi-machine agents/worktrees.
+- Capture unique dirty work on named branches first; integrate into staging deliberately.
+- Do not merge to `main`, tag, or restart production without explicit approval after staging validation.
+
