@@ -38,9 +38,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     paths,
-    tui::{
-        app::AppServices,
-        input::{has_image_references, parse_input, InputSegment},
+    tui_support::{
+        has_image_references, parse_input, AppServices, InputSegment,
         utils::{DeviceCodeInfo, OAuthStatusUpdate},
     },
     tui_v2::model::{
@@ -259,7 +258,7 @@ impl RuntimeServices {
             _legacy_theme,
             _legacy_theme_name,
             active_provider,
-        ) = crate::tui::app_builder::init_services(&working_dir).await;
+        ) = crate::tui_support::app_builder::init_services(&working_dir).await;
 
         if active_provider.supports_oauth() {
             if let Err(error) = mitsuro_core::auth::refresh_oauth_token(active_provider).await {
@@ -1770,7 +1769,7 @@ fn create_ai_client(services: &AppServices, metadata: &ModelMetadata) -> Option<
     let credential = if metadata.provider == ProviderId::Anthropic {
         mitsuro_core::auth::resolve_anthropic_auth(&services.credential_store).credential
     } else if metadata.provider == ProviderId::OpenAI {
-        crate::tui::auth::resolve_openai_auth_for_metadata(metadata, &services.credential_store)
+        crate::tui_support::auth::resolve_openai_auth_for_metadata(metadata, &services.credential_store)
             .credential
     } else if metadata.provider == ProviderId::Grok {
         mitsuro_core::auth::resolve_grok_auth(&services.credential_store).credential
@@ -1778,7 +1777,7 @@ fn create_ai_client(services: &AppServices, metadata: &ModelMetadata) -> Option<
         services.credential_store.get_auth(&metadata.provider)
     }?;
 
-    let config = crate::tui::auth::create_client_config(metadata, &services.credential_store);
+    let config = crate::tui_support::auth::create_client_config(metadata, &services.credential_store);
     AiClient::new_with_resolved_model(config, credential, metadata.resolve_runtime()).ok()
 }
 

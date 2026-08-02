@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mitsuro",
     "slug": "mitsuro",
-    "version": "0.9.20",
+    "version": "0.9.21",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "io.mitsuro.mobile",
+      "bundleIdentifier": "io.krusty.mobile",
       "backgroundColor": "#0e0e11",
       "icon": {
         "light": "./assets/icons/ios-light.png",
@@ -37,7 +37,7 @@
       "buildNumber": "274"
     },
     "android": {
-      "package": "io.mitsuro.mobile",
+      "package": "io.krusty.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0e0e11"
@@ -82,7 +82,7 @@
       [
         "expo-widgets",
         {
-          "groupIdentifier": "group.io.mitsuro.mobile",
+          "groupIdentifier": "group.io.krusty.mobile",
           "enablePushNotifications": true,
           "frequentUpdates": true,
           "widgets": [

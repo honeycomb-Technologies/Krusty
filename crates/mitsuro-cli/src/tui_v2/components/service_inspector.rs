@@ -263,7 +263,7 @@ fn render_plugin_dock(
 
     // Live classic plugin runtime is wired in a follow-up; this well is the
     // reserved surface with empty state and available ids when present.
-    let available = crate::tui::plugins::available_plugin_ids();
+    let available = crate::tui_support::plugins::available_plugin_ids();
     let mut lines = Vec::new();
     if available.is_empty() {
         lines.push(Line::styled(

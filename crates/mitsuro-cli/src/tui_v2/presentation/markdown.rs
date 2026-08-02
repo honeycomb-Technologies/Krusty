@@ -8,7 +8,7 @@ use ratatui::{
 };
 use url::Url;
 
-use crate::tui::{
+use crate::tui_support::{
     markdown::{self, RenderedMarkdown},
     themes::{Theme, THEME_REGISTRY},
 };

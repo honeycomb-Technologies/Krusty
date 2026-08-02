@@ -1,6 +1,6 @@
 {
   "name": "@mitsuro/mobile",
-  "version": "0.9.20",
+  "version": "0.9.21",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",

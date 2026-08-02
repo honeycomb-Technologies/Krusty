@@ -1,6 +1,6 @@
 [package]
 name = "mitsuro-client"
-version = "0.9.20"
+version = "0.9.21"
 edition = "2021"
 description = "Async Rust client for the Mitsuro server API"
 

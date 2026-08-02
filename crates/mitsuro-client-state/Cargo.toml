@@ -1,6 +1,6 @@
 [package]
 name = "mitsuro-client-state"
-version = "0.9.20"
+version = "0.9.21"
 edition = "2021"
 description = "Headless Rust state machine for Mitsuro clients"
 

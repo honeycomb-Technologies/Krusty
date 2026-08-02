@@ -328,7 +328,7 @@ fn render_agent_markdown(
         Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.canvas)),
         layout.visible_rect,
     );
-    crate::tui::markdown::apply_hyperlinks(
+    crate::tui_support::markdown::apply_hyperlinks(
         frame.buffer_mut(),
         layout.visible_rect,
         &markdown.links,

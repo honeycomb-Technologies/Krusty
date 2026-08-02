@@ -14,10 +14,13 @@ use futures::StreamExt;
 use serde::{de::DeserializeOwned, Deserialize};
 
 // Re-export core modules for TUI usage
-use mitsuro_core::{acp, agent, ai, extensions, paths, plan, plugins, process, storage, tools};
+// Crate-root re-exports so terminal modules can use `crate::agent`, etc.
+pub(crate) use mitsuro_core::{
+    acp, agent, ai, extensions, paths, plan, plugins, process, storage, tools,
+};
 
 mod serve;
-mod tui;
+mod tui_support;
 mod tui_v2;
 
 /// Mitsuro - AI Coding Assistant

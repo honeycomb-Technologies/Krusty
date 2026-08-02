@@ -83,7 +83,7 @@ pub struct PreviewApp {
     compaction: Option<oneshot::Receiver<Result<(), String>>>,
     extension_command: Option<(String, oneshot::Receiver<Result<String, String>>)>,
     extension_toggle: Option<oneshot::Receiver<Result<(), String>>>,
-    auth_events: Option<mpsc::UnboundedReceiver<crate::tui::utils::OAuthStatusUpdate>>,
+    auth_events: Option<mpsc::UnboundedReceiver<crate::tui_support::utils::OAuthStatusUpdate>>,
     setup_events: Option<mpsc::UnboundedReceiver<SetupServiceUpdate>>,
     home: Option<HomeSnapshot>,
     setup: Option<SetupSnapshot>,
@@ -98,7 +98,7 @@ pub struct PreviewApp {
     attachment_image: Option<ratatui_image::protocol::StatefulProtocol>,
     /// Key (path or clipboard id) currently loaded into `attachment_image`.
     attachment_image_key: Option<String>,
-    graphics: crate::tui::graphics::GraphicsContext,
+    graphics: crate::tui_support::graphics::GraphicsContext,
     /// Throttle for git status polling (context-bar diff chrome).
     last_git_poll: std::time::Instant,
 }
@@ -134,7 +134,7 @@ impl PreviewApp {
             attachment_image: None,
             attachment_image_key: None,
             // Lazy: avoid stdio query in unit tests / headless; detect on first use.
-            graphics: crate::tui::graphics::GraphicsContext { picker: None },
+            graphics: crate::tui_support::graphics::GraphicsContext { picker: None },
             // Force a first poll shortly after startup.
             last_git_poll: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(60))
@@ -245,12 +245,12 @@ impl PreviewApp {
             Event::Paste(value)
                 if self.state.focus.is_composer()
                     && !matches!(self.state.route, AppRoute::Setup)
-                    && crate::tui::utils::clipboard::looks_like_non_text_paste(value)
+                    && crate::tui_support::utils::clipboard::looks_like_non_text_paste(value)
         ) {
             // Binary/garbage paste payload: only fall back to image when there is
             // no usable text (release-copy of stream text must not be shadowed).
-            if crate::tui::utils::clipboard::read_clipboard_text().is_none() {
-                if let Some(image) = crate::tui::utils::clipboard::read_clipboard_image() {
+            if crate::tui_support::utils::clipboard::read_clipboard_text().is_none() {
+                if let Some(image) = crate::tui_support::utils::clipboard::read_clipboard_image() {
                     let id = uuid::Uuid::new_v4().to_string();
                     self.pending_clipboard_images
                         .insert(id.clone(), (image.width, image.height, image.rgba_bytes));
@@ -304,12 +304,12 @@ impl PreviewApp {
         // Prefer text when present. Image-first caused stale clipboard images to
         // win over freshly release-copied transcript/composer text (macOS often
         // keeps both representations until text fully replaces the pasteboard).
-        if let Some(text) = crate::tui::utils::clipboard::read_clipboard_text() {
+        if let Some(text) = crate::tui_support::utils::clipboard::read_clipboard_text() {
             let prepared = prepare_pasted_composer_text(&text);
             self.dispatch(UiAction::ComposerInserted(prepared));
             return Redraw::Full;
         }
-        if let Some(image) = crate::tui::utils::clipboard::read_clipboard_image() {
+        if let Some(image) = crate::tui_support::utils::clipboard::read_clipboard_image() {
             let id = uuid::Uuid::new_v4().to_string();
             self.pending_clipboard_images
                 .insert(id.clone(), (image.width, image.height, image.rgba_bytes));
@@ -1331,7 +1331,7 @@ impl PreviewApp {
                             if start < end {
                                 let selected = text[start..end].to_owned();
                                 let _ =
-                                    crate::tui::utils::clipboard::write_clipboard_text(&selected);
+                                    crate::tui_support::utils::clipboard::write_clipboard_text(&selected);
                                 // Keep buffer selection so typing replaces the range.
                                 self.state.composer.set_selection(start, end);
                             }
@@ -1348,7 +1348,7 @@ impl PreviewApp {
                 self.state.mouse.selecting = false;
                 // Release-to-copy: write visible selected stream text, then clear.
                 if let Some(text) = self.selected_transcript_text() {
-                    let _ = crate::tui::utils::clipboard::write_clipboard_text(&text);
+                    let _ = crate::tui_support::utils::clipboard::write_clipboard_text(&text);
                 }
                 // Drop highlight after copy so the next click is clean.
                 self.state.mouse.clear_selection();
@@ -1666,7 +1666,7 @@ impl PreviewApp {
         let preview = if let Some(id) = inner.strip_prefix("clipboard:") {
             if let Some((width, height, rgba)) = self.pending_clipboard_images.get(id) {
                 let (width, height, rgba) = (*width, *height, rgba.clone());
-                match crate::tui::utils::clipboard::save_clipboard_image_preview(
+                match crate::tui_support::utils::clipboard::save_clipboard_image_preview(
                     width, height, &rgba, id,
                 ) {
                     Ok(path) => AttachmentPreview {
@@ -1717,7 +1717,7 @@ impl PreviewApp {
 
     fn ensure_graphics(&mut self) {
         if self.graphics.picker.is_none() {
-            self.graphics = crate::tui::graphics::GraphicsContext::detect();
+            self.graphics = crate::tui_support::graphics::GraphicsContext::detect();
         }
     }
 
@@ -2620,7 +2620,7 @@ impl PreviewApp {
         }
     }
 
-    async fn handle_oauth_update(&mut self, update: crate::tui::utils::OAuthStatusUpdate) {
+    async fn handle_oauth_update(&mut self, update: crate::tui_support::utils::OAuthStatusUpdate) {
         if let Some(device) = update.device_code {
             self.state.setup.oauth_message = Some(update.message);
             self.state.setup.oauth_url = Some(device.verification_uri);
@@ -3059,7 +3059,7 @@ impl PreviewApp {
             } => lines.join("\n"),
             _ => part.measurement_text.clone(),
         };
-        if !crate::tui::utils::clipboard::write_clipboard_text(&text) {
+        if !crate::tui_support::utils::clipboard::write_clipboard_text(&text) {
             self.conversation.apply_event(LoopEvent::Error {
                 error: "Could not write the focused content to the clipboard.".to_owned(),
             });
@@ -3320,7 +3320,7 @@ pub async fn run() -> Result<()> {
         enum NextEvent {
             Terminal(Option<std::io::Result<Event>>),
             Loop(Option<LoopEvent>),
-            Auth(Option<crate::tui::utils::OAuthStatusUpdate>),
+            Auth(Option<crate::tui_support::utils::OAuthStatusUpdate>),
             Setup(Option<SetupServiceUpdate>),
             Compaction(Option<Result<(), String>>),
             ExtensionCommand(Option<Result<String, String>>),
@@ -3366,7 +3366,7 @@ pub async fn run() -> Result<()> {
                 event = async {
                     match auth_events.as_mut() {
                         Some(receiver) => receiver.recv().await,
-                        None => std::future::pending::<Option<crate::tui::utils::OAuthStatusUpdate>>().await,
+                        None => std::future::pending::<Option<crate::tui_support::utils::OAuthStatusUpdate>>().await,
                     }
                 } => NextEvent::Auth(event),
                 event = async {
@@ -3977,7 +3977,7 @@ mod tests {
             pending_clipboard_images: std::collections::HashMap::new(),
             attachment_image: None,
             attachment_image_key: None,
-            graphics: crate::tui::graphics::GraphicsContext { picker: None },
+            graphics: crate::tui_support::graphics::GraphicsContext { picker: None },
             last_git_poll: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(60))
                 .unwrap_or_else(std::time::Instant::now),
@@ -4904,11 +4904,11 @@ mod tests {
         app.setup = Some(setup_fixture());
         app.state.setup.step = SetupStep::OAuthWaiting;
 
-        app.handle_oauth_update(crate::tui::utils::OAuthStatusUpdate {
+        app.handle_oauth_update(crate::tui_support::utils::OAuthStatusUpdate {
             provider: ProviderId::OpenAI,
             success: true,
             message: "Enter the code in your browser".to_owned(),
-            device_code: Some(crate::tui::utils::DeviceCodeInfo {
+            device_code: Some(crate::tui_support::utils::DeviceCodeInfo {
                 user_code: "ABCD-EFGH".to_owned(),
                 verification_uri: "https://example.test/device".to_owned(),
             }),

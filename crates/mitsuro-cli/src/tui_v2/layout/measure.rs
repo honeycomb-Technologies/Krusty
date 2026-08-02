@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    tui::markdown::RenderedMarkdown,
+    tui_support::markdown::RenderedMarkdown,
     tui_v2::{
         model::{artifact::PartId, capability::CapabilityProfile},
         presentation::{markdown, theme::SemanticTheme, theme::ThemeKind},
