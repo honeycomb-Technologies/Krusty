@@ -2,9 +2,8 @@
 
 use mitsuro_core::{
     agent::{
-        loop_events::LoopStopReason,
-        subagent::{AgentProgressStatus},
-        DelegatedProgressEvent, LoopEvent,
+        loop_events::LoopStopReason, subagent::AgentProgressStatus, DelegatedProgressEvent,
+        LoopEvent,
     },
     ai::types::Citation,
 };
@@ -642,9 +641,7 @@ fn update_agent_stream(
         .or(progress.current_action.as_deref())
     {
         let formatted = action.trim();
-        if !formatted.is_empty()
-            && lines.last().map(String::as_str) != Some(formatted)
-        {
+        if !formatted.is_empty() && lines.last().map(String::as_str) != Some(formatted) {
             for chunk in formatted.lines() {
                 lines.push(chunk.to_owned());
             }
@@ -653,10 +650,7 @@ fn update_agent_stream(
 
     let body = lines.join("\n");
     tool.artifact = ArtifactModel {
-        content: ArtifactContent::Text(bound_text(
-            &body,
-            super::tool_output::LIVE_ARTIFACT_BYTES,
-        )),
+        content: ArtifactContent::Text(bound_text(&body, super::tool_output::LIVE_ARTIFACT_BYTES)),
         ..ArtifactModel::default()
     };
 
@@ -691,7 +685,6 @@ fn update_agent_stream(
             });
     }
 }
-
 
 fn map_citation(citation: Citation) -> CitationModel {
     CitationModel {

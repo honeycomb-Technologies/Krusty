@@ -78,8 +78,8 @@ impl HighlightCache {
     }
 
     fn insert(&mut self, key: u64, value: Arc<Vec<Vec<SyntaxChunk>>>) {
-        if self.map.contains_key(&key) {
-            self.map.insert(key, value);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(key) {
+            e.insert(value);
             return;
         }
         while self.map.len() >= self.cap {

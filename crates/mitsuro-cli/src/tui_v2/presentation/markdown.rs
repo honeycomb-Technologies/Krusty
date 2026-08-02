@@ -232,7 +232,9 @@ mod tests {
         // Major block transitions may use a couple blanks; never stack four empties.
         assert!(!text.contains("\n\n\n\n\n"));
         assert!(
-            text.contains("First paragraph.") && text.contains("Heading") && text.contains("Second paragraph."),
+            text.contains("First paragraph.")
+                && text.contains("Heading")
+                && text.contains("Second paragraph."),
             "rendered markdown: {text:?}"
         );
         // At least one blank separates prose from the heading.

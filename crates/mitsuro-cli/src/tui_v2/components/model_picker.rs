@@ -153,7 +153,9 @@ pub fn render(
         ));
     } else {
         let reserved = usize::from(picker.error.is_some());
-        let available = usize::from(list_area.height).saturating_sub(reserved).max(1);
+        let available = usize::from(list_area.height)
+            .saturating_sub(reserved)
+            .max(1);
         let selected = picker.selected.min(choices.len().saturating_sub(1));
         let rows = display_rows(&choices);
         let window = visible_rows(&rows, selected, available);
@@ -190,15 +192,14 @@ pub fn render(
         }
     }
     if let Some(error) = &picker.error {
-        lines.push(Line::styled(error.clone(), Style::default().fg(theme.error)));
+        lines.push(Line::styled(
+            error.clone(),
+            Style::default().fg(theme.error),
+        ));
     }
     if list_area.height > 0 {
         frame.render_widget(
-            Paragraph::new(lines).style(
-                Style::default()
-                    .fg(theme.foreground)
-                    .bg(theme.surface),
-            ),
+            Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.surface)),
             list_area,
         );
     }

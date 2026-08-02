@@ -56,6 +56,12 @@ content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	44	  const existingTo
 content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	56	      (window as any).__KRUSTY_SERVER_URL = baseUrl;
 content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	57	      (window as any).__KRUSTY_SERVER_TOKEN = 'local';
 content	apps/desktop/ui/src/host/desktopHost.ts	13	      w.__KRUSTY_DESKTOP_HOST === true,
+content	apps/mobile/EAS-PROJECT.md	4	- App `slug` is currently **`krusty`** so it matches the existing Expo project
+content	apps/mobile/EAS-PROJECT.md	6	- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store freeze).
+content	apps/mobile/EAS-PROJECT.md	14	Slug for project identified by "extra.eas.projectId" (krusty)
+content	apps/mobile/EAS-PROJECT.md	20	1. Rename the Expo project slug `krusty` → `mitsuro` in the Expo dashboard
+content	apps/mobile/EAS-PROJECT.md	26	Until that rename is done, keep `slug: "krusty"` so TestFlight CI can build.
+content	apps/mobile/app.json	4	    "slug": "krusty",
 content	apps/mobile/app.json	11	      "krusty"
 content	apps/mobile/app.json	18	      "bundleIdentifier": "io.krusty.mobile",
 content	apps/mobile/app.json	40	      "package": "io.krusty.mobile",
@@ -101,8 +107,6 @@ content	apps/mobile/test/identityMigration.test.ts	179	    "krusty://connect?url
 content	apps/mobile/test/identityMigration.test.ts	182	    "https://device.example/#krusty-remote-token=secret",
 content	apps/mobile/test/identityMigration.test.ts	193	    __KRUSTY_SERVER_URL: "http://legacy.example",
 content	apps/mobile/test/identityMigration.test.ts	194	    __KRUSTY_SERVER_TOKEN: "legacy-token",
-content	apps/mobile/test/identityMigration.test.ts	200	    __KRUSTY_SERVER_URL: "http://legacy.example",
-content	apps/mobile/test/identityMigration.test.ts	201	    __KRUSTY_SERVER_TOKEN: "legacy-token",
 content	apps/mobile/test/identityMigration.test.ts	210	  const action = canonicalNotificationAction("OPEN_MAKO");
 content	apps/mobile/test/identityMigration.test.ts	212	    type: "mako_update",
 content	apps/mobile/test/identityMigration.test.ts	213	    focus: "mako",
@@ -144,6 +148,8 @@ content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	106	}} else if (globalT
 content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	107	  globalThis.__mitsuroPluginRegistry[{plugin_id}] = globalThis.krustyPlugin;
 content	crates/mitsuro-cli/src/tui_support/plugins/legacy_identity.rs	3	pub(super) const NATIVE_PLUGIN_ENTRY_SYMBOL: &[u8] = b"krusty_plugin_entry";
 content	crates/mitsuro-cli/src/tui_support/plugins/retroarch_identity.rs	14	const LEGACY_RELATIVE_ROOT: &str = ".config/krusty/gameboy-color";
+content	crates/mitsuro-cli/src/tui_v2/projection/tests.rs	190	    assert_eq!(agent_text.join(""), "Checking Hive/Mako next.");
+content	crates/mitsuro-cli/src/tui_v2/services.rs	2031	        assert_eq!(parse_theme_kind("krusty"), None);
 content	crates/mitsuro-client/src/types.rs	274	    #[serde(alias = "mako")]
 content	crates/mitsuro-client/src/types.rs	1126	            serde_json::from_str::<SessionType>(r#""mako""#).expect("deprecated session type"),
 content	crates/mitsuro-core/src/acp/agent/tests.rs	206	    let legacy = canonical.replacen("mitsuro:model-key:", "krusty:model-key:", 1);
@@ -151,7 +157,6 @@ content	crates/mitsuro-core/src/agent/history_policy/mod.rs	510	                
 content	crates/mitsuro-core/src/agent/orchestrator.rs	552	    /// Database-owned Mako identity frozen once at run start.
 content	crates/mitsuro-core/src/agent/orchestrator.rs	783	        // Load per-project settings from .krusty/settings.json
 content	crates/mitsuro-core/src/agent/orchestrator.rs	3019	        let db_path = temp.path().join("krusty.db");
-content	crates/mitsuro-core/src/agent/orchestrator.rs	3101	        let db_path = temp.path().join("krusty.db");
 content	crates/mitsuro-core/src/agent/orchestrator.rs	3546	        let db_path = repo.join("krusty.db");
 content	crates/mitsuro-core/src/agent/run_spec.rs	33	    #[serde(alias = "mako")]
 content	crates/mitsuro-core/src/agent/user_hooks/executor.rs	560	test "$MITSURO_PLUGIN_ID" = "$KRUSTY_PLUGIN_ID" &&
@@ -204,7 +209,6 @@ content	crates/mitsuro-core/src/identity.rs	1731	                | "Krusty.exe"
 content	crates/mitsuro-core/src/identity.rs	1995	            Some("KRUSTY_MAKO_SOCKET")
 content	crates/mitsuro-core/src/identity.rs	1999	            Some("KRUSTY_PROVIDER")
 content	crates/mitsuro-core/src/identity.rs	2021	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
-content	crates/mitsuro-core/src/identity.rs	2065	        for name in [legacy::DATABASE_FILE_NAME, "krusty.db-wal", "krusty.db-shm"] {
 content	crates/mitsuro-core/src/identity.rs	2466	        std::fs::write(old.join("krusty.log"), "terminal runtime").expect("root terminal log");
 content	crates/mitsuro-core/src/identity.rs	2467	        std::fs::write(old.join("krusty-desktop-server.log"), "desktop runtime")
 content	crates/mitsuro-core/src/identity.rs	2482	        assert!(!receipt.canonical_root.join("krusty.log").exists());
@@ -228,7 +232,6 @@ content	crates/mitsuro-core/src/identity.rs	2891	            "/opt/mako-analysis
 content	crates/mitsuro-core/src/identity.rs	2892	            "/opt/krusty-helper",
 content	crates/mitsuro-core/src/identity.rs	2893	            "/srv/not-.krusty-releases/random-name",
 content	crates/mitsuro-core/src/identity.rs	2903	            Path::new("/opt/krusty"),
-content	crates/mitsuro-core/src/identity.rs	2915	            Path::new("/opt/krusty"),
 content	crates/mitsuro-core/src/plugins/manager/package.rs	385	    #[serde(default, alias = "krusty")]
 content	crates/mitsuro-core/src/plugins/signing.rs	10	const LEGACY_RELEASE_ENVELOPE_V1_DOMAIN: &[u8] = b"krusty-plugin-release-envelope-v1\0";
 content	crates/mitsuro-core/src/plugins/signing.rs	148	            r#"{{"manifest_version":1,"id":"signed.plugin","name":"Signed Plugin","version":"1.0.0","publisher":"signed.publisher","description":null,"runtime":"wasm","entry_component":"plugin.wasm","render_capabilities":[],"requested_permissions":{{"fs_read":false,"fs_write":false,"network":false,"process":false}},"release":{{"url":"https://plugins.example/plugin.wasm","sha256":"{}","signature":"","signing_key_id":"release-key","signature_scheme":"manifest-envelope-v1"}},"compat":{{"krusty_min":"0.7.0","krusty_max":null}}}}"#,
@@ -245,8 +248,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	191	            .
 content	crates/mitsuro-core/src/storage/database/migrations.rs	221	                .context("enabling secure deletion for Mako privacy migration")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	224	                .context("reserving exclusive access for Mako privacy migration")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	227	        // The HTTP process and the independently supervised Mako daemon can
-content	crates/mitsuro-core/src/storage/database/migrations.rs	264	                .context("enabling secure deletion for Mako privacy migration")?;
-content	crates/mitsuro-core/src/storage/database/migrations.rs	267	                .context("reserving exclusive access for Mako privacy migration")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	843	        // Migration 20: Autonomous tasks for Mako agent coordination
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1035	                    bundle_id TEXT NOT NULL DEFAULT 'io.krusty.mobile',
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1049	        // Migration 27: Persisted Mako runtime state
@@ -264,7 +265,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	1079	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1086	        // Migration 29: Persisted Mako crew assignment
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1088	            info!("Running migration 29: Mako crew assignment");
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1089	            if !Self::column_exists(&tx, "mako_runtime_state", "crew_slug") {
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1091	                    "ALTER TABLE mako_runtime_state
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1098	        // Migration 30: Persisted Mako attention item state
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1100	            info!("Running migration 30: Mako attention state");
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1102	                "CREATE TABLE IF NOT EXISTS mako_attention_state (
@@ -279,7 +279,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	1231	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1233	                CREATE TABLE mako_profile_documents (
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1240	                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1243	                CREATE TABLE mako_crew_profiles (
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1250	                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1253	                CREATE TABLE mako_crew_documents (
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1261	                        REFERENCES mako_crew_profiles(profile_id, slug) ON DELETE CASCADE
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1265	            .context("Migration 35: Mako identity profiles")?;
@@ -317,7 +316,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	1413	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1422	                CREATE TABLE mako_idempotency_keys (
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1433	                CREATE INDEX idx_mako_idempotency_expiry ON mako_idempotency_keys(expires_at);
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1435	                CREATE TABLE mako_controller_events (
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1446	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1447	                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE SET NULL,
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1448	                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE SET NULL
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1450	                CREATE UNIQUE INDEX idx_mako_controller_events_dedupe
@@ -352,19 +350,12 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	1817	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1819	                && Self::table_exists(&tx, "mako_runs")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1823	                ALTER TABLE mako_runs
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1827	                CREATE TABLE mako_control_outbox (
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1846	                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1848	                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE CASCADE
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1850	                CREATE INDEX idx_mako_control_outbox_pending
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1851	                    ON mako_control_outbox(status, available_at, created_at);
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1854	                .context("Migration 41: durable Mako control outbox")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1859	        // Migration 42: Repair the atomic Mako transition journal for
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1866	            info!("Running migration 42: Complete atomic Mako transition journal");
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1867	            if Self::table_exists(&tx, "mako_runs")
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1868	                && Self::table_exists(&tx, "mako_controller_events")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1872	                DROP TRIGGER IF EXISTS mako_runs_transition_event;
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1873	                CREATE TRIGGER mako_runs_transition_event
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1874	                AFTER UPDATE OF status ON mako_runs
-content	crates/mitsuro-core/src/storage/database/migrations.rs	1877	                    INSERT OR IGNORE INTO mako_controller_events (
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1883	                         FROM mako_controller_events
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1917	                .context("Migration 42: complete atomic Mako transition journal")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	1922	        // Migration 43: Replace legacy Mako execution payloads with a
@@ -377,14 +368,12 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	2055	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2056	                if Self::column_exists(&tx, "mako_runs", "last_error") {
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2058	                        "UPDATE mako_runs
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2064	                if Self::column_exists(&tx, "mako_runs", "last_stop_reason") {
-content	crates/mitsuro-core/src/storage/database/migrations.rs	2066	                        "UPDATE mako_runs
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2080	                if Self::column_exists(&tx, "mako_runs", "outcome_json") {
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2083	                        UPDATE mako_runs
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2101	            if Self::table_exists(&tx, "mako_run_attempts") {
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2102	                if Self::column_exists(&tx, "mako_run_attempts", "error") {
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2104	                        "UPDATE mako_run_attempts
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2110	                if Self::column_exists(&tx, "mako_run_attempts", "stop_reason") {
-content	crates/mitsuro-core/src/storage/database/migrations.rs	2112	                        "UPDATE mako_run_attempts
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2127	            if Self::table_exists(&tx, "mako_runtime_state")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2128	                && Self::column_exists(&tx, "mako_runtime_state", "last_error")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2131	                    "UPDATE mako_runtime_state
@@ -393,8 +382,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	2138	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2140	                        "UPDATE mako_control_outbox
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2146	                if Self::column_exists(&tx, "mako_control_outbox", "payload_json") {
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2149	                        UPDATE mako_control_outbox
-content	crates/mitsuro-core/src/storage/database/migrations.rs	2174	            if Self::table_exists(&tx, "mako_runs")
-content	crates/mitsuro-core/src/storage/database/migrations.rs	2175	                && Self::table_exists(&tx, "mako_controller_events")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2179	                    DROP TRIGGER IF EXISTS mako_runs_transition_event;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2180	                    CREATE TRIGGER mako_runs_transition_event
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2181	                    AFTER UPDATE OF status ON mako_runs
@@ -414,7 +401,6 @@ content	crates/mitsuro-core/src/storage/database/migrations.rs	2300	            
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2301	                        .execute_batch("ALTER TABLE mako_schedules ADD COLUMN model_key_json TEXT;")
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2302	                        .context("Migration 46: add Mako schedule model key")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2304	                if !Self::column_exists(&mako_model_tx, "mako_schedules", "model_catalog_revision")
-content	crates/mitsuro-core/src/storage/database/migrations.rs	2306	                    mako_model_tx
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2308	                            "ALTER TABLE mako_schedules ADD COLUMN model_catalog_revision TEXT;",
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2310	                        .context("Migration 46: add Mako schedule model catalog revision")?;
 content	crates/mitsuro-core/src/storage/database/migrations.rs	2313	            mako_model_tx.execute(
@@ -506,8 +492,6 @@ content	crates/mitsuro-server/src/routes/chat/tests.rs	280	    let new_mako = ch
 content	crates/mitsuro-server/src/routes/chat/tests.rs	304	    assert!(matches!(new_mako, Err(AppError::Conflict(_))));
 content	crates/mitsuro-server/src/routes/chat/tests.rs	721	    std::fs::create_dir_all(project_dir.join(".krusty"))
 content	crates/mitsuro-server/src/routes/chat/tests.rs	756	        project_dir.join(".krusty/settings.json"),
-content	crates/mitsuro-server/src/routes/chat/tests.rs	801	    std::fs::create_dir_all(project_dir.join(".krusty"))
-content	crates/mitsuro-server/src/routes/chat/tests.rs	839	        project_dir.join(".krusty/settings.json"),
 content	crates/mitsuro-server/src/routes/hive/tests.rs	176	    assert_eq!(legacy.session_type, "mako");
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	50	    let db_path = temp_dir.join("krusty.db");
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	264	async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch() {
@@ -670,43 +654,21 @@ content	packages/api/test/client.test.ts	20			const client = new KrustyClient({
 content	packages/api/test/client.test.ts	21				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	33				expect(error).toBeInstanceOf(KrustyApiError);
 content	packages/api/test/client.test.ts	34				const apiError = error as KrustyApiError;
-content	packages/api/test/client.test.ts	42			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	43				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	61	describe("KrustyClient content-free request diagnostics", () => {
-content	packages/api/test/client.test.ts	64			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	65				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	89			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	90				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	111			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	112				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	144			const httpClient = new KrustyClient({
-content	packages/api/test/client.test.ts	145				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	149			await expect(httpClient.getModels()).rejects.toBeInstanceOf(KrustyApiError);
 content	packages/api/test/client.test.ts	152			const networkClient = new KrustyClient({
-content	packages/api/test/client.test.ts	153				baseUrl: "http://krusty.test",
-content	packages/api/test/client.test.ts	176			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	177				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	187			expect(requestUrl).toBe("http://krusty.test/health");
-content	packages/api/test/client.test.ts	195			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	196				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	210	describe("KrustyClient provider-aware model identity", () => {
 content	packages/api/test/client.test.ts	211		it("sends the exact key and legacy model mirror when dispatching Mako", async () => {
-content	packages/api/test/client.test.ts	214			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	215				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	223					return Response.json({ session_id: "mako-1", status: "started" });
 content	packages/api/test/client.test.ts	227			await client.dispatchMako("Audit this project", {
 content	packages/api/test/client.test.ts	233			expect(requestUrl).toBe("http://krusty.test/api/hive/dispatch");
 content	packages/api/test/client.test.ts	243		it("keeps legacy Mako dispatches compatible by omitting model_key", async () => {
-content	packages/api/test/client.test.ts	245			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	246				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	253					return Response.json({ session_id: "mako-legacy", status: "started" });
 content	packages/api/test/client.test.ts	257			await client.dispatchMako("Continue", { model: "grok-4.5" });
-content	packages/api/test/client.test.ts	269			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	270				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	286				url: "http://krusty.test/api/models/current",
 content	packages/api/test/client.test.ts	305	describe("KrustyClient Mako schedules", () => {
-content	packages/api/test/client.test.ts	308			const client = new KrustyClient({
-content	packages/api/test/client.test.ts	309				baseUrl: "http://krusty.test",
 content	packages/api/test/client.test.ts	320			await client.pauseMakoSchedule("session-1", "schedule-1", 7);
 content	packages/api/test/identity-compatibility.test.ts	4	import { KrustyClient } from "../src/compatibility.ts";
 content	packages/api/test/identity-compatibility.test.ts	25	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
@@ -715,16 +677,13 @@ content	packages/api/test/identity-compatibility.test.ts	35	    calls[0] === "/a
 content	packages/api/test/identity-compatibility.test.ts	54	    if (path === "/api/mako/sessions") return json([]);
 content	packages/api/test/identity-compatibility.test.ts	55	    if (path === "/api/mako/dispatch" && method === "POST") {
 content	packages/api/test/identity-compatibility.test.ts	66	    mutations[0]?.path === "/api/mako/dispatch",
-content	packages/api/test/identity-compatibility.test.ts	81	    if (path === "/api/mako/sessions") return json([]);
 content	packages/api/test/identity-compatibility.test.ts	84	      assert(payload.session_type === "mako", "a proven old server must receive its stored enum");
 content	packages/api/test/identity-compatibility.test.ts	85	      return json({ id: "created", session_type: "mako" });
 content	packages/api/test/identity-compatibility.test.ts	98	      "/api/hive/capabilities,/api/mako/capabilities,/api/hive/sessions,/api/mako/sessions",
-content	packages/api/test/identity-compatibility.test.ts	113	    if (path === "/api/mako/sessions") return json([]);
 content	packages/api/test/identity-compatibility.test.ts	116	      assert(payload.session_type === "mako", "old chat transport must receive its session enum");
 content	packages/api/test/identity-compatibility.test.ts	154	        session: { id: "session-1", session_type: "mako" },
 content	packages/api/test/identity-compatibility.test.ts	161	                input: { session_type: "mako", note: "user-owned data" },
 content	packages/api/test/identity-compatibility.test.ts	178	    opaqueInput?.session_type === "mako",
-content	packages/api/test/identity-compatibility.test.ts	187	    if (path === "/api/mako/main") return json({ session_id: "main", created: false });
 content	packages/api/test/identity-compatibility.test.ts	190	  const client = new KrustyClient({ baseUrl: "https://example.test", fetchImpl });
 content	packages/api/test/identity-compatibility.test.ts	191	  assert((await client.getMakoMain()).session_id === "main", "old method should forward through the safe transport bridge");
 content	scripts/identity-env.sh	11	      KRUSTY_MAKO_*)
@@ -733,10 +692,4 @@ content	scripts/identity-env.sh	15	      KRUSTY_*)
 content	scripts/identity-env.sh	16	        suffix=${legacy_name#KRUSTY_}
 content	scripts/identity-env.sh	28	  done < <(compgen -A variable 'KRUSTY_')
 content	scripts/identity-env.sh	34	    KRUSTY_TEST_VALUE=previous
-content	scripts/identity-env.sh	40	    KRUSTY_TEST_VALUE=previous
-content	scripts/identity-env.sh	46	    KRUSTY_TEST_VALUE=previous
 content	scripts/identity-env.sh	52	    KRUSTY_MAKO_TEST_SOCKET=previous-hive
-content	apps/mobile/EAS-PROJECT.md	4	- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store identity freeze).
-content	apps/mobile/EAS-PROJECT.md	10	Slug for project identified by "extra.eas.projectId" (krusty) does not match the "slug" field (mitsuro)
-content	apps/mobile/EAS-PROJECT.md	13	the Expo project is still named `krusty`. Rename it in the Expo dashboard (or with EAS CLI) to `mitsuro`, **or** create a new Expo project with slug `mitsuro` and update `projectId`. Do not change the iOS bundle id as part of that rename.
-content	crates/mitsuro-cli/src/tui_v2/services.rs	2031	        assert_eq!(parse_theme_kind("krusty"), None);

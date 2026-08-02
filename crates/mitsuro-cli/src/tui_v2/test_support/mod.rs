@@ -180,7 +180,6 @@ mod tests {
                 ("80x24", "93ad4e887b3785b4"),
                 ("120x36", "1e8ead9e47a559bb"),
                 ("160x48", "cae8b48fca412efc"),
-
             ]
             .into_iter()
             .map(|(label, fingerprint)| (label.to_owned(), fingerprint.to_owned()))
@@ -579,9 +578,11 @@ mod tests {
             // Discover max scroll via follow-live frame then walk every offset.
             state.transcript.follow_live = true;
             let live = RenderHarness::new(width, height).draw_conversation(&state, &presentation);
-            let max = live.layout.transcript.total_height.saturating_sub(u32::from(
-                live.layout.transcript.viewport.height,
-            ));
+            let max = live
+                .layout
+                .transcript
+                .total_height
+                .saturating_sub(u32::from(live.layout.transcript.viewport.height));
             state.transcript.follow_live = false;
             for offset in 0..=max {
                 state.transcript.scroll_rows = offset;

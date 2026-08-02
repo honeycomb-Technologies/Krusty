@@ -61,12 +61,7 @@ pub fn split_dock(inspector: Rect, plan_ratio: f32, plugin_focused: bool) -> Opt
         }
         let plan = Rect::new(inspector.x, inspector.y, inspector.width, plan_height);
         let gap_rect = if gap > 0 {
-            Some(Rect::new(
-                inspector.x,
-                plan.bottom(),
-                inspector.width,
-                gap,
-            ))
+            Some(Rect::new(inspector.x, plan.bottom(), inspector.width, gap))
         } else {
             None
         };
@@ -98,8 +93,7 @@ mod tests {
 
     #[test]
     fn twin_panels_respect_mins_and_gap() {
-        let split = split_dock(Rect::new(100, 2, 40, 36), DEFAULT_PLAN_RATIO, false)
-            .expect("dock");
+        let split = split_dock(Rect::new(100, 2, 40, 36), DEFAULT_PLAN_RATIO, false).expect("dock");
         assert!(split.plan.height >= PLAN_MIN_HEIGHT);
         assert!(split.plugin.height >= PLUGIN_MIN_HEIGHT || split.plugin.height == 0);
         if let Some(gap) = split.gap {

@@ -55,15 +55,33 @@ pub fn render_panel_row(
             content_offset,
             theme,
         ),
-        ArtifactPanelKind::Diff => {
-            render_diff_row(frame, area, panel_row, panel_height, content, capability, theme)
-        }
-        ArtifactPanelKind::Code => {
-            render_code_row(frame, area, panel_row, panel_height, content, capability, theme)
-        }
-        ArtifactPanelKind::Generic => {
-            render_generic_row(frame, area, panel_row, panel_height, content, capability, theme)
-        }
+        ArtifactPanelKind::Diff => render_diff_row(
+            frame,
+            area,
+            panel_row,
+            panel_height,
+            content,
+            capability,
+            theme,
+        ),
+        ArtifactPanelKind::Code => render_code_row(
+            frame,
+            area,
+            panel_row,
+            panel_height,
+            content,
+            capability,
+            theme,
+        ),
+        ArtifactPanelKind::Generic => render_generic_row(
+            frame,
+            area,
+            panel_row,
+            panel_height,
+            content,
+            capability,
+            theme,
+        ),
     }
 }
 
@@ -99,12 +117,7 @@ fn render_agent_chat_row(
     let text = line.map(|line| line.text.as_str()).unwrap_or("");
     let body = truncate_to_width(text, usize::from(area.width), "…");
     frame.render_widget(
-        Paragraph::new(body).style(
-            Style::default()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(style_mod),
-        ),
+        Paragraph::new(body).style(Style::default().fg(fg).bg(bg).add_modifier(style_mod)),
         area,
     );
 }
@@ -232,22 +245,9 @@ fn render_code_row(
         Some(ArtifactLineKind::Meta) => (theme.foreground_muted, Modifier::empty()),
         _ => (theme.foreground, Modifier::empty()),
     };
-    let use_syntax = matches!(
-        line.map(|line| line.kind),
-        Some(ArtifactLineKind::Plain)
-    );
+    let use_syntax = matches!(line.map(|line| line.kind), Some(ArtifactLineKind::Plain));
     if use_syntax {
-        paint_framed_line(
-            frame,
-            area,
-            line,
-            left,
-            right,
-            fallback_fg,
-            bg,
-            theme,
-            true,
-        );
+        paint_framed_line(frame, area, line, left, right, fallback_fg, bg, theme, true);
     } else {
         let text = line.map(|line| line.text.as_str()).unwrap_or("");
         let inner_width = usize::from(area.width.saturating_sub(2));
@@ -293,11 +293,7 @@ fn render_generic_row(
     let padding = " ".repeat(inner_width.saturating_sub(UnicodeWidthStr::width(body.as_str())));
     let symbol = format!("{left}{body}{padding}{right}");
     frame.render_widget(
-        Paragraph::new(symbol).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.code_surface),
-        ),
+        Paragraph::new(symbol).style(Style::default().fg(theme.foreground).bg(theme.code_surface)),
         area,
     );
 }
@@ -338,10 +334,7 @@ fn paint_framed_line(
             ArtifactLineKind::Remove => theme.diff_remove,
             _ => theme.foreground_muted,
         };
-        spans.push(Span::styled(
-            gutter,
-            Style::default().fg(gutter_fg).bg(bg),
-        ));
+        spans.push(Span::styled(gutter, Style::default().fg(gutter_fg).bg(bg)));
     }
 
     let remaining = inner_width.saturating_sub(used);
@@ -358,7 +351,9 @@ fn paint_framed_line(
             }
             spans.push(Span::styled(
                 piece,
-                Style::default().fg(role_color(chunk.role, theme, fallback_fg)).bg(bg),
+                Style::default()
+                    .fg(role_color(chunk.role, theme, fallback_fg))
+                    .bg(bg),
             ));
             room = room.saturating_sub(width);
             used = used.saturating_add(width);

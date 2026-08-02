@@ -1,13 +1,26 @@
 # EAS / Expo project identity
 
-- App `slug` in `app.json` is **mitsuro**.
-- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store identity freeze).
-- `extra.eas.projectId` must point at an Expo project whose **slug is also mitsuro**.
+- App display `name` is **Mitsuro**.
+- App `slug` is currently **`krusty`** so it matches the existing Expo project
+  bound by `extra.eas.projectId` (`6e327449-af3c-4138-b1c4-7ceca2baf243`).
+- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store freeze).
 
-If EAS fails with:
+## Why slug is not `mitsuro` yet
+
+EAS fails when `app.json` slug disagrees with the Expo project slug for the
+linked `projectId`:
 
 ```
-Slug for project identified by "extra.eas.projectId" (krusty) does not match the "slug" field (mitsuro)
+Slug for project identified by "extra.eas.projectId" (krusty)
+does not match the "slug" field (mitsuro)
 ```
 
-the Expo project is still named `krusty`. Rename it in the Expo dashboard (or with EAS CLI) to `mitsuro`, **or** create a new Expo project with slug `mitsuro` and update `projectId`. Do not change the iOS bundle id as part of that rename.
+To switch the slug to `mitsuro` permanently:
+
+1. Rename the Expo project slug `krusty` → `mitsuro` in the Expo dashboard
+   (or create a new Expo project with slug `mitsuro`).
+2. If you create a new project, update `extra.eas.projectId`.
+3. Set `app.json` `slug` to `mitsuro`.
+4. Do **not** change the iOS bundle id as part of that rename.
+
+Until that rename is done, keep `slug: "krusty"` so TestFlight CI can build.

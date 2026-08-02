@@ -108,9 +108,7 @@ pub fn compose_route(
         (
             Rect::new(body.x, body.y, primary_width, body.height),
             Some(Rect::new(
-                body.x
-                    .saturating_add(primary_width)
-                    .saturating_add(channel),
+                body.x.saturating_add(primary_width).saturating_add(channel),
                 body.y,
                 inspector_width,
                 body.height,
@@ -151,11 +149,7 @@ pub fn transcript_column(primary: Rect) -> Rect {
 /// so the message stream aligns with the plan/plugin panel chrome (inline ends).
 pub fn transcript_column_with_dock(primary: Rect, dock_open: bool) -> Rect {
     let left = TRANSCRIPT_SIDE_GUTTER;
-    let right = if dock_open {
-        0
-    } else {
-        TRANSCRIPT_SIDE_GUTTER
-    };
+    let right = if dock_open { 0 } else { TRANSCRIPT_SIDE_GUTTER };
     let v_inset = if dock_open {
         TRANSCRIPT_DOCK_VERTICAL_INSET.min(primary.height.saturating_sub(2) / 2)
     } else {
@@ -165,7 +159,10 @@ pub fn transcript_column_with_dock(primary: Rect, dock_open: bool) -> Rect {
         .width
         .saturating_sub(left.saturating_add(right))
         .max(1);
-    let height = primary.height.saturating_sub(v_inset.saturating_mul(2)).max(1);
+    let height = primary
+        .height
+        .saturating_sub(v_inset.saturating_mul(2))
+        .max(1);
     Rect::new(
         primary.x.saturating_add(left),
         primary.y.saturating_add(v_inset),
@@ -251,14 +248,20 @@ mod tests {
         // dock channel owns the separation.
         assert_eq!(
             transcript.width,
-            geometry.primary.width.saturating_sub(TRANSCRIPT_SIDE_GUTTER)
+            geometry
+                .primary
+                .width
+                .saturating_sub(TRANSCRIPT_SIDE_GUTTER)
         );
         assert_eq!(transcript.right(), geometry.primary.right());
         // Top/bottom match dock panel frame inset so stream and plan/plugin
         // chrome read as one horizontal band.
         assert_eq!(
             transcript.y,
-            geometry.primary.y.saturating_add(TRANSCRIPT_DOCK_VERTICAL_INSET)
+            geometry
+                .primary
+                .y
+                .saturating_add(TRANSCRIPT_DOCK_VERTICAL_INSET)
         );
         assert_eq!(
             transcript.height,
@@ -267,7 +270,12 @@ mod tests {
                 .height
                 .saturating_sub(TRANSCRIPT_DOCK_VERTICAL_INSET.saturating_mul(2))
         );
-        assert_eq!(transcript.bottom(), inspector.bottom().saturating_sub(TRANSCRIPT_DOCK_VERTICAL_INSET));
+        assert_eq!(
+            transcript.bottom(),
+            inspector
+                .bottom()
+                .saturating_sub(TRANSCRIPT_DOCK_VERTICAL_INSET)
+        );
         assert!(transcript.right() < inspector.x);
         assert_eq!(
             inspector.x.saturating_sub(geometry.primary.right()),

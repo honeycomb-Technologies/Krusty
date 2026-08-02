@@ -10,8 +10,9 @@ use anyhow::{anyhow, Context, Result};
 use mitsuro_core::{
     agent::{
         plan_handler::parse_plan_confirm_choice, run_compaction_pipeline, AgentCancellation,
-        AgentConfig, CompactionManager, CompactionRequest, CompactionTrigger, DelegatedProgressEvent,
-        LoopEvent, LoopInput, OrchestratorServices, RunProvenance, RunSpecBuilder,
+        AgentConfig, CompactionManager, CompactionRequest, CompactionTrigger,
+        DelegatedProgressEvent, LoopEvent, LoopInput, OrchestratorServices, RunProvenance,
+        RunSpecBuilder,
     },
     ai::{
         client::{config::AnthropicAdaptiveEffort, AiClient, CallOptions, CodexReasoningEffort},
@@ -795,7 +796,7 @@ impl RuntimeServices {
         let db_path = paths::config_dir().join("mitsuro.db");
 
         // Prefer durable workflow Goal + steps (canonical plan surface).
-        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path.clone()) {
+        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path) {
             if let Ok(Some(snapshot)) = manager.get_snapshot(session_id) {
                 let completed_steps = snapshot
                     .steps
@@ -860,10 +861,7 @@ impl RuntimeServices {
                 description: task.description.clone(),
                 done: task.completed,
                 active: !task.completed
-                    && tasks
-                        .iter()
-                        .position(|candidate| !candidate.completed)
-                        == Some(index),
+                    && tasks.iter().position(|candidate| !candidate.completed) == Some(index),
             })
             .collect();
         Some(PlanSnapshot {
@@ -1827,15 +1825,19 @@ fn create_ai_client(services: &AppServices, metadata: &ModelMetadata) -> Option<
     let credential = if metadata.provider == ProviderId::Anthropic {
         mitsuro_core::auth::resolve_anthropic_auth(&services.credential_store).credential
     } else if metadata.provider == ProviderId::OpenAI {
-        crate::tui_support::auth::resolve_openai_auth_for_metadata(metadata, &services.credential_store)
-            .credential
+        crate::tui_support::auth::resolve_openai_auth_for_metadata(
+            metadata,
+            &services.credential_store,
+        )
+        .credential
     } else if metadata.provider == ProviderId::Grok {
         mitsuro_core::auth::resolve_grok_auth(&services.credential_store).credential
     } else {
         services.credential_store.get_auth(&metadata.provider)
     }?;
 
-    let config = crate::tui_support::auth::create_client_config(metadata, &services.credential_store);
+    let config =
+        crate::tui_support::auth::create_client_config(metadata, &services.credential_store);
     AiClient::new_with_resolved_model(config, credential, metadata.resolve_runtime()).ok()
 }
 

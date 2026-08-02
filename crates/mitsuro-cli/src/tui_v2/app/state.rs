@@ -223,10 +223,7 @@ impl MouseUiState {
         self.edge_scroll.clear();
     }
 
-    pub fn begin_selection(
-        &mut self,
-        point: crate::tui_v2::layout::snapshot::SelectionPoint,
-    ) {
+    pub fn begin_selection(&mut self, point: crate::tui_v2::layout::snapshot::SelectionPoint) {
         self.scrollbar_drag = None;
         self.selecting_composer = false;
         self.composer_selection = None;
@@ -238,10 +235,7 @@ impl MouseUiState {
         });
     }
 
-    pub fn drag_selection(
-        &mut self,
-        point: crate::tui_v2::layout::snapshot::SelectionPoint,
-    ) {
+    pub fn drag_selection(&mut self, point: crate::tui_v2::layout::snapshot::SelectionPoint) {
         if !self.selecting {
             return;
         }
@@ -549,8 +543,7 @@ impl ComposerUiState {
         self.field_width = width.max(1);
         self.field_rows = visible_rows.max(1);
         if forward {
-            self.buffer
-                .move_down(self.field_width, self.field_rows);
+            self.buffer.move_down(self.field_width, self.field_rows);
         } else {
             self.buffer.move_up(self.field_width, self.field_rows);
         }
@@ -648,12 +641,9 @@ impl ComposerUiState {
         self.follow_cursor = true;
         self.field_width = width.max(1);
         self.field_rows = visible_rows.max(1);
-        let byte = self.buffer.byte_from_click(
-            column,
-            row,
-            self.field_width,
-            self.field_rows,
-        );
+        let byte = self
+            .buffer
+            .byte_from_click(column, row, self.field_width, self.field_rows);
         self.buffer.set_cursor(byte);
         self.buffer
             .ensure_cursor_visible(self.field_width, self.field_rows);
@@ -676,8 +666,7 @@ impl ComposerUiState {
     }
 
     fn refresh_assist(&mut self) {
-        self.autocomplete_open =
-            !crate::tui_v2::input::slash::suggestions(self.text()).is_empty();
+        self.autocomplete_open = !crate::tui_v2::input::slash::suggestions(self.text()).is_empty();
         self.autocomplete_selected = 0;
         self.file_search_open = !self.autocomplete_open
             && crate::tui_v2::input::file_search::active_query(self.text(), self.cursor_byte())

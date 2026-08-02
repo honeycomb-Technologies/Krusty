@@ -64,8 +64,8 @@ impl ArtifactViewCache {
     }
 
     fn insert(&mut self, key: u64, value: CachedArtifactView) {
-        if self.map.contains_key(&key) {
-            self.map.insert(key, value);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(key) {
+            e.insert(value);
             return;
         }
         while self.map.len() >= self.cap {
@@ -251,9 +251,7 @@ fn resolve_artifact_view(
     // Terminal / agent chat / generic stream often; caching would thrash.
     if matches!(
         classified,
-        ArtifactPanelKind::Terminal
-            | ArtifactPanelKind::AgentChat
-            | ArtifactPanelKind::Generic
+        ArtifactPanelKind::Terminal | ArtifactPanelKind::AgentChat | ArtifactPanelKind::Generic
     ) {
         let (kind, lines, language) = build_artifact_view(part);
         return (kind, Arc::new(lines), language.or(classified_lang));
@@ -444,10 +442,7 @@ fn status_kind(part: &ToolPart) -> StatusKind {
 }
 
 fn is_agent_tool(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "agent" | "subagent"
-    )
+    matches!(name.to_ascii_lowercase().as_str(), "agent" | "subagent")
 }
 
 fn is_interactive_tool(name: &str) -> bool {
@@ -489,9 +484,7 @@ fn artifact_text(part: &ToolPart) -> Option<&str> {
 fn build_artifact_view(part: &ToolPart) -> (ArtifactPanelKind, Vec<ArtifactLine>, Option<String>) {
     let name = part.name.to_ascii_lowercase();
     match name.as_str() {
-        "bash" | "shell" | "terminal" => {
-            (ArtifactPanelKind::Terminal, terminal_lines(part), None)
-        }
+        "bash" | "shell" | "terminal" => (ArtifactPanelKind::Terminal, terminal_lines(part), None),
         "agent" | "subagent" => (ArtifactPanelKind::AgentChat, agent_chat_lines(part), None),
         "read" | "read_file" => {
             let path = field(part, "path")
@@ -614,10 +607,15 @@ fn code_read_lines(part: &ToolPart, language: Option<&str>) -> Vec<ArtifactLine>
             let body = &text.text;
             let source_lines: Vec<&str> = body.lines().collect();
             let body_len = source_lines.len() as u32;
-            let end_line = start_line.saturating_add(body_len.saturating_sub(1).max(0));
+            let end_line = start_line.saturating_add(body_len.saturating_sub(1));
             lines.push(ArtifactLine::plain(
                 ArtifactLineKind::Header,
-                file_scope_header(path, start_line, end_line, part.artifact.provenance.total_lines),
+                file_scope_header(
+                    path,
+                    start_line,
+                    end_line,
+                    part.artifact.provenance.total_lines,
+                ),
             ));
             let highlighted = language.map(|lang| highlight_roles(body, lang));
             let count = source_lines

@@ -44,10 +44,7 @@ pub fn render(
     for row in 0..area.height {
         let mut spans = Vec::with_capacity(area.width as usize);
         for col in 0..area.width {
-            if row >= mark_y0
-                && row < mark_y0 + mark_h
-                && col >= mark_x0
-                && col < mark_x0 + mark_w
+            if row >= mark_y0 && row < mark_y0 + mark_h && col >= mark_x0 && col < mark_x0 + mark_w
             {
                 let sx = (col - mark_x0) as usize;
                 let sy = (row - mark_y0) as usize;

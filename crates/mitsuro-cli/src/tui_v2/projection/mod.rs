@@ -393,10 +393,7 @@ impl ConversationProjection {
                             "askuserquestion" | "planconfirm" | "plan_confirm"
                         );
                         if interactive
-                            && matches!(
-                                part.status,
-                                ToolStatus::Pending | ToolStatus::Receiving
-                            )
+                            && matches!(part.status, ToolStatus::Pending | ToolStatus::Receiving)
                             && matches!(
                                 status,
                                 ToolStatus::AwaitingApproval | ToolStatus::Interrupted

@@ -11,6 +11,7 @@ use ratatui::{
 use crate::tui_v2::{
     app::state::{AgentRunState, UiState},
     components::{
+        attachment_preview::render as render_attachment_preview,
         command_palette::render as render_command_palette,
         conversation::{
             render_context_bar as render_conversation_context, render_decision_dock,
@@ -18,7 +19,6 @@ use crate::tui_v2::{
         },
         file_search::render as render_file_search,
         home::render as render_home,
-        attachment_preview::render as render_attachment_preview,
         model_picker::render as render_model_picker,
         primitive::{
             action_footer::ActionFooter,
@@ -207,8 +207,7 @@ fn render_fullscreen_artifact(
         DisplayPartKind::Thinking { lines, .. } => ("thinking", lines.clone()),
         _ => return,
     };
-    let hints = if state.capability.glyph_mode
-        == crate::tui_v2::model::capability::GlyphMode::Ascii
+    let hints = if state.capability.glyph_mode == crate::tui_v2::model::capability::GlyphMode::Ascii
     {
         "PgUp/PgDn scroll | c copy | Esc close"
     } else {
@@ -224,11 +223,7 @@ fn render_fullscreen_artifact(
         .map(|line| Line::styled(line.clone(), Style::default().fg(theme.foreground)))
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(visible).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(visible).style(Style::default().fg(theme.foreground).bg(theme.surface)),
         chrome.body,
     );
 }
@@ -423,10 +418,7 @@ fn render_status_line(
 /// Status-line reasoning token: short word only (`high`, not `reasoning high`).
 fn status_reasoning_word(label: &str) -> String {
     let trimmed = label.trim();
-    let word = trimmed
-        .strip_prefix("reasoning ")
-        .unwrap_or(trimmed)
-        .trim();
+    let word = trimmed.strip_prefix("reasoning ").unwrap_or(trimmed).trim();
     if word.eq_ignore_ascii_case("off") || word.eq_ignore_ascii_case("none") {
         return String::new();
     }
@@ -437,7 +429,7 @@ fn status_permission_word(permission: &str) -> String {
     match permission.trim().to_ascii_lowercase().as_str() {
         "autonomous" | "auto" => "autonomous".to_owned(),
         "supervised" | "manual" => "supervised".to_owned(),
-        other if other.is_empty() => String::new(),
+        "" => String::new(),
         other => other.to_owned(),
     }
 }
@@ -505,42 +497,21 @@ fn render_overlay(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::CommandPalette
     ) {
-        render_command_palette(
-            frame,
-            chrome,
-            &state.picker,
-            false,
-            state.capability,
-            theme,
-        );
+        render_command_palette(frame, chrome, &state.picker, false, state.capability, theme);
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::Help
     ) {
-        render_command_palette(
-            frame,
-            chrome,
-            &state.picker,
-            true,
-            state.capability,
-            theme,
-        );
+        render_command_palette(frame, chrome, &state.picker, true, state.capability, theme);
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::ModelPicker
     ) {
-        render_model_picker(
-            frame,
-            chrome,
-            setup,
-            &state.picker,
-            state.capability,
-            theme,
-        );
+        render_model_picker(frame, chrome, setup, &state.picker, state.capability, theme);
         return;
     }
     match overlay.kind {
@@ -556,13 +527,7 @@ fn render_overlay(
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::PlanGoal => {
-            render_plan(
-                frame,
-                chrome.body,
-                plan,
-                state.capability.glyph_mode,
-                theme,
-            );
+            render_plan(frame, chrome.body, plan, state.capability.glyph_mode, theme);
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::ExtensionsCenter => {
@@ -594,13 +559,7 @@ fn render_overlay(
         }
         crate::tui_v2::model::overlay::OverlayKind::AttachmentPreview => {
             if let Some(preview) = state.attachment_preview.as_ref() {
-                render_attachment_preview(
-                    frame,
-                    chrome.body,
-                    preview,
-                    theme,
-                    attachment_image,
-                );
+                render_attachment_preview(frame, chrome.body, preview, theme, attachment_image);
             }
             return;
         }
@@ -678,11 +637,9 @@ fn render_artifact_inspector(
         .map_or(0, |artifact| artifact.inner_scroll)
         .min(u32::from(u16::MAX)) as u16;
     frame.render_widget(
-        Paragraph::new(lines).scroll((offset, 0)).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(lines)
+            .scroll((offset, 0))
+            .style(Style::default().fg(theme.foreground).bg(theme.surface)),
         area,
     );
 }

@@ -345,7 +345,7 @@ impl PreviewApp {
         if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
             return None;
         }
-        let suggestions = slash::suggestions(&self.state.composer.text());
+        let suggestions = slash::suggestions(self.state.composer.text());
         match key.code {
             KeyCode::Esc => {
                 self.state.composer.autocomplete_open = false;
@@ -386,7 +386,7 @@ impl PreviewApp {
         }
         let suggestions = file_search::suggestions(
             &self.project_entries,
-            &self.state.composer.text(),
+            self.state.composer.text(),
             self.state.composer.cursor_byte(),
         );
         match key.code {
@@ -1241,8 +1241,7 @@ impl PreviewApp {
         };
         let drag = self.state.mouse.scrollbar_drag.clone();
         let selecting_composer = self.state.mouse.selecting_composer;
-        let resolution =
-            resolve_mouse_with_drag(layout, event, drag.as_ref(), selecting_composer);
+        let resolution = resolve_mouse_with_drag(layout, event, drag.as_ref(), selecting_composer);
         match resolution {
             Some(MouseResolution::Action(action)) => {
                 self.state.mouse.clear_selection();
@@ -1310,11 +1309,8 @@ impl PreviewApp {
             }
             Some(MouseResolution::OpenLink(url)) => {
                 self.state.mouse.clear_selection();
-                if webbrowser::open(&url).is_ok() {
-                    Redraw::None
-                } else {
-                    Redraw::None
-                }
+                let _ = webbrowser::open(&url);
+                Redraw::None
             }
             Some(MouseResolution::SelectionStart(point)) => {
                 // Click-drag selection: do not steal layout-heavy focus changes.
@@ -1322,11 +1318,7 @@ impl PreviewApp {
                 self.state.mouse.edge_scroll.clear();
                 Redraw::Light
             }
-            Some(MouseResolution::SelectionDrag {
-                point,
-                column,
-                row,
-            }) => {
+            Some(MouseResolution::SelectionDrag { point, column, row }) => {
                 if !self.state.mouse.selecting {
                     return Redraw::None;
                 }
@@ -1364,8 +1356,9 @@ impl PreviewApp {
                             let start = text.floor_char_boundary(lo.min(text.len()));
                             if start < end {
                                 let selected = text[start..end].to_owned();
-                                let _ =
-                                    crate::tui_support::utils::clipboard::write_clipboard_text(&selected);
+                                let _ = crate::tui_support::utils::clipboard::write_clipboard_text(
+                                    &selected,
+                                );
                                 // Keep buffer selection so typing replaces the range.
                                 self.state.composer.set_selection(start, end);
                             }
@@ -1452,11 +1445,8 @@ impl PreviewApp {
                 self.state.mouse.position = Some(position);
                 self.state.mouse.hover_link = link;
                 // Hover never forces a layout pass.
-                if changed {
-                    Redraw::None
-                } else {
-                    Redraw::None
-                }
+                let _ = changed;
+                Redraw::None
             }
             Some(MouseResolution::EditSessionTitle) => {
                 self.start_title_edit();
@@ -1473,7 +1463,7 @@ impl PreviewApp {
 
     fn nudge_assist_selection(&mut self, forward: bool, steps: usize) {
         if self.state.composer.autocomplete_open {
-            let total = slash::suggestions(&self.state.composer.text()).len();
+            let total = slash::suggestions(self.state.composer.text()).len();
             if total == 0 {
                 return;
             }
@@ -1487,7 +1477,7 @@ impl PreviewApp {
         if self.state.composer.file_search_open {
             let total = file_search::suggestions(
                 &self.project_entries,
-                &self.state.composer.text(),
+                self.state.composer.text(),
                 self.state.composer.cursor_byte(),
             )
             .len();
@@ -1509,7 +1499,7 @@ impl PreviewApp {
             return;
         };
         if self.state.composer.autocomplete_open {
-            let suggestions = slash::suggestions(&self.state.composer.text());
+            let suggestions = slash::suggestions(self.state.composer.text());
             let selected = self.state.composer.autocomplete_selected;
             if let Some(index) = crate::tui_v2::components::slash_autocomplete::index_at_y(
                 area,
@@ -1527,7 +1517,7 @@ impl PreviewApp {
         if self.state.composer.file_search_open {
             let matches = file_search::suggestions(
                 &self.project_entries,
-                &self.state.composer.text(),
+                self.state.composer.text(),
                 self.state.composer.cursor_byte(),
             );
             let selected = self.state.composer.file_search_selected;
@@ -1550,9 +1540,7 @@ impl PreviewApp {
             return;
         }
         let current = self.conversation.presentation().metadata.title.clone();
-        self.state
-            .title_edit
-            .start(current.as_deref());
+        self.state.title_edit.start(current.as_deref());
     }
 
     fn handle_title_edit_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Redraw {
@@ -1601,7 +1589,12 @@ impl PreviewApp {
             .metadata
             .usage
             .as_ref()
-            .map(|usage| usage.total_tokens.max(usage.prompt_tokens).max(usage.input_tokens))
+            .map(|usage| {
+                usage
+                    .total_tokens
+                    .max(usage.prompt_tokens)
+                    .max(usage.input_tokens)
+            })
             .unwrap_or(0);
         let max = self
             .runtime
@@ -1771,14 +1764,12 @@ impl PreviewApp {
                 }
             }
         } else {
-            let path = std::path::PathBuf::from(
-                if inner.starts_with("~/") {
-                    dirs_next_home().map(|home| home.join(inner.trim_start_matches("~/")))
-                } else {
-                    None
-                }
-                .unwrap_or_else(|| std::path::PathBuf::from(&inner)),
-            );
+            let path = if inner.starts_with("~/") {
+                dirs_next_home().map(|home| home.join(inner.trim_start_matches("~/")))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| std::path::PathBuf::from(&inner));
             attachment_preview_for_path(&path, &inner)
         };
         self.load_attachment_image(&preview);
@@ -1825,19 +1816,15 @@ impl PreviewApp {
         }
     }
 
-    fn jump_scrollbar(
-        &mut self,
-        region: &crate::tui_v2::layout::snapshot::ScrollRegionId,
-        y: u16,
-    ) {
+    fn jump_scrollbar(&mut self, region: &crate::tui_v2::layout::snapshot::ScrollRegionId, y: u16) {
         let Some(layout) = self.last_layout.as_ref() else {
             return;
         };
         match region {
             crate::tui_v2::layout::snapshot::ScrollRegionId::Transcript => {
-                let Some(area) = layout.region(
-                    crate::tui_v2::layout::snapshot::LayoutRegionId::TranscriptScrollbar,
-                ) else {
+                let Some(area) = layout
+                    .region(crate::tui_v2::layout::snapshot::LayoutRegionId::TranscriptScrollbar)
+                else {
                     return;
                 };
                 let total = layout.transcript.total_height;
@@ -1854,9 +1841,9 @@ impl PreviewApp {
             }
             crate::tui_v2::layout::snapshot::ScrollRegionId::Composer => {
                 self.state.focus = FocusTarget::Composer;
-                let Some(area) = layout.region(
-                    crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerScrollbar,
-                ) else {
+                let Some(area) = layout
+                    .region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerScrollbar)
+                else {
                     return;
                 };
                 let (width, visible) = self.composer_layout_metrics();
@@ -1874,9 +1861,9 @@ impl PreviewApp {
             }
             crate::tui_v2::layout::snapshot::ScrollRegionId::ComposerAssist => {
                 self.state.focus = FocusTarget::Composer;
-                let Some(area) = layout.region(
-                    crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerAutocomplete,
-                ) else {
+                let Some(area) = layout
+                    .region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerAutocomplete)
+                else {
                     return;
                 };
                 // Jump selection proportionally along the panel body.
@@ -1887,11 +1874,11 @@ impl PreviewApp {
                     height: area.height.saturating_sub(4).max(1),
                 };
                 let total = if self.state.composer.autocomplete_open {
-                    slash::suggestions(&self.state.composer.text()).len()
+                    slash::suggestions(self.state.composer.text()).len()
                 } else if self.state.composer.file_search_open {
                     file_search::suggestions(
                         &self.project_entries,
-                        &self.state.composer.text(),
+                        self.state.composer.text(),
                         self.state.composer.cursor_byte(),
                     )
                     .len()
@@ -1950,11 +1937,7 @@ impl PreviewApp {
             ScrollDirection::Backward | ScrollDirection::Start => -1,
             ScrollDirection::Forward | ScrollDirection::End => 1,
         };
-        self.state.picker.selected = self
-            .state
-            .picker
-            .selected
-            .saturating_add_signed(delta);
+        self.state.picker.selected = self.state.picker.selected.saturating_add_signed(delta);
     }
 
     fn selected_transcript_text(&self) -> Option<String> {
@@ -2029,8 +2012,14 @@ impl PreviewApp {
             ))
             .filter(|text| !text.is_empty());
         }
-        let start_idx = display.parts.iter().position(|part| part.id == start.part_id)?;
-        let end_idx = display.parts.iter().position(|part| part.id == end.part_id)?;
+        let start_idx = display
+            .parts
+            .iter()
+            .position(|part| part.id == start.part_id)?;
+        let end_idx = display
+            .parts
+            .iter()
+            .position(|part| part.id == end.part_id)?;
         let (lo_idx, hi_idx, lo_off, hi_off) = if start_idx <= end_idx {
             (start_idx, end_idx, start.source_offset, end.source_offset)
         } else {
@@ -2045,11 +2034,7 @@ impl PreviewApp {
                 out.push('\n');
             }
             if index == lo_idx && index == hi_idx {
-                out.push_str(&slice_inclusive(
-                    &part.measurement_text,
-                    lo_off,
-                    hi_off,
-                ));
+                out.push_str(&slice_inclusive(&part.measurement_text, lo_off, hi_off));
             } else if index == lo_idx {
                 let start = part.measurement_text.floor_char_boundary(lo_off);
                 out.push_str(&part.measurement_text[start..]);
@@ -3199,7 +3184,7 @@ impl PreviewApp {
             .try_into()
             .unwrap_or(u16::MAX);
         // Field grows with content up to 4 content rows (+ borders in layout).
-        let composer_content_rows = u16::from(composer_total_rows).clamp(1, 4);
+        let composer_content_rows = composer_total_rows.clamp(1, 4);
         let transcript_width = crate::tui_v2::layout::responsive::compose_route(
             frame.area(),
             inspector_requested,
@@ -3213,14 +3198,16 @@ impl PreviewApp {
             .width
         })
         .unwrap_or(frame.area().width.max(1));
-        let inspect_part = self.state.overlay.as_ref().and_then(|overlay| {
-            match &overlay.kind {
+        let inspect_part = self
+            .state
+            .overlay
+            .as_ref()
+            .and_then(|overlay| match &overlay.kind {
                 crate::tui_v2::model::overlay::OverlayKind::FileArtifactInspector { part_id } => {
                     Some(part_id)
                 }
                 _ => None,
-            }
-        });
+            });
         let display = matches!(self.state.route, AppRoute::Conversation { .. }).then(|| {
             ConversationDisplayList::build_with_materialize(
                 self.conversation.presentation(),
@@ -3270,14 +3257,14 @@ impl PreviewApp {
             composer_total_rows,
             composer_fullscreen: self.state.composer.fullscreen,
             composer_autocomplete_rows: if self.state.composer.autocomplete_open {
-                crate::tui_v2::input::slash::suggestions(&self.state.composer.text())
+                crate::tui_v2::input::slash::suggestions(self.state.composer.text())
                     .len()
                     .try_into()
                     .unwrap_or(u16::MAX)
             } else if self.state.composer.file_search_open {
                 file_search::suggestions(
                     &self.project_entries,
-                    &self.state.composer.text(),
+                    self.state.composer.text(),
                     self.state.composer.cursor_byte(),
                 )
                 .len()
@@ -3356,14 +3343,16 @@ impl PreviewApp {
             self.state.appearance.theme,
             self.state.capability.color_depth,
         );
-        let conversation = self.last_display.as_ref().zip(self.last_measured.as_ref()).map(
-            |(display, measured)| ConversationRenderData {
+        let conversation = self
+            .last_display
+            .as_ref()
+            .zip(self.last_measured.as_ref())
+            .map(|(display, measured)| ConversationRenderData {
                 display,
                 measured,
                 metadata: &self.conversation.presentation().metadata,
                 pending: &self.conversation.presentation().pending_interactions,
-            },
-        );
+            });
         render_preview(
             frame,
             &self.state,
@@ -3590,14 +3579,14 @@ pub async fn run() -> Result<()> {
                     let _ = reduce(&mut app.state, UiAction::MotionAdvancedTo(elapsed_ms));
                     if matches!(app.state.route, AppRoute::Home) {
                         let wall = app.state.appearance.motion.clock.elapsed_ms();
-                        app.state.splash.mark_settled_if_ready(
-                            wall,
-                            app.state.appearance.motion.preference,
-                        );
+                        app.state
+                            .splash
+                            .mark_settled_if_ready(wall, app.state.appearance.motion.preference);
                         // Stroke-in only — stop ticking once the wordmark is settled.
-                        app.state.appearance.motion.set_active_regions(u8::from(
-                            !app.state.splash.settled,
-                        ));
+                        app.state
+                            .appearance
+                            .motion
+                            .set_active_regions(u8::from(!app.state.splash.settled));
                     }
                     need = Redraw::Full;
                 }
@@ -3711,9 +3700,7 @@ fn slice_measured_until_inclusive(
 mod measured_selection_copy_tests {
     use super::{measured_plain_text, slice_measured_inclusive};
     use crate::tui_v2::{
-        layout::measure::{
-            ExpansionMode, MeasuredPart, MeasuredRow, MeasurementKey, ThemeMetrics,
-        },
+        layout::measure::{ExpansionMode, MeasuredPart, MeasuredRow, MeasurementKey, ThemeMetrics},
         model::{
             artifact::PartId,
             capability::{CapabilityProfile, ColorDepth, GlyphMode},
@@ -3807,10 +3794,7 @@ fn attachment_preview_for_path(path: &std::path::Path, label: &str) -> Attachmen
         };
     }
     let meta = std::fs::metadata(path).ok();
-    let size = meta
-        .as_ref()
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let size = meta.as_ref().map(|meta| meta.len()).unwrap_or(0);
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -3830,13 +3814,7 @@ fn attachment_preview_for_path(path: &std::path::Path, label: &str) -> Attachmen
         "rs" | "ts" | "tsx" | "js" | "py" | "md" | "txt" | "toml" | "json" | "yaml" | "yml"
     ) {
         std::fs::read_to_string(path)
-            .map(|content| {
-                content
-                    .lines()
-                    .take(40)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
+            .map(|content| content.lines().take(40).collect::<Vec<_>>().join("\n"))
             .unwrap_or_else(|error| format!("Could not read file: {error}"))
     } else if matches!(
         ext.as_str(),
@@ -3957,8 +3935,7 @@ fn decision_dock_height(pending: Option<&PendingInteraction>) -> u16 {
             u16::try_from(max_options)
                 .unwrap_or(u16::MAX)
                 .saturating_add(4) // border×2 + question + footer
-                .min(12)
-                .max(5)
+                .clamp(5, 12)
         }
         None => 0,
     }
@@ -4101,28 +4078,36 @@ mod tests {
                 .unwrap_or_else(std::time::Instant::now),
         };
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('q'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(!app.state.should_exit());
         assert_eq!(app.state.composer.text(), "q");
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('q'),
-            KeyModifiers::CONTROL,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
         assert!(app.state.should_exit());
     }
 
     #[test]
     fn home_submit_routes_to_a_typed_conversation_and_clears_composer() {
         let mut app = PreviewApp::preview();
-        assert!(app.handle_event(Event::Paste("Build the clean TUI.".to_owned())).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Paste("Build the clean TUI.".to_owned()))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
 
         assert!(matches!(app.state.route, AppRoute::Conversation { .. }));
         assert!(app.state.composer.text().is_empty());
@@ -4139,33 +4124,47 @@ mod tests {
     #[test]
     fn composer_supports_multiline_cursor_and_editing_contract() {
         let mut app = PreviewApp::preview();
-        assert!(app.handle_event(Event::Paste("alpha beta".to_owned())).handled());
+        assert!(app
+            .handle_event(Event::Paste("alpha beta".to_owned()))
+            .handled());
         for _ in 0..4 {
-            assert!(app.handle_event(Event::Key(
-                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,)
-            )).handled());
+            assert!(app
+                .handle_event(Event::Key(
+                    KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,)
+                ))
+                .handled());
         }
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
         assert_eq!(app.state.composer.text(), "beta");
         assert_eq!(app.state.composer.cursor_byte(), 0);
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('j'),
-            KeyModifiers::CONTROL,
-        ))).handled());
-        assert!(app.handle_event(Event::Paste("second".to_owned())).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
+        assert!(app
+            .handle_event(Event::Paste("second".to_owned()))
+            .handled());
         assert_eq!(app.state.composer.text(), "\nsecondbeta");
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE,)
-        )).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE,)
+            ))
+            .handled());
         assert_eq!(app.state.composer.cursor_byte(), 1);
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('u'),
-            KeyModifiers::CONTROL,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
         assert_eq!(app.state.composer.text(), "\nsecondbeta");
     }
 
@@ -4192,18 +4191,22 @@ mod tests {
     fn full_screen_composer_preserves_the_draft_and_restores_the_exact_buffer() {
         let mut app = PreviewApp::preview();
         app.state.capability = unicode_capability();
-        assert!(app.handle_event(Event::Paste(
-            "A long prompt\nwith implementation detail\nand validation notes.".to_owned(),
-        )).handled());
+        assert!(app
+            .handle_event(Event::Paste(
+                "A long prompt\nwith implementation detail\nand validation notes.".to_owned(),
+            ))
+            .handled());
         let cursor = app.state.composer.cursor_byte();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
         let before = terminal.backend().buffer().clone();
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('e'),
-            KeyModifiers::CONTROL,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
         terminal.draw(|frame| app.render(frame)).expect("render");
         let editor = app
             .last_layout
@@ -4215,7 +4218,9 @@ mod tests {
         assert!(app.state.composer.fullscreen);
         assert!(editor.height > 10);
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,)))
+            .handled());
         terminal.draw(|frame| app.render(frame)).expect("render");
         assert!(!app.state.composer.fullscreen);
         assert_eq!(app.state.composer.cursor_byte(), cursor);
@@ -4228,10 +4233,12 @@ mod tests {
         app.state.appearance.motion.preference = MotionPreference::Full;
         app.state.appearance.motion.set_active_regions(1);
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
 
         assert_eq!(app.state.composer.text(), "x");
         // Entrance is skipped; no ambient fireflies — motion stops after settle.
@@ -4384,11 +4391,17 @@ mod tests {
         }
         for ch in "Fresh name".chars() {
             assert!(app
-                .handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)))
+                .handle_event(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE
+                )))
                 .handled());
         }
         assert!(app
-            .handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE
+            )))
             .handled());
         assert!(!app.state.title_edit.active);
         assert_eq!(
@@ -4499,22 +4512,27 @@ mod tests {
         );
         assert_eq!(transcript.right(), primary.right());
         // Scrollbar sits centered in the primary→inspector channel.
-        if let Some(sb) = layout.region(
-            crate::tui_v2::layout::snapshot::LayoutRegionId::TranscriptScrollbar,
-        ) {
+        if let Some(sb) =
+            layout.region(crate::tui_v2::layout::snapshot::LayoutRegionId::TranscriptScrollbar)
+        {
             let left_pad = sb.x.saturating_sub(primary.right());
             let right_pad = inspector.x.saturating_sub(sb.right());
-            assert_eq!(left_pad, right_pad, "scrollbar not centered in dock channel");
+            assert_eq!(
+                left_pad, right_pad,
+                "scrollbar not centered in dock channel"
+            );
         }
         // Composer shares the panel's outer right edge (full route width).
         assert_eq!(composer.x, 0);
         assert_eq!(composer.width, 160);
         assert_eq!(composer.right(), inspector.right());
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('t'),
-            KeyModifiers::CONTROL,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
         terminal
             .draw(|frame| app.render(frame))
             .expect("sidebar hidden");
@@ -4552,8 +4570,11 @@ mod tests {
             "expected compact controls, got: {rendered:?}"
         );
 
-        app.state.composer.buffer.clear(); app.state.composer.insert("draft");
-        assert!(!app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))).handled());
+        app.state.composer.buffer.clear();
+        app.state.composer.insert("draft");
+        assert!(!app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,)))
+            .handled());
         assert_eq!(app.state.composer.text(), "draft");
     }
 
@@ -4594,10 +4615,12 @@ mod tests {
         assert!(rendered.contains("MCP · filesystem"));
         assert!(rendered.contains("Enter toggle"));
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(
             app.state.picker.error.as_deref(),
             Some("Runtime services are unavailable.")
@@ -4653,10 +4676,12 @@ mod tests {
             glyph_mode: crate::tui_v2::model::capability::GlyphMode::Ascii,
             color_depth: crate::tui_v2::model::capability::ColorDepth::Monochrome,
         };
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('/'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app.state.composer.autocomplete_open);
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
@@ -4685,9 +4710,11 @@ mod tests {
             .is_some()));
 
         for _ in 1..crate::tui_v2::input::slash::DEFINITIONS.len() {
-            assert!(app.handle_event(Event::Key(
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-            )).handled());
+            assert!(app
+                .handle_event(Event::Key(
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+                ))
+                .handled());
         }
         let mut compact = Terminal::new(TestBackend::new(50, 16)).expect("compact terminal");
         compact
@@ -4707,7 +4734,9 @@ mod tests {
             crate::tui_v2::input::slash::DEFINITIONS.len() - 1
         );
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,)))
+            .handled());
         terminal
             .draw(|frame| app.render(frame))
             .expect("closed autocomplete");
@@ -4721,28 +4750,38 @@ mod tests {
             .is_none()));
         assert!(closed.text().contains('/'));
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Backspace,
-            KeyModifiers::NONE,
-        ))).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('/'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app.state.composer.autocomplete_open);
 
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,)))
+            .handled());
         assert_eq!(app.state.composer.text(), "/load");
         assert!(!app.state.composer.autocomplete_open);
         assert!(app.conversation.presentation().turns.is_empty());
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(matches!(
             app.state.overlay.as_ref().map(|overlay| &overlay.kind),
             Some(OverlayKind::SessionPicker)
@@ -4777,12 +4816,16 @@ mod tests {
                         search_name: path.rsplit('/').next().unwrap_or(path).to_owned(),
                     }),
             );
-        assert!(app.handle_event(Event::Paste("Review @".to_owned())).handled());
+        assert!(app
+            .handle_event(Event::Paste("Review @".to_owned()))
+            .handled());
         assert!(app.state.composer.file_search_open);
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.composer.text(), "Review @src/");
         assert!(app.state.composer.file_search_open);
 
@@ -4805,10 +4848,14 @@ mod tests {
             .region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerAutocomplete)
             .is_some()));
 
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,)))
+            .handled());
         assert_eq!(app.state.composer.text(), "Review [src/model.rs] ");
         assert!(!app.state.composer.file_search_open);
         assert!(app.conversation.presentation().turns.is_empty());
@@ -4822,8 +4869,12 @@ mod tests {
         assert!(!closed.text().contains("Enter open") && !closed.text().contains("scroll wheel"));
         let mut reference = PreviewApp::preview();
         reference.state.capability = app.state.capability;
-        reference.state.composer.buffer.clear(); reference.state.composer.insert(app.state.composer.text());
-        reference.state.composer.set_cursor_byte(app.state.composer.cursor_byte());
+        reference.state.composer.buffer.clear();
+        reference.state.composer.insert(app.state.composer.text());
+        reference
+            .state
+            .composer
+            .set_cursor_byte(app.state.composer.cursor_byte());
         let mut reference_terminal =
             Terminal::new(TestBackend::new(80, 24)).expect("reference terminal");
         reference_terminal
@@ -4856,22 +4907,30 @@ mod tests {
         app.state.route = AppRoute::Setup;
         app.setup = Some(setup_fixture());
 
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
         assert_eq!(app.state.setup.provider_index, 1);
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.setup.step, SetupStep::AuthMethod);
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.setup.step, SetupStep::Credential);
 
         let secret = "sk-test-secret-that-must-not-render";
@@ -4900,14 +4959,18 @@ mod tests {
         app.state.route = AppRoute::Setup;
         app.setup = Some(setup_fixture());
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.setup.step, SetupStep::Model);
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
         assert_eq!(app.state.setup.model_index, 1);
     }
 
@@ -4973,7 +5036,8 @@ mod tests {
                 app.state.setup.device_code = Some("ABCD-EFGH".to_owned());
                 app.state.setup.oauth_url = Some("https://example.test/auth".to_owned());
                 if matches!(step, SetupStep::Credential | SetupStep::OAuthPasteCode) {
-                    app.state.composer.buffer.clear(); app.state.composer.insert("never-render-this-secret");
+                    app.state.composer.buffer.clear();
+                    app.state.composer.insert("never-render-this-secret");
                 }
                 app.setup = Some(setup_fixture());
                 let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
@@ -5047,10 +5111,12 @@ mod tests {
         );
 
         for character in "claude".chars() {
-            assert!(app.handle_event(Event::Key(KeyEvent::new(
-                KeyCode::Char(character),
-                KeyModifiers::NONE,
-            ))).handled());
+            assert!(app
+                .handle_event(Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                )))
+                .handled());
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
@@ -5064,7 +5130,9 @@ mod tests {
         assert!(rendered.contains("Artifact cleanup"));
         assert!(!rendered.contains("Setup polish"));
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,)))
+            .handled());
         assert!(app.state.overlay.is_none());
         assert!(app.state.focus.is_composer());
     }
@@ -5137,15 +5205,19 @@ mod tests {
         app.setup = Some(setup_fixture());
         app.dispatch(UiAction::Invoke(ActionId::OpenCommandPalette));
         for character in "choose model".chars() {
-            assert!(app.handle_event(Event::Key(KeyEvent::new(
-                KeyCode::Char(character),
-                KeyModifiers::NONE,
-            ))).handled());
+            assert!(app
+                .handle_event(Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                )))
+                .handled());
         }
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app
             .state
             .overlay
@@ -5170,20 +5242,24 @@ mod tests {
         let mut app = PreviewApp::preview();
         app.dispatch(UiAction::Invoke(ActionId::OpenThemeAppearance));
         app.state.picker.selected = 1;
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(
             app.state.appearance.theme,
             crate::tui_v2::presentation::theme::ThemeKind::MitsuroLight
         );
 
         app.state.picker.selected = crate::tui_v2::components::service_inspector::THEMES.len() + 1;
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(
             app.state.appearance.motion.preference,
             MotionPreference::Reduced
@@ -5273,10 +5349,12 @@ mod tests {
         assert!(first.contains("check 0"));
         assert!(!first.contains("ready for its feature adapter"));
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::PageDown,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app
             .state
             .artifacts
@@ -5296,10 +5374,12 @@ mod tests {
             active: true,
         }];
         app.dispatch(UiAction::Invoke(ActionId::OpenProcesses));
-        assert!(!app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(!app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
         let rendered = terminal
@@ -5372,25 +5452,35 @@ mod tests {
         assert!(!first.contains("structured value omitted"));
         assert!(!first.contains("approval"));
 
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.decision_dock.current_question, 1);
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        ))).handled());
-        assert!(app.handle_event(Event::Key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
-        )).handled());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+            )))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert_eq!(app.state.decision_dock.toggled_options, vec![0, 1]);
         let pending = app
             .conversation
@@ -5418,10 +5508,12 @@ mod tests {
                 }
             })
         );
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
 
         assert!(app
             .conversation
@@ -5475,16 +5567,19 @@ mod tests {
         });
         // Composer focus must not strand answers (this is what looked broken).
         app.state.focus = crate::tui_v2::model::focus::FocusTarget::Composer;
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,)
+            ))
+            .handled());
         assert_eq!(app.state.decision_dock.selected_option, 1);
         assert!(app.state.decision_dock.toggled_options.is_empty());
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         // Empty multi toggles + Enter must still submit (focused row) and clear pending.
         assert!(
             app.conversation
@@ -5534,10 +5629,12 @@ mod tests {
                 }]
             }),
         });
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('2'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('2'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app
             .conversation
             .presentation()
@@ -5583,10 +5680,12 @@ mod tests {
             });
         app.state.focus = crate::tui_v2::model::focus::FocusTarget::DecisionDock;
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
 
         assert!(app
             .conversation
@@ -5630,12 +5729,14 @@ mod tests {
             })
             .expect("approve region");
 
-        assert!(app.handle_event(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: approve.x,
-            row: approve.y,
-            modifiers: KeyModifiers::NONE,
-        })).handled());
+        assert!(app
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: approve.x,
+                row: approve.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .handled());
         assert!(app
             .conversation
             .presentation()
@@ -5664,10 +5765,12 @@ mod tests {
         app.state.focus = crate::tui_v2::model::focus::FocusTarget::Transcript {
             part_id: part_id.clone(),
         };
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE,
+            )))
+            .handled());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
         assert!(app
@@ -5677,12 +5780,16 @@ mod tests {
                 .region(crate::tui_v2::layout::snapshot::LayoutRegionId::FullScreenArtifact))
             .is_some());
 
-        assert!(app.handle_event(Event::Key(KeyEvent::new(
-            KeyCode::PageDown,
-            KeyModifiers::NONE,
-        ))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+            )))
+            .handled());
         assert!(app.state.artifacts[&part_id].inner_scroll > 0);
-        assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))).handled());
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,)))
+            .handled());
         assert!(!app.state.artifacts[&part_id].fullscreen);
         assert!(matches!(
             app.state.focus,
@@ -5716,12 +5823,14 @@ mod tests {
                 layout.region(crate::tui_v2::layout::snapshot::LayoutRegionId::NewContentIndicator)
             })
             .expect("indicator");
-        assert!(app.handle_event(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: indicator.x,
-            row: indicator.y,
-            modifiers: KeyModifiers::NONE,
-        })).handled());
+        assert!(app
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: indicator.x,
+                row: indicator.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .handled());
         assert!(app.state.transcript.follow_live);
         assert_eq!(app.state.transcript.unseen_parts, 0);
     }
