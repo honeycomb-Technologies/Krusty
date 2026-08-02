@@ -101,6 +101,52 @@ pub struct DelegatedRunRecord {
     /// is resolved through the role fallback in `effective_capabilities`.
     #[serde(default)]
     pub capabilities: BTreeSet<AgentCapability>,
+    /// Durable launch intent for server-hosted background children. This is
+    /// persisted before execution so a restart can reconstruct a completion
+    /// wake even when the process dies between terminal persistence and the
+    /// pending-steering enqueue.
+    #[serde(default)]
+    pub wake_parent: bool,
+}
+
+/// Lightweight durable projection used to reconcile a hydrated transcript.
+///
+/// Full delegated artifacts can be large, so session state returns only a
+/// small recent window of full records and this compact index for older tool
+/// calls. There is at most one summary per parent tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunSummary {
+    pub delegated_run_id: String,
+    pub parent_session_id: String,
+    pub parent_tool_call_id: String,
+    pub role: DelegatedRunRole,
+    pub stage: DelegatedRunStage,
+    pub child_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: BTreeSet<AgentCapability>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl DelegatedRunSummary {
+    pub fn effective_capabilities(&self) -> BTreeSet<AgentCapability> {
+        if !self.capabilities.is_empty() {
+            return self.capabilities.clone();
+        }
+
+        match self.role {
+            DelegatedRunRole::Build => BTreeSet::from([
+                AgentCapability::Read,
+                AgentCapability::Write,
+                AgentCapability::Execute,
+            ]),
+            DelegatedRunRole::Verifier => {
+                BTreeSet::from([AgentCapability::Read, AgentCapability::Execute])
+            }
+            DelegatedRunRole::Explore | DelegatedRunRole::Planner => {
+                BTreeSet::from([AgentCapability::Read])
+            }
+        }
+    }
 }
 
 impl DelegatedRunRecord {
@@ -123,6 +169,36 @@ impl DelegatedRunRecord {
             }
         }
     }
+
+    /// Whether this durable terminal row is allowed to wake its parent.
+    ///
+    /// Normal user-requested cancellation intentionally stays quiet. The
+    /// lease's `caller_aborted_before_terminal` outcome is different: the
+    /// background worker vanished without a truthful terminal handoff, so the
+    /// parent must be told that side effects may have occurred.
+    pub fn should_wake_parent(&self) -> bool {
+        if !self.wake_parent {
+            return false;
+        }
+
+        match self.stage {
+            DelegatedRunStage::Complete
+            | DelegatedRunStage::Degraded
+            | DelegatedRunStage::Failed => true,
+            DelegatedRunStage::Cancelled => {
+                matches!(
+                    self.artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.get("outcome_reason"))
+                        .and_then(Value::as_str),
+                    Some("caller_aborted_before_terminal" | "background_host_lease_expired")
+                )
+            }
+            DelegatedRunStage::Created
+            | DelegatedRunStage::Running
+            | DelegatedRunStage::Synthesizing => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +213,15 @@ pub struct DelegatedRunStartInput {
     pub resumable: bool,
     pub resumed_from_run_id: Option<String>,
     pub target_scope: Vec<DelegatedRunScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegatedRunCreateOutcome {
+    Created,
+    ExistingContinuation {
+        delegated_run_id: String,
+        resumed_from_run_id: String,
+    },
 }
 
 pub fn normalize_scope_key(target_scope: &[DelegatedRunScope]) -> String {

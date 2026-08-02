@@ -31,6 +31,7 @@ impl TeammateRole {
             Self::Builder => DelegationPolicy {
                 surface: DelegationSurface::SubagentBuild,
                 inherited_permission_mode,
+                supervised_approval_granted: false,
                 max_turns,
                 read_only_only: false,
                 bash_allowed: false,
@@ -39,6 +40,7 @@ impl TeammateRole {
             Self::Reviewer | Self::Tester => DelegationPolicy {
                 surface: DelegationSurface::SubagentVerify,
                 inherited_permission_mode,
+                supervised_approval_granted: false,
                 max_turns,
                 read_only_only: true,
                 bash_allowed: true,

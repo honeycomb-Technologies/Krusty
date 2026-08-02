@@ -385,7 +385,7 @@ export function createStreamCallbacks(
 				const status: ToolCall["status"] =
 					delegated?.outcome === "partial"
 						? "partial"
-						: delegated?.outcome === "failed"
+						: delegated?.outcome === "failed" || delegated?.outcome === "cancelled"
 							? "error"
 							: isError
 								? "error"

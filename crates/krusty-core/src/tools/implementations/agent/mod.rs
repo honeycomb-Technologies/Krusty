@@ -21,8 +21,10 @@ use tracing::{info, warn};
 use crate::agent::subagent::{AgentExecutionProfile, AgentRuntimeManager, AgentSpec};
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
+use crate::storage::{Database, SessionType};
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
+use crate::SessionManager;
 
 use helpers::*;
 
@@ -122,6 +124,19 @@ struct Params {
     /// Internal marker preventing duplicate parent context injection.
     #[serde(skip)]
     parent_context_applied: bool,
+
+    /// Exact durable run selected by lifecycle `resume`/terminal `followup`.
+    /// Fresh spawns may still discover related evidence, but an explicit
+    /// resume must never be rebound to a newer sibling with the same scope.
+    #[serde(skip)]
+    resumed_from_run_id: Option<String>,
+
+    /// A single component is executed by the unified child rather than the
+    /// legacy parallel pool. Keep the assignment after `components` is
+    /// normalized away so it remains part of the durable resume contract.
+    #[serde(skip)]
+    assigned_component: Option<String>,
+
     /// Optional: path hint to scope exploration (explore only)
     #[serde(default)]
     scope: Option<String>,
@@ -146,8 +161,9 @@ struct Params {
     #[serde(default)]
     run_in_background: Option<bool>,
 
-    /// Optional stable label for a background agent run in Mako mode.
-    /// This is used for progress/status visibility, not mailbox routing.
+    /// Parent-chosen child identity for spawn calls. This remains optional in
+    /// deserialization for lifecycle actions and legacy compatibility; current
+    /// spawn validation requires a non-empty name.
     #[serde(default)]
     name: Option<String>,
 
@@ -163,17 +179,17 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn and supervise agnostic child agents directed by the parent. Use for parallel, deep multi-file, or background work — not simple lookups or one-file edits. Required product fields: name (from your plan) and instructions (or prompt). Optional capabilities: read, write, execute (parent policy is the ceiling). Set run_in_background=true so the parent continues and wakes on completion. Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates results."
+        "Spawn and supervise agnostic child agents directed by the parent. Use for parallel or deep multi-file work — not simple lookups or one-file edits. Required product fields: name (from your plan) and instructions (or prompt). Optional capabilities: read, write, execute (parent policy is the ceiling). Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates results."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Spawn a named child with clear instructions for substantial independent work. Prefer run_in_background=true and continue other work; the parent is notified when the child completes — do not thrash-poll status. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence. Keep multi-scope digs on children so the parent transcript stays thin.",
+            "Spawn a named child with clear instructions for substantial independent work. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence. Keep multi-scope digs on children so the parent transcript stays thin.",
         )
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "action": {
@@ -215,6 +231,7 @@ impl Tool for AgentTool {
                 },
                 "capabilities": {
                     "type": "array",
+                    "minItems": 1,
                     "items": {
                         "type": "string",
                         "enum": ["read", "write", "execute"]
@@ -269,7 +286,7 @@ impl Tool for AgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Return immediately; parent is notified when the child completes"
+                    "description": "Hosted Chat/Code only: return immediately; the parent is notified when the child completes"
                 },
                 "description": {
                     "type": "string",
@@ -277,11 +294,25 @@ impl Tool for AgentTool {
                 }
             },
             "additionalProperties": false
-        })
+        });
+        if !self.runtime.has_completion_listener() {
+            schema["properties"]
+                .as_object_mut()
+                .expect("Agent schema properties")
+                .remove("run_in_background");
+        }
+        schema
     }
 
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
         info!("Agent tool execute called with params: {:?}", params);
+
+        if has_explicit_empty_capabilities(&params) {
+            return ToolResult::error_with_code(
+                "invalid_agent_capabilities",
+                "Agent capabilities cannot be an empty array. Omit the field for the default read capability, or request one or more of read, write, and execute.",
+            );
+        }
 
         let mut params = match parse_params::<Params>(params) {
             Ok(p) => p,
@@ -299,6 +330,13 @@ impl Tool for AgentTool {
             self.execute_control(params, ctx).await
         }
     }
+}
+
+fn has_explicit_empty_capabilities(params: &Value) -> bool {
+    params
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
 }
 
 impl AgentTool {
@@ -319,6 +357,12 @@ impl AgentTool {
             Err(error) => return ToolResult::error_with_code("invalid_agent_spec", error),
         };
         let execution_profile = spec.execution_profile();
+
+        if params.run_in_background.unwrap_or(false) {
+            if let Err(error) = validate_background_wake_host(&self.runtime, ctx) {
+                return error;
+            }
+        }
         params.prompt = spec.rendered_objective();
         params.profile = Some(spec.profile.clone());
         // agent_type retained for internal compatibility as capability class only.
@@ -345,6 +389,7 @@ impl AgentTool {
                 .as_ref()
                 .and_then(|components| components.first())
             {
+                params.assigned_component = Some(component.trim().to_string());
                 params.prompt = format!(
                     "{}\n\nAssigned component: {}",
                     params.prompt,
@@ -382,6 +427,50 @@ impl AgentTool {
             self.execute_child(params, ctx).await
         }
     }
+}
+
+fn validate_background_wake_host(
+    runtime: &AgentRuntimeManager,
+    ctx: &ToolContext,
+) -> Result<(), ToolResult> {
+    if !runtime.has_completion_listener() {
+        return Err(ToolResult::error_with_code(
+            "background_wake_unsupported",
+            "Background Agent execution requires a live parent-wake host. Use a foreground Agent on this surface.",
+        ));
+    }
+    let db_path = ctx.db_path.as_deref().ok_or_else(|| {
+        ToolResult::error_with_code(
+            "background_session_required",
+            "Background Agent execution requires durable session storage.",
+        )
+    })?;
+    let session_id = ctx.session_id.as_deref().ok_or_else(|| {
+        ToolResult::error_with_code(
+            "background_session_required",
+            "Background Agent execution requires a persisted parent session.",
+        )
+    })?;
+    let manager =
+        SessionManager::new(Database::new(db_path).map_err(|error| {
+            ToolResult::error_with_code("agent_store_error", error.to_string())
+        })?);
+    let session = manager
+        .get_session(session_id)
+        .map_err(|error| ToolResult::error_with_code("agent_store_error", error.to_string()))?
+        .ok_or_else(|| {
+            ToolResult::error_with_code(
+                "background_session_required",
+                format!("Parent session '{session_id}' was not found."),
+            )
+        })?;
+    if !matches!(session.session_type, SessionType::Chat | SessionType::Code) {
+        return Err(ToolResult::error_with_code(
+            "background_wake_unsupported",
+            "Background child completion cannot autonomously wake a Hive-owned session. Run this Agent in the foreground.",
+        ));
+    }
+    Ok(())
 }
 
 fn should_use_parallel_component_pool(

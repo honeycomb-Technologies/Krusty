@@ -3,9 +3,12 @@
 //! Keeps "active plan" and "effective work mode" resolution consistent across
 //! CLI, server, and core context injection.
 
-use crate::storage::WorkMode;
+use std::path::Path;
 
-use super::{PlanFile, PlanStatus};
+use crate::storage::WorkMode;
+use crate::workflow::{GoalStatus, WorkflowManager};
+
+use super::{PlanFile, PlanManager, PlanStatus};
 
 /// Canonicalized plan lifecycle state for a session.
 #[derive(Debug, Clone)]
@@ -31,6 +34,40 @@ impl PlanLifecycleState {
 /// Returns true when a stored plan should still be treated as active runtime state.
 pub fn is_active_plan(plan: &PlanFile) -> bool {
     matches!(plan.status, PlanStatus::InProgress) && !plan.is_complete()
+}
+
+/// Resolve whether a session needs the execution-workflow tool surface.
+///
+/// Workflow v2 is authoritative when present. An active Goal still needs
+/// `workflow_update` after its final plan step, so this intentionally follows
+/// Goal lifecycle rather than only looking for an unfinished step. Legacy
+/// plans remain a fallback only when no canonical Goal exists.
+pub fn has_active_workflow_or_plan(db_path: &Path, session_id: &str) -> bool {
+    match WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+    {
+        Ok(Some(snapshot)) => return snapshot.goal.status == GoalStatus::Active,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to resolve canonical workflow lifecycle"
+            );
+        }
+    }
+
+    PlanManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_active_plan(session_id))
+        .map(|plan| plan.is_some())
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to resolve legacy active plan lifecycle"
+            );
+            false
+        })
 }
 
 /// Resolve the effective work mode for a session from persisted mode + plan state.

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::ai::client::AiClient;
 use crate::ai::types::{AiToolCall, Content};
@@ -27,8 +28,8 @@ use crate::storage::{
     WorkspaceMode,
 };
 use crate::tools::registry::{
-    tool_policy_for_call, FileObservationTracker, PermissionMode, ToolCategory, ToolContext,
-    ToolRegistry, ToolResult,
+    effective_tool_call, tool_policy_for_call, FileObservationTracker, PermissionMode,
+    ToolCategory, ToolContext, ToolRegistry, ToolResult,
 };
 
 #[cfg(test)]
@@ -208,6 +209,7 @@ pub(crate) async fn execute_tools(
                             db_path,
                             user_id,
                             permission_mode,
+                            false,
                             work_mode,
                             delegated_progress_tx,
                             event_tx,
@@ -216,6 +218,7 @@ pub(crate) async fn execute_tools(
                             execution_tool_allowlist,
                             Arc::clone(&file_observations),
                             extension_snapshot_prepared,
+                            None,
                         )
                         .await;
 
@@ -398,6 +401,7 @@ pub(crate) async fn execute_tools(
 
         let mut retries_attempted = 0usize;
         let result = loop {
+            let execution_cancellation = CancellationToken::new();
             let execution = execute_regular_tool(
                 call,
                 tool_registry,
@@ -410,6 +414,7 @@ pub(crate) async fn execute_tools(
                 db_path,
                 user_id,
                 permission_mode,
+                requires_approval,
                 work_mode,
                 delegated_progress_tx,
                 event_tx,
@@ -418,15 +423,22 @@ pub(crate) async fn execute_tools(
                 execution_tool_allowlist,
                 Arc::clone(&file_observations),
                 extension_snapshot_prepared,
+                Some(execution_cancellation.clone()),
             );
             tokio::pin!(execution);
 
             let mut input_closed = false;
+            let mut cancellation_requested = false;
             let result = loop {
                 tokio::select! {
                     result = &mut execution => break Some(result),
                     cancelled = input_inbox.recv_cancel(), if !input_closed => {
                         match cancelled {
+                            Some(()) if tool_call_requires_completion_shield(call) => {
+                                cancellation_requested = true;
+                                execution_cancellation.cancel();
+                                break Some(execution.as_mut().await);
+                            }
                             Some(()) => break None,
                             None => input_closed = true,
                         }
@@ -444,6 +456,15 @@ pub(crate) async fn execute_tools(
                     cancelled: true,
                 };
             };
+
+            if cancellation_requested {
+                results.push(tool_control.publish_result(call, &result, event_tx));
+                return ToolExecutionBatch {
+                    results,
+                    next_work_mode: work_mode,
+                    cancelled: true,
+                };
+            }
 
             match tool_control.retry_directive(call, &result, retries_attempted) {
                 RetryDirective::Stop => break result,
@@ -468,6 +489,20 @@ pub(crate) async fn execute_tools(
         next_work_mode: work_mode,
         cancelled: false,
     }
+}
+
+/// Once a mutating operation has been dispatched, dropping its future is not
+/// proof that its side effects stopped. Signal the exact call's cancellation
+/// token and retain ownership until the registry's governed timeout or its
+/// producer-owned terminal result. Read-only calls remain immediately
+/// cancellable.
+fn tool_call_requires_completion_shield(call: &AiToolCall) -> bool {
+    let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
+    tool_policy_for_call(&call.name, &call.arguments).category == ToolCategory::Write
+        // Bash owns a process-group drop guard and kill-on-drop child, so
+        // dropping it is its bounded quiescence mechanism. Waiting here would
+        // regress an interrupt into the command's (potentially long) timeout.
+        && effective_name != "bash"
 }
 
 fn emit_workflow_update(
@@ -1550,7 +1585,7 @@ export default (krusty) => {
     }
 
     #[tokio::test]
-    async fn loop_cancel_drops_foreground_children_without_cancelling_another_session() {
+    async fn loop_cancel_waits_for_dispatched_write_without_cancelling_another_session() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let registry = Arc::new(ToolRegistry::new());
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
@@ -1609,11 +1644,64 @@ export default (krusty) => {
 
         assert!(cancelled_batch.cancelled);
         assert!(!unaffected_batch.cancelled);
-        assert!(!cancelled_output.exists());
+        assert_eq!(
+            std::fs::read_to_string(cancelled_output)
+                .expect("dispatched write should reach its producer-owned result"),
+            "delegated mutation"
+        );
         assert_eq!(
             std::fs::read_to_string(unaffected_output).expect("other session output should exist"),
             "delegated mutation"
         );
+    }
+
+    #[test]
+    fn completion_shield_follows_effective_write_policy() {
+        let write = AiToolCall {
+            id: "write".to_string(),
+            name: "write".to_string(),
+            arguments: json!({"file_path": "out.txt", "content": "data"}),
+        };
+        let deferred_write = AiToolCall {
+            id: "deferred-write".to_string(),
+            name: "tool_search".to_string(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {"file_path": "out.txt", "content": "data"}
+            }),
+        };
+        let read = AiToolCall {
+            id: "read".to_string(),
+            name: "read".to_string(),
+            arguments: json!({"file_path": "out.txt"}),
+        };
+        let bash = AiToolCall {
+            id: "bash".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command": "sleep 30"}),
+        };
+        let execute_agent = AiToolCall {
+            id: "execute-agent".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "name": "validator",
+                "instructions": "run the validation",
+                "capabilities": ["execute"]
+            }),
+        };
+        let legacy_verify_agent = AiToolCall {
+            id: "legacy-verify-agent".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type": "verify", "prompt": "validate"}),
+        };
+
+        assert!(tool_call_requires_completion_shield(&write));
+        assert!(tool_call_requires_completion_shield(&deferred_write));
+        assert!(tool_call_requires_completion_shield(&execute_agent));
+        assert!(tool_call_requires_completion_shield(&legacy_verify_agent));
+        assert!(!tool_call_requires_completion_shield(&read));
+        assert!(!tool_call_requires_completion_shield(&bash));
     }
 
     fn create_session_db() -> (TempDir, std::path::PathBuf, String) {

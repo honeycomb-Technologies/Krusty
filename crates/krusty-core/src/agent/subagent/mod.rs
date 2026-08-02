@@ -51,8 +51,8 @@ pub use scheduler::{
 pub use spec::{AgentCapability, AgentContextMode, AgentExecutionProfile, AgentSpec};
 pub use tools::BuilderTools;
 pub use types::{
-    AgentProgress, AgentProgressStatus, DelegatedProcessArtifact, SubAgentApiError, SubAgentResult,
-    SubAgentTask,
+    AgentProgress, AgentProgressStatus, DelegatedEvidenceKind, DelegatedEvidenceSummary,
+    DelegatedProcessArtifact, SubAgentApiError, SubAgentResult, SubAgentTask, SubAgentTermination,
 };
 
 // Re-export single agent entry points
@@ -219,7 +219,9 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
+                        termination: SubAgentTermination::Failed,
                         policy_violations: vec![],
+                        evidence: Default::default(),
                         background_processes: vec![],
                     });
                 }
@@ -329,7 +331,9 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
+                        termination: SubAgentTermination::Failed,
                         policy_violations: vec![],
+                        evidence: Default::default(),
                         background_processes: vec![],
                     });
                 }
@@ -359,7 +363,9 @@ fn cancelled_result(task: &SubAgentTask) -> SubAgentResult {
         duration_ms: 0,
         turns_used: 0,
         error: Some("Cancelled".to_string()),
+        termination: SubAgentTermination::Cancelled,
         policy_violations: vec![],
+        evidence: Default::default(),
         background_processes: vec![],
     }
 }

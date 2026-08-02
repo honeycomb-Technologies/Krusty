@@ -31,7 +31,17 @@ export interface ToolCall {
 export interface DelegatedAgentState {
   taskId: string;
   name: string;
-  status: 'pending' | 'running' | 'complete' | 'failed';
+  status:
+    | 'pending'
+    | 'running'
+    | 'complete'
+    | 'degraded'
+    | 'cancelled'
+    | 'failed';
+  success?: boolean;
+  usableEvidence?: boolean;
+  degradedSuccess?: boolean;
+  termination?: string;
   outcomeReason?: string;
   toolCount: number;
   tokens: number;
@@ -52,7 +62,7 @@ export interface DelegatedArtifactState {
   message?: string;
   investigationSummary?: string;
   humanReview?: string;
-  outcome?: 'success' | 'partial' | 'failed';
+  outcome?: 'success' | 'partial' | 'failed' | 'cancelled';
   confidence?: 'high' | 'medium' | 'low';
   structuralCoverage?: 'high' | 'medium' | 'low';
   semanticCoverage?: 'high' | 'medium' | 'low';
@@ -62,6 +72,7 @@ export interface DelegatedArtifactState {
   agentCount?: number;
   usableAgents?: number;
   degradedAgents?: number;
+  cancelledAgents?: number;
   successfulAgents?: number;
   failedAgents?: number;
   filesExaminedCount?: number;

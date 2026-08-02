@@ -1,8 +1,8 @@
 use krusty_core::ai::models::ModelKey;
 use krusty_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, PendingInteractionSnapshot,
-    RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
-    WorkMode, WorkspaceMode,
+    DelegatedRunRecord, DelegatedRunScope, DelegatedRunSummary, PartialAssistantState,
+    PendingInteractionSnapshot, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
+    SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
 use krusty_core::tools::registry::PermissionMode;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -195,6 +195,10 @@ pub struct SessionStateResponse {
     pub delegated_tools: Vec<DelegatedToolStateResponse>,
     /// Recent persisted delegated runs for this session.
     pub recent_delegated_runs: Vec<DelegatedRunResponse>,
+    /// Compact newest-run index for delegated tool calls in the hydrated
+    /// transcript. Unlike recent_delegated_runs, these rows never carry large
+    /// snapshots or artifacts.
+    pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
 }
@@ -221,6 +225,57 @@ pub struct DelegatedToolStateResponse {
     pub stage: DelegatedRunStage,
     pub parent_session_id: Option<String>,
     pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+impl DelegatedToolStateResponse {
+    pub(crate) fn from_active_durable_snapshot(record: &DelegatedRunRecord) -> Option<Self> {
+        if !matches!(
+            record.stage,
+            krusty_core::agent::DelegatedRunStage::Created
+                | krusty_core::agent::DelegatedRunStage::Running
+                | krusty_core::agent::DelegatedRunStage::Synthesizing
+        ) {
+            return None;
+        }
+        let tool_call_id = record.parent_tool_call_id.clone()?;
+        let snapshot = record.snapshot.as_ref()?;
+        let status = |status: &str| match status {
+            "complete" => DelegatedProgressStatus::Complete,
+            "degraded" => DelegatedProgressStatus::Degraded,
+            "cancelled" => DelegatedProgressStatus::Cancelled,
+            "failed" => DelegatedProgressStatus::Failed,
+            _ => DelegatedProgressStatus::Running,
+        };
+
+        Some(Self {
+            delegated_run_id: record.delegated_run_id.clone(),
+            tool_call_id,
+            kind: match record.role {
+                krusty_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                krusty_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                krusty_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                krusty_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: DelegatedRunStage::from(record.stage),
+            parent_session_id: Some(record.parent_session_id.clone()),
+            agents: snapshot
+                .agents
+                .iter()
+                .map(|agent| DelegatedAgentStateResponse {
+                    task_id: agent.task_id.clone(),
+                    agent_name: agent.agent_name.clone(),
+                    status: status(&agent.status),
+                    tool_count: agent.tool_count,
+                    tokens: agent.tokens,
+                    current_action: agent.current_action.clone(),
+                    completion_summary: agent.completion_summary.clone(),
+                    lines_added: agent.lines_added,
+                    lines_removed: agent.lines_removed,
+                    completed_plan_task: agent.completed_plan_task.clone(),
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +311,45 @@ pub struct DelegatedRunResponse {
     pub human_review: Option<String>,
     pub artifact: Option<Value>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunSummaryResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub child_name: Option<String>,
+    pub capabilities: Vec<String>,
+    pub updated_at: String,
+}
+
+impl From<DelegatedRunSummary> for DelegatedRunSummaryResponse {
+    fn from(value: DelegatedRunSummary) -> Self {
+        let capabilities = value
+            .effective_capabilities()
+            .into_iter()
+            .map(|capability| match capability {
+                krusty_core::agent::subagent::AgentCapability::Read => "read".to_string(),
+                krusty_core::agent::subagent::AgentCapability::Write => "write".to_string(),
+                krusty_core::agent::subagent::AgentCapability::Execute => "execute".to_string(),
+            })
+            .collect();
+        Self {
+            delegated_run_id: value.delegated_run_id,
+            parent_tool_call_id: value.parent_tool_call_id,
+            kind: match value.role {
+                krusty_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                krusty_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                krusty_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                krusty_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: DelegatedRunStage::from(value.stage),
+            child_name: value.child_name,
+            capabilities,
+            updated_at: value.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 impl From<DelegatedRunRecord> for DelegatedRunResponse {

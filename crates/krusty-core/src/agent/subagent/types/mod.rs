@@ -17,7 +17,10 @@ pub(crate) use self::report::{
     parse_explore_report, render_explore_report, summary_looks_non_substantive,
     synthesize_explore_report, synthesize_explore_report_from_paths,
 };
-pub use self::result::{DelegatedProcessArtifact, SubAgentResult};
+pub use self::result::{
+    DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult,
+    SubAgentTermination,
+};
 
 /// Parsed tool call from a sub-agent API response.
 #[derive(Debug)]

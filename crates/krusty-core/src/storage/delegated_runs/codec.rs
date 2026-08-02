@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use serde_json::Value;
 
-use super::model::{DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot};
+use super::model::{
+    DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
+    DelegatedRunSummary,
+};
 use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 
@@ -88,6 +91,30 @@ pub(super) fn row_to_delegated_run(
             .map(parse_datetime)
             .transpose()?,
         child_name: row.get(17)?,
+        capabilities,
+        wake_parent: row.get::<_, i64>(19)? != 0,
+    })
+}
+
+pub(super) fn row_to_delegated_run_summary(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DelegatedRunSummary> {
+    let role = DelegatedRunRole::from_str(&row.get::<_, String>(3)?).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, "invalid delegated role".into())
+    })?;
+    let capabilities_json: String = row.get(7)?;
+    let capabilities =
+        serde_json::from_str::<std::collections::BTreeSet<AgentCapability>>(&capabilities_json)
+            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(7, Type::Text, err.into()))?;
+
+    Ok(DelegatedRunSummary {
+        delegated_run_id: row.get(0)?,
+        parent_session_id: row.get(1)?,
+        parent_tool_call_id: row.get(2)?,
+        role,
+        stage: parse_stage(&row.get::<_, String>(4)?)?,
+        updated_at: parse_datetime(row.get(5)?)?,
+        child_name: row.get(6)?,
         capabilities,
     })
 }

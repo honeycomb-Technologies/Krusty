@@ -1,6 +1,6 @@
 use tempfile::TempDir;
 
-use crate::plan::{PlanManager, TaskStatus};
+use crate::plan::{has_active_workflow_or_plan, PlanManager, TaskStatus};
 use crate::storage::{Database, SessionManager};
 
 use super::{
@@ -98,7 +98,7 @@ fn activate_fixture(manager: &WorkflowManager, session_id: &str) -> (String, Str
 
 #[test]
 fn lifecycle_is_revisioned_evidence_backed_and_idempotent() {
-    let (_temp, session_id, manager) = setup();
+    let (temp, session_id, manager) = setup();
     let (goal_id, _plan_id, revision) = activate_fixture(&manager, &session_id);
 
     let attempt = manager
@@ -184,6 +184,10 @@ fn lifecycle_is_revisioned_evidence_backed_and_idempotent() {
         GoalStatus::Active,
         "finishing a plan step must not complete the goal"
     );
+    assert!(
+        has_active_workflow_or_plan(&temp.path().join("workflow.db"), &session_id),
+        "a Goal awaiting verification must retain workflow_update on the direct surface"
+    );
 
     let criterion_id = completed_step.snapshot.criteria[0].id.clone();
     let verified = manager
@@ -211,6 +215,10 @@ fn lifecycle_is_revisioned_evidence_backed_and_idempotent() {
         )
         .expect("complete goal");
     assert_eq!(completed.snapshot.goal.status, GoalStatus::Completed);
+    assert!(!has_active_workflow_or_plan(
+        &temp.path().join("workflow.db"),
+        &session_id
+    ));
     assert_eq!(completed.snapshot.permission_mode, "autonomous");
 }
 

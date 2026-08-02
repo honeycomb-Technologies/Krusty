@@ -44,7 +44,35 @@ fn session_creation_supports_legacy_required_provider_columns() {
              user_id TEXT,
              target_branch TEXT,
              permission_mode TEXT NOT NULL DEFAULT 'autonomous'
-         );",
+         );
+         CREATE TABLE delegated_runs (
+             delegated_run_id TEXT PRIMARY KEY,
+             parent_session_id TEXT NOT NULL,
+             parent_tool_call_id TEXT,
+             role TEXT NOT NULL
+                 CHECK (role IN ('explore', 'build', 'planner', 'verifier')),
+             stage TEXT NOT NULL
+                 CHECK (stage IN ('created', 'running', 'synthesizing', 'complete', 'degraded', 'failed', 'cancelled')),
+             provider TEXT,
+             model TEXT,
+             resumable INTEGER NOT NULL DEFAULT 0,
+             resumed_from_run_id TEXT,
+             target_scope_key TEXT NOT NULL,
+             target_scope_json TEXT NOT NULL,
+             snapshot_json TEXT,
+             artifact_json TEXT,
+             human_review TEXT,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             completed_at TEXT,
+             FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+         );
+         CREATE INDEX idx_delegated_runs_session_updated
+             ON delegated_runs(parent_session_id, updated_at DESC);
+         CREATE INDEX idx_delegated_runs_session_scope
+             ON delegated_runs(parent_session_id, role, target_scope_key, updated_at DESC);
+         CREATE INDEX idx_delegated_runs_parent_tool
+             ON delegated_runs(parent_tool_call_id);",
     )
     .expect("legacy schema");
     drop(conn);

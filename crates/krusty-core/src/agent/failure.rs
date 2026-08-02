@@ -13,8 +13,8 @@ use crate::agent::hooks::shell_policy::{
 };
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::registry::{
-    agent_call_execution_profile, agent_call_starts_run, effective_tool_call, tool_policy_for_call,
-    ToolCategory,
+    agent_call_execution_profile, agent_call_is_research, agent_call_starts_run,
+    effective_tool_call, tool_policy_for_call, ToolCategory,
 };
 
 /// Default threshold: stop after this many identical failures.
@@ -349,17 +349,17 @@ pub fn detect_terminal_explore_failure(
     tool_calls: &[AiToolCall],
     tool_results: &[Content],
 ) -> Option<String> {
-    let explore_ids = tool_calls
+    let explore_calls = tool_calls
         .iter()
         .filter(|call| {
             call.name == "agent"
                 && agent_call_starts_run(&call.arguments)
                 && agent_call_execution_profile(&call.arguments) == "explore"
         })
-        .map(|call| call.id.as_str())
+        .map(|call| (call.id.as_str(), agent_call_is_research(&call.arguments)))
         .collect::<Vec<_>>();
 
-    if explore_ids.is_empty() {
+    if explore_calls.is_empty() {
         return None;
     }
 
@@ -373,9 +373,12 @@ pub fn detect_terminal_explore_failure(
             continue;
         };
 
-        if !explore_ids.contains(&tool_use_id.as_str()) {
+        let Some((_, requires_file_evidence)) = explore_calls
+            .iter()
+            .find(|(call_id, _)| *call_id == tool_use_id.as_str())
+        else {
             continue;
-        }
+        };
         // Tool-validation and execution errors have their own retry and
         // repeated-failure policy. Only a successfully returned delegated-run
         // result can prove that exploration completed without usable evidence.
@@ -412,17 +415,17 @@ pub fn detect_terminal_explore_failure(
             .get("usable_agents")
             .or_else(|| result_payload.get("successful_agents"))
             .and_then(|value| value.as_u64());
-        let files_examined_count = result_payload
-            .get("files_examined_count")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
+        let paths_examined_count = result_payload
+            .get("paths_examined_count")
+            .or_else(|| result_payload.get("files_examined_count"))
+            .and_then(|value| value.as_u64());
 
         // New single-agent format: check success bool directly
         // Legacy multi-agent format: check usable_agents count
         let is_terminal = outcome == "failed"
             || !success
             || usable_agents.is_some_and(|count| count == 0)
-            || files_examined_count == 0;
+            || (*requires_file_evidence && paths_examined_count == Some(0));
 
         if is_terminal {
             return Some(format!(
@@ -494,6 +497,7 @@ pub fn detect_post_explore_manual_fallback(
                                                 && name == "agent"
                                                 && agent_call_starts_run(input)
                                                 && agent_call_execution_profile(input) == "explore"
+                                                && agent_call_is_research(input)
                                     )
                                 })
                         });
@@ -1180,6 +1184,73 @@ mod tests {
     }
 
     #[test]
+    fn terminal_explore_guard_reads_the_real_retained_agent_contract() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "spawn",
+                "name": "map runtime",
+                "instructions": "audit",
+                "capabilities": ["read"]
+            }),
+        }];
+        let raw = crate::tools::ToolResult::success_data(json!({
+            "delegated_run_id": "run-1",
+            "outcome": "success",
+            "success": true,
+            "usable_agents": 1,
+            "files_examined_count": 8,
+            "next_action_hint": "Synthesize the evidence."
+        }))
+        .output;
+        let history = crate::agent::history_policy::build_history_tool_result("agent", &raw, false);
+        assert_eq!(history["result"]["paths_examined_count"], 8);
+        assert_eq!(history["result"]["usable_agents"], 1);
+        assert_eq!(
+            history["result"]["next_action_hint"],
+            "Synthesize the evidence."
+        );
+        let results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: history,
+            is_error: Some(false),
+        }];
+
+        assert!(detect_terminal_explore_failure(&tool_calls, &results).is_none());
+    }
+
+    #[test]
+    fn execute_only_success_does_not_require_examined_files() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "spawn",
+                "name": "focused validator",
+                "instructions": "run tests",
+                "capabilities": ["execute"]
+            }),
+        }];
+        let raw = crate::tools::ToolResult::success_data(json!({
+            "delegated_run_id": "run-validate",
+            "outcome": "success",
+            "success": true,
+            "usable_agents": 1,
+            "files_examined_count": 0,
+            "findings": "Focused tests passed."
+        }))
+        .output;
+        let results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: crate::agent::history_policy::build_history_tool_result("agent", &raw, false),
+            is_error: Some(false),
+        }];
+
+        assert!(detect_terminal_explore_failure(&tool_calls, &results).is_none());
+    }
+
+    #[test]
     fn terminal_explore_failure_ignores_status_control_result() {
         let tool_calls = vec![AiToolCall {
             id: "tool-1".to_string(),
@@ -1268,9 +1339,9 @@ mod tests {
                     name: "agent".to_string(),
                     input: json!({
                         "action": "spawn",
-                        "profile": "explore",
-                        "task_name": "map_runtime",
-                        "prompt": "Map the runtime boundaries"
+                        "name": "map runtime",
+                        "instructions": "Map the runtime boundaries",
+                        "capabilities": ["read"]
                     }),
                 }],
             },
@@ -1300,6 +1371,96 @@ mod tests {
         let diagnostic = detect_post_explore_manual_fallback(&conversation, &tool_calls)
             .expect("unified explore result should prevent broad manual fallback");
         assert!(diagnostic.contains("usable delegated coverage already exists"));
+    }
+
+    #[test]
+    fn post_explore_guard_uses_real_retained_agent_output() {
+        let raw = crate::tools::ToolResult::success_data(json!({
+            "delegated_run_id": "run-1",
+            "outcome": "success",
+            "success": true,
+            "usable_agents": 1,
+            "files_examined_count": 8,
+            "next_action_hint": "Synthesize the delegated evidence."
+        }))
+        .output;
+        let conversation = vec![
+            ModelMessage {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "agent-1".to_string(),
+                    name: "agent".to_string(),
+                    input: json!({
+                        "action": "spawn",
+                        "name": "map runtime",
+                        "instructions": "Map runtime boundaries",
+                        "capabilities": ["read"]
+                    }),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "agent-1".to_string(),
+                    output: crate::agent::history_policy::build_history_tool_result(
+                        "agent", &raw, false,
+                    ),
+                    is_error: Some(false),
+                }],
+            },
+        ];
+        let tool_calls = vec![AiToolCall {
+            id: "read-1".to_string(),
+            name: "read".to_string(),
+            arguments: json!({"file_path":"src/main.rs"}),
+        }];
+
+        assert!(detect_post_explore_manual_fallback(&conversation, &tool_calls).is_some());
+    }
+
+    #[test]
+    fn execute_only_child_does_not_block_later_manual_research() {
+        let raw = crate::tools::ToolResult::success_data(json!({
+            "delegated_run_id": "run-validate",
+            "outcome": "success",
+            "success": true,
+            "usable_agents": 1,
+            "files_examined_count": 0,
+            "next_action_hint": "Review the validation result."
+        }))
+        .output;
+        let conversation = vec![
+            ModelMessage {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "agent-1".to_string(),
+                    name: "agent".to_string(),
+                    input: json!({
+                        "action": "spawn",
+                        "name": "focused validator",
+                        "instructions": "Run focused tests",
+                        "capabilities": ["execute"]
+                    }),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "agent-1".to_string(),
+                    output: crate::agent::history_policy::build_history_tool_result(
+                        "agent", &raw, false,
+                    ),
+                    is_error: Some(false),
+                }],
+            },
+        ];
+        let tool_calls = vec![AiToolCall {
+            id: "read-1".to_string(),
+            name: "read".to_string(),
+            arguments: json!({"file_path":"src/main.rs"}),
+        }];
+
+        assert!(detect_post_explore_manual_fallback(&conversation, &tool_calls).is_none());
     }
 
     #[test]

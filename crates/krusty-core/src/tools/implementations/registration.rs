@@ -134,6 +134,24 @@ mod tests {
         )
         .await;
 
+        let unhosted_catalog = registry.get_ai_tools_all().await;
+        let unhosted_agent = unhosted_catalog
+            .iter()
+            .find(|tool| tool.name == "agent")
+            .expect("agent tool should be registered");
+        assert!(unhosted_agent.input_schema["properties"]
+            .get("run_in_background")
+            .is_none());
+
+        let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        registry
+            .agent_runtime_manager()
+            .set_completion_sender(completion_tx);
+        let (reconciliation_tx, _reconciliation_rx) = tokio::sync::mpsc::unbounded_channel();
+        registry
+            .agent_runtime_manager()
+            .set_completion_reconciliation_sender(reconciliation_tx);
+
         let wire_tools = registry.get_ai_tools().await;
         let catalog = registry.get_ai_tools_all().await;
 
@@ -170,13 +188,13 @@ mod tests {
         );
         assert!(agent.input_schema["properties"]["task_ids"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("build components")));
+            .is_some_and(|description| description.contains("corresponding to components")));
 
         let provider_tools =
             get_format_handler(ApiFormat::OpenAIResponses).convert_tools(&wire_tools);
         assert!(serde_json::to_string(&provider_tools)
             .expect("serialize provider tools")
-            .contains("tightly coupled work"));
+            .contains("not simple lookups"));
         for (tool, provider_tool) in wire_tools.iter().zip(provider_tools.iter()) {
             println!(
                 "tool_schema name={} bytes={}",

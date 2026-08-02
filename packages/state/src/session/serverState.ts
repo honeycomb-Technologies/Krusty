@@ -108,6 +108,7 @@ export function applySessionSnapshot(
         ),
         serverState.delegated_tools,
         serverState.recent_delegated_runs,
+        serverState.delegated_run_summaries,
       ),
     };
   });

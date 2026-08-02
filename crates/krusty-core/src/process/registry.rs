@@ -680,21 +680,16 @@ impl ProcessRegistry {
                     entry.info.status = status;
                     if !entry.info.is_active() && !entry.info.completion_notified {
                         entry.info.completion_notified = true;
-                        let output_preview = entry
-                            .output
-                            .try_lock()
-                            .ok()
-                            .map(|output| {
-                                let text = String::from_utf8_lossy(&output.bytes);
-                                let trimmed = text.trim();
-                                if trimmed.is_empty() {
-                                    None
-                                } else {
-                                    let preview: String = trimmed.chars().take(2_000).collect();
-                                    Some(preview)
-                                }
-                            })
-                            .flatten();
+                        let output_preview = entry.output.try_lock().ok().and_then(|output| {
+                            let text = String::from_utf8_lossy(&output.bytes);
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                let preview: String = trimmed.chars().take(2_000).collect();
+                                Some(preview)
+                            }
+                        });
                         completion_event = Some(ProcessCompletionEvent {
                             user_id: user_id.to_string(),
                             process_id: entry.info.id.clone(),

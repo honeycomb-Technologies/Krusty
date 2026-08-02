@@ -8,7 +8,7 @@ use krusty_core::ai::client::{AiClient, CallOptions};
 use krusty_core::ai::models::{ModelKey, ModelLookupError, ModelMetadata, ProjectModelRef};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
-use krusty_core::plan::PlanManager;
+use krusty_core::plan::{has_active_workflow_or_plan, PlanManager};
 use krusty_core::storage::{
     Database, MakoRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
     WorkspaceMode,
@@ -739,11 +739,7 @@ pub(super) async fn setup_chat_session_with_guard(
     }
 
     let effective_work_mode = effective_session_work_mode(state, &session);
-    let has_active_plan = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|manager| manager.get_active_plan(session_id).ok())
-        .flatten()
-        .is_some();
+    let has_active_plan = has_active_workflow_or_plan(state.db_path.as_path(), session_id);
     let guard = match preacquired_guard {
         Some(guard) => guard,
         None => state
@@ -874,11 +870,7 @@ pub(super) async fn refresh_chat_code_tool_surface(
         .or(Some(ctx.working_dir.as_path()))
         .map(ProjectSettings::load)
         .unwrap_or_default();
-    let has_active_plan = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|manager| manager.get_active_plan(&ctx.session_id).ok())
-        .flatten()
-        .is_some();
+    let has_active_plan = has_active_workflow_or_plan(state.db_path.as_path(), &ctx.session_id);
     let tools = filter_code_tools_for_mode(
         state.tool_registry.get_ai_tools_all().await,
         permission_mode,

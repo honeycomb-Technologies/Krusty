@@ -213,7 +213,7 @@ function applyStoredContentBlock(
     const status: ToolCall['status'] = toolResult
       ? delegated?.outcome === 'partial'
         ? 'partial'
-        : delegated?.outcome === 'failed'
+        : delegated?.outcome === 'failed' || delegated?.outcome === 'cancelled'
           ? 'error'
           : toolResult.isError
             ? 'error'

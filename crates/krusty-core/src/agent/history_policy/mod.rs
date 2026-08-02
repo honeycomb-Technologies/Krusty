@@ -489,6 +489,64 @@ mod tests {
     }
 
     #[test]
+    fn agent_lifecycle_history_keeps_bounded_durable_run_evidence() {
+        let output = json!({
+            "ok": true,
+            "data": {
+                "agent_type": "build",
+                "terminal": true,
+                "timed_out": false,
+                "run": {
+                    "delegated_run_id": "run-child",
+                    "parent_tool_call_id": "tool-parent",
+                    "role": "build",
+                    "stage": "complete",
+                    "resumable": true,
+                    "resumed_from_run_id": "run-parent",
+                    "child_name": "repair storage",
+                    "capabilities": ["read", "write", "execute"],
+                    "target_scope": [{
+                        "label": "storage",
+                        "path": "crates/krusty-core/src/storage",
+                        "kind": "directory"
+                    }],
+                    "human_review": "Repair complete.",
+                    "artifact": {
+                        "outcome": "success",
+                        "usable_agents": 1,
+                        "files_examined_count": 4,
+                        "findings": "Implemented the atomic transition.",
+                        "next_action_hint": "Integrate and validate."
+                    }
+                },
+                "live": null
+            }
+        })
+        .to_string();
+
+        let history = build_history_tool_result("agent", &output, false);
+        assert_eq!(
+            history.get("summary").and_then(|value| value.as_str()),
+            Some("Agent repair storage complete (run run-child): Repair complete.")
+        );
+        assert!(!history
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .is_some_and(|summary| summary.contains("build agent")));
+        let run = &history["result"]["run"];
+        assert_eq!(run["delegated_run_id"], "run-child");
+        assert_eq!(run["stage"], "complete");
+        assert_eq!(run["resumed_from_run_id"], "run-parent");
+        assert_eq!(run["capabilities"], json!(["read", "write", "execute"]));
+        assert_eq!(run["artifact"]["paths_examined_count"], 4);
+        assert_eq!(
+            run["artifact"]["next_action_hint"],
+            "Integrate and validate."
+        );
+        assert!(!history.to_string().contains("unbounded_nested_payload"));
+    }
+
+    #[test]
     fn retains_bounded_read_content_in_history() {
         let content = "x".repeat(20_000);
         let output = json!({

@@ -2692,6 +2692,102 @@ impl Database {
             delegated_tx.commit()?;
         }
 
+        // Migration 52: one durable descendant may claim a delegated run as
+        // its continuation origin. A separate claim table lets older databases
+        // retain historical duplicate rows while making every new claim
+        // atomic across concurrent SQLite connections.
+        if current_version < 52 {
+            info!("Running migration 52: unique delegated continuation claims");
+            let continuation_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegated continuation migration lock")?;
+            continuation_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS delegated_run_continuations (
+                    resumed_from_run_id TEXT PRIMARY KEY,
+                    delegated_run_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (delegated_run_id) REFERENCES delegated_runs(delegated_run_id)
+                        ON DELETE CASCADE
+                );
+
+                INSERT OR IGNORE INTO delegated_run_continuations (
+                    resumed_from_run_id,
+                    delegated_run_id,
+                    created_at
+                )
+                SELECT resumed_from_run_id, delegated_run_id, created_at
+                  FROM delegated_runs
+                 WHERE resumed_from_run_id IS NOT NULL
+                 ORDER BY created_at ASC, delegated_run_id ASC;
+                "#,
+            )?;
+            continuation_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (52)",
+                [],
+            )?;
+            continuation_tx.commit()?;
+        }
+
+        // Migration 53: persist background parent-wake intent before a child
+        // begins. Terminal artifacts and pending steering are separate durable
+        // writes; this flag lets server startup reconcile the crash window
+        // between them without mistaking foreground delegated runs for work
+        // that promised an autonomous parent continuation.
+        if current_version < 53 {
+            info!("Running migration 53: delegated background wake intent");
+            let wake_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegated wake-intent migration lock")?;
+            if !Self::column_exists(&wake_tx, "delegated_runs", "wake_parent") {
+                wake_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 0 CHECK (wake_parent IN (0, 1))",
+                    [],
+                )?;
+            }
+            wake_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegated_runs_unqueued_wake
+                    ON delegated_runs(wake_parent, stage, completed_at);",
+            )?;
+            wake_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (53)",
+                [],
+            )?;
+            wake_tx.commit()?;
+        }
+
+        // Migration 54: fence server-hosted background Agent execution with a
+        // renewable process-owner lease. New launches persist both fields
+        // before execution. Existing non-terminal rows remain NULL on purpose:
+        // a mixed-version peer may still own them and cannot renew this new
+        // contract, so inventing an expiry during migration would be unsafe.
+        if current_version < 54 {
+            info!("Running migration 54: delegated background host leases");
+            let host_lease_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegated host-lease migration lock")?;
+            if !Self::column_exists(&host_lease_tx, "delegated_runs", "host_owner_id") {
+                host_lease_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN host_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&host_lease_tx, "delegated_runs", "host_lease_expires_at_ms") {
+                host_lease_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN host_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            host_lease_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegated_runs_expired_host_lease
+                    ON delegated_runs(wake_parent, stage, host_lease_expires_at_ms);",
+            )?;
+            host_lease_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (54)",
+                [],
+            )?;
+            host_lease_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }

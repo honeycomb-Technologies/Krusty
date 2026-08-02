@@ -43,6 +43,8 @@ impl From<CoreDelegatedToolKind> for DelegatedToolKind {
 pub enum DelegatedProgressStatus {
     Running,
     Complete,
+    Degraded,
+    Cancelled,
     Failed,
 }
 
@@ -52,6 +54,19 @@ impl From<&AgentProgressStatus> for DelegatedProgressStatus {
             AgentProgressStatus::Running => Self::Running,
             AgentProgressStatus::Complete => Self::Complete,
             AgentProgressStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl DelegatedProgressStatus {
+    pub(crate) fn from_progress(
+        status: &AgentProgressStatus,
+        stage: CoreDelegatedRunStage,
+    ) -> Self {
+        match (status, stage) {
+            (AgentProgressStatus::Failed, CoreDelegatedRunStage::Degraded) => Self::Degraded,
+            (AgentProgressStatus::Failed, CoreDelegatedRunStage::Cancelled) => Self::Cancelled,
+            _ => Self::from(status),
         }
     }
 }
@@ -319,16 +334,17 @@ pub enum AgenticEvent {
 
 impl AgenticEvent {
     pub fn delegated_progress(event: DelegatedProgressEvent) -> Self {
+        let stage = event.stage;
         let progress = event.progress;
         Self::DelegatedProgress {
             delegated_run_id: event.delegated_run_id,
             tool_call_id: event.tool_call_id,
             kind: DelegatedToolKind::from(event.kind),
-            stage: DelegatedRunStage::from(event.stage),
+            stage: DelegatedRunStage::from(stage),
             parent_session_id: event.parent_session_id,
             task_id: progress.task_id,
             agent_name: progress.name,
-            status: DelegatedProgressStatus::from(&progress.status),
+            status: DelegatedProgressStatus::from_progress(&progress.status, stage),
             tool_count: progress.tool_count,
             tokens: progress.tokens,
             current_action: progress.current_action,

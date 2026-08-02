@@ -102,6 +102,7 @@ export interface SessionStateResponse {
 	live_partial_assistant?: PartialAssistantState | null;
 	delegated_tools?: DelegatedToolStateResponse[];
 	recent_delegated_runs?: DelegatedRunResponse[];
+	delegated_run_summaries?: DelegatedRunSummaryResponse[];
 	last_event_sequence?: number | null;
 }
 
@@ -526,7 +527,12 @@ export interface ImageContent {
 // ============================================================================
 
 export type DelegatedToolKind = "explore" | "plan" | "verify" | "build";
-export type DelegatedProgressStatus = "running" | "complete" | "failed";
+export type DelegatedProgressStatus =
+	| "running"
+	| "complete"
+	| "degraded"
+	| "cancelled"
+	| "failed";
 export type DelegatedRunStage =
 	| "created"
 	| "running"
@@ -557,7 +563,17 @@ export interface DelegatedProgressEvent {
 export interface DelegatedAgentState {
 	taskId: string;
 	name: string;
-	status: "pending" | "running" | "complete" | "failed";
+	status:
+		| "pending"
+		| "running"
+		| "complete"
+		| "degraded"
+		| "cancelled"
+		| "failed";
+	success?: boolean;
+	usableEvidence?: boolean;
+	degradedSuccess?: boolean;
+	termination?: string;
 	outcomeReason?: string;
 	toolCount: number;
 	tokens: number;
@@ -578,7 +594,7 @@ export interface DelegatedArtifactState {
 	message?: string;
 	investigationSummary?: string;
 	humanReview?: string;
-	outcome?: "success" | "partial" | "failed";
+	outcome?: "success" | "partial" | "failed" | "cancelled";
 	confidence?: "high" | "medium" | "low";
 	structuralCoverage?: "high" | "medium" | "low";
 	semanticCoverage?: "high" | "medium" | "low";
@@ -588,6 +604,7 @@ export interface DelegatedArtifactState {
 	agentCount?: number;
 	usableAgents?: number;
 	degradedAgents?: number;
+	cancelledAgents?: number;
 	successfulAgents?: number;
 	failedAgents?: number;
 	filesExaminedCount?: number;
@@ -648,6 +665,16 @@ export interface DelegatedRunResponse {
 	target_scope: DelegatedRunScopeResponse[];
 	human_review?: string | null;
 	artifact?: Record<string, unknown> | null;
+	updated_at: string;
+}
+
+export interface DelegatedRunSummaryResponse {
+	delegated_run_id: string;
+	parent_tool_call_id: string;
+	kind: DelegatedToolKind;
+	stage: DelegatedRunStage;
+	child_name?: string | null;
+	capabilities?: Array<"read" | "write" | "execute">;
 	updated_at: string;
 }
 

@@ -62,18 +62,32 @@ fn summarize_agent(parsed: &Value, is_error: bool) -> String {
     }
 
     let payload = tool_payload(parsed);
-    let agent_type = payload
-        .get("agent_type")
+    let run = payload.get("run").filter(|value| value.is_object());
+    let child_name = payload
+        .get("child_name")
         .and_then(Value::as_str)
-        .unwrap_or("delegated");
+        .or_else(|| {
+            run.and_then(|run| run.get("child_name"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("name").and_then(Value::as_str))
+        .or_else(|| run.and_then(|run| run.get("name")).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("child");
     let status = payload
         .get("status")
         .and_then(Value::as_str)
         .or_else(|| payload.get("outcome").and_then(Value::as_str))
+        .or_else(|| run.and_then(|run| run.get("stage")).and_then(Value::as_str))
         .unwrap_or("completed");
     let run_id = payload
         .get("delegated_run_id")
         .and_then(Value::as_str)
+        .or_else(|| {
+            run.and_then(|run| run.get("delegated_run_id"))
+                .and_then(Value::as_str)
+        })
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(" (run {value})"))
         .unwrap_or_default();
@@ -81,17 +95,48 @@ fn summarize_agent(parsed: &Value, is_error: bool) -> String {
         .get("investigation_summary")
         .or_else(|| payload.get("findings"))
         .or_else(|| payload.get("message"))
+        .or_else(|| run.and_then(|run| run.get("human_review")))
+        .or_else(|| {
+            run.and_then(|run| run.get("artifact"))
+                .and_then(|artifact| artifact.get("findings"))
+        })
         .and_then(Value::as_str)
         .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS))
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(": {value}"))
         .unwrap_or_default();
 
-    format!("{agent_type} agent {status}{run_id}{detail}")
+    format!("Agent {child_name} {status}{run_id}{detail}")
 }
 
 fn summarize_agent_result(parsed: &Value) -> Value {
     let payload = tool_payload(parsed);
+    let mut summarized = summarize_agent_payload(payload);
+    let Some(object) = summarized.as_object_mut() else {
+        return summarized;
+    };
+
+    if let Some(run) = payload.get("run").filter(|value| value.is_object()) {
+        object.insert("run".to_string(), summarize_delegated_run(run));
+    }
+    if let Some(runs) = payload.get("runs").and_then(Value::as_array) {
+        object.insert(
+            "runs".to_string(),
+            Value::Array(
+                runs.iter()
+                    .take(MAX_LIST_ITEMS)
+                    .map(summarize_delegated_run)
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(live) = payload.get("live") {
+        object.insert("live".to_string(), summarize_live_agent_state(live));
+    }
+    summarized
+}
+
+fn summarize_agent_payload(payload: &Value) -> Value {
     let paths = payload
         .get("paths_examined")
         .or_else(|| payload.get("files_examined"))
@@ -133,12 +178,22 @@ fn summarize_agent_result(parsed: &Value) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let examined_count = payload
+        .get("paths_examined_count")
+        .or_else(|| payload.get("files_examined_count"))
+        .and_then(Value::as_u64);
 
     json!({
         "status": payload.get("status").and_then(Value::as_str),
+        "stage": payload.get("stage").and_then(Value::as_str),
+        "terminal": payload.get("terminal").and_then(Value::as_bool),
+        "timed_out": payload.get("timed_out").and_then(Value::as_bool),
         "delegated_run_id": payload.get("delegated_run_id").and_then(Value::as_str),
+        "resumed_from_run_id": payload.get("resumed_from_run_id").and_then(Value::as_str),
         "agent_type": payload.get("agent_type").and_then(Value::as_str),
         "name": payload.get("name").and_then(Value::as_str),
+        "child_name": payload.get("child_name").and_then(Value::as_str),
+        "success": payload.get("success").and_then(Value::as_bool),
         "message": payload
             .get("message")
             .and_then(Value::as_str)
@@ -158,16 +213,29 @@ fn summarize_agent_result(parsed: &Value) -> Value {
         "outcome": payload.get("outcome").and_then(Value::as_str),
         "outcome_reason": payload.get("outcome_reason").and_then(Value::as_str),
         "confidence": payload.get("confidence").and_then(Value::as_str),
+        "human_review": payload
+            .get("human_review")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8_head_tail(
+                value,
+                MAX_AGENT_FINDINGS_HEAD_CHARS,
+                MAX_AGENT_FINDINGS_TAIL_CHARS,
+            )),
+        "next_action_hint": payload
+            .get("next_action_hint")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
         "paths_examined": paths,
-        "paths_examined_count": payload
-            .get("paths_examined_count")
-            .or_else(|| payload.get("files_examined_count"))
-            .and_then(Value::as_u64),
+        "paths_examined_count": examined_count,
         "agent_count": payload
             .get("agent_count")
             .or_else(|| payload.get("builder_count"))
             .and_then(Value::as_u64),
         "successful_agents": payload.get("successful_agents").and_then(Value::as_u64),
+        "usable_agents": payload
+            .get("usable_agents")
+            .or_else(|| payload.get("successful_agents"))
+            .and_then(Value::as_u64),
         "failed_agents": payload.get("failed_agents").and_then(Value::as_u64),
         "files_modified": payload.get("files_modified").and_then(Value::as_u64),
         "lines_added": payload.get("lines_added").and_then(Value::as_u64),
@@ -179,6 +247,85 @@ fn summarize_agent_result(parsed: &Value) -> Value {
             .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
         "background_processes": background_processes,
     })
+}
+
+fn summarize_delegated_run(run: &Value) -> Value {
+    let target_scope = run
+        .get("target_scope")
+        .and_then(Value::as_array)
+        .map(|scopes| {
+            scopes
+                .iter()
+                .take(MAX_LIST_ITEMS)
+                .map(|scope| {
+                    json!({
+                        "label": scope
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+                        "path": scope
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_PATH_CHARS)),
+                        "kind": scope.get("kind").and_then(Value::as_str),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let capabilities = run
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|items| truncate_array_strings(items, 3, 16))
+        .unwrap_or_default();
+
+    json!({
+        "delegated_run_id": run.get("delegated_run_id").and_then(Value::as_str),
+        "parent_tool_call_id": run.get("parent_tool_call_id").and_then(Value::as_str),
+        "role": run.get("role").and_then(Value::as_str),
+        "kind": run.get("kind").and_then(Value::as_str),
+        "stage": run.get("stage").and_then(Value::as_str),
+        "resumable": run.get("resumable").and_then(Value::as_bool),
+        "resumed_from_run_id": run.get("resumed_from_run_id").and_then(Value::as_str),
+        "child_name": run.get("child_name").and_then(Value::as_str),
+        "capabilities": capabilities,
+        "target_scope": target_scope,
+        "human_review": run
+            .get("human_review")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8_head_tail(
+                value,
+                MAX_AGENT_FINDINGS_HEAD_CHARS,
+                MAX_AGENT_FINDINGS_TAIL_CHARS,
+            )),
+        "artifact": run.get("artifact").map(summarize_agent_payload),
+    })
+}
+
+fn summarize_live_agent_state(live: &Value) -> Value {
+    match live {
+        Value::Array(entries) => Value::Array(
+            entries
+                .iter()
+                .take(MAX_LIST_ITEMS)
+                .map(|entry| {
+                    json!({
+                        "delegated_run_id": entry
+                            .get("delegated_run_id")
+                            .and_then(Value::as_str),
+                        "task_name": entry.get("task_name").and_then(Value::as_str),
+                        "status": entry.get("status").and_then(Value::as_str),
+                    })
+                })
+                .collect(),
+        ),
+        Value::Object(_) => json!({
+            "delegated_run_id": live.get("delegated_run_id").and_then(Value::as_str),
+            "task_name": live.get("task_name").and_then(Value::as_str),
+            "status": live.get("status").and_then(Value::as_str),
+        }),
+        _ => Value::Null,
+    }
 }
 
 fn summarize_read(parsed: &Value, is_error: bool) -> String {

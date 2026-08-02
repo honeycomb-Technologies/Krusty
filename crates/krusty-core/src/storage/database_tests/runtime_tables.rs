@@ -71,6 +71,16 @@ fn test_delegated_runs_table_exists() {
     assert!(columns.contains(&"target_scope_json".to_string()));
     assert!(columns.contains(&"snapshot_json".to_string()));
     assert!(columns.contains(&"artifact_json".to_string()));
+
+    let continuation_table: String = conn
+        .query_row(
+            "SELECT name FROM sqlite_master
+              WHERE type = 'table' AND name = 'delegated_run_continuations'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("delegated continuation claim table should exist");
+    assert_eq!(continuation_table, "delegated_run_continuations");
 }
 
 #[test]

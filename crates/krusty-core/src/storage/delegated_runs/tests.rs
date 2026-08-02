@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rusqlite::params;
+use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
 use super::*;
@@ -92,6 +93,7 @@ fn round_trip_persisted_delegated_run() {
         .expect("get run")
         .expect("record exists");
     assert_eq!(record.stage, DelegatedRunStage::Complete);
+    assert!(!record.wake_parent);
     assert_eq!(record.role, DelegatedRunRole::Explore);
     assert!(record.resumable);
     assert_eq!(record.target_scope.len(), 1);
@@ -106,11 +108,11 @@ fn round_trip_persisted_delegated_run() {
 }
 
 #[test]
-fn round_trip_preserves_name_and_execute_only_contract() {
+fn background_round_trip_preserves_name_capabilities_and_wake_intent() {
     let (store, _tmp) = create_store();
     let capabilities = [AgentCapability::Execute].into_iter().collect();
     store
-        .create_run_with_child_contract(
+        .create_background_run_with_child_contract(
             &DelegatedRunStartInput {
                 delegated_run_id: "run-execute-only".to_string(),
                 parent_session_id: "session-1".to_string(),
@@ -132,9 +134,200 @@ fn round_trip_preserves_name_and_execute_only_contract() {
         .get_run("run-execute-only")
         .expect("get run")
         .expect("record exists");
+    assert_eq!(record.stage, DelegatedRunStage::Created);
     assert_eq!(record.child_name.as_deref(), Some("focused validation"));
     assert_eq!(record.capabilities, capabilities);
     assert_eq!(record.effective_capabilities(), capabilities);
+    assert!(record.wake_parent);
+}
+
+#[test]
+fn second_continuation_returns_the_existing_durable_descendant() {
+    let (store, _tmp) = create_store();
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "origin".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-origin".to_string()),
+            role: DelegatedRunRole::Explore,
+            stage: DelegatedRunStage::Complete,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("project", ".", "project")],
+        })
+        .expect("create origin");
+    let first = DelegatedRunStartInput {
+        delegated_run_id: "continuation-1".to_string(),
+        parent_session_id: "session-1".to_string(),
+        parent_tool_call_id: Some("tool-continuation-1".to_string()),
+        role: DelegatedRunRole::Explore,
+        stage: DelegatedRunStage::Created,
+        provider: None,
+        model: None,
+        resumable: true,
+        resumed_from_run_id: Some("origin".to_string()),
+        target_scope: vec![scope("project", ".", "project")],
+    };
+    assert_eq!(
+        store.create_run(&first).expect("create first continuation"),
+        DelegatedRunCreateOutcome::Created
+    );
+
+    let second = DelegatedRunStartInput {
+        delegated_run_id: "continuation-2".to_string(),
+        parent_tool_call_id: Some("tool-continuation-2".to_string()),
+        ..first
+    };
+    assert_eq!(
+        store
+            .create_run(&second)
+            .expect("duplicate continuation should resolve"),
+        DelegatedRunCreateOutcome::ExistingContinuation {
+            delegated_run_id: "continuation-1".to_string(),
+            resumed_from_run_id: "origin".to_string(),
+        }
+    );
+    assert!(store
+        .get_run("continuation-2")
+        .expect("load rejected continuation")
+        .is_none());
+}
+
+#[test]
+fn concurrent_continuation_creation_launches_exactly_one_descendant() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "concurrent-origin".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-origin".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Complete,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("project", ".", "project")],
+        })
+        .expect("create origin");
+
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for index in 0..2 {
+        let db_path = db_path.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let store = DelegatedRunStore::new(Database::new(&db_path).expect("continuation db"));
+            barrier.wait();
+            store.create_run(&DelegatedRunStartInput {
+                delegated_run_id: format!("concurrent-child-{index}"),
+                parent_session_id: "session-1".to_string(),
+                parent_tool_call_id: Some(format!("tool-child-{index}")),
+                role: DelegatedRunRole::Build,
+                stage: DelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: Some("concurrent-origin".to_string()),
+                target_scope: vec![scope("project", ".", "project")],
+            })
+        }));
+    }
+    barrier.wait();
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| {
+            handle
+                .join()
+                .expect("continuation thread")
+                .expect("continuation result")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, DelegatedRunCreateOutcome::Created))
+            .count(),
+        1
+    );
+    let winner = outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            DelegatedRunCreateOutcome::ExistingContinuation {
+                delegated_run_id, ..
+            } => Some(delegated_run_id.as_str()),
+            DelegatedRunCreateOutcome::Created => None,
+        })
+        .expect("one caller should observe the winner");
+    let descendants = store
+        .list_runs_for_session("session-1", 10)
+        .expect("list descendants")
+        .into_iter()
+        .filter(|run| run.resumed_from_run_id.as_deref() == Some("concurrent-origin"))
+        .collect::<Vec<_>>();
+    assert_eq!(descendants.len(), 1);
+    assert_eq!(descendants[0].delegated_run_id, winner);
+}
+
+#[test]
+fn hydration_summaries_keep_only_the_newest_run_per_parent_tool() {
+    let (store, _tmp) = create_store();
+    for (run_id, tool_call_id, role) in [
+        ("run-old", "tool-shared", DelegatedRunRole::Explore),
+        ("run-new", "tool-shared", DelegatedRunRole::Build),
+        ("run-other", "tool-other", DelegatedRunRole::Verifier),
+    ] {
+        store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: run_id.to_string(),
+                parent_session_id: "session-1".to_string(),
+                parent_tool_call_id: Some(tool_call_id.to_string()),
+                role,
+                stage: DelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![scope("project", ".", "project")],
+            })
+            .expect("create hydration run");
+    }
+    store
+        .db
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET updated_at = CASE delegated_run_id
+                WHEN 'run-old' THEN '2026-01-01T00:00:00Z'
+                WHEN 'run-new' THEN '2026-01-03T00:00:00Z'
+                ELSE '2026-01-02T00:00:00Z' END",
+            [],
+        )
+        .expect("order hydration runs");
+
+    let summaries = store
+        .list_run_summaries_for_session("session-1", 10)
+        .expect("list hydration summaries");
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].delegated_run_id, "run-new");
+    assert_eq!(summaries[0].parent_tool_call_id, "tool-shared");
+    assert_eq!(summaries[0].role, DelegatedRunRole::Build);
+    assert_eq!(
+        summaries[0].effective_capabilities(),
+        [
+            AgentCapability::Read,
+            AgentCapability::Write,
+            AgentCapability::Execute,
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(summaries
+        .iter()
+        .all(|summary| summary.delegated_run_id != "run-old"));
 }
 
 #[test]
@@ -290,4 +483,599 @@ fn cancelled_run_cannot_be_overwritten_by_late_child_finalization() {
         .expect("record");
     assert_eq!(record.stage, DelegatedRunStage::Cancelled);
     assert_eq!(record.artifact.unwrap()["outcome"], "cancelled");
+}
+
+#[test]
+fn late_progress_snapshot_cannot_reopen_a_terminal_run() {
+    let (store, _temp) = create_store();
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-terminal-snapshot".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-terminal-snapshot".to_string()),
+            role: DelegatedRunRole::Explore,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+    store
+        .finalize_run(
+            "run-terminal-snapshot",
+            DelegatedRunStage::Complete,
+            &serde_json::json!({"outcome": "success"}),
+            Some("complete"),
+            true,
+        )
+        .expect("terminal result should persist");
+
+    store
+        .update_snapshot(
+            "run-terminal-snapshot",
+            DelegatedRunStage::Running,
+            &DelegatedRunSnapshot {
+                stage: DelegatedRunStage::Running,
+                agents: Vec::new(),
+            },
+        )
+        .expect("stale progress should be a harmless terminal loser");
+
+    let record = store
+        .get_run("run-terminal-snapshot")
+        .expect("read run")
+        .expect("run exists");
+    assert_eq!(record.stage, DelegatedRunStage::Complete);
+    assert_eq!(
+        record.artifact,
+        Some(serde_json::json!({"outcome": "success"}))
+    );
+}
+
+#[test]
+fn concurrent_terminal_writers_preserve_the_first_durable_winner() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+
+    for index in 0..12 {
+        let run_id = format!("run-race-{index}");
+        store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: run_id.clone(),
+                parent_session_id: "session-1".to_string(),
+                parent_tool_call_id: Some(format!("tool-{index}")),
+                role: DelegatedRunRole::Build,
+                stage: DelegatedRunStage::Running,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![scope("main", ".", "project")],
+            })
+            .expect("create raced run");
+
+        let barrier = Arc::new(Barrier::new(3));
+        let completion_path = db_path.clone();
+        let completion_id = run_id.clone();
+        let completion_barrier = Arc::clone(&barrier);
+        let completion = std::thread::spawn(move || {
+            let store = DelegatedRunStore::new(
+                Database::new(&completion_path).expect("completion database"),
+            );
+            completion_barrier.wait();
+            store.finalize_run(
+                &completion_id,
+                DelegatedRunStage::Complete,
+                &serde_json::json!({"outcome": "complete"}),
+                Some("child completed"),
+                true,
+            )
+        });
+
+        let cancel_path = db_path.clone();
+        let cancel_id = run_id.clone();
+        let cancel_barrier = Arc::clone(&barrier);
+        let cancel = std::thread::spawn(move || {
+            let store =
+                DelegatedRunStore::new(Database::new(&cancel_path).expect("cancel database"));
+            cancel_barrier.wait();
+            store.finalize_run(
+                &cancel_id,
+                DelegatedRunStage::Cancelled,
+                &serde_json::json!({"outcome": "cancelled"}),
+                Some("parent interrupt"),
+                true,
+            )
+        });
+
+        barrier.wait();
+        completion
+            .join()
+            .expect("completion thread")
+            .expect("completion finalization");
+        cancel
+            .join()
+            .expect("cancel thread")
+            .expect("cancel finalization");
+
+        let record = store
+            .get_run(&run_id)
+            .expect("load raced run")
+            .expect("raced run exists");
+        let artifact = record.artifact.expect("winning artifact");
+        match record.stage {
+            DelegatedRunStage::Complete => {
+                assert_eq!(artifact["outcome"], "complete");
+                assert_eq!(record.human_review.as_deref(), Some("child completed"));
+            }
+            DelegatedRunStage::Cancelled => {
+                assert_eq!(artifact["outcome"], "cancelled");
+                assert_eq!(record.human_review.as_deref(), Some("parent interrupt"));
+            }
+            stage => panic!("unexpected terminal winner: {stage:?}"),
+        }
+        assert!(record.completed_at.is_some());
+    }
+}
+
+#[test]
+fn completed_run_cannot_be_overwritten_by_late_interrupt() {
+    let (store, _tmp) = create_store();
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-complete".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-complete".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+
+    store
+        .finalize_run(
+            "run-complete",
+            DelegatedRunStage::Complete,
+            &serde_json::json!({"outcome": "complete"}),
+            Some("child completed"),
+            true,
+        )
+        .expect("complete run");
+    store
+        .finalize_run(
+            "run-complete",
+            DelegatedRunStage::Cancelled,
+            &serde_json::json!({"outcome": "cancelled"}),
+            Some("late parent interrupt"),
+            true,
+        )
+        .expect("late interrupt observes terminal winner");
+
+    let record = store
+        .get_run("run-complete")
+        .expect("load run")
+        .expect("record");
+    assert_eq!(record.stage, DelegatedRunStage::Complete);
+    assert_eq!(record.artifact.unwrap()["outcome"], "complete");
+    assert_eq!(record.human_review.as_deref(), Some("child completed"));
+}
+
+#[test]
+fn finalizing_unknown_run_is_an_error() {
+    let (store, _tmp) = create_store();
+    let error = store
+        .finalize_run(
+            "missing-run",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"outcome": "failed"}),
+            Some("missing"),
+            false,
+        )
+        .expect_err("unknown run must not look finalized");
+    assert!(error.to_string().contains("does not exist"));
+}
+
+#[test]
+fn dropping_armed_lease_cancels_nonterminal_run() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+    let mut lease = DelegatedRunLease::new(store);
+    lease
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-abandoned".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-abandoned".to_string()),
+            role: DelegatedRunRole::Explore,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+    drop(lease);
+
+    let store = DelegatedRunStore::new(Database::new(&db_path).expect("reopen database"));
+    let record = store
+        .get_run("run-abandoned")
+        .expect("load abandoned run")
+        .expect("abandoned run exists");
+    assert_eq!(record.stage, DelegatedRunStage::Cancelled);
+    assert!(record.resumable);
+    assert_eq!(
+        record.artifact.as_ref().unwrap()["outcome_reason"],
+        "caller_aborted_before_terminal"
+    );
+    assert_eq!(record.artifact.as_ref().unwrap()["quiescent"], false);
+    assert_eq!(
+        record.artifact.as_ref().unwrap()["side_effects_may_have_occurred"],
+        true
+    );
+    assert!(record.completed_at.is_some());
+}
+
+#[test]
+fn disarmed_lease_preserves_authoritative_completion() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+    let mut lease = DelegatedRunLease::new(store);
+    lease
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-disarmed".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-disarmed".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+    lease
+        .finalize_run(
+            "run-disarmed",
+            DelegatedRunStage::Complete,
+            &serde_json::json!({"outcome": "complete"}),
+            Some("child completed"),
+            true,
+        )
+        .expect("finalize run");
+    assert!(lease.disarm("run-disarmed"));
+
+    drop(lease);
+
+    let store = DelegatedRunStore::new(Database::new(&db_path).expect("reopen database"));
+    let record = store
+        .get_run("run-disarmed")
+        .expect("load completed run")
+        .expect("completed run exists");
+    assert_eq!(record.stage, DelegatedRunStage::Complete);
+    assert_eq!(record.artifact.unwrap()["outcome"], "complete");
+}
+
+#[test]
+fn armed_lease_cannot_overwrite_terminal_winner() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+    let mut lease = DelegatedRunLease::new(store);
+    lease
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-terminal-winner".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-terminal-winner".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+    lease
+        .finalize_run(
+            "run-terminal-winner",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"outcome": "failed", "outcome_reason": "provider_error"}),
+            Some("provider failed"),
+            true,
+        )
+        .expect("finalize run");
+
+    // Intentionally leave the lease armed. Its Drop finalizer must observe,
+    // rather than overwrite, the first terminal writer.
+    drop(lease);
+
+    let store = DelegatedRunStore::new(Database::new(&db_path).expect("reopen database"));
+    let record = store
+        .get_run("run-terminal-winner")
+        .expect("load terminal winner")
+        .expect("terminal winner exists");
+    assert_eq!(record.stage, DelegatedRunStage::Failed);
+    assert_eq!(record.artifact.unwrap()["outcome_reason"], "provider_error");
+    assert_eq!(record.human_review.as_deref(), Some("provider failed"));
+}
+
+#[test]
+fn wake_scan_includes_background_completion_and_abnormal_drop_only() {
+    let (store, temp) = create_store();
+    let background = DelegatedRunStartInput {
+        delegated_run_id: "background-failed".to_string(),
+        parent_session_id: "session-1".to_string(),
+        parent_tool_call_id: Some("tool-background".to_string()),
+        role: DelegatedRunRole::Explore,
+        stage: DelegatedRunStage::Running,
+        provider: None,
+        model: None,
+        resumable: true,
+        resumed_from_run_id: None,
+        target_scope: vec![scope(
+            "workspace",
+            temp.path().to_string_lossy().as_ref(),
+            "workspace",
+        )],
+    };
+    store
+        .create_background_run(&background)
+        .expect("create background run");
+    store
+        .finalize_run(
+            "background-failed",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"outcome": "failed"}),
+            Some("background failed"),
+            true,
+        )
+        .expect("finalize background run");
+
+    let mut explicit_cancel = background.clone();
+    explicit_cancel.delegated_run_id = "background-explicit-cancel".to_string();
+    store
+        .create_background_run(&explicit_cancel)
+        .expect("create explicit cancellation fixture");
+    store
+        .finalize_run(
+            "background-explicit-cancel",
+            DelegatedRunStage::Cancelled,
+            &serde_json::json!({"outcome": "cancelled", "outcome_reason": "cancelled"}),
+            Some("cancelled by user"),
+            true,
+        )
+        .expect("finalize explicit cancellation");
+
+    let mut foreground = background.clone();
+    foreground.delegated_run_id = "foreground-failed".to_string();
+    store
+        .create_run(&foreground)
+        .expect("create foreground run");
+    store
+        .finalize_run(
+            "foreground-failed",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"outcome": "failed"}),
+            Some("foreground failed"),
+            true,
+        )
+        .expect("finalize foreground run");
+
+    let db_path = temp.path().join("delegated-runs.db");
+    let mut lease = DelegatedRunLease::new(store);
+    let mut abnormal = background;
+    abnormal.delegated_run_id = "background-abnormal".to_string();
+    lease
+        .create_background_run(&abnormal)
+        .expect("create abnormal fixture");
+    drop(lease);
+
+    let store = DelegatedRunStore::new(Database::new(&db_path).expect("reopen database"));
+    let wake_ids = store
+        .list_unqueued_parent_wakes()
+        .expect("list wakeable completions")
+        .into_iter()
+        .map(|record| record.delegated_run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wake_ids,
+        vec![
+            "background-failed".to_string(),
+            "background-abnormal".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn expired_background_host_lease_terminalizes_once_and_wakes_parent() {
+    let (store, temp) = create_store();
+    let run = DelegatedRunStartInput {
+        delegated_run_id: "expired-host".to_string(),
+        parent_session_id: "session-1".to_string(),
+        parent_tool_call_id: Some("tool-expired-host".to_string()),
+        role: DelegatedRunRole::Build,
+        stage: DelegatedRunStage::Running,
+        provider: None,
+        model: None,
+        resumable: true,
+        resumed_from_run_id: None,
+        target_scope: vec![scope(
+            "workspace",
+            temp.path().to_string_lossy().as_ref(),
+            "workspace",
+        )],
+    };
+    store
+        .create_background_run(&run)
+        .expect("create leased background run");
+    let (owner, initial_expiry): (Option<String>, Option<i64>) = store
+        .db
+        .conn()
+        .query_row(
+            "SELECT host_owner_id, host_lease_expires_at_ms FROM delegated_runs WHERE delegated_run_id = ?1",
+            params![run.delegated_run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read host lease");
+    assert!(owner.is_some());
+    assert!(initial_expiry.is_some_and(|expiry| expiry > Utc::now().timestamp_millis()));
+
+    store
+        .db
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET host_lease_expires_at_ms = ?2 WHERE delegated_run_id = ?1",
+            params![run.delegated_run_id, Utc::now().timestamp_millis() - 5_000],
+        )
+        .expect("expire host lease");
+    assert_eq!(
+        store
+            .expire_stale_background_host_leases()
+            .expect("recover expired host lease"),
+        vec!["expired-host".to_string()]
+    );
+    assert!(store
+        .expire_stale_background_host_leases()
+        .expect("repeat recovery is idempotent")
+        .is_empty());
+
+    let record = store
+        .get_run("expired-host")
+        .expect("load recovered run")
+        .expect("recovered run exists");
+    assert_eq!(record.stage, DelegatedRunStage::Cancelled);
+    assert_eq!(
+        record.artifact.as_ref().unwrap()["outcome_reason"],
+        "background_host_lease_expired"
+    );
+    assert!(record.should_wake_parent());
+}
+
+#[test]
+fn fresh_or_legacy_unowned_background_rows_are_never_stolen() {
+    let (store, temp) = create_store();
+    let run = DelegatedRunStartInput {
+        delegated_run_id: "fresh-host".to_string(),
+        parent_session_id: "session-1".to_string(),
+        parent_tool_call_id: None,
+        role: DelegatedRunRole::Explore,
+        stage: DelegatedRunStage::Running,
+        provider: None,
+        model: None,
+        resumable: true,
+        resumed_from_run_id: None,
+        target_scope: vec![scope(
+            "workspace",
+            temp.path().to_string_lossy().as_ref(),
+            "workspace",
+        )],
+    };
+    store
+        .create_background_run(&run)
+        .expect("create fresh leased run");
+    let mut legacy = run;
+    legacy.delegated_run_id = "legacy-unowned".to_string();
+    store
+        .create_background_run(&legacy)
+        .expect("create legacy fixture");
+    store
+        .db
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET host_owner_id = NULL, host_lease_expires_at_ms = NULL WHERE delegated_run_id = ?1",
+            params![legacy.delegated_run_id],
+        )
+        .expect("simulate migration-era unowned row");
+
+    assert!(store
+        .expire_stale_background_host_leases()
+        .expect("scan active and legacy rows")
+        .is_empty());
+    assert_eq!(
+        store.get_run("fresh-host").unwrap().unwrap().stage,
+        DelegatedRunStage::Running
+    );
+    assert_eq!(
+        store.get_run("legacy-unowned").unwrap().unwrap().stage,
+        DelegatedRunStage::Running
+    );
+}
+
+#[test]
+fn expired_owner_cannot_publish_completion_or_drop_overwrite_recovery() {
+    let (store, temp) = create_store();
+    let db_path = temp.path().join("delegated-runs.db");
+    let mut lease = DelegatedRunLease::new(store);
+    lease
+        .create_background_run(&DelegatedRunStartInput {
+            delegated_run_id: "expired-owner-writer".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-expired-owner".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope(
+                "workspace",
+                temp.path().to_string_lossy().as_ref(),
+                "workspace",
+            )],
+        })
+        .expect("create leased run");
+    lease
+        .db
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET host_lease_expires_at_ms = 0 WHERE delegated_run_id = 'expired-owner-writer'",
+            [],
+        )
+        .expect("expire owner lease");
+
+    let stale_completion = serde_json::json!({"outcome": "success"});
+    let error = lease
+        .finalize_background_run(
+            "expired-owner-writer",
+            DelegatedRunStage::Complete,
+            &stale_completion,
+            Some("stale success"),
+            true,
+        )
+        .expect_err("expired owner must not publish completion");
+    assert!(error.to_string().contains("lost its background host lease"));
+    assert_eq!(
+        lease
+            .get_run("expired-owner-writer")
+            .unwrap()
+            .unwrap()
+            .stage,
+        DelegatedRunStage::Running
+    );
+
+    assert_eq!(
+        lease
+            .expire_stale_background_host_leases()
+            .expect("recovery should win terminal CAS"),
+        vec!["expired-owner-writer".to_string()]
+    );
+    // The armed lease's Drop fallback is owner-fenced and must observe rather
+    // than overwrite the recovery terminal artifact.
+    drop(lease);
+
+    let record = DelegatedRunStore::new(Database::new(&db_path).expect("reopen database"))
+        .get_run("expired-owner-writer")
+        .expect("load recovered row")
+        .expect("recovered row exists");
+    assert_eq!(record.stage, DelegatedRunStage::Cancelled);
+    assert_eq!(
+        record.artifact.as_ref().unwrap()["outcome_reason"],
+        "background_host_lease_expired"
+    );
 }

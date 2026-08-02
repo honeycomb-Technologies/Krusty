@@ -7,7 +7,8 @@ mod store;
 mod tests;
 
 pub use model::{
-    normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunRecord, DelegatedRunRole,
-    DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput,
+    normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunCreateOutcome, DelegatedRunRecord,
+    DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput,
+    DelegatedRunSummary,
 };
-pub use store::DelegatedRunStore;
+pub use store::{DelegatedRunLease, DelegatedRunStore};

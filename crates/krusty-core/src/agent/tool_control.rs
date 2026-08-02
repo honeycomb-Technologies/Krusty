@@ -560,6 +560,23 @@ mod tests {
             RetryDirective::Stop
         );
         assert_eq!(
+            control.retry_directive(&agent_call("explore"), &timeout, 0),
+            RetryDirective::Stop,
+            "a timed-out Agent spawn must not create a second durable run"
+        );
+        let agent_status = AiToolCall {
+            id: "call_agent_status".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"action": "status", "delegated_run_id": "run-1"}),
+        };
+        assert_eq!(
+            control.retry_directive(&agent_status, &timeout, 0),
+            RetryDirective::RetryOnce {
+                reason: "read-only tool timed out"
+            },
+            "read-only lifecycle inspection remains safe to retry"
+        );
+        assert_eq!(
             control.retry_directive(&read_call(), &denied, 0),
             RetryDirective::Stop
         );

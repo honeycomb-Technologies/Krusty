@@ -483,8 +483,14 @@ export class KrustyClient {
 		await this.request(`/sessions/${id}`, { method: "DELETE" });
 	}
 
-	async getSessionState(id: string): Promise<SessionStateResponse> {
-		return this.request(`/sessions/${id}/state`);
+	async getSessionState(
+		id: string,
+		options?: { includeDelegatedHistory?: boolean },
+	): Promise<SessionStateResponse> {
+		const query = options?.includeDelegatedHistory
+			? "?include_delegated_history=true"
+			: "";
+		return this.request(`/sessions/${id}/state${query}`);
 	}
 
 	async getWorkflow(id: string): Promise<WorkflowSnapshot | null> {

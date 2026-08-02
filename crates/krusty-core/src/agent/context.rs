@@ -226,7 +226,11 @@ pub fn inject_context_with_mako_profile(
     let delegation_mode = project_settings.delegation_mode.unwrap_or(if is_mako {
         DelegationMode::Proactive
     } else {
-        DelegationMode::Balanced
+        // Code mode is the coordinating parent by product contract. The
+        // Orchestrator prompt still keeps simple and tightly-coupled work in
+        // the parent, while making substantial decomposable work delegate
+        // early instead of relying on a weak best-effort suggestion.
+        DelegationMode::Orchestrator
     });
     injected.push(ModelMessage {
         role: Role::System,

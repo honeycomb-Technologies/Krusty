@@ -36,7 +36,9 @@ use self::session::{
     setup_chat_session_with_guard, ChatSessionContext, RequestedModel,
 };
 #[cfg(test)]
-use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
+use self::stream::{
+    forward_loop_event, run_delegated_progress_bridge, run_orchestrator_event_bridge,
+};
 use self::stream::{start_orchestrator_detached, start_orchestrator_sse};
 use self::tools::{restrict_tools_to_allowlist, should_suppress_code_tools};
 use super::session_access::{current_user_id, load_owned_session};

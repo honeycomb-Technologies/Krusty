@@ -1,6 +1,8 @@
 import type {
   DelegatedProgressEvent,
   DelegatedRunResponse,
+  DelegatedRunSummaryResponse,
+  DelegatedRunStage,
   DelegatedToolKind,
   DelegatedToolStateResponse,
 } from '@krusty/api';
@@ -22,6 +24,73 @@ type ParsedToolEnvelope = {
 
 function isDelegatedKind(value: unknown): value is DelegatedToolKind {
   return value === 'explore' || value === 'plan' || value === 'verify' || value === 'build';
+}
+
+function delegatedOutcomeForStage(
+  stage: DelegatedRunStage | undefined,
+): DelegatedArtifactState['outcome'] {
+  switch (stage) {
+    case 'complete':
+      return 'success';
+    case 'degraded':
+      return 'partial';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return undefined;
+  }
+}
+
+function isTerminalDelegatedStage(
+  stage: DelegatedRunStage | undefined,
+): stage is Extract<
+  DelegatedRunStage,
+  'complete' | 'degraded' | 'failed' | 'cancelled'
+> {
+  return stage === 'complete'
+    || stage === 'degraded'
+    || stage === 'failed'
+    || stage === 'cancelled';
+}
+
+function toolCallStatusForDelegatedStage(
+  stage: DelegatedRunStage | undefined,
+  current: ToolCall['status'],
+): ToolCall['status'] {
+  switch (stage) {
+    case 'created':
+    case 'running':
+    case 'synthesizing':
+      return 'running';
+    case 'complete':
+      return 'success';
+    case 'degraded':
+      return 'partial';
+    case 'failed':
+    case 'cancelled':
+      return 'error';
+    default:
+      return current;
+  }
+}
+
+function delegatedAgentStatus(record: Record<string, unknown>): DelegatedAgentState['status'] {
+  const success = typeof record.success === 'boolean' ? record.success : undefined;
+  const usableEvidence =
+    typeof record.usable_evidence === 'boolean' ? record.usable_evidence : undefined;
+  const termination = typeof record.termination === 'string' ? record.termination : undefined;
+  const degradedSuccess = record.degraded_success === true
+    || (usableEvidence === true
+      && (termination === 'provider_max_tokens' || termination === 'provider_timeout'));
+
+  if (degradedSuccess) return 'degraded';
+  if (termination === 'cancelled' || record.cancelled === true) return 'cancelled';
+  if (typeof record.error === 'string' || success === false || usableEvidence === false) {
+    return 'failed';
+  }
+  return 'complete';
 }
 
 export function formatToolOutputForDisplay(
@@ -86,12 +155,35 @@ export function resolveDelegatedKind(
   toolName: string,
   args?: Record<string, unknown>,
   fallbackKind?: DelegatedToolKind | null,
+  authoritativeCapabilities?: unknown,
 ): DelegatedToolKind | undefined {
   if (isDelegatedKind(toolName)) {
     return toolName;
   }
 
   if (toolName === 'agent') {
+    if (Array.isArray(authoritativeCapabilities)) {
+      const capabilities = authoritativeCapabilities.filter(
+        (value): value is string => typeof value === 'string',
+      );
+      if (capabilities.length > 0) {
+        return capabilities.includes('write') ? 'build' : 'explore';
+      }
+      // Migration 51 represents pre-contract rows as an empty capability
+      // array. Their persisted role/kind remains authoritative; do not turn
+      // every legacy builder into an explorer or trust stale raw call labels.
+      if (fallbackKind) return fallbackKind;
+    }
+
+    if (Array.isArray(args?.capabilities)) {
+      const capabilities = args.capabilities.filter(
+        (value): value is string => typeof value === 'string',
+      );
+      if (capabilities.length > 0) {
+        return capabilities.includes('write') ? 'build' : 'explore';
+      }
+    }
+
     const agentType = args?.agent_type;
     if (isDelegatedKind(agentType)) {
       return agentType;
@@ -101,12 +193,7 @@ export function resolveDelegatedKind(
       return profile;
     }
     const action = typeof args?.action === 'string' ? args.action : 'spawn';
-    if (action === 'spawn') {
-      const capabilities = Array.isArray(args?.capabilities)
-        ? args.capabilities.filter((value): value is string => typeof value === 'string')
-        : [];
-      return capabilities.includes('write') ? 'build' : 'explore';
-    }
+    if (action === 'spawn') return 'explore';
   }
 
   return fallbackKind ?? undefined;
@@ -265,6 +352,10 @@ function conciseDelegatedOutput(
         : undefined;
   const failedAgents =
     typeof payload.failed_agents === 'number' ? payload.failed_agents : undefined;
+  const degradedAgents =
+    typeof payload.degraded_agents === 'number' ? payload.degraded_agents : undefined;
+  const cancelledAgents =
+    typeof payload.cancelled_agents === 'number' ? payload.cancelled_agents : undefined;
   const turns =
     typeof payload.total_turns === 'number'
       ? payload.total_turns
@@ -279,6 +370,8 @@ function conciseDelegatedOutput(
         : undefined;
   const stats = [
     agentCount !== undefined ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : undefined,
+    degradedAgents !== undefined ? `${degradedAgents} degraded` : undefined,
+    cancelledAgents !== undefined ? `${cancelledAgents} cancelled` : undefined,
     failedAgents !== undefined ? `${failedAgents} failed` : undefined,
     turns !== undefined ? `${turns} turns` : undefined,
     files !== undefined ? `${files} paths` : undefined,
@@ -351,13 +444,15 @@ export function annotateDelegatedArtifactState(
     (agent) => agent.status === 'running',
   ).length;
   const completedTargets = artifact.agents.filter(
-    (agent) => agent.status === 'complete',
+    (agent) => agent.status === 'complete' || agent.status === 'degraded',
   ).length;
   const pendingTargets = Math.max(
     totalTargets
       - activeTargets
       - completedTargets
-      - artifact.agents.filter((agent) => agent.status === 'failed').length,
+      - artifact.agents.filter(
+        (agent) => agent.status === 'failed' || agent.status === 'cancelled',
+      ).length,
     artifact.agents.filter((agent) => agent.status === 'pending').length,
   );
   return {
@@ -401,7 +496,6 @@ export function parseDelegatedArtifactState(
     const kind = resolveDelegatedKind(toolName, args, fallbackKind);
     if (!kind) return undefined;
 
-    const listKey = kind === 'build' ? 'builders' : 'agents';
     const artifact: DelegatedArtifactState = {
       kind,
       name:
@@ -419,12 +513,16 @@ export function parseDelegatedArtifactState(
           ? payload.delegated_run_id
           : undefined,
       stage:
-        payload.outcome === 'success'
+        payload.status === 'background_started'
+          ? 'running'
+          : payload.outcome === 'success'
           ? 'complete'
           : payload.outcome === 'partial'
             ? 'degraded'
             : payload.outcome === 'failed'
               ? 'failed'
+              : payload.outcome === 'cancelled'
+                ? 'cancelled'
               : undefined,
       message:
         typeof payload.message === 'string' ? payload.message : undefined,
@@ -442,6 +540,7 @@ export function parseDelegatedArtifactState(
         payload.outcome === 'success'
         || payload.outcome === 'partial'
         || payload.outcome === 'failed'
+        || payload.outcome === 'cancelled'
           ? payload.outcome
           : typeof payload.success === 'boolean'
             ? payload.success
@@ -466,7 +565,10 @@ export function parseDelegatedArtifactState(
         || payload.semantic_coverage === 'low'
           ? payload.semantic_coverage
           : undefined,
-      agents: [],
+      agents:
+        payload.status === 'background_started'
+          ? buildSeedDelegatedAgents(kind, args)
+          : [],
       filesExamined: Array.isArray(payload.paths_examined)
         ? payload.paths_examined.filter(
             (value): value is string => typeof value === 'string',
@@ -494,6 +596,10 @@ export function parseDelegatedArtifactState(
       degradedAgents:
         typeof payload.degraded_agents === 'number'
           ? payload.degraded_agents
+          : undefined,
+      cancelledAgents:
+        typeof payload.cancelled_agents === 'number'
+          ? payload.cancelled_agents
           : undefined,
       successfulAgents:
         typeof payload.successful_agents === 'number'
@@ -551,7 +657,11 @@ export function parseDelegatedArtifactState(
           : undefined,
     };
 
-    const agents = payload[listKey];
+    const preferredAgents = kind === 'build' ? payload.builders : payload.agents;
+    const fallbackAgents = kind === 'build' ? payload.agents : payload.builders;
+    const agents = Array.isArray(preferredAgents) && preferredAgents.length > 0
+      ? preferredAgents
+      : fallbackAgents;
     if (Array.isArray(agents)) {
       artifact.agents = agents.flatMap((entry) => {
         if (!entry || typeof entry !== 'object') return [];
@@ -568,13 +678,27 @@ export function parseDelegatedArtifactState(
             : typeof record.output === 'string'
               ? record.output
               : undefined;
-        const error =
-          typeof record.error === 'string' ? record.error : undefined;
+        const success = typeof record.success === 'boolean' ? record.success : undefined;
+        const usableEvidence =
+          typeof record.usable_evidence === 'boolean'
+            ? record.usable_evidence
+            : undefined;
+        const termination =
+          typeof record.termination === 'string' ? record.termination : undefined;
+        const degradedSuccess =
+          typeof record.degraded_success === 'boolean'
+            ? record.degraded_success
+            : (usableEvidence === true
+                && (termination === 'provider_max_tokens' || termination === 'provider_timeout'));
         return [
           {
             taskId,
             name: delegatedDisplayName(taskId, defaultAgentName(kind, args)),
-            status: error ? ('failed' as const) : ('complete' as const),
+            status: delegatedAgentStatus(record),
+            success,
+            usableEvidence,
+            degradedSuccess,
+            termination,
             outcomeReason:
               typeof record.outcome_reason === 'string'
                 ? record.outcome_reason
@@ -601,9 +725,43 @@ export function parseDelegatedArtifactState(
           },
         ];
       });
+
+      const hasPerAgentSuccess = agents.some(
+        (entry) => entry && typeof entry === 'object' && 'success' in entry,
+      );
+      const hasPerAgentUsability = agents.some(
+        (entry) => entry && typeof entry === 'object' && 'usable_evidence' in entry,
+      );
+      const hasPerAgentDegradation = agents.some(
+        (entry) => entry && typeof entry === 'object' && 'degraded_success' in entry,
+      );
+      if (hasPerAgentSuccess) {
+        artifact.successfulAgents = artifact.agents.filter(
+          (agent) => agent.success === true && agent.status !== 'degraded',
+        ).length;
+        artifact.failedAgents = artifact.agents.filter(
+          (agent) => agent.status === 'failed',
+        ).length;
+      }
+      if (hasPerAgentUsability) {
+        artifact.usableAgents = artifact.agents.filter(
+          (agent) => agent.usableEvidence === true,
+        ).length;
+      }
+      if (hasPerAgentDegradation || artifact.agents.some((agent) => agent.status === 'degraded')) {
+        artifact.degradedAgents = artifact.agents.filter(
+          (agent) => agent.status === 'degraded',
+        ).length;
+      }
+      if (artifact.agents.some((agent) => agent.status === 'cancelled')) {
+        artifact.cancelledAgents = artifact.agents.filter(
+          (agent) => agent.status === 'cancelled',
+        ).length;
+      }
+      artifact.agentCount ??= artifact.agents.length;
     }
 
-    return artifact;
+    return annotateDelegatedArtifactState(artifact);
   } catch {
     return undefined;
   }
@@ -613,6 +771,17 @@ export function applyDelegatedProgress(
   toolCall: ToolCall,
   event: DelegatedProgressEvent,
 ): ToolCall {
+  const currentRunId = toolCall.delegated?.delegatedRunId || toolCall.delegatedRunId;
+  if (
+    isTerminalDelegatedStage(toolCall.delegated?.stage)
+    && !isTerminalDelegatedStage(event.stage)
+    && (!currentRunId || currentRunId === event.delegated_run_id)
+  ) {
+    // A late process-local progress frame must never reopen a run whose tool
+    // result or durable hydration already established a terminal outcome.
+    return toolCall;
+  }
+
   const delegatedKind = resolveDelegatedKind(
     toolCall.name,
     toolCall.arguments,
@@ -652,32 +821,70 @@ export function applyDelegatedProgress(
   const successfulAgents = delegated.agents.filter(
     (entry) => entry.status === 'complete',
   ).length;
+  const degradedAgents = delegated.agents.filter(
+    (entry) => entry.status === 'degraded',
+  ).length;
   const failedAgents = delegated.agents.filter(
     (entry) => entry.status === 'failed',
   ).length;
+  const cancelledAgents = delegated.agents.filter(
+    (entry) => entry.status === 'cancelled',
+  ).length;
   delegated.successfulAgents = successfulAgents;
+  delegated.usableAgents = successfulAgents + degradedAgents;
+  delegated.degradedAgents = degradedAgents;
+  delegated.cancelledAgents = cancelledAgents;
   delegated.failedAgents = failedAgents;
-  delegated.outcome =
-    failedAgents === 0
-      ? 'success'
-      : successfulAgents === 0
-        ? 'failed'
-        : 'partial';
+  delegated.outcome = delegatedOutcomeForStage(event.stage);
   return {
     ...toolCall,
     delegatedRunId: event.delegated_run_id,
     delegated: annotateDelegatedArtifactState(delegated),
+    status: toolCallStatusForDelegatedStage(event.stage, toolCall.status),
   };
+}
+
+function parseRecentDelegatedRunArtifact(
+  toolCall: ToolCall,
+  recentRun: DelegatedRunResponse,
+  kind: DelegatedToolKind,
+): DelegatedArtifactState | undefined {
+  if (!recentRun.artifact) return undefined;
+
+  const artifact = parseDelegatedArtifactState(
+    toolCall.name,
+    JSON.stringify(recentRun.artifact),
+    toolCall.arguments,
+    kind,
+  );
+  if (!artifact) return undefined;
+
+  artifact.kind = kind;
+  artifact.delegatedRunId = recentRun.delegated_run_id;
+  artifact.stage = recentRun.stage;
+  artifact.outcome = delegatedOutcomeForStage(recentRun.stage) ?? artifact.outcome;
+  artifact.humanReview = recentRun.human_review || artifact.humanReview;
+  artifact.name = recentRun.child_name || artifact.name;
+  if (recentRun.capabilities && recentRun.capabilities.length > 0) {
+    artifact.capabilities = recentRun.capabilities;
+  }
+  if (recentRun.child_name && artifact.agents.length === 1) {
+    artifact.agents[0].name = recentRun.child_name;
+  }
+
+  return annotateDelegatedArtifactState(artifact);
 }
 
 export function applyDelegatedSessionState(
   messages: ChatMessage[],
   delegatedTools: DelegatedToolStateResponse[] | null | undefined,
   recentRuns?: DelegatedRunResponse[] | null | undefined,
+  runSummaries?: DelegatedRunSummaryResponse[] | null | undefined,
 ): ChatMessage[] {
   if (
     (!delegatedTools || delegatedTools.length === 0)
     && (!recentRuns || recentRuns.length === 0)
+    && (!runSummaries || runSummaries.length === 0)
   ) {
     return messages;
   }
@@ -685,61 +892,130 @@ export function applyDelegatedSessionState(
   const delegatedByToolCall = new Map(
     (delegatedTools || []).map((snapshot) => [snapshot.tool_call_id, snapshot]),
   );
-  const recentRunByToolCall = new Map(
-    (recentRuns || [])
-      .filter(
-        (run) =>
-          typeof run.parent_tool_call_id === 'string'
-          && run.parent_tool_call_id.length > 0,
+  const recentRunByToolCall = new Map<string, DelegatedRunResponse>();
+  for (const run of recentRuns || []) {
+    const toolCallId = run.parent_tool_call_id;
+    if (!toolCallId) continue;
+    const existing = recentRunByToolCall.get(toolCallId);
+    if (
+      !existing
+      || run.updated_at > existing.updated_at
+      || (
+        run.updated_at === existing.updated_at
+        && run.delegated_run_id > existing.delegated_run_id
       )
-      .map((run) => [run.parent_tool_call_id as string, run]),
-  );
+    ) {
+      recentRunByToolCall.set(toolCallId, run);
+    }
+  }
+  const summaryByToolCall = new Map<string, DelegatedRunSummaryResponse>();
+  for (const summary of runSummaries || []) {
+    const existing = summaryByToolCall.get(summary.parent_tool_call_id);
+    if (
+      !existing
+      || summary.updated_at > existing.updated_at
+      || (
+        summary.updated_at === existing.updated_at
+        && summary.delegated_run_id > existing.delegated_run_id
+      )
+    ) {
+      summaryByToolCall.set(summary.parent_tool_call_id, summary);
+    }
+  }
 
   return messages.map((message) => ({
     ...message,
     toolCalls: message.toolCalls?.map((toolCall) => {
-      const snapshot = delegatedByToolCall.get(toolCall.id);
+      const unverifiedSnapshot = delegatedByToolCall.get(toolCall.id);
       const recentRun = recentRunByToolCall.get(toolCall.id);
+      // New servers expose a compact, newest-per-tool durable index. It is the
+      // lifecycle authority even when the full artifact has aged out of the
+      // small recent window. Older servers fall back to the recent full row.
+      const durableRun = summaryByToolCall.get(toolCall.id) ?? recentRun;
+      const snapshot = unverifiedSnapshot && (
+        !durableRun
+        || durableRun.delegated_run_id === unverifiedSnapshot.delegated_run_id
+      )
+        ? unverifiedSnapshot
+        : undefined;
+      const durableArtifactRun = recentRun?.delegated_run_id === durableRun?.delegated_run_id
+        ? recentRun
+        : undefined;
       const delegatedKind = resolveDelegatedKind(
         toolCall.name,
         toolCall.arguments,
-        snapshot?.kind ?? recentRun?.kind,
+        snapshot?.kind ?? durableRun?.kind,
+        durableRun?.capabilities,
       );
       if (!delegatedKind) return toolCall;
 
+      const currentRunId = toolCall.delegated?.delegatedRunId || toolCall.delegatedRunId;
+      const sameCurrentRun = !currentRunId
+        || !durableRun
+        || currentRunId === durableRun.delegated_run_id;
+      const durableStage = durableRun?.stage;
+      const currentTerminalStage = sameCurrentRun
+        && isTerminalDelegatedStage(toolCall.delegated?.stage)
+        ? toolCall.delegated?.stage
+        : undefined;
+
       if (!snapshot) {
-        const delegated = toolCall.delegated
+        let delegated = toolCall.delegated
           ? { ...toolCall.delegated }
           : createDelegatedArtifactState(delegatedKind, toolCall.arguments);
+        const durableArtifact = durableArtifactRun
+          ? parseRecentDelegatedRunArtifact(toolCall, durableArtifactRun, delegatedKind)
+          : undefined;
+        if (durableArtifact) {
+          delegated = mergeDelegatedArtifactState(delegated, durableArtifact);
+          if (durableArtifact.agents.length > 0) {
+            // A durable terminal artifact is authoritative; do not retain
+            // optimistic launch rows that never received a matching live ID.
+            delegated.agents = durableArtifact.agents;
+          }
+        }
         delegated.kind = delegatedKind;
-        if (recentRun?.stage) {
-          delegated.stage = recentRun.stage;
+        const canonicalStage = isTerminalDelegatedStage(durableStage)
+          ? durableStage
+          : currentTerminalStage ?? durableStage;
+        if (canonicalStage) {
+          delegated.stage = canonicalStage;
+          delegated.outcome = delegatedOutcomeForStage(canonicalStage);
         }
-        if (recentRun?.child_name) {
-          delegated.name = recentRun.child_name;
-          if (delegated.agents[0]) delegated.agents[0].name = recentRun.child_name;
+        if (durableRun?.child_name) {
+          delegated.name = durableRun.child_name;
+          if (delegated.agents.length === 1) {
+            delegated.agents[0].name = durableRun.child_name;
+          }
         }
-        if (recentRun?.capabilities) {
-          delegated.capabilities = recentRun.capabilities;
+        if (durableRun?.capabilities && durableRun.capabilities.length > 0) {
+          delegated.capabilities = durableRun.capabilities;
         }
         return {
           ...toolCall,
           delegatedRunId:
-            recentRun?.delegated_run_id || toolCall.delegatedRunId,
-          delegated,
+            durableRun?.delegated_run_id || toolCall.delegatedRunId,
+          delegated: annotateDelegatedArtifactState(delegated),
+          status: toolCallStatusForDelegatedStage(canonicalStage, toolCall.status),
         };
       }
 
+      const canonicalStage = isTerminalDelegatedStage(durableStage)
+        ? durableStage
+        : currentTerminalStage ?? snapshot.stage;
+
       const delegated: DelegatedArtifactState = {
-        kind: snapshot.kind,
-        name: recentRun?.child_name || toolCall.delegated?.name,
+        kind: delegatedKind,
+        name: durableRun?.child_name || toolCall.delegated?.name,
         capabilities:
-          recentRun?.capabilities || toolCall.delegated?.capabilities,
+          durableRun?.capabilities && durableRun.capabilities.length > 0
+            ? durableRun.capabilities
+            : toolCall.delegated?.capabilities,
         delegatedRunId:
           snapshot.delegated_run_id
-          || recentRun?.delegated_run_id
+          || durableRun?.delegated_run_id
           || toolCall.delegatedRunId,
-        stage: snapshot.stage,
+        stage: canonicalStage,
         agents: snapshot.agents.map((agent) => ({
           taskId: agent.task_id,
           name: agent.agent_name,
@@ -760,9 +1036,14 @@ export function applyDelegatedSessionState(
           toolCall.delegated?.agentCount || 0,
           snapshot.agents.length,
         ),
-        usableAgents: snapshot.agents.filter((agent) => agent.status === 'complete')
+        usableAgents: snapshot.agents.filter(
+          (agent) => agent.status === 'complete' || agent.status === 'degraded',
+        ).length,
+        degradedAgents: snapshot.agents.filter((agent) => agent.status === 'degraded')
           .length,
-        degradedAgents: 0,
+        cancelledAgents: snapshot.agents.filter(
+          (agent) => agent.status === 'cancelled',
+        ).length,
         successfulAgents: snapshot.agents.filter((agent) => agent.status === 'complete')
           .length,
         failedAgents: snapshot.agents.filter((agent) => agent.status === 'failed')
@@ -775,20 +1056,33 @@ export function applyDelegatedSessionState(
           toolCall.delegated?.totalTargets
           || toolCall.delegated?.agentCount
           || snapshot.agents.length,
-        outcome: snapshot.agents.some((agent) => agent.status === 'failed')
-          ? snapshot.agents.some((agent) => agent.status === 'complete')
-            ? 'partial'
-            : 'failed'
-          : 'success',
+        outcome: delegatedOutcomeForStage(canonicalStage),
       };
+
+      let canonicalDelegated = mergeDelegatedArtifactState(toolCall.delegated, delegated);
+      const durableArtifact = durableArtifactRun
+        ? parseRecentDelegatedRunArtifact(toolCall, durableArtifactRun, delegatedKind)
+        : undefined;
+      if (durableArtifact && isTerminalDelegatedStage(canonicalStage)) {
+        canonicalDelegated = mergeDelegatedArtifactState(
+          canonicalDelegated,
+          durableArtifact,
+        );
+        if (durableArtifact.agents.length > 0) {
+          canonicalDelegated.agents = durableArtifact.agents;
+        }
+        canonicalDelegated.stage = canonicalStage;
+        canonicalDelegated.outcome = delegatedOutcomeForStage(canonicalStage);
+      }
 
       return {
         ...toolCall,
         delegatedRunId:
           snapshot.delegated_run_id
-          || recentRun?.delegated_run_id
+          || durableRun?.delegated_run_id
           || toolCall.delegatedRunId,
-        delegated: mergeDelegatedArtifactState(toolCall.delegated, delegated),
+        delegated: annotateDelegatedArtifactState(canonicalDelegated),
+        status: toolCallStatusForDelegatedStage(canonicalStage, toolCall.status),
       };
     }),
   }));

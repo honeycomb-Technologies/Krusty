@@ -9,7 +9,8 @@ use tokio::sync::{Mutex, RwLock};
 
 use krusty_core::agent::loop_events::{LoopEvent, LoopStopReason};
 use krusty_core::agent::{
-    effective_context_window_for_runtime, AgentCancellation, LoopInput, UserHookManager,
+    effective_context_window_for_runtime, AgentCancellation,
+    DelegatedRunStage as CoreDelegatedRunStage, LoopInput, UserHookManager,
 };
 use krusty_core::ai::models::{
     create_model_registry, ApiFormat, ModelCatalogSource, ModelKey, ModelMetadata,
@@ -21,9 +22,11 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, PendingPlanTaskSnapshot,
-    RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall,
-    RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
+    Database, DelegatedRunAgentSnapshot, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
+    DelegatedRunStartInput, DelegatedRunStore, PartialAssistantState, PendingInteractionSnapshot,
+    PendingPlanTaskSnapshot, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+    RecoveryToolCall, RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType,
+    WorkspaceMode,
 };
 use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::workflow::{
@@ -830,6 +833,7 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
         Path(session_id.clone()),
+        Query(state::GetSessionStateQuery::default()),
     )
     .await
     .unwrap_or_else(|_| panic!("session state should load"));
@@ -978,6 +982,177 @@ async fn session_trace_after_sequence_applies_limit_without_changing_snapshot_me
 }
 
 #[tokio::test]
+async fn get_session_state_restores_active_delegated_snapshot_from_durable_run() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Durable delegated state", None, None, None)
+        .expect("session should create");
+    let store =
+        DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"));
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "durable-live-run".to_string(),
+            parent_session_id: session_id.clone(),
+            parent_tool_call_id: Some("tool-durable-live".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: CoreDelegatedRunStage::Created,
+            provider: Some("test".to_string()),
+            model: Some("test:model".to_string()),
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![DelegatedRunScope {
+                label: "workspace".to_string(),
+                path: ".".to_string(),
+                kind: "workspace".to_string(),
+            }],
+        })
+        .expect("delegated run should create");
+    store
+        .update_snapshot(
+            "durable-live-run",
+            CoreDelegatedRunStage::Running,
+            &DelegatedRunSnapshot {
+                stage: CoreDelegatedRunStage::Running,
+                agents: vec![DelegatedRunAgentSnapshot {
+                    task_id: "builder-a".to_string(),
+                    agent_name: "builder-a".to_string(),
+                    status: "degraded".to_string(),
+                    tool_count: 4,
+                    tokens: 120,
+                    current_action: Some("degraded".to_string()),
+                    completion_summary: Some("Partial evidence retained".to_string()),
+                    lines_added: 8,
+                    lines_removed: 2,
+                    completed_plan_task: None,
+                }],
+            },
+        )
+        .expect("live snapshot should persist");
+
+    // The in-memory map is intentionally empty, as it would be after a server
+    // restart. The session route must reconstruct active progress from the
+    // durable delegated run snapshot.
+    let Json(response) = get_session_state(
+        State(state),
+        None,
+        Path(session_id),
+        Query(state::GetSessionStateQuery::default()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+    assert_eq!(response.delegated_tools.len(), 1);
+    let snapshot = &response.delegated_tools[0];
+    assert_eq!(snapshot.delegated_run_id, "durable-live-run");
+    assert_eq!(snapshot.tool_call_id, "tool-durable-live");
+    assert!(matches!(
+        snapshot.stage,
+        crate::types::DelegatedRunStage::Running
+    ));
+    assert!(matches!(
+        snapshot.agents.first().map(|agent| agent.status),
+        Some(crate::types::DelegatedProgressStatus::Degraded)
+    ));
+}
+
+#[tokio::test]
+async fn get_session_state_evicts_stale_live_running_and_indexes_old_terminal_runs() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Canonical delegated state", None, None, None)
+        .expect("session should create");
+    let store =
+        DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"));
+
+    let create_run = |run_id: &str, tool_call_id: &str| {
+        store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: run_id.to_string(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: Some(tool_call_id.to_string()),
+                role: DelegatedRunRole::Build,
+                stage: CoreDelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "project".to_string(),
+                    path: ".".to_string(),
+                    kind: "project".to_string(),
+                }],
+            })
+            .expect("delegated run should create");
+        store
+            .finalize_run(
+                run_id,
+                CoreDelegatedRunStage::Complete,
+                &serde_json::json!({"outcome": "success"}),
+                Some("complete"),
+                true,
+            )
+            .expect("delegated run should finalize");
+    };
+
+    create_run("old-terminal-run", "old-terminal-tool");
+    Database::new(&state.db_path)
+        .expect("database should open")
+        .conn()
+        .execute(
+            "UPDATE delegated_runs SET updated_at = '2020-01-01T00:00:00Z'
+             WHERE delegated_run_id = 'old-terminal-run'",
+            [],
+        )
+        .expect("old run should age out of artifact window");
+    for index in 0..24 {
+        create_run(
+            &format!("newer-terminal-run-{index:02}"),
+            &format!("newer-terminal-tool-{index:02}"),
+        );
+    }
+
+    state.delegated_state.write().await.insert(
+        session_id.clone(),
+        vec![crate::types::DelegatedToolStateResponse {
+            delegated_run_id: "old-terminal-run".to_string(),
+            tool_call_id: "old-terminal-tool".to_string(),
+            kind: crate::types::DelegatedToolKind::Build,
+            stage: crate::types::DelegatedRunStage::Running,
+            parent_session_id: Some(session_id.clone()),
+            agents: Vec::new(),
+        }],
+    );
+
+    let Json(response) = get_session_state(
+        State(state),
+        None,
+        Path(session_id),
+        Query(state::GetSessionStateQuery {
+            include_delegated_history: true,
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+    assert!(response.delegated_tools.is_empty());
+    assert!(response
+        .recent_delegated_runs
+        .iter()
+        .all(|run| run.delegated_run_id != "old-terminal-run"));
+    let old_summary = response
+        .delegated_run_summaries
+        .iter()
+        .find(|summary| summary.delegated_run_id == "old-terminal-run")
+        .expect("compact hydration index should retain the old terminal run");
+    assert!(matches!(
+        old_summary.stage,
+        crate::types::DelegatedRunStage::Complete
+    ));
+}
+
+#[tokio::test]
 async fn get_session_state_exposes_awaiting_input_details_after_reload() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -1049,6 +1224,7 @@ async fn get_session_state_exposes_awaiting_input_details_after_reload() {
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
         Path(session_id.clone()),
+        Query(state::GetSessionStateQuery::default()),
     )
     .await
     .unwrap_or_else(|_| panic!("session state should load"));
