@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/identity-env.sh"
 
-DB_PATH="${1:-${KRUSTY_DB_PATH:-$HOME/.krusty/krusty.db}}"
+DB_PATH="${1:-${MITSURO_DB_PATH:-$HOME/.mitsuro/mitsuro.db}}"
 SESSION_ID="${2:-}"
 
 if [[ ! -f "$DB_PATH" ]]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run repeated real-model Krusty harness acceptance cycles.
+"""Run repeated real-model Mitsuro harness acceptance cycles.
 
 The runner is intentionally dependency-free so it can execute beside the Honey
 server. It exercises the actual HTTP/SSE surface, model provider, coding tools,
@@ -168,7 +168,7 @@ def classified_failure(
     )
 
 
-class KrustyApi:
+class MitsuroApi:
     def __init__(self, base_url: str, timeout: float) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -296,7 +296,7 @@ def validate_candidate_base_url(value: str) -> str:
 
 
 def select_stable_exact_model(
-    api: KrustyApi,
+    api: MitsuroApi,
     model_id: str,
     *,
     provider_id: str = "grok",
@@ -1195,7 +1195,7 @@ def wait_for_exact_text(path: Path, expected: str, timeout: float, label: str) -
 
 
 def wait_for_session_idle(
-    api: KrustyApi, session_id: str, timeout: float = 120.0
+    api: MitsuroApi, session_id: str, timeout: float = 120.0
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     latest: dict[str, Any] | None = None
@@ -1218,7 +1218,7 @@ def require_clean_idle_state(state: dict[str, Any], label: str) -> None:
     require(state.get("recovery") is None, f"{label}: recovery state remained: {state}")
 
 
-def session_messages(api: KrustyApi, session_id: str) -> list[dict[str, Any]]:
+def session_messages(api: MitsuroApi, session_id: str) -> list[dict[str, Any]]:
     persisted = api.json_request("GET", f"/api/sessions/{session_id}")
     messages = persisted.get("messages", [])
     require(isinstance(messages, list), f"session messages were malformed: {persisted}")
@@ -1281,7 +1281,7 @@ def validate_trace_response(trace: Any, label: str) -> dict[str, Any]:
 
 
 def wait_for_completed_trace_run(
-    api: KrustyApi,
+    api: MitsuroApi,
     session_id: str,
     label: str,
     *,
@@ -1390,7 +1390,7 @@ def wait_for_completed_trace_run(
 
 
 def wait_for_settled_trace_runs(
-    api: KrustyApi,
+    api: MitsuroApi,
     session_id: str,
     label: str,
     *,
@@ -1501,7 +1501,7 @@ def wait_for_settled_trace_runs(
 
 
 def trace_summary(
-    api: KrustyApi,
+    api: MitsuroApi,
     session_id: str,
     *,
     expected_runs: int,
@@ -1646,7 +1646,7 @@ def require_probe_quiet(
 
 
 def wait_for_process_status(
-    api: KrustyApi, process_id: str, expected: str, timeout: float = 10.0
+    api: MitsuroApi, process_id: str, expected: str, timeout: float = 10.0
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     latest: dict[str, Any] | None = None
@@ -1755,7 +1755,7 @@ def assert_preview_port_quiet(url: str, timeout: float = 5.0) -> None:
 
 
 def create_session(
-    api: KrustyApi,
+    api: MitsuroApi,
     run_dir: Path,
     model: dict[str, Any],
     label: str,
@@ -1808,7 +1808,7 @@ def chat_payload(
 
 
 def require_session_model(
-    api: KrustyApi,
+    api: MitsuroApi,
     session_id: str,
     expected_model: dict[str, Any],
     label: str,
@@ -1833,7 +1833,7 @@ def require_session_model(
 
 
 def process_for_cycle(
-    api: KrustyApi, run_dir: Path, port: int
+    api: MitsuroApi, run_dir: Path, port: int
 ) -> dict[str, Any]:
     matches = [
         process
@@ -1849,7 +1849,7 @@ def process_for_cycle(
     return running[0]
 
 
-def active_processes_for_dir(api: KrustyApi, run_dir: Path) -> list[dict[str, Any]]:
+def active_processes_for_dir(api: MitsuroApi, run_dir: Path) -> list[dict[str, Any]]:
     return [
         process
         for process in api.json_request("GET", "/api/processes")
@@ -1940,7 +1940,7 @@ def _captured_evidence(
 
 
 def collect_failed_cycle_evidence(
-    api: KrustyApi,
+    api: MitsuroApi,
     run_dir: Path,
     session_id: str | None,
     marker: str,
@@ -2287,7 +2287,7 @@ def validate_trace_exact_runtime(
 
 
 def verify_persistence_and_trace(
-    api: KrustyApi,
+    api: MitsuroApi,
     session_id: str,
     marker: str,
     expected_user_turns: int,
@@ -2341,7 +2341,7 @@ def verify_persistence_and_trace(
 
 
 def cleanup_cycle_processes(
-    api: KrustyApi,
+    api: MitsuroApi,
     run_dir: Path,
     *,
     port: int | None = None,
@@ -2453,7 +2453,7 @@ def cleanup_cycle_processes(
 
 
 def cleanup_resilience_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     run_dir: Path,
     *,
     session_id: str | None = None,
@@ -2545,14 +2545,14 @@ def cleanup_gated_error(
 
 
 def run_cycle(
-    api: KrustyApi,
+    api: MitsuroApi,
     root: Path,
     model: dict[str, Any],
     port: int,
     cycle: int,
     keep_process: bool,
 ) -> dict[str, Any]:
-    marker = f"krusty-e2e-{cycle}-{uuid.uuid4().hex[:10]}"
+    marker = f"mitsuro-e2e-{cycle}-{uuid.uuid4().hex[:10]}"
     run_dir = root / f"cycle-{cycle:03d}-{marker.rsplit('-', 1)[-1]}"
     run_dir.mkdir(parents=True, exist_ok=False)
     session_id: str | None = None
@@ -2602,7 +2602,7 @@ Acceptance contract:
 - Run the tests.
 - Start it with `python3 server.py --host 127.0.0.1 --port {port}` as a harness-tracked background process, never with a shell ampersand.
 - Verify both live endpoints.
-- Leave exactly one healthy server running and report the Krusty process registry UUID
+- Leave exactly one healthy server running and report the Mitsuro process registry UUID
   (the hyphenated process_id returned by the background tool), files, test result,
   and endpoint checks. If you also report the operating-system PID, label it separately.
 
@@ -2640,7 +2640,7 @@ Work autonomously. Do not install packages and do not ask styling or product que
 
         continuity_prompt = (
             "Without calling any tool and without changing or restarting anything, "
-            "state the exact marker, port, and Krusty process registry UUID from this "
+            "state the exact marker, port, and Mitsuro process registry UUID from this "
             "session in one sentence. The registry UUID is the hyphenated process_id "
             "returned by the background tool, not the numeric operating-system PID. "
             "Use only conversation context."
@@ -2758,14 +2758,14 @@ Work autonomously. Do not install packages and do not ask styling or product que
 
 
 def run_disconnect_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "sse-disconnect"
     run_dir = resilience_dir / lane
     run_dir.mkdir(parents=True, exist_ok=False)
-    marker = f"krusty-disconnect-{uuid.uuid4().hex[:12]}"
+    marker = f"mitsuro-disconnect-{uuid.uuid4().hex[:12]}"
     ready = f"READY:{marker}"
     artifact = run_dir / "disconnect-complete.txt"
     run_dir.joinpath("disconnect_probe.py").write_text(
@@ -2936,14 +2936,14 @@ def run_disconnect_lane(
 
 
 def run_failed_bash_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "failed-bash-recovery"
     run_dir = resilience_dir / lane
     run_dir.mkdir(parents=True, exist_ok=False)
-    marker = f"krusty-failed-bash-{uuid.uuid4().hex[:12]}"
+    marker = f"mitsuro-failed-bash-{uuid.uuid4().hex[:12]}"
     prelude_reply = f"PRELUDE-READY:{marker}"
     stderr_marker = f"EXPECTED-STDERR:{marker}"
     failure_reply = f"FAILED-BASH-HANDLED:{marker}"
@@ -3429,14 +3429,14 @@ expected failure, reply exactly {failure_reply}"""
 
 
 def run_live_steering_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "live-steering"
     run_dir = resilience_dir / lane
     run_dir.mkdir(parents=True, exist_ok=False)
-    marker = f"krusty-live-steering-{uuid.uuid4().hex[:12]}"
+    marker = f"mitsuro-live-steering-{uuid.uuid4().hex[:12]}"
     ready = f"READY:{marker}"
     completed = f"DONE:{marker}"
     original_reply = f"ORIGINAL-REPLY:{marker}"
@@ -3671,14 +3671,14 @@ def run_live_steering_lane(
 
 
 def run_cancel_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "explicit-cancel"
     run_dir = resilience_dir / lane
     run_dir.mkdir(parents=True, exist_ok=False)
-    marker = f"krusty-cancel-{uuid.uuid4().hex[:12]}"
+    marker = f"mitsuro-cancel-{uuid.uuid4().hex[:12]}"
     ready = f"READY:{marker}"
     orphan_artifact = run_dir / "cancel-orphan.txt"
     parent_artifact = run_dir / "cancel-parent-complete.txt"
@@ -3890,7 +3890,7 @@ def run_cancel_lane(
 
 
 def run_direct_tool_policy_lane(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     port: int,
 ) -> dict[str, Any]:
@@ -3992,7 +3992,7 @@ def run_direct_tool_policy_lane(
 
 
 def run_resilience_suite(
-    api: KrustyApi,
+    api: MitsuroApi,
     resilience_dir: Path,
     model: dict[str, Any],
     direct_tool_port: int,
@@ -4129,7 +4129,7 @@ def main() -> int:
         "invalid port range",
     )
     args.root.mkdir(parents=True, exist_ok=True)
-    api = KrustyApi(args.base_url, args.timeout)
+    api = MitsuroApi(args.base_url, args.timeout)
     exact_model: dict[str, Any] | None = None
     invocation_id = str(uuid.uuid4())
     attempt_log_path = args.root / "acceptance-attempts.jsonl"
@@ -4186,7 +4186,7 @@ def main() -> int:
         require(health.get("status") == "ok", f"server health failed: {health}")
         exact_model = select_stable_exact_model(api, args.model)
         print(
-            f"Krusty harness E2E: model={args.model} "
+            f"Mitsuro harness E2E: model={args.model} "
             f"revision={exact_model.get('catalog_revision')} "
             f"clean_cycles={args.cycles} root={args.root}",
             flush=True,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { KrustyClient, type ModelKey, type StreamCallbacks } from "../src";
+import { MitsuroClient, type ModelKey, type StreamCallbacks } from "../src";
 
 function streamResponse(...chunks: string[]): Response {
 	const encoder = new TextEncoder();
@@ -45,14 +45,14 @@ function createCallbacks(
 	};
 }
 
-function clientFor(response: Response): KrustyClient {
-	return new KrustyClient({
-		baseUrl: "https://krusty.test",
+function clientFor(response: Response): MitsuroClient {
+	return new MitsuroClient({
+		baseUrl: "https://mitsuro.test",
 		fetchImpl: (async () => response) as typeof fetch,
 	});
 }
 
-describe("KrustyClient streaming lifecycle", () => {
+describe("MitsuroClient streaming lifecycle", () => {
 	test("sends an exact model key when a chat stream starts", async () => {
 		const modelKey: ModelKey = {
 			provider: "grok",
@@ -61,8 +61,8 @@ describe("KrustyClient streaming lifecycle", () => {
 			api_format: "open_ai_responses",
 		};
 		let requestBody: unknown;
-		const client = new KrustyClient({
-			baseUrl: "https://krusty.test",
+		const client = new MitsuroClient({
+			baseUrl: "https://mitsuro.test",
 			fetchImpl: (async (_input, init) => {
 				requestBody = JSON.parse(String(init?.body));
 				return streamResponse(
@@ -259,8 +259,8 @@ describe("KrustyClient streaming lifecycle", () => {
 		const controller = new AbortController();
 		controller.abort();
 		const errors: string[] = [];
-		const client = new KrustyClient({
-			baseUrl: "https://krusty.test",
+		const client = new MitsuroClient({
+			baseUrl: "https://mitsuro.test",
 			fetchImpl: (async () => {
 				throw new DOMException("Aborted", "AbortError");
 			}) as typeof fetch,

@@ -1,5 +1,5 @@
 {
-  "name": "@krusty/ui",
+  "name": "@mitsuro/ui",
   "version": "0.6.1",
   "private": true,
   "main": "src/index.ts",

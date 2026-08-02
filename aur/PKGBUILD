@@ -1,6 +1,8 @@
 # Maintainer: Burgess <burgess@example.com>
-pkgname=krusty
-pkgver=0.7.3
+# UNRELEASED TEMPLATE: run ./update-release.sh only after a canonical Mitsuro
+# tag exists and its immutable source archive passes the layout checks.
+pkgname=mitsuro
+pkgver=UNRELEASED
 pkgrel=1
 pkgdesc="Mitsuro multi-platform AI coding product with Agent and Hive"
 arch=('x86_64' 'aarch64')
@@ -8,44 +10,67 @@ url="https://github.com/honeycomb-Technologies/Mitsuro"
 license=('MIT')
 depends=('gcc-libs' 'openssl')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/honeycomb-Technologies/Mitsuro/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('7f21b43dab2607d8864de641e7f11c920e73fdaee378f9c1115dadf4760fcbfa')
+provides=('krusty')
+conflicts=('krusty')
+source=()
+sha256sums=()
 
 prepare() {
-    cd "Krusty-$pkgver"
+    if [[ "$pkgver" == UNRELEASED || ${#source[@]} -ne 1 || \
+          ${#sha256sums[@]} -ne 1 ]]; then
+        error "This PKGBUILD is an unreleased template; run aur/update-release.sh for an existing canonical tag."
+        return 1
+    fi
+    cd "Mitsuro-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "Krusty-$pkgver"
+    cd "Mitsuro-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     export CARGO_PROFILE_RELEASE_LTO=false
-    cargo build --frozen --release -p krusty
-    if [[ -f crates/krusty-mako/Cargo.toml ]]; then
-        cargo build --frozen --release -p krusty-mako
+    cargo build --frozen --release -p mitsuro
+    if [[ -f crates/mitsuro-hive/Cargo.toml ]]; then
+        cargo build --frozen --release -p mitsuro-hive
     fi
 }
 
 check() {
-    cd "Krusty-$pkgver"
+    cd "Mitsuro-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo test --frozen --release
+    [[ "$(target/release/mitsuro --version)" == "$(target/release/krusty --version)" ]]
+    if [[ -x target/release/mitsuro-hive ]]; then
+        [[ "$(target/release/mitsuro-hive --version)" == \
+            "$(target/release/krusty-mako --version)" ]]
+    fi
+}
+
+render_systemd_unit() {
+    local source_path=$1
+    local destination_path=$2
+    install -d -m755 "$(dirname "$destination_path")"
+    sed 's|^ExecStart=%h/.local/bin/.mitsuro-current/|ExecStart=/usr/bin/|' \
+        "$source_path" > "$destination_path"
+    chmod 0644 "$destination_path"
 }
 
 package() {
-    cd "Krusty-$pkgver"
+    cd "Mitsuro-$pkgver"
+    install -Dm755 "target/release/mitsuro" "$pkgdir/usr/bin/mitsuro"
     install -Dm755 "target/release/krusty" "$pkgdir/usr/bin/krusty"
-    if [[ -f crates/krusty-mako/Cargo.toml ]]; then
+    if [[ -f crates/mitsuro-hive/Cargo.toml ]]; then
+        install -Dm755 "target/release/mitsuro-hive" "$pkgdir/usr/bin/mitsuro-hive"
         install -Dm755 "target/release/krusty-mako" "$pkgdir/usr/bin/krusty-mako"
-        install -Dm644 deploy/systemd/krusty-mako.socket \
-            "$pkgdir/usr/lib/systemd/user/krusty-mako.socket"
-        install -Dm644 deploy/systemd/krusty-mako.service \
-            "$pkgdir/usr/lib/systemd/user/krusty-mako.service"
-        install -Dm644 deploy/systemd/krusty-serve.service \
-            "$pkgdir/usr/lib/systemd/user/krusty-serve.service"
+        install -Dm644 deploy/systemd/mitsuro-hive.socket \
+            "$pkgdir/usr/lib/systemd/user/mitsuro-hive.socket"
+        render_systemd_unit deploy/systemd/mitsuro-hive.service \
+            "$pkgdir/usr/lib/systemd/user/mitsuro-hive.service"
+        render_systemd_unit deploy/systemd/mitsuro-serve.service \
+            "$pkgdir/usr/lib/systemd/user/mitsuro-serve.service"
     fi
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

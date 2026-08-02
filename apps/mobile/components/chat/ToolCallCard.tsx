@@ -29,7 +29,7 @@ import {
   presentTool,
   type ToolPresentation,
 } from "./toolPresentation";
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 
 interface ToolCallCardProps {
   toolCall: ToolCall;
@@ -106,6 +106,8 @@ export const ToolCallCard = memo(function ToolCallCard({
       ? presentation.isPolicyRedirect
         ? t.warning
         : t.error
+      : toolCall.status === "partial"
+        ? t.warning
       : toolCall.status === "running"
         ? t.foreground
         : t.mutedForeground;
@@ -433,6 +435,14 @@ function StatusIcon({
         return <CornerDownRight size={14} color={colors.warning} strokeWidth={2} />;
       }
       return <X size={14} color={colors.error} strokeWidth={2.5} />;
+    case "partial":
+      return (
+        <ToolGlyph
+          family={presentation.family}
+          name={toolCall.name}
+          color={colors.warning}
+        />
+      );
     case "awaiting_approval":
       return <Clock size={14} color={colors.warning} strokeWidth={2} />;
     default:

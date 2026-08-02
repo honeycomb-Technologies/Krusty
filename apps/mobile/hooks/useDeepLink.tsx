@@ -1,16 +1,17 @@
 import { useEffect, useRef } from 'react';
 import * as Linking from '../platform/linking';
+import { parseConnectionLaunchUrl } from '../platform/identity-compatibility';
 import { useConnection } from './useConnection';
 
 /**
  * Handles Mitsuro deep links for seamless server connection.
  *
  * Supported URLs:
- *   mitsuro://connect?url=https://device.ts.net:8443&token=kr_remote_...
- *   krusty://connect?url=https://device.ts.net:8443&token=kr_remote_...
+ *   mitsuro://connect?url=https://device.ts.net:8443&token=mitsuro_remote_...
+ *   prior-scheme compatibility links issued by an older server
  *
  * Also handles HTTPS universal links:
- *   https://device.ts.net:8443/#krusty-remote-token=kr_remote_...
+ *   https://device.ts.net:8443/#mitsuro-remote-token=mitsuro_remote_...
  */
 export function useDeepLink() {
   const { connect } = useConnection();
@@ -35,61 +36,7 @@ export function useDeepLink() {
     if (handledRef.current === url) return;
     handledRef.current = url;
 
-    // mitsuro:// is canonical; krusty:// remains a compatibility alias.
-    if (
-      url.startsWith('mitsuro://connect') ||
-      url.startsWith('krusty://connect')
-    ) {
-      const params = parseQueryParams(url);
-      const serverUrl = params.url;
-      const token = params.token;
-
-      if (serverUrl && token) {
-        connectRef.current(serverUrl, token);
-      }
-      return;
-    }
-
-    // https://.../#krusty-remote-token=... (hash-based launch URL)
-    if (url.includes('krusty-remote-token=')) {
-      const hashPart = url.split('#')[1];
-      if (hashPart) {
-        const hashParams = new URLSearchParams(hashPart);
-        const token = hashParams.get('krusty-remote-token');
-        // Extract base URL (everything before the hash)
-        const serverUrl = url.split('#')[0].replace(/\/+$/, '');
-
-        if (token && serverUrl) {
-          connectRef.current(serverUrl, token);
-        }
-      }
-      return;
-    }
-
-    // Expo development schemes (for example exp+mitsuro://connect?...).
-    if (url.includes('connect') && url.includes('url=') && url.includes('token=')) {
-      const params = parseQueryParams(url);
-      const serverUrl = params.url;
-      const token = params.token;
-
-      if (serverUrl && token) {
-        connectRef.current(serverUrl, token);
-      }
-    }
+    const launch = parseConnectionLaunchUrl(url);
+    if (launch) connectRef.current(launch.serverUrl, launch.token);
   }
-}
-
-function parseQueryParams(url: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  const queryStart = url.indexOf('?');
-  if (queryStart === -1) return params;
-
-  const query = url.slice(queryStart + 1);
-  for (const pair of query.split('&')) {
-    const [key, ...rest] = pair.split('=');
-    if (key) {
-      params[decodeURIComponent(key)] = decodeURIComponent(rest.join('='));
-    }
-  }
-  return params;
 }

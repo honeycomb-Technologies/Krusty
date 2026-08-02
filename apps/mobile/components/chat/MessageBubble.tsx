@@ -27,8 +27,8 @@ import {
   presentTool,
   shouldExpandToolByPolicy,
 } from "./toolPresentation";
-import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@krusty/api";
-import { beginKrustyPerformanceSpan } from "@krusty/state";
+import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@mitsuro/api";
+import { beginMitsuroPerformanceSpan } from "@mitsuro/state";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
 
@@ -69,7 +69,7 @@ export const MessageBubble = memo(function MessageBubble({
   const assistantSegments = useMemo(
     () => {
       if (isUser) return [];
-      const finishVisualPlanSpan = beginKrustyPerformanceSpan(
+      const finishVisualPlanSpan = beginMitsuroPerformanceSpan(
         "transcript.visual_plan",
       );
       try {

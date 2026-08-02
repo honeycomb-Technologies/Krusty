@@ -36,22 +36,23 @@ For the full engineering contract, see
 
 ## Command-line controls
 
-The installed compatibility command is `krusty`:
+The primary installed command is `mitsuro`:
 
 ```bash
-krusty hive run "Update the API documentation"
-krusty hive status
-krusty hive attach <run-id>
-krusty hive pause <run-id>
-krusty hive resume <run-id>
-krusty hive send <run-id> "Focus on the mobile client first"
-krusty hive cancel <run-id>
+mitsuro hive run "Update the API documentation"
+mitsuro hive status
+mitsuro hive attach <run-id>
+mitsuro hive pause <run-id>
+mitsuro hive resume <run-id>
+mitsuro hive send <run-id> "Focus on the mobile client first"
+mitsuro hive cancel <run-id>
 ```
 
-Run `krusty hive --help` for the current options.
+Run `mitsuro hive --help` for the current options.
 
-The older `krusty mako` spelling remains an alias for existing automation. New
-documentation and product copy use Hive.
+The deprecated `krusty hive` spelling remains a tested alias for existing
+automation during the announced transition window. New documentation and
+product copy use Mitsuro and Hive.
 
 ## Control and safety
 

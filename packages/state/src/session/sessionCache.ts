@@ -4,7 +4,7 @@ import type {
   SessionStateResponse,
   SessionType,
   SessionWithMessagesResponse,
-} from "@krusty/api";
+} from "@mitsuro/api";
 
 import type { ChatMessage, PermissionMode, SessionMode } from "./types";
 import {

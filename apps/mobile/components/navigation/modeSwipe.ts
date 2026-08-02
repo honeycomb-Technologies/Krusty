@@ -1,6 +1,6 @@
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
-const MODE_ORDER: SessionType[] = ["chat", "code", "mako"];
+const MODE_ORDER: SessionType[] = ["chat", "code", "hive"];
 const SWIPE_DISTANCE = 64;
 const SWIPE_VELOCITY = 700;
 

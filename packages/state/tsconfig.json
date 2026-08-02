@@ -5,7 +5,7 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "@krusty/api": ["../api/src"]
+      "@mitsuro/api": ["../api/src"]
     },
     "strict": false,
     "noImplicitAny": false,

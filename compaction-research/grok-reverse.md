@@ -139,13 +139,13 @@ Tests are shallow and do not cover compaction:
 
 No tests assert token thresholds, compaction prompts, context reconstruction content, durable checkpoint restore, reconnect backfill, or history persistence.
 
-## Strengths worth copying into Krusty
+## Strengths worth copying into Mitsuro
 
-- **Typed event stream boundary.** `UpdateKind`/`SessionEvent` cleanly separates provider/ACP wire shape from UI/server DTOs (`grok-server/src/types.rs:163-194`, `:352-368`). Krusty’s replacement should similarly expose typed compaction/reconstruction lifecycle events.
+- **Typed event stream boundary.** `UpdateKind`/`SessionEvent` cleanly separates provider/ACP wire shape from UI/server DTOs (`grok-server/src/types.rs:163-194`, `:352-368`). Mitsuro’s replacement should similarly expose typed compaction/reconstruction lifecycle events.
 - **Gateway separation.** ACP translation is isolated in `acp_client.rs`, session state in `session.rs`, JSON-RPC in `server.rs`, and UI schemas in `grok-app/lib/effect/schemas.ts`.
 - **Live UX patterns.** The app renders a broad typed feed with explicit status/error surfaces and bounded memory (`grok-app/App.tsx:292-495`, `:843-899`, `:1188-1205`). Useful for showing compaction/reconstruction progress and artifacts.
 - **Explicit approval flow.** Permission requests become typed pending plan steps with approve/reject outcomes (`grok-server/src/acp_client.rs:99-138`, `grok-server/src/session.rs:341-376`, `grok-app/App.tsx:330-348`). A compaction replacement could reuse this pattern for user-approved context restores or destructive summarization.
-- **Bounded in-memory fanout.** Broadcast channels and caps avoid unbounded UI/tool growth (`grok-server/src/session.rs:59-60`, `:315-331`; `grok-app/App.tsx:871`). Krusty should copy the bounded/fanout mindset, but add durable persistence.
+- **Bounded in-memory fanout.** Broadcast channels and caps avoid unbounded UI/tool growth (`grok-server/src/session.rs:59-60`, `:315-331`; `grok-app/App.tsx:871`). Mitsuro should copy the bounded/fanout mindset, but add durable persistence.
 
 ## Weaknesses / risks
 
@@ -161,14 +161,14 @@ No tests assert token thresholds, compaction prompts, context reconstruction con
 - **Tests are mostly smoke tests.** Several tests explicitly avoid full integration (`grok-server/src/acp_client.rs:467-490`, `grok-server/src/session.rs:433-446`).
 - **No reconnect/backoff.** Client leaves `TODO: auto-reconnect logic` (`grok-app/lib/effect/json-rpc-client.ts:81-84`).
 
-## Transferable to Krusty’s compaction replacement
+## Transferable to Mitsuro’s compaction replacement
 
 Transferable scaffolding, not algorithm:
 
-1. **Typed lifecycle events.** Add Krusty events analogous to `UpdateKind`, e.g. `CompactionTriggered`, `ContextSnapshotPersisted`, `ReconstructionStarted`, `ReconstructionSourceSelected`, `ReconstructionApplied`, `ReconstructionValidationFailed`.
+1. **Typed lifecycle events.** Add Mitsuro events analogous to `UpdateKind`, e.g. `CompactionTriggered`, `ContextSnapshotPersisted`, `ReconstructionStarted`, `ReconstructionSourceSelected`, `ReconstructionApplied`, `ReconstructionValidationFailed`.
 2. **Separated layers.** Keep provider/tool-history normalization separate from session state and UI/API exposure, as `acp_client.rs`/`session.rs`/`server.rs` do.
 3. **Live observability.** Surface compaction/reconstruction as feed/status events with bounded UI retention and clear error banners, copying the app’s typed ActivityFeed approach.
-4. **Explicit durable source of truth.** Do the opposite of `grok-stack` persistence: store transcript segments, tool results, summaries, context packs, hashes, and reconstruction decisions durably in Krusty core storage.
+4. **Explicit durable source of truth.** Do the opposite of `grok-stack` persistence: store transcript segments, tool results, summaries, context packs, hashes, and reconstruction decisions durably in Mitsuro core storage.
 5. **Canonical event sequence.** Use a session-level durable event sequence, not per-subscription seq, so reconnect/backfill and reconstruction audits are possible.
 6. **Approval/governance hook.** The plan approval pattern is useful for asking users to approve a risky reconstruction or summary discard, but fix ID correlation and store policy decisions durably.
 7. **Model/data contract first.** Define explicit `ContextSnapshot`/`ReconstructionPlan`/`ReconstructionResult` DTOs and tests; no equivalent exists here.
@@ -181,6 +181,6 @@ Not transferable:
 - Persisted session restore/backfill design.
 - Token accounting/budget management.
 
-## Recommendation for Krusty
+## Recommendation for Mitsuro
 
-Use `grok-stack` as a cautionary gateway/UI example, not as a compaction reference. For Krusty’s compaction replacement, design the missing pieces explicitly: durable session-event storage, token-budget triggers, prompt templates, context-pack/reconstruction data models, provenance/audit hashes, replay/backfill APIs, and tests that verify reconstruction quality and safety across restart/reconnect.
+Use `grok-stack` as a cautionary gateway/UI example, not as a compaction reference. For Mitsuro’s compaction replacement, design the missing pieces explicitly: durable session-event storage, token-budget triggers, prompt templates, context-pack/reconstruction data models, provenance/audit hashes, replay/backfill APIs, and tests that verify reconstruction quality and safety across restart/reconnect.

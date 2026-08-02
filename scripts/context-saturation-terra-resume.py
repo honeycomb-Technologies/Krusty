@@ -43,7 +43,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         compaction.get("estimated_tokens_before", 0) > compaction.get("estimated_tokens_after", 0),
         f"compaction did not reduce context: {compaction}",
     )
-    api = HARNESS.KrustyApi(base_url, args.timeout)
+    api = HARNESS.MitsuroApi(base_url, args.timeout)
     terra = HARNESS.select_stable_exact_model(
         api, args.terra_model, provider_id="open_a_i", timeout=60
     )

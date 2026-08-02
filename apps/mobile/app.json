@@ -1,8 +1,8 @@
 {
   "expo": {
     "name": "Mitsuro",
-    "slug": "krusty",
-    "version": "0.9.20",
+    "slug": "mitsuro",
+    "version": "0.9.21",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
@@ -87,9 +87,23 @@
           "frequentUpdates": true,
           "widgets": [
             {
-              "name": "MakoWidget",
+              "name": "HiveWidget",
               "displayName": "Hive Status",
               "description": "Daily updates and status from your Hive agent",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "systemLarge",
+                "accessoryCircular",
+                "accessoryRectangular",
+                "accessoryInline"
+              ],
+              "contentMarginsDisabled": false
+            },
+            {
+              "name": "MakoWidget",
+              "displayName": "Hive Status (Compatibility)",
+              "description": "Keeps an existing Hive status widget active during the Mitsuro transition",
               "supportedFamilies": [
                 "systemSmall",
                 "systemMedium",

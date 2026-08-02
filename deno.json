@@ -1,6 +1,6 @@
 {
   "imports": {
-    "@krusty/api": "./packages/api/src/index.ts",
+    "@mitsuro/api": "./packages/api/src/index.ts",
     "react": "npm:react@19.2.0",
     "zustand": "npm:zustand@5.0.12"
   },

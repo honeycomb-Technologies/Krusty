@@ -1,4 +1,4 @@
-import type { SessionResponse, SessionType } from "@krusty/api";
+import type { SessionResponse, SessionType } from "@mitsuro/api";
 
 export interface CodeProjectThreadGroup {
   directory: string;

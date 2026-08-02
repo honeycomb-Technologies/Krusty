@@ -26,7 +26,7 @@ One of the more unusual things about this codebase is that the same React Native
 
 This works because Expo supports a web target through Metro bundler and `react-native-web`. The `app.json` configuration sets `"web": { "bundler": "metro", "output": "single" }`, which tells Expo to produce a single-file web build. The `web:build` script in `package.json` runs `expo export --platform web` to generate this output.
 
-On the desktop, the same web build is also loaded inside a Tauri webview. The `useConnection` hook checks for `window.__KRUSTY_SERVER_URL` and `window.__KRUSTY_SERVER_TOKEN` globals that the Tauri shell injects, allowing automatic connection without the onboarding flow.
+On the desktop, the same web build is also loaded inside a Tauri webview. The `useConnection` hook checks for `window.__MITSURO_SERVER_URL` and `window.__MITSURO_SERVER_TOKEN` globals that the Tauri shell injects, allowing automatic connection without the onboarding flow.
 
 The result is three deployment targets from one codebase: native iOS, native Android, and web (both standalone and inside Tauri).
 
@@ -55,7 +55,7 @@ The platform directory covers twelve capabilities:
 | `linear-gradient` | `expo-linear-gradient` | CSS gradient div |
 | `linking` | `expo-linking` | `window.location` wrapper |
 | `fetch` | Native fetch | Browser fetch |
-| `krusty-storage` | `AsyncStorage` | `localStorage` |
+| `mitsuro-storage` | `AsyncStorage` | `localStorage` |
 
 This pattern keeps platform-specific code isolated and the main component tree completely platform-agnostic.
 
@@ -108,11 +108,11 @@ There are also two top-level components: `ReportsViewer` for browsing Hive repor
 
 The `hooks/` directory contains ten hooks that manage the app's reactive behavior:
 
-**`useConnection`** -- Provides the `KrustyClient` instance and connection lifecycle. Stores the server URL and authentication token in secure storage. Exposes `connect`, `disconnect`, and `reconnect` methods. On mount, it attempts to restore a saved connection or detect Tauri-injected globals.
+**`useConnection`** -- Provides the `MitsuroClient` instance and connection lifecycle. Stores the server URL and authentication token in secure storage. Exposes `connect`, `disconnect`, and `reconnect` methods. On mount, it attempts to restore a saved connection or detect Tauri-injected globals.
 
-**`useStores`** -- Creates and provides Zustand stores scoped to the active `KrustyClient`. Initializes five stores: `sessions` (session list), `session` (active session state including messages, streaming, model), `workspace` (current working directory and mode), `git` (repository state), and `plan` (task plan tracking). Stores are recreated when the client changes.
+**`useStores`** -- Creates and provides Zustand stores scoped to the active `MitsuroClient`. Initializes five stores: `sessions` (session list), `session` (active session state including messages, streaming, model), `workspace` (current working directory and mode), `git` (repository state), and `plan` (task plan tracking). Stores are recreated when the client changes.
 
-**`useTheme`** -- Wraps the `@krusty/ui` theme system. Resolves `system`, `dark`, or `light` preference against the device color scheme and provides the resolved `Theme` object with all color tokens.
+**`useTheme`** -- Wraps the `@mitsuro/ui` theme system. Resolves `system`, `dark`, or `light` preference against the device color scheme and provides the resolved `Theme` object with all color tokens.
 
 **`useBreakpoint`** -- Reads window dimensions and returns a `mobile` / `tablet` / `desktop` breakpoint. The thresholds are 768px for tablet and 1024px for desktop. Components use `isDesktop` to decide between the sidebar layout and the mobile drawer layout.
 
@@ -122,7 +122,7 @@ The `hooks/` directory contains ten hooks that manage the app's reactive behavio
 
 **`useWidgetSync`** -- Pushes current chat state (session title, last message, model, streaming status, token count) to the ChatWidget on iOS. Runs on every relevant state change so the home screen widget stays current.
 
-**`useDeepLink`** -- Handles `krusty://connect` deep links and `https://.../#krusty-remote-token=...` universal links for one-tap server connection. Parses the URL, extracts credentials, and calls `connect`.
+**`useDeepLink`** -- Handles `mitsuro://connect` deep links and `https://.../#mitsuro-remote-token=...` universal links for one-tap server connection. Parses the URL, extracts credentials, and calls `connect`.
 
 **`useEntranceAnimation`** -- Orchestrates a staggered entrance animation after the splash screen completes. The top bar slides down, the content fades in with a subtle scale, and the bottom bar slides up, all using Reanimated shared values.
 
@@ -146,13 +146,18 @@ Components subscribe to individual slices of these stores via selector hooks lik
 
 The app includes two home screen widgets and one Live Activity, all built with `expo-widgets` and authored in JSX using `@expo/ui/swift-ui` components:
 
-**MakoWidget** -- The compatibility component name for the Hive autonomous-mode widget. It supports six size families: `systemSmall`, `systemMedium`, `systemLarge`, `accessoryCircular`, `accessoryRectangular`, and `accessoryInline`. The small widget shows agent status and briefing text. The medium and large variants add task progress bars and completion counts. Lock-screen accessories use the product's rounded-cell symbol with status text.
+**HiveWidget** -- The Hive autonomous-mode widget. It supports six size
+families: `systemSmall`, `systemMedium`, `systemLarge`, `accessoryCircular`,
+`accessoryRectangular`, and `accessoryInline`. The small widget shows agent
+status and briefing text. The medium and large variants add task progress bars
+and completion counts. Lock-screen accessories use the product's rounded-cell
+symbol with status text.
 
 **ChatWidget** -- Shows the active chat session with title, last message preview, model name, and token count. Supports `systemSmall`, `systemMedium`, `accessoryCircular`, and `accessoryRectangular`. Includes a `widgetURL` modifier so tapping the widget opens the app directly to the chat. When no session is active, it shows a "New Chat" prompt.
 
 **ChatStreamActivity** -- A Live Activity that appears on the lock screen and in the Dynamic Island while the AI is streaming a response. Shows the chat title, model, elapsed time, token count, and a progress bar. When a tool requires approval, it renders approve and deny buttons directly in the activity, allowing the user to grant permission without opening the app.
 
-Widget data is pushed from the app via `useWidgetSync` and `useMakoWidgetSync`, which call `updateSnapshot` on the widget instances whenever relevant state changes.
+Widget data is pushed from the app via `useWidgetSync` and `useHiveWidgetSync`, which call `updateSnapshot` on the widget instances whenever relevant state changes.
 
 All widgets use a shared `AccessoryBackground` component for consistent styling in the lock screen accessory sizes.
 
@@ -164,9 +169,9 @@ The app uses **EAS Build** (Expo Application Services) with three profiles defin
 - **preview** -- Internal distribution build without simulator support. Used for TestFlight or internal testing on real devices.
 - **production** -- Release build with `autoIncrement: true` on iOS, which automatically bumps the build number. Submits to the App Store via the `submit.production` configuration with the Apple app ID.
 
-The bundle identifier is `io.krusty.mobile` on both iOS and Android. The EAS project ID ties builds to the Expo dashboard.
+The bundle identifier is `io.mitsuro.mobile` on both iOS and Android. The EAS project ID ties builds to the Expo dashboard.
 
-The Metro bundler configuration in `metro.config.js` is customized for the monorepo. It adds watch folders for `packages/api`, `packages/state`, and `packages/ui`, and maps `@krusty/*` imports to the source directories of those packages. This allows the mobile app to import from shared packages without requiring them to be pre-built.
+The Metro bundler configuration in `metro.config.js` is customized for the monorepo. It adds watch folders for `packages/api`, `packages/state`, and `packages/ui`, and maps `@mitsuro/*` imports to the source directories of those packages. This allows the mobile app to import from shared packages without requiring them to be pre-built.
 
 ## Assets
 
@@ -182,10 +187,10 @@ The `assets/` directory contains:
 
 First-time users see the onboarding screen, which asks for two pieces of information: the Mitsuro server URL and a remote access token. The server URL is typically a Tailscale address (e.g., `https://device.tail123.ts.net:8443`), and the token is generated by the server. The screen validates the connection with a health check and authentication bootstrap before navigating to the main chat.
 
-Alternatively, users can skip manual entry entirely by using a deep link. The server provides a one-tap connection URL in the format `krusty://connect?url=...&token=...` that the `useDeepLink` hook handles automatically.
+Alternatively, users can skip manual entry entirely by using a deep link. The server provides a one-tap connection URL in the format `mitsuro://connect?url=...&token=...` that the `useDeepLink` hook handles automatically.
 
 ## Session Types and Tabs
 
-The chat screen supports three session types organized by tab: **chat** (general conversation), **code** (coding sessions with workspace context), and **mako** (autonomous agent sessions). The active tab determines what type of session is created when the user starts a new conversation.
+The chat screen supports three session types organized by tab: **chat** (general conversation), **code** (coding sessions with workspace context), and **hive** (autonomous agent sessions). The active tab determines what type of session is created when the user starts a new conversation.
 
 On mobile, sessions are accessed through the `SessionDrawer`, a slide-in panel from the left edge. On desktop-width screens (1024px and above), the `DesktopShell` provides a persistent sidebar with the session list, plus additional panels for a terminal emulator and workspace preview. This adaptive layout means the app feels native on a phone and productive on a wide screen, all from the same component tree.

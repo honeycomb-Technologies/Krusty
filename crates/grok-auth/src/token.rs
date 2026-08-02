@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// The rich entry stored under each issuer::client key in auth.json.
 /// This structure is designed to be (mostly) compatible with what the official
-/// `grok` CLI writes so that `grok` and your harness (Krusty, etc.) can share
+/// `grok` CLI writes so that `grok` and your harness (Mitsuro, etc.) can share
 /// the same login session.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthEntry {

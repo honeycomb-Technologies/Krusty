@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "krusty-native-rust-demo"
+name = "mitsuro-native-rust-demo"
 version = "0.1.0"

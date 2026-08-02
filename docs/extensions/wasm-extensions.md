@@ -18,7 +18,7 @@ Traditional plugin systems face a fundamental tension: give plugins too much acc
 
 The extension system is ported from Zed's `crates/extension` and `crates/extension_host` modules and adapted for Mitsuro's Tokio async runtime. The WIT interface definitions, manifest format, and API versioning scheme are all compatible with Zed's extension ecosystem. This means existing Zed extensions that compile to WASM component binaries can be loaded by Mitsuro without modification, provided the API version they target is supported.
 
-The WIT files in the `wit/` directory at the project root mirror Zed's public interface. Internally, versioned copies of these WIT files live under `crates/krusty-core/src/extensions/wit/` in directories named by version (e.g., `since_v0.8.0/`).
+The WIT files in the `wit/` directory at the project root mirror Zed's public interface. Internally, versioned copies of these WIT files live under `crates/mitsuro-core/src/extensions/wit/` in directories named by version (e.g., `since_v0.8.0/`).
 
 ## WIT: The Contract Between Host and Extension
 
@@ -61,13 +61,13 @@ WIT resources are handle types that the host creates and passes to extension cal
 
 ## The Host Runtime
 
-The WASM host is implemented in `crates/krusty-core/src/extensions/wasm_host/`. At its center is the `WasmHost` struct, which owns a Wasmtime `Engine`, an HTTP client, a Bun runtime, and a working directory for extension file operations.
+The WASM host is implemented in `crates/mitsuro-core/src/extensions/wasm_host/`. At its center is the `WasmHost` struct, which owns a Wasmtime `Engine`, an HTTP client, a Bun runtime, and a working directory for extension file operations.
 
 When loading an extension, the host reads `extension.toml` from the extension directory, locates the `.wasm` file (named after the extension ID, or `extension.wasm` as a fallback), parses the `zed:api-version` custom section from the WASM binary to determine which API version to use, compiles the component, and spawns a dedicated tokio task for the extension's lifetime.
 
 Each extension runs on its own task with its own `Store<WasmState>`. The store holds the WASI context (providing stdio, environment variables, and preopened directories), the resource table, and a reference back to the host. Communication between the host and the extension task happens over an unbounded mpsc channel: the host sends closures that are executed against the extension instance and store, with results returned through oneshot channels.
 
-The WASI sandbox is configured to give each extension access to its own working directory (under `~/.krusty/extensions/work/<extension-id>/`) both as `.` and as the absolute path. Extensions cannot access files outside this directory through the WASI filesystem.
+The WASI sandbox is configured to give each extension access to its own working directory (under `~/.mitsuro/extensions/work/<extension-id>/`) both as `.` and as the absolute path. Extensions cannot access files outside this directory through the WASI filesystem.
 
 ## Extension Manifest
 
@@ -128,7 +128,7 @@ Older extensions continue to work because the host translates their types into t
 
 Some extensions, particularly those wrapping JavaScript-based language servers, need a JS runtime to install and run npm packages. Mitsuro uses Bun instead of Node.js for this purpose, chosen for its faster startup and install times.
 
-The `BunRuntime` manager in `crates/krusty-core/src/extensions/bun_runtime.rs` handles Bun lifecycle:
+The `BunRuntime` manager in `crates/mitsuro-core/src/extensions/bun_runtime.rs` handles Bun lifecycle:
 
 1. **System detection** -- first checks if `bun` is available on the system PATH
 2. **Managed installation** -- if no system Bun is found, downloads Bun 1.1.42 from GitHub releases, extracts it, and places it in the Mitsuro data directory
@@ -138,10 +138,10 @@ When extensions call the `nodejs` WIT interface, the host routes those calls thr
 
 ## Where Extensions Live
 
-Extensions are stored under `~/.krusty/extensions/`. The directory layout separates installed extension files from runtime working directories:
+Extensions are stored under `~/.mitsuro/extensions/`. The directory layout separates installed extension files from runtime working directories:
 
 ```
-~/.krusty/extensions/
+~/.mitsuro/extensions/
     my-extension/
         extension.toml      # manifest
         my-extension.wasm   # compiled WASM component

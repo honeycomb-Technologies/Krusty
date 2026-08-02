@@ -1,0 +1,419 @@
+//! ACP Server - Main entry point for ACP mode
+//!
+//! Handles the stdio transport and message routing for ACP protocol.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use agent_client_protocol::{AgentSideConnection, Client};
+use anyhow::Result;
+use tokio::io::{stdin, stdout};
+use tokio::sync::mpsc;
+use tokio::task::LocalSet;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::{error, info, warn};
+
+use super::agent::MitsuroAgent;
+use super::bridge::AcpOutbound;
+use crate::ai::providers::ProviderId;
+use crate::storage::credentials::{ActiveProviderStore, CredentialStore};
+use crate::storage::{Database, Preferences};
+use crate::tools::{register_acp_tools, ToolRegistry};
+
+/// ACP Server configuration
+#[derive(Debug, Clone, Default)]
+pub struct AcpServerConfig {
+    /// Working directory override
+    pub working_dir: Option<std::path::PathBuf>,
+}
+
+/// ACP Server that runs Mitsuro as an ACP-compatible agent
+pub struct AcpServer {
+    agent: Arc<MitsuroAgent>,
+    /// Server configuration (reserved for future use)
+    config: AcpServerConfig,
+}
+
+impl AcpServer {
+    /// Create a new ACP server with default configuration
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            agent: Arc::new(MitsuroAgent::new()),
+            config: AcpServerConfig::default(),
+        })
+    }
+
+    /// Create with custom tool registry
+    pub fn with_tools(tools: Arc<ToolRegistry>) -> Result<Self> {
+        Ok(Self {
+            agent: Arc::new(MitsuroAgent::with_tools(tools)),
+            config: AcpServerConfig::default(),
+        })
+    }
+
+    /// Create with configuration
+    pub fn with_config(config: AcpServerConfig) -> Result<Self> {
+        Ok(Self {
+            agent: Arc::new(MitsuroAgent::new()),
+            config,
+        })
+    }
+
+    /// Run the ACP server (blocks until connection closes)
+    ///
+    /// This method takes over stdin/stdout for ACP communication.
+    /// All logging should go to stderr.
+    pub async fn run(self) -> Result<()> {
+        info!("Starting Mitsuro ACP server");
+
+        // Register ACP-compatible tools (excludes TUI-only tools like AskUserQuestion)
+        register_acp_tools(self.agent.tools()).await;
+        info!(
+            "Registered {} tools",
+            self.agent.tools().get_ai_tools().await.len()
+        );
+
+        // Retain the exact shared preference before model discovery. A key is
+        // not enough to recreate its capability row, so initialization waits
+        // for discovery unless the user supplied an explicit environment model.
+        if let Some(key) = load_current_model_key_preference() {
+            self.agent.set_current_model_key(key).await;
+        }
+
+        // Auto-initialize an explicitly selected environment model.
+        if let Some(config) = detect_api_key_from_env() {
+            info!(
+                "Auto-initializing AI client: provider={:?}, model={:?}",
+                config.provider,
+                config.model.as_deref().unwrap_or("default")
+            );
+            if config.model.is_some() {
+                self.agent
+                    .init_ai_client_with_model(config.api_key, config.provider, config.model)
+                    .await;
+            }
+        } else {
+            warn!(
+                "No API key found in environment. Set one of:\n\
+                 - MITSURO_PROVIDER + MITSURO_API_KEY (+ optional MITSURO_MODEL)\n\
+                 - MINIMAX_API_KEY\n\
+                 - OPENROUTER_API_KEY\n\
+                 - ZAI_API_KEY\n\
+                 - ~/.grok/auth.json for Grok (`grok login` or Mitsuro OAuth)"
+            );
+        }
+
+        // Create the agent-side connection
+        // Note: ACP connections are not Send, so we need LocalSet
+        let local = LocalSet::new();
+
+        // Clone agent reference for cleanup after connection closes
+        let agent_for_cleanup = Arc::clone(&self.agent);
+
+        local
+            .run_until(async move {
+                // Create notification channel
+                let (tx, mut rx) = mpsc::channel::<AcpOutbound>(1000);
+
+                // Give the sender to the agent
+                self.agent.set_notification_channel(tx).await;
+
+                // Get stdin/stdout for transport, wrapped for futures compatibility
+                let stdin = stdin().compat();
+                let stdout = stdout().compat_write();
+
+                // Spawn function for the connection
+                let spawn_fn = |fut: Pin<Box<dyn Future<Output = ()>>>| {
+                    tokio::task::spawn_local(fut);
+                };
+
+                // Create connection with our agent
+                let (connection, io_task) =
+                    AgentSideConnection::new(self.agent, stdout, stdin, spawn_fn);
+
+                info!("ACP connection established, waiting for requests...");
+
+                // Spawn task to forward notifications to the connection
+                tokio::task::spawn_local(async move {
+                    while let Some(outbound) = rx.recv().await {
+                        match outbound {
+                            AcpOutbound::Notification(notification) => {
+                                if let Err(e) = connection.session_notification(notification).await
+                                {
+                                    warn!("Failed to forward notification: {}", e);
+                                }
+                            }
+                            AcpOutbound::Permission {
+                                request,
+                                response_tx,
+                            } => {
+                                let response = connection
+                                    .request_permission(request)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                if response_tx.send(response).is_err() {
+                                    warn!("ACP permission requester dropped before response");
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Run the IO task
+                if let Err(e) = io_task.await {
+                    error!("ACP connection error: {}", e);
+                    return Err(anyhow::anyhow!("ACP connection error: {}", e));
+                }
+
+                // Clean up sessions on disconnect
+                let session_ids = agent_for_cleanup.sessions().session_ids();
+                let session_count = session_ids.len();
+                for id in session_ids {
+                    agent_for_cleanup.sessions().remove_session(&id);
+                }
+                if session_count > 0 {
+                    info!("Cleaned up {} sessions on disconnect", session_count);
+                }
+
+                info!("ACP connection closed");
+                Ok(())
+            })
+            .await
+    }
+
+    /// Get a reference to the agent
+    pub fn agent(&self) -> &MitsuroAgent {
+        &self.agent
+    }
+
+    /// Get the retained ACP server configuration.
+    pub fn config(&self) -> &AcpServerConfig {
+        &self.config
+    }
+}
+
+/// Configuration detected from environment variables
+#[derive(Debug, Clone)]
+pub struct AcpEnvConfig {
+    pub api_key: String,
+    pub provider: ProviderId,
+    pub model: Option<String>,
+}
+
+/// Detect API key and provider configuration
+///
+/// Checks in order:
+/// 1. Environment variables (MITSURO_PROVIDER + MITSURO_API_KEY)
+/// 2. Provider-specific env vars (MINIMAX_API_KEY, OPENROUTER_API_KEY, etc.)
+/// 3. Mitsuro's stored credentials (~/.mitsuro/tokens/credentials.json)
+///
+/// Environment variable options:
+/// - MITSURO_PROVIDER: minimax, openrouter, zai, openai, anthropic, grok
+/// - MITSURO_MODEL: Override the default model for the provider
+/// - MITSURO_API_KEY: Generic API key (used with MITSURO_PROVIDER)
+fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
+    let model = crate::identity::env_var("MITSURO_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    // Check for explicit provider configuration first
+    if let Ok(provider_str) = crate::identity::env_var("MITSURO_PROVIDER") {
+        let provider = match provider_str.to_lowercase().as_str() {
+            "minimax" => Some(ProviderId::MiniMax),
+            "openrouter" => Some(ProviderId::OpenRouter),
+            "zai" | "z.ai" => Some(ProviderId::ZAi),
+            "openai" => Some(ProviderId::OpenAI),
+            "anthropic" => Some(ProviderId::Anthropic),
+            "grok" | "xai" | "x.ai" | "x_ai" => Some(ProviderId::Grok),
+            _ => None,
+        };
+
+        if let Some(provider) = provider {
+            // Look for MITSURO_API_KEY/provider env for API-key providers; Grok uses X-sub auth.
+            let api_key = if provider == ProviderId::Grok {
+                get_provider_auth_from_store(provider)
+            } else {
+                crate::identity::env_var("MITSURO_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| get_provider_api_key(provider))
+                    .or_else(|| get_provider_auth_from_store(provider))
+            };
+
+            if let Some(api_key) = api_key {
+                return Some(AcpEnvConfig {
+                    api_key,
+                    provider,
+                    model,
+                });
+            }
+        }
+    }
+
+    // Fall back to checking provider-specific environment variables
+    let providers_and_vars = [
+        (ProviderId::MiniMax, "MINIMAX_API_KEY"),
+        (ProviderId::OpenRouter, "OPENROUTER_API_KEY"),
+        (ProviderId::ZAi, "ZAI_API_KEY"),
+        (ProviderId::OpenAI, "OPENAI_API_KEY"),
+        (ProviderId::Anthropic, "ANTHROPIC_API_KEY"),
+    ];
+
+    for (provider, env_var) in providers_and_vars {
+        if let Ok(key) = std::env::var(env_var) {
+            if !key.is_empty() {
+                return Some(AcpEnvConfig {
+                    api_key: key,
+                    provider,
+                    model,
+                });
+            }
+        }
+    }
+
+    // Fall back to Mitsuro's stored credentials
+    if let Some(config) = detect_from_credential_store(model) {
+        return Some(config);
+    }
+
+    None
+}
+
+/// Detect API key from Mitsuro's credential store
+fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
+    // Load stored credentials
+    let store = match CredentialStore::load() {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("Failed to load credential store: {}", e);
+            return None;
+        }
+    };
+
+    // Get the active provider, or find the first configured one
+    let active_provider = ActiveProviderStore::load();
+
+    // Try active provider first
+    if let Some(active_provider) = active_provider {
+        if let Some(api_key) = store.get_auth(&active_provider) {
+            info!(
+                "Using active provider {:?} from credential store",
+                active_provider
+            );
+            return Some(AcpEnvConfig {
+                api_key,
+                provider: active_provider,
+                model,
+            });
+        }
+    }
+
+    // Fall back to first configured provider
+    let configured = store.providers_with_auth();
+    if let Some(provider) = configured.first() {
+        if let Some(api_key) = store.get_auth(provider) {
+            info!(
+                "Using first configured provider {:?} from credential store",
+                provider
+            );
+            return Some(AcpEnvConfig {
+                api_key,
+                provider: *provider,
+                model,
+            });
+        }
+    }
+
+    None
+}
+
+fn load_current_model_key_from(preferences: &Preferences) -> Option<crate::ai::models::ModelKey> {
+    preferences.get_current_model_key()
+}
+
+fn load_current_model_key_preference() -> Option<crate::ai::models::ModelKey> {
+    let db_path = crate::paths::config_dir().join("mitsuro.db");
+    let db = Database::new(&db_path).ok()?;
+    load_current_model_key_from(&Preferences::new(db))
+}
+
+/// Get provider auth from Mitsuro's credential store or OAuth integrations.
+fn get_provider_auth_from_store(provider: ProviderId) -> Option<String> {
+    CredentialStore::load()
+        .ok()
+        .and_then(|store| store.get_auth(&provider))
+}
+
+/// Get API key for a specific provider from environment
+fn get_provider_api_key(provider: ProviderId) -> Option<String> {
+    let env_var = match provider {
+        ProviderId::MiniMax => "MINIMAX_API_KEY",
+        ProviderId::OpenRouter => "OPENROUTER_API_KEY",
+        ProviderId::ZAi => "ZAI_API_KEY",
+        ProviderId::Anthropic => "ANTHROPIC_API_KEY",
+        ProviderId::OpenAI => "OPENAI_API_KEY",
+        ProviderId::Grok => "GROK_ACCESS_TOKEN",
+    };
+    std::env::var(env_var).ok().filter(|s| !s.is_empty())
+}
+
+/// Check if we should run in ACP mode
+///
+/// Returns true if stdin is not a TTY (likely being spawned by an editor)
+/// and the `--acp` flag is present.
+#[cfg(test)]
+pub fn should_run_acp_mode(force_acp: bool) -> bool {
+    if force_acp {
+        return true;
+    }
+
+    // Auto-detect: if stdin is not a TTY, we might be in ACP mode
+    // But only if explicitly requested or detected
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::models::{ApiFormat, ModelAuthScope, ModelKey};
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_server_creation() {
+        let server = AcpServer::new().unwrap();
+        assert_eq!(server.agent().sessions().session_count(), 0);
+    }
+
+    #[test]
+    fn test_server_configuration_is_retained() {
+        let config = AcpServerConfig {
+            working_dir: Some(std::path::PathBuf::from("/tmp/mitsuro-acp")),
+        };
+        let server = AcpServer::with_config(config.clone()).unwrap();
+
+        assert_eq!(server.config().working_dir, config.working_dir);
+    }
+
+    #[test]
+    fn test_acp_mode_detection() {
+        assert!(should_run_acp_mode(true));
+        assert!(!should_run_acp_mode(false));
+    }
+
+    #[test]
+    fn startup_preference_loader_retains_exact_model_identity() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let preferences = Preferences::new(Database::new(&dir.path().join("preferences.db"))?);
+        let key = ModelKey::new(
+            ProviderId::OpenAI,
+            "shared-slug",
+            ApiFormat::OpenAIResponses,
+        )
+        .with_auth_scope(ModelAuthScope::OAuth);
+        preferences.set_current_model_key(&key)?;
+
+        assert_eq!(load_current_model_key_from(&preferences), Some(key));
+        Ok(())
+    }
+}

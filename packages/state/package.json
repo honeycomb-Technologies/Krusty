@@ -1,5 +1,5 @@
 {
-  "name": "@krusty/state",
+  "name": "@mitsuro/state",
   "version": "0.6.1",
   "private": true,
   "main": "src/index.ts",
@@ -8,6 +8,6 @@
     "zustand": ">=4.0.0"
   },
   "dependencies": {
-    "@krusty/api": "workspace:*"
+    "@mitsuro/api": "workspace:*"
   }
 }

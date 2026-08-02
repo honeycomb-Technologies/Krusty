@@ -36,7 +36,7 @@ the Mitsuro server rather than split across client-only copies.
 | **iPhone** | Conversations, code sessions, Hive runs, reports, and remote tools |
 | **Web** | The full Mitsuro workspace in a browser |
 | **Desktop** | A native desktop window around the shared web workspace |
-| **Terminal** | Interactive work and direct server control |
+| **Terminal** | Interactive coding via the modern Mitsuro TUI (`mitsuro` / `krusty` alias) |
 | **Editor** | Connecting compatible editors through ACP |
 
 ## Highlights
@@ -48,6 +48,20 @@ the Mitsuro server rather than split across client-only copies.
   workspace.
 - Extend the agent with skills, plugins, MCP servers, and local extensions.
 - Keep the server self-hosted and connect privately from your other devices.
+
+
+
+## Terminal
+
+The default CLI experience is the modern Mitsuro terminal UI:
+
+```bash
+mitsuro
+
+```
+
+The previous full-screen TUI is archived on git branch `archive/tui-v1-20260802`
+and is no longer the product default.
 
 ## Install
 
@@ -64,17 +78,17 @@ release.
 Start the terminal app:
 
 ```bash
-krusty
+mitsuro
 ```
 
 Start the server and web workspace:
 
 ```bash
-krusty serve
+mitsuro serve
 ```
 
-Mitsuro is the product name. The installed `krusty` command remains available
-for compatibility with existing installations and automation.
+`mitsuro` is the primary command. The deprecated `krusty` command remains a
+tested compatibility alias during the announced migration window.
 
 ### Build from source
 
@@ -132,10 +146,8 @@ engineering guidance lives in [AGENTS.md](AGENTS.md).
 
 ## Project status
 
-Mitsuro is under active development. Some internal package, executable, route,
-and storage identifiers still use the legacy `krusty` or `mako` names so
-existing installations keep working. Public product language and new links use
-Mitsuro, Agent, and Hive.
+Mitsuro is under active development. Current source, release artifacts, and
+documentation use Mitsuro for the harness and Hive for durable autonomous work.
 
 ## License
 

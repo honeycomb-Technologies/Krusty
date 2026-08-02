@@ -56,7 +56,7 @@ def main() -> int:
         "post-compaction build proof absent",
     )
     project_dir = args.root / "context-atlas"
-    api = HARNESS.KrustyApi(
+    api = HARNESS.MitsuroApi(
         HARNESS.validate_candidate_base_url(args.base_url), args.timeout
     )
     terra = HARNESS.select_stable_exact_model(

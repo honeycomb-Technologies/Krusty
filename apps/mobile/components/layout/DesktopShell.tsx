@@ -27,7 +27,7 @@ export function DesktopShell({
   onNewSession,
   onNewSessionWithDir,
   activeTab,
-  onSelectMakoView,
+  onSelectHiveView,
   ...sessionListProps
 }: DesktopShellProps) {
   const { isDesktop } = useBreakpoint();

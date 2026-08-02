@@ -99,7 +99,7 @@ export default function OnboardingScreen() {
               style={[styles.input, { color: t.foreground }]}
               value={token}
               onChangeText={setToken}
-              placeholder="kr_remote_..."
+              placeholder="mitsuro_remote_..."
               placeholderTextColor={t.mutedForeground + '60'}
               autoCapitalize="none"
               autoCorrect={false}
@@ -133,7 +133,7 @@ export default function OnboardingScreen() {
         </View>
 
         <Text style={[styles.hint, { color: t.mutedForeground }]}>
-          Start your Mitsuro server with `krusty serve` and find your Tailscale URL in Settings → Remote Access.
+          Start your Mitsuro server with `mitsuro serve` and find your Tailscale URL in Settings → Remote Access.
         </Text>
       </KeyboardAvoidingView>
     </SafeAreaView>

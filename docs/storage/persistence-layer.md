@@ -10,13 +10,13 @@ The decision to use SQLite comes down to three properties that align with how Mi
 
 **Zero-config.** There is no setup step. The first time Mitsuro starts, it creates the database file automatically, runs all schema migrations, and is ready to go. Users never interact with the database directly.
 
-**Single-file.** The entire database is one file: `~/.krusty/krusty.db`. Backing it up means copying one file. Moving it to another machine means copying one file. Deleting it resets everything cleanly. This makes the operational model as simple as it gets.
+**Single-file.** The entire database is one file: `~/.mitsuro/mitsuro.db`. Backing it up means copying one file. Moving it to another machine means copying one file. Deleting it resets everything cleanly. This makes the operational model as simple as it gets.
 
 SQLite also brings WAL (Write-Ahead Logging) mode, which Mitsuro enables on every connection. WAL allows concurrent reads while a write is in progress, preventing lock contention when the server and CLI access the database simultaneously. A 5-second busy timeout is configured so that brief lock conflicts resolve automatically rather than failing immediately.
 
 ## The Database Wrapper
 
-All database access flows through the `Database` struct in `crates/krusty-core/src/storage/database.rs`. This wrapper handles three responsibilities:
+All database access flows through the `Database` struct in `crates/mitsuro-core/src/storage/database.rs`. This wrapper handles three responsibilities:
 
 1. **Connection setup.** It opens the SQLite connection, enables WAL mode, turns on foreign key enforcement, and sets the busy timeout.
 2. **Migration management.** It tracks the current schema version and runs any outstanding migrations.
@@ -85,8 +85,8 @@ The current set of managers:
 | `AutonomousTaskStore` | Hive task coordination | Create, claim, complete, fail tasks |
 | `PushSubscriptionStore` | Push notification subscriptions | Upsert, remove, mark success/failure |
 | `PushDeliveryAttemptStore` | Delivery tracking | Record attempts, compute summaries |
-| `MakoRuntimeStateStore` | Hive daemon state | Get/set/upsert runtime state, list recoverable |
-| `ProjectSettings` | Per-project overrides | Load from `.krusty/settings.json` |
+| `HiveRuntimeStateStore` | Hive daemon state | Get/set/upsert runtime state, list recoverable |
+| `ProjectSettings` | Per-project overrides | Load from `.mitsuro/settings.json` |
 
 This structure keeps each file focused. Adding a new storage domain means creating a new file with a new manager struct, not modifying a central class.
 
@@ -98,7 +98,7 @@ Sessions are the backbone of persistence. Every conversation, every plan, every 
 
 A session starts with `SessionManager::create_session()`, which generates a UUID, records the title, model, working directory, and timestamps, then inserts the row. Sessions carry metadata about their context:
 
-- **`session_type`** -- One of `chat`, `code`, or `mako`, distinguishing the product surface.
+- **`session_type`** -- One of `chat`, `code`, or `hive`, distinguishing the product surface.
 - **`work_mode`** -- Either `build` (the agent writes code) or `plan` (the agent plans only).
 - **`workspace_mode`** -- Whether the session is `neutral` (no project), `selected` (user picked a project), or `created` (the session spawned a new workspace).
 - **`project_dir`** -- The active project directory, when one exists.
@@ -139,7 +139,7 @@ The `messages` table stores every message in every session. Each row records the
 
 ## Credentials
 
-API key storage uses a different approach from the rest of the persistence layer. Instead of SQLite, `CredentialStore` reads and writes a JSON file at `~/.krusty/tokens/credentials.json`. The file is a flat map of provider keys to API key strings.
+API key storage uses a different approach from the rest of the persistence layer. Instead of SQLite, `CredentialStore` reads and writes a JSON file at `~/.mitsuro/tokens/credentials.json`. The file is a flat map of provider keys to API key strings.
 
 Security measures:
 
@@ -153,7 +153,7 @@ The store tracks which providers have keys configured and provides a unified `ha
 
 `Preferences` wraps the `user_preferences` table, a simple key-value store with timestamps. It provides typed accessors for common settings:
 
-- **Theme** -- The active UI theme (defaults to `"krusty"`).
+- **Theme** -- The active UI theme (defaults to `"mitsuro"`).
 - **Current model** -- The last-used model ID.
 - **Recent models** -- An ordered list of up to 10 recently used models, stored as JSON.
 - **Model cache** -- Cached model catalogs from dynamic providers like OpenRouter, with TTL-based staleness detection and fingerprint validation to detect catalog drift.
@@ -204,7 +204,7 @@ Traces serve two purposes: post-mortem diagnostics (understanding what went wron
 
 ### Hive Runtime State
 
-`MakoRuntimeStateStore` persists the daemon-level runtime state for autonomous sessions. Each Hive session has a status (`idle`, `running`, `sleeping`, `awaiting_input`, `paused`, `error`, `cancelled`), an optional next wake time, a sleep reason, the current run ID, and the last wake reason.
+`HiveRuntimeStateStore` persists the daemon-level runtime state for autonomous sessions. Each Hive session has a status (`idle`, `running`, `sleeping`, `awaiting_input`, `paused`, `error`, `cancelled`), an optional next wake time, a sleep reason, the current run ID, and the last wake reason.
 
 The `list_recoverable_states()` method returns sessions in `running` or `sleeping` status, which the daemon uses on startup to resume work that was interrupted when the process last stopped.
 
@@ -216,40 +216,40 @@ This data feeds an importance scoring algorithm used during context preservation
 
 ## Reports
 
-`ReportStore` persists research reports produced by Chat sessions (with the research toggle) and Hive sessions. Each report has a title, content, summary, tags, sources, and an optional project directory. Reports are stored both in SQLite and as Markdown files on disk -- in `.krusty/reports/` within the project directory when one exists, or in `~/.krusty/reports/` otherwise.
+`ReportStore` persists research reports produced by Chat sessions (with the research toggle) and Hive sessions. Each report has a title, content, summary, tags, sources, and an optional project directory. Reports are stored both in SQLite and as Markdown files on disk -- in `.mitsuro/reports/` within the project directory when one exists, or in `~/.mitsuro/reports/` otherwise.
 
 Reports support listing by project directory and searching by title or tags.
 
 ## Project Settings
 
-`ProjectSettings` loads per-project overrides from `.krusty/settings.json` within any project directory. Unlike the other storage domains, this is a read-only JSON file rather than a database table. It supports overriding the model, permission mode, system prompt, subagent turn limits, conventions, and disabled tools. All fields are optional -- only specified values override the defaults.
+`ProjectSettings` loads per-project overrides from `.mitsuro/settings.json` within any project directory. Unlike the other storage domains, this is a read-only JSON file rather than a database table. It supports overriding the model, permission mode, system prompt, subagent turn limits, conventions, and disabled tools. All fields are optional -- only specified values override the defaults.
 
 The loading is deliberately forgiving: a missing file returns defaults, invalid JSON returns defaults, and unknown fields are silently ignored. This matches the graceful-degradation pattern used throughout Mitsuro's configuration loading.
 
 ## File Paths
 
-Everything lives under `~/.krusty/`:
+Everything lives under `~/.mitsuro/`:
 
 ```
-~/.krusty/
-  krusty.db              # The main SQLite database
+~/.mitsuro/
+  mitsuro.db              # The main SQLite database
   tokens/
     credentials.json     # API keys (mode 0600)
     active_provider.json # Currently selected provider
     mcp_keys.json        # MCP server API keys
     vapid_key.pem        # Web Push signing key
   logs/
-    krusty.log           # Application logs
+    mitsuro.log           # Application logs
   plans/                 # Plan files in plan mode
   reports/               # Global reports (when no project is active)
   extensions/            # Extension scripts
   plugins/               # Installable plugins
 ```
 
-Per-project state lives under `<project>/.krusty/`:
+Per-project state lives under `<project>/.mitsuro/`:
 
 ```
-<project>/.krusty/
+<project>/.mitsuro/
   settings.json          # Project-specific overrides
   reports/               # Project-scoped reports
   mailbox/               # Inter-agent messaging (delegated runs)

@@ -1,6 +1,6 @@
 {
   "imports": {
-    "@krusty/api": "../../api/src/index.ts",
+    "@mitsuro/api": "../../api/src/index.ts",
     "zustand": "./zustand-stub.ts"
   }
 }

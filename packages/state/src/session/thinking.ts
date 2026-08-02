@@ -6,8 +6,8 @@ import {
   supportsThinking,
   thinkingLevelLabel,
   thinkingLevelToApiValue,
-} from '@krusty/api';
-import type { ModelCapabilityInput } from '@krusty/api';
+} from '@mitsuro/api';
+import type { ModelCapabilityInput } from '@mitsuro/api';
 import type { ThinkingLevel } from './types';
 
 export { isThinkingEnabled, supportsFastMode, supportsThinking, thinkingLevelLabel, thinkingLevelToApiValue };

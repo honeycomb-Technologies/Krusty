@@ -1,5 +1,8 @@
 # Death-loop remediation plan (2026-07-31)
 
+> Historical pre-migration record: prior crate and service identifiers below
+> are preserved exactly as observed on 2026-07-31.
+
 Goals from forensic audit of Mitsuro sessions 26102, 06c5, cf41, d666.
 
 ## Goals

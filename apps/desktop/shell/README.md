@@ -1,4 +1,4 @@
-# Mitsuro Desktop Shell (Tauri)
+# Desktop Shell (Tauri)
 
 This wraps the Expo web app surface as a native desktop app.
 
@@ -24,12 +24,15 @@ Build outputs:
 - `src-tauri/target/release/bundle/rpm/*.rpm`
 
 ## Linux Install + Run
-- Debian/Ubuntu: install the generated `Mitsuro_<version>_amd64.deb`.
-- Fedora/RHEL: install the generated `Mitsuro-<version>-1.x86_64.rpm`.
-- openSUSE: install the generated `Mitsuro-<version>-1.x86_64.rpm`.
+- Debian/Ubuntu:
+  - `sudo apt install "./src-tauri/target/release/bundle/deb/Krusty Desktop_0.8.1_amd64.deb"`
+- Fedora/RHEL:
+  - `sudo dnf install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
+- openSUSE:
+  - `sudo zypper install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
 
 After install, launch with:
-- `krusty-desktop` (compatibility binary)
+- `krusty-desktop`
 
 If your Wayland compositor has dmabuf issues, force X11 fallback:
 - `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 krusty-desktop`

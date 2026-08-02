@@ -33,8 +33,8 @@ import type {
   PreviewSettingsPatch,
   ProviderStatus,
   SkillInfo,
-} from "@krusty/api";
-import type { ColorScheme } from "@krusty/ui";
+} from "@mitsuro/api";
+import type { ColorScheme } from "@mitsuro/ui";
 
 import * as Haptics from "../../platform/haptics";
 import { openURL } from "../../platform/linking";
@@ -314,7 +314,7 @@ export function ConnectionSection({
                 style={[styles.input, { color: t.foreground }]}
                 value={inputToken}
                 onChangeText={onInputTokenChange}
-                placeholder="kr_remote_..."
+                placeholder="mitsuro_remote_..."
                 placeholderTextColor={`${t.mutedForeground}60`}
                 autoCapitalize="none"
                 autoCorrect={false}

@@ -7,7 +7,7 @@ import {
   type Theme,
   type ColorScheme,
   type ResolvedScheme,
-} from '@krusty/ui';
+} from '@mitsuro/ui';
 
 interface ThemeContextValue {
   theme: Theme;

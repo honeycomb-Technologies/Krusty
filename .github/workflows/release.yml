@@ -9,8 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  canonical-identity:
+    name: Canonical Identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Check canonical names and exact compatibility exceptions
+        run: bash scripts/check-canonical-names.sh
+      - name: Exercise installer migration and rollback fixtures
+        run: sh install.sh --self-test
+
   client-quality:
     name: Client Quality Gates
+    needs: canonical-identity
     uses: ./.github/workflows/client-quality.yml
 
   build:
@@ -55,27 +66,43 @@ jobs:
 
       - name: Build (Unix)
         if: matrix.os != 'windows-latest'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p krusty -p krusty-mako
+        run: cargo build --release --locked --target ${{ matrix.target }} -p mitsuro -p mitsuro-hive
 
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p krusty
+        run: cargo build --release --locked --target ${{ matrix.target }} -p mitsuro
+
+      - name: Verify compatibility command forwarding (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          release_dir="target/${{ matrix.target }}/release"
+          test "$("$release_dir/mitsuro" --version)" = "$("$release_dir/krusty" --version)"
+          test "$("$release_dir/mitsuro-hive" --version)" = "$("$release_dir/krusty-mako" --version)"
+
+      - name: Verify compatibility command forwarding (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          release_dir="target/${{ matrix.target }}/release"
+          test "$("$release_dir/mitsuro.exe" --version)" = "$("$release_dir/krusty.exe" --version)"
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          package_dir="krusty-${{ matrix.target }}"
+          package_dir="mitsuro-${{ matrix.target }}"
           mkdir -p "$package_dir/systemd"
+          cp "target/${{ matrix.target }}/release/mitsuro" "$package_dir/"
+          cp "target/${{ matrix.target }}/release/mitsuro-hive" "$package_dir/"
           cp "target/${{ matrix.target }}/release/krusty" "$package_dir/"
           cp "target/${{ matrix.target }}/release/krusty-mako" "$package_dir/"
-          cp deploy/systemd/krusty-mako.service "$package_dir/systemd/"
-          cp deploy/systemd/krusty-mako.socket "$package_dir/systemd/"
-          cp deploy/systemd/krusty-serve.service "$package_dir/systemd/"
-          tar czf "krusty-${{ matrix.target }}.tar.gz" -C "$package_dir" .
+          cp deploy/systemd/mitsuro-hive.service "$package_dir/systemd/"
+          cp deploy/systemd/mitsuro-hive.socket "$package_dir/systemd/"
+          cp deploy/systemd/mitsuro-serve.service "$package_dir/systemd/"
+          tar czf "mitsuro-${{ matrix.target }}.tar.gz" -C "$package_dir" .
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
+            sha256sum mitsuro-${{ matrix.target }}.tar.gz > mitsuro-${{ matrix.target }}.tar.gz.sha256
           else
-            shasum -a 256 krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
+            shasum -a 256 mitsuro-${{ matrix.target }}.tar.gz > mitsuro-${{ matrix.target }}.tar.gz.sha256
           fi
 
       - name: Package (Windows)
@@ -83,15 +110,23 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
+          7z a ../../../mitsuro-${{ matrix.target }}.zip mitsuro.exe
+          # The old Windows updater extracts only krusty.exe. Give it the full
+          # canonical binary, not the thin forwarder that needs mitsuro.exe.
+          cp mitsuro.exe krusty.exe
+          cmp -s mitsuro.exe krusty.exe
           7z a ../../../krusty-${{ matrix.target }}.zip krusty.exe
           cd ../../..
+          sha256sum mitsuro-${{ matrix.target }}.zip > mitsuro-${{ matrix.target }}.zip.sha256
           sha256sum krusty-${{ matrix.target }}.zip > krusty-${{ matrix.target }}.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: krusty-${{ matrix.target }}
-          path: krusty-${{ matrix.target }}.*
+          name: mitsuro-${{ matrix.target }}
+          path: |
+            mitsuro-${{ matrix.target }}.*
+            krusty-${{ matrix.target }}.*
 
   desktop-linux:
     name: Build Desktop Linux Bundles
@@ -124,7 +159,7 @@ jobs:
       - name: Upload desktop Linux artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: krusty-desktop-linux
+          name: mitsuro-desktop-linux
           path: |
             apps/desktop/shell/src-tauri/target/release/bundle/deb/*.deb
             apps/desktop/shell/src-tauri/target/release/bundle/rpm/*.rpm
@@ -151,6 +186,84 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
 
+      - name: Validate Windows updater bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t unexpected_unix_aliases < <(
+            find artifacts -type f -name 'krusty-*.tar.gz*' -print
+          )
+          if [[ "${#unexpected_unix_aliases[@]}" -ne 0 ]]; then
+            printf 'Unix compatibility archives are not reachable by the old updater:\n' >&2
+            printf '  %s\n' "${unexpected_unix_aliases[@]}" >&2
+            exit 1
+          fi
+
+          canonical_name=mitsuro-x86_64-pc-windows-msvc.zip
+          compatibility_name=krusty-x86_64-pc-windows-msvc.zip
+          mapfile -t canonical_matches < <(find artifacts -type f -name "$canonical_name" -print)
+          mapfile -t compatibility_matches < <(find artifacts -type f -name "$compatibility_name" -print)
+          test "${#canonical_matches[@]}" -eq 1
+          test "${#compatibility_matches[@]}" -eq 1
+
+          validate_manifest() {
+            archive_path=$1
+            archive_name=$2
+            manifest_path="$archive_path.sha256"
+            test -f "$manifest_path"
+            test "$(awk 'NF { count++ } END { print count + 0 }' "$manifest_path")" -eq 1
+            grep -Eq "^[0-9a-f]{64}  \\*?$archive_name$" "$manifest_path"
+            expected_digest=$(awk 'NF { print $1; exit }' "$manifest_path")
+            actual_digest=$(sha256sum "$archive_path" | awk '{ print $1 }')
+            test "$expected_digest" = "$actual_digest"
+          }
+          validate_manifest "${canonical_matches[0]}" "$canonical_name"
+          validate_manifest "${compatibility_matches[0]}" "$compatibility_name"
+
+          python - \
+            "${canonical_matches[0]}" mitsuro.exe \
+            "${compatibility_matches[0]}" krusty.exe <<'PY'
+          import hashlib
+          import stat
+          import sys
+          import zipfile
+
+          maximum_bytes = 512 * 1024 * 1024
+
+          def exact_payload_digest(archive_path: str, expected_name: str) -> str:
+              with zipfile.ZipFile(archive_path) as archive:
+                  entries = archive.infolist()
+                  if len(entries) != 1:
+                      raise SystemExit(
+                          f"{archive_path}: expected one {expected_name} entry, found {len(entries)}"
+                      )
+                  entry = entries[0]
+                  if entry.filename != expected_name or entry.is_dir():
+                      raise SystemExit(
+                          f"{archive_path}: entry must be exactly the file {expected_name}"
+                      )
+                  unix_mode = (entry.external_attr >> 16) & 0xFFFF
+                  if unix_mode and stat.S_IFMT(unix_mode) not in (0, stat.S_IFREG):
+                      raise SystemExit(f"{archive_path}: unsupported ZIP entry type")
+                  if entry.file_size > maximum_bytes:
+                      raise SystemExit(f"{archive_path}: extracted binary is too large")
+
+                  digest = hashlib.sha256()
+                  copied = 0
+                  with archive.open(entry) as payload:
+                      while chunk := payload.read(1024 * 1024):
+                          copied += len(chunk)
+                          if copied > maximum_bytes:
+                              raise SystemExit(f"{archive_path}: extracted binary is too large")
+                          digest.update(chunk)
+                  return digest.hexdigest()
+
+          canonical_digest = exact_payload_digest(sys.argv[1], sys.argv[2])
+          compatibility_digest = exact_payload_digest(sys.argv[3], sys.argv[4])
+          if canonical_digest != compatibility_digest:
+              raise SystemExit("Windows canonical and compatibility payloads differ")
+          PY
+
       - name: Render and validate Homebrew formula
         env:
           TAG_NAME: ${{ github.ref_name }}
@@ -158,7 +271,7 @@ jobs:
           bash .github/homebrew/render-formula.sh \
             "$TAG_NAME" \
             artifacts \
-            artifacts/homebrew/krusty.rb
+            artifacts/homebrew/mitsuro.rb
 
       - name: Create Release
         env:
@@ -182,17 +295,19 @@ jobs:
             fi
             expected_by_name[$asset_name]=$asset
             case "$asset_name" in
-              krusty-aarch64-apple-darwin.tar.gz | \
-              krusty-aarch64-apple-darwin.tar.gz.sha256 | \
-              krusty-x86_64-apple-darwin.tar.gz | \
-              krusty-x86_64-apple-darwin.tar.gz.sha256 | \
-              krusty-aarch64-unknown-linux-gnu.tar.gz | \
-              krusty-aarch64-unknown-linux-gnu.tar.gz.sha256 | \
-              krusty-x86_64-unknown-linux-gnu.tar.gz | \
-              krusty-x86_64-unknown-linux-gnu.tar.gz.sha256 | \
+              mitsuro-aarch64-apple-darwin.tar.gz | \
+              mitsuro-aarch64-apple-darwin.tar.gz.sha256 | \
+              mitsuro-x86_64-apple-darwin.tar.gz | \
+              mitsuro-x86_64-apple-darwin.tar.gz.sha256 | \
+              mitsuro-aarch64-unknown-linux-gnu.tar.gz | \
+              mitsuro-aarch64-unknown-linux-gnu.tar.gz.sha256 | \
+              mitsuro-x86_64-unknown-linux-gnu.tar.gz | \
+              mitsuro-x86_64-unknown-linux-gnu.tar.gz.sha256 | \
+              mitsuro-x86_64-pc-windows-msvc.zip | \
+              mitsuro-x86_64-pc-windows-msvc.zip.sha256 | \
               krusty-x86_64-pc-windows-msvc.zip | \
               krusty-x86_64-pc-windows-msvc.zip.sha256 | \
-              krusty.rb)
+              mitsuro.rb)
                 ;;
               *.deb)
                 desktop_deb_count=$((desktop_deb_count + 1))
@@ -208,17 +323,19 @@ jobs:
           done
 
           required_assets=(
-            krusty-aarch64-apple-darwin.tar.gz
-            krusty-aarch64-apple-darwin.tar.gz.sha256
-            krusty-x86_64-apple-darwin.tar.gz
-            krusty-x86_64-apple-darwin.tar.gz.sha256
-            krusty-aarch64-unknown-linux-gnu.tar.gz
-            krusty-aarch64-unknown-linux-gnu.tar.gz.sha256
-            krusty-x86_64-unknown-linux-gnu.tar.gz
-            krusty-x86_64-unknown-linux-gnu.tar.gz.sha256
+            mitsuro-aarch64-apple-darwin.tar.gz
+            mitsuro-aarch64-apple-darwin.tar.gz.sha256
+            mitsuro-x86_64-apple-darwin.tar.gz
+            mitsuro-x86_64-apple-darwin.tar.gz.sha256
+            mitsuro-aarch64-unknown-linux-gnu.tar.gz
+            mitsuro-aarch64-unknown-linux-gnu.tar.gz.sha256
+            mitsuro-x86_64-unknown-linux-gnu.tar.gz
+            mitsuro-x86_64-unknown-linux-gnu.tar.gz.sha256
+            mitsuro-x86_64-pc-windows-msvc.zip
+            mitsuro-x86_64-pc-windows-msvc.zip.sha256
             krusty-x86_64-pc-windows-msvc.zip
             krusty-x86_64-pc-windows-msvc.zip.sha256
-            krusty.rb
+            mitsuro.rb
           )
           for asset_name in "${required_assets[@]}"; do
             if [[ -z "${expected_by_name[$asset_name]+present}" ]]; then

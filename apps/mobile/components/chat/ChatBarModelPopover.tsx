@@ -9,7 +9,7 @@ import {
 import Animated from 'react-native-reanimated';
 import { BlurView } from '../../platform/blur';
 import * as Haptics from '../../platform/haptics';
-import type { ModelInfo } from '@krusty/api';
+import type { ModelInfo } from '@mitsuro/api';
 
 const PILL = 56;
 const RADIUS = 18;

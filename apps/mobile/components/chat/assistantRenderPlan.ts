@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatRenderPart, ToolCall } from "@krusty/api";
+import type { ChatMessage, ChatRenderPart, ToolCall } from "@mitsuro/api";
 import {
   isExplorationToolName,
   isHiddenToolName,

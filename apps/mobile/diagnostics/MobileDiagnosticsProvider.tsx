@@ -17,25 +17,29 @@ import {
   MobileDiagnosticRecorder,
   buildDiagnosticUploadBatch,
   createStressDiagnosticRecorder,
-  beginKrustyPerformanceSpan,
-  getKrustyPerformanceSnapshot,
+  beginMitsuroPerformanceSpan,
+  getMitsuroPerformanceSnapshot,
   type DiagnosticBatch,
   type DiagnosticMode,
   type DiagnosticUploadClient,
-} from '@krusty/state';
+} from '@mitsuro/state';
 
 import { useConnection } from '../hooks/useConnection';
 import {
   installMobileDiagnosticRecorder,
   recordMobileDiagnostic,
 } from './mobileDiagnostics';
-import KrustyDiagnosticsModule, {
+import MitsuroDiagnosticsModule, {
   type NativeMetricKitPayload,
-} from '../modules/krusty-diagnostics';
+} from '../modules/mitsuro-diagnostics';
 import { summarizeDelayedInteractions } from './performanceEntries';
+import {
+  deleteMigratedAsyncValue,
+  IDENTITY_STORAGE_KEYS,
+  readMigratedAsyncValue,
+  writeCanonicalAsyncValue,
+} from '../platform/identity-storage';
 
-const INSTALLATION_KEY = 'krusty:diagnostics:installation-v1';
-const PENDING_KEY = 'krusty:diagnostics:pending-v1';
 const BASELINE_HEARTBEAT_MS = 1_000;
 const STRESS_HEARTBEAT_MS = 250;
 const PERSIST_INTERVAL_MS = 15_000;
@@ -68,7 +72,7 @@ const DiagnosticsContext = createContext<DiagnosticsContextValue>({
 });
 
 interface DiagnosticsGlobal {
-  __KRUSTY_MOBILE_DIAGNOSTICS__?: DiagnosticsContextValue & {
+  __MITSURO_MOBILE_DIAGNOSTICS__?: DiagnosticsContextValue & {
     snapshot: () => ReturnType<MobileDiagnosticRecorder['snapshot']> | null;
   };
   PerformanceObserver?: new (
@@ -188,10 +192,13 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
         : mode === 'stress'
           ? targetRecorder.createPersistenceBatch() ?? createCompletionMarkerBatch(targetRecorder)
           : targetRecorder.createPersistenceBatch();
-      const endPersistSpan = beginKrustyPerformanceSpan('diagnostics.persist');
+      const endPersistSpan = beginMitsuroPerformanceSpan('diagnostics.persist');
       try {
         if (!batch) {
-          await AsyncStorage.removeItem(PENDING_KEY);
+          await deleteMigratedAsyncValue(
+            AsyncStorage,
+            IDENTITY_STORAGE_KEYS.diagnosticsPending,
+          );
         } else {
           const state: PersistedDiagnosticsStateV2 = {
             schemaVersion: 2,
@@ -201,7 +208,11 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
             mode,
             stressEndsAtMs: targetRecorder.getStressEndsAtMs(),
           };
-          await AsyncStorage.setItem(PENDING_KEY, JSON.stringify(state));
+          await writeCanonicalAsyncValue(
+            AsyncStorage,
+            IDENTITY_STORAGE_KEYS.diagnosticsPending,
+            JSON.stringify(state),
+          );
         }
         persistedRunIdRef.current = targetRecorder.runId;
         persistedRevisionRef.current = revision;
@@ -234,23 +245,23 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
     }
     uploadingRef.current = true;
     setUploadState('uploading');
-    const endUploadSpan = beginKrustyPerformanceSpan('diagnostics.upload');
+    const endUploadSpan = beginMitsuroPerformanceSpan('diagnostics.upload');
     try {
       const completionRequested = () => (
         pendingCompletionRef.current || recorder.isStressCompletionPending()
       );
-      let nativePayloads: NativeMetricKitPayload[] = KrustyDiagnosticsModule
-        ? await KrustyDiagnosticsModule.listMetricKitPayloads().catch(() => [])
+      let nativePayloads: NativeMetricKitPayload[] = MitsuroDiagnosticsModule
+        ? await MitsuroDiagnosticsModule.listMetricKitPayloads().catch(() => [])
         : [];
       setNativePayloadCount(nativePayloads.length);
       if (!recorder.createBatch() && nativePayloads.length > 0 && !recorder.isStressCompletionPending()) {
         recorder.record('diagnostic', { name: 'native.payloads', count: nativePayloads.length });
       }
       let batch = recorder.createBatch() ?? createNativeOnlyBatch(recorder, nativePayloads);
-      const buildNumber = KrustyDiagnosticsModule?.getBuildNumber()
+      const buildNumber = MitsuroDiagnosticsModule?.getBuildNumber()
         ?? Constants.nativeBuildVersion
         ?? 'unknown';
-      // Calling through the configured KrustyClient preserves its authenticated
+      // Calling through the configured MitsuroClient preserves its authenticated
       // transport. There is deliberately no raw URL/token fallback here.
       while (batch) {
         await upload.call(client, buildDiagnosticUploadBatch(batch, {
@@ -269,9 +280,9 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
           endedAtMs: null,
         }, nativePayloads));
         recorder.acknowledge(batch.events.map((event) => event.id));
-        if (KrustyDiagnosticsModule && nativePayloads.length > 0) {
+        if (MitsuroDiagnosticsModule && nativePayloads.length > 0) {
           try {
-            await KrustyDiagnosticsModule
+            await MitsuroDiagnosticsModule
               .acknowledgeMetricKitPayloads(nativePayloads.map((payload) => payload.id));
             setNativePayloadCount(0);
             nativePayloads = [];
@@ -305,7 +316,10 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
           endedAtMs: recorder.getStressCompletedAtMs(),
         }));
         try {
-          await AsyncStorage.removeItem(PENDING_KEY);
+          await deleteMigratedAsyncValue(
+            AsyncStorage,
+            IDENTITY_STORAGE_KEYS.diagnosticsPending,
+          );
         } catch {
           setUploadState('failed');
           return false;
@@ -405,9 +419,9 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
 
   useEffect(() => {
     if (!recorder) return;
-    if (!KrustyDiagnosticsModule) return;
+    if (!MitsuroDiagnosticsModule) return;
     let cancelled = false;
-    void KrustyDiagnosticsModule.listMetricKitPayloads()
+    void MitsuroDiagnosticsModule.listMetricKitPayloads()
       .then((payloads) => {
         if (!cancelled) setNativePayloadCount(payloads.length);
       })
@@ -532,7 +546,7 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
   useEffect(() => {
     if (!recorder) return;
     const timer = setInterval(() => {
-      const snapshot = getKrustyPerformanceSnapshot();
+      const snapshot = getMitsuroPerformanceSnapshot();
       for (const entry of snapshot.entries) {
         if (seenPerformanceEntriesRef.current.has(entry)) continue;
         seenPerformanceEntriesRef.current.add(entry);
@@ -575,12 +589,12 @@ export function MobileDiagnosticsProvider({ children }: { children: ReactNode })
 
   useEffect(() => {
     const root = globalThis as typeof globalThis & DiagnosticsGlobal;
-    root.__KRUSTY_MOBILE_DIAGNOSTICS__ = {
+    root.__MITSURO_MOBILE_DIAGNOSTICS__ = {
       ...context,
       snapshot: () => recorder?.snapshot() ?? null,
     };
     return () => {
-      delete root.__KRUSTY_MOBILE_DIAGNOSTICS__;
+      delete root.__MITSURO_MOBILE_DIAGNOSTICS__;
     };
   }, [context, recorder]);
 
@@ -595,7 +609,7 @@ export function useMobileDiagnostics(): DiagnosticsContextValue {
   return useContext(DiagnosticsContext);
 }
 
-export function useMobileDiagnosticMode(mode: 'chat' | 'code' | 'mako'): void {
+export function useMobileDiagnosticMode(mode: 'chat' | 'code' | 'hive'): void {
   useEffect(() => {
     recordMobileDiagnostic('mode', { state: mode });
   }, [mode]);
@@ -618,8 +632,14 @@ async function readDiagnosticsBootstrap(
   let candidateInstallationId: string | null = null;
   while (!isCancelled()) {
     const [installationResult, pendingResult] = await Promise.allSettled([
-      AsyncStorage.getItem(INSTALLATION_KEY),
-      AsyncStorage.getItem(PENDING_KEY),
+      readMigratedAsyncValue(
+        AsyncStorage,
+        IDENTITY_STORAGE_KEYS.diagnosticsInstallation,
+      ),
+      readMigratedAsyncValue(
+        AsyncStorage,
+        IDENTITY_STORAGE_KEYS.diagnosticsPending,
+      ),
     ]);
     if (installationResult.status === 'rejected' || pendingResult.status === 'rejected') {
       onRetry();
@@ -634,7 +654,11 @@ async function readDiagnosticsBootstrap(
     if (!validIdentifier(storedInstallationId)) {
       candidateInstallationId = installationId;
       try {
-        await AsyncStorage.setItem(INSTALLATION_KEY, installationId);
+        await writeCanonicalAsyncValue(
+          AsyncStorage,
+          IDENTITY_STORAGE_KEYS.diagnosticsInstallation,
+          installationId,
+        );
       } catch {
         onRetry();
         await diagnosticsRetryDelay();
@@ -696,7 +720,7 @@ function classifyRoute(segments: string[]): string {
 }
 
 function safeModeTransition(detail: string | undefined): string {
-  return /^(chat|code|mako)->(chat|code|mako)$/.test(detail ?? '')
+  return /^(chat|code|hive)->(chat|code|hive)$/.test(detail ?? '')
     ? detail!
     : 'mode.change';
 }

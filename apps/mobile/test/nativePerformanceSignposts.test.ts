@@ -10,7 +10,7 @@ function assert(condition: unknown, message: string): asserts condition {
 Deno.test("native performance spans use fixed privacy-safe signposts", async () => {
   const nativeSource = await Deno.readTextFile(
     new URL(
-      "../modules/krusty-diagnostics/ios/KrustyDiagnosticsModule.swift",
+      "../modules/mitsuro-diagnostics/ios/MitsuroDiagnosticsModule.swift",
       import.meta.url,
     ).pathname,
   );
@@ -27,7 +27,7 @@ Deno.test("native performance spans use fixed privacy-safe signposts", async () 
     "native signposts must reject arbitrary labels",
   );
   const phaseUnion = performanceSource.match(
-    /export type KrustyPerformancePhase =([\s\S]*?);/,
+    /export type MitsuroPerformancePhase =([\s\S]*?);/,
   )?.[1] ?? "";
   const jsPhases = [...phaseUnion.matchAll(/'([^']+)'/g)].map((match) => match[1]);
   const nativeAllowlist = nativeSource.match(
@@ -41,17 +41,17 @@ Deno.test("native performance spans use fixed privacy-safe signposts", async () 
     "every JS span phase must have a matching fixed native signpost label",
   );
   assert(
-    nativeSource.includes('"KrustyPerformance"')
+    nativeSource.includes('"MitsuroPerformance"')
       && !nativeSource.includes("detail, privacy:"),
     "native intervals must never contain session detail",
   );
   assert(
-    performanceSource.includes("__KRUSTY_NATIVE_PERFORMANCE__?.begin(spanId, name)")
-      && performanceSource.includes("__KRUSTY_NATIVE_PERFORMANCE__?.end(spanId, name)"),
+    performanceSource.includes("__MITSURO_NATIVE_PERFORMANCE__?.begin(spanId, name)")
+      && performanceSource.includes("__MITSURO_NATIVE_PERFORMANCE__?.end(spanId, name)"),
     "JS spans must bracket matching native intervals",
   );
   assert(
-    providerSource.includes("KrustyDiagnosticsModule?.getBuildNumber()"),
+    providerSource.includes("MitsuroDiagnosticsModule?.getBuildNumber()"),
     "uploads must identify the installed CFBundleVersion",
   );
 });

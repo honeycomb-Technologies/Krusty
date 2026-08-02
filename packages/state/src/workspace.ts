@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import type { KrustyStorage } from './storage';
+import type { MitsuroStorage } from './storage';
 
-export const DEFAULT_WORKSPACE_STORAGE_KEY = 'krusty:workspace';
+export const DEFAULT_WORKSPACE_STORAGE_KEY = 'mitsuro:workspace';
 
 type WorkspaceMode = 'neutral' | 'selected' | 'created';
 
@@ -40,7 +40,7 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
 }
 
 function loadState(
-  storage: KrustyStorage,
+  storage: MitsuroStorage,
   storageKey: string,
 ): Omit<WorkspaceStoreState, 'setWorkspace' | 'setSession' | 'setDirectory' | 'setTargetBranch' | 'clear' | 'initFromSession'> {
   try {
@@ -62,7 +62,7 @@ function loadState(
 }
 
 function saveState(
-  storage: KrustyStorage,
+  storage: MitsuroStorage,
   storageKey: string,
   state: {
     directory: string | null;
@@ -84,7 +84,7 @@ function saveState(
 }
 
 export function createWorkspaceStore(
-  storage: KrustyStorage,
+  storage: MitsuroStorage,
   storageKey = DEFAULT_WORKSPACE_STORAGE_KEY,
 ) {
   const initial = loadState(storage, storageKey);

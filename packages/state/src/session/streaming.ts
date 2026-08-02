@@ -2,7 +2,7 @@ import type {
 	PlanItem,
 	SessionContinuationEvent,
 	StreamCallbacks,
-} from "@krusty/api";
+} from "@mitsuro/api";
 import {
 	MAX_LIVE_MESSAGE_CONTENT_LENGTH,
 	MAX_LIVE_THINKING_CONTENT_LENGTH,
@@ -10,7 +10,7 @@ import {
 } from "./constants";
 import type { createPlanStore } from "../plan";
 import type { createSessionsStore } from "../sessions";
-import { beginKrustyPerformanceSpan } from "../performance";
+import { beginMitsuroPerformanceSpan } from "../performance";
 import {
 	applyDelegatedProgress,
 	createDelegatedArtifactState,
@@ -141,7 +141,7 @@ export function createStreamCallbacks(
 	const pendingToolOutputDeltas = new Map<string, string>();
 	let streamFlushScheduled = false;
 	let firstEventPending = true;
-	const finishFirstEventSpan = beginKrustyPerformanceSpan("stream.first_event");
+	const finishFirstEventSpan = beginMitsuroPerformanceSpan("stream.first_event");
 
 	function noteFirstEvent() {
 		if (!firstEventPending) return;
@@ -168,7 +168,7 @@ export function createStreamCallbacks(
 			pendingToolOutputDeltas.clear();
 			return;
 		}
-		const finishFlushSpan = beginKrustyPerformanceSpan("stream.flush");
+		const finishFlushSpan = beginMitsuroPerformanceSpan("stream.flush");
 		let changed = false;
 		let flushedText = false;
 		let flushedThinking = false;
@@ -385,7 +385,7 @@ export function createStreamCallbacks(
 				const status: ToolCall["status"] =
 					delegated?.outcome === "partial"
 						? "partial"
-						: delegated?.outcome === "failed"
+						: delegated?.outcome === "failed" || delegated?.outcome === "cancelled"
 							? "error"
 							: isError
 								? "error"

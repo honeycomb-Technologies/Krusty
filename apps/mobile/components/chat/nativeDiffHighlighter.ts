@@ -1,9 +1,9 @@
 import { createHighlighterCore, type HighlighterCore, type ThemedToken } from "@shikijs/core";
 import {
-  KRUSTY_DIFF_THEME_NAMES,
-  krustyDarkDiffTheme,
-  krustyLightDiffTheme,
-} from "./krustyDiffThemes";
+  MITSURO_DIFF_THEME_NAMES,
+  mitsuroDarkDiffTheme,
+  mitsuroLightDiffTheme,
+} from "./mitsuroDiffThemes";
 import type { ToolDiffRow } from "./toolDiffModel";
 
 export interface NativeDiffToken {
@@ -24,7 +24,7 @@ export async function highlightDiffRows(
   if (!highlighter) return null;
 
   const language = languageForPath(filePath);
-  const theme = KRUSTY_DIFF_THEME_NAMES[scheme];
+  const theme = MITSURO_DIFF_THEME_NAMES[scheme];
   const source = rows.map((row) => (row.kind === "metadata" ? "" : row.content)).join("\n");
   const sourceKey = `${source.length}:${source.slice(0, 96)}:${source.slice(-96)}`;
   const cacheKey = `${theme}\u0000${language}\u0000${sourceKey}`;
@@ -81,7 +81,7 @@ async function createNativeHighlighter(): Promise<HighlighterCore | null> {
     ]);
     if (!engine.isNativeEngineAvailable()) return null;
     return createHighlighterCore({
-      themes: [krustyDarkDiffTheme, krustyLightDiffTheme],
+      themes: [mitsuroDarkDiffTheme, mitsuroLightDiffTheme],
       langs: languages.flatMap((language) => language.default),
       engine: engine.createNativeEngine({ maxCacheSize: 800 }),
     });

@@ -1,20 +1,20 @@
 import { create } from 'zustand';
-import { KrustyApiError } from '@krusty/api';
+import { MitsuroApiError } from '@mitsuro/api';
 import type {
-  KrustyClient,
+  MitsuroClient,
   ModelInfo,
   ModelKey,
   SessionStateResponse as ApiSessionStateResponse,
   StreamCallbacks,
-} from '@krusty/api';
+} from '@mitsuro/api';
 import type { createPlanStore } from '../plan';
 import type { createSessionsStore } from '../sessions';
-import type { KrustyStorage } from '../storage';
+import type { MitsuroStorage } from '../storage';
 import type { createWorkspaceStore } from '../workspace';
 import {
-  beginKrustyPerformanceSpan,
-  recordKrustyPerformanceMetric,
-  trackKrustyPerformanceResource,
+  beginMitsuroPerformanceSpan,
+  recordMitsuroPerformanceMetric,
+  trackMitsuroPerformanceResource,
 } from '../performance';
 
 import {
@@ -98,7 +98,7 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
 }
 
 function isNotFoundApiError(err: unknown): boolean {
-  if (err instanceof KrustyApiError) {
+  if (err instanceof MitsuroApiError) {
     return err.status === 404;
   }
   if (!err || typeof err !== "object") {
@@ -134,8 +134,8 @@ function buildDisplayAttachments(
 }
 
 export function createSessionStore(
-  client: KrustyClient,
-  storage: KrustyStorage,
+  client: MitsuroClient,
+  storage: MitsuroStorage,
   workspace: ReturnType<typeof createWorkspaceStore>,
   sessionsStore: ReturnType<typeof createSessionsStore>,
   planStore: ReturnType<typeof createPlanStore>,
@@ -147,7 +147,7 @@ export function createSessionStore(
   const sessionCache = new SessionSnapshotCache();
   const inFlightSessionLoads = new Map<string, Promise<void>>();
   const inFlightSessionHydrations = new Map<string, Promise<{
-    data: Awaited<ReturnType<KrustyClient['getSession']>>;
+    data: Awaited<ReturnType<MitsuroClient['getSession']>>;
     serverStateResult: {
       ok: boolean;
       state: ApiSessionStateResponse | null;
@@ -198,7 +198,7 @@ export function createSessionStore(
     presenceHeartbeatInterval = setInterval(() => {
       void syncPresence(sessionId, getState);
     }, PRESENCE_HEARTBEAT_INTERVAL);
-    releasePresenceHeartbeatResource = trackKrustyPerformanceResource(
+    releasePresenceHeartbeatResource = trackMitsuroPerformanceResource(
       'presence_heartbeats',
     );
   }
@@ -216,7 +216,7 @@ export function createSessionStore(
           state: prefetchedServerState,
         })
       : client.getSessionState
-        ? client.getSessionState(sessionId).then(
+        ? client.getSessionState(sessionId, { includeDelegatedHistory: true }).then(
             (state) => ({ ok: true, state }),
             () => ({ ok: false, state: null }),
           )
@@ -254,6 +254,7 @@ export function createSessionStore(
       live_partial_assistant: null,
       delegated_tools: [],
       recent_delegated_runs: [],
+      delegated_run_summaries: [],
     });
     while (lastKnownServerState.size > MAX_LAST_KNOWN_SERVER_STATE) {
       const oldest = lastKnownServerState.keys().next().value;
@@ -281,7 +282,7 @@ export function createSessionStore(
 
   function loadPermissionMode(): PermissionMode {
     try {
-      const stored = storage.get("krusty-permission-mode");
+      const stored = storage.get("mitsuro-permission-mode");
       if (stored === "supervised" || stored === "autonomous") return stored;
     } catch {
       /* ignore */
@@ -350,7 +351,7 @@ export function createSessionStore(
     | "sendMessage"
     | "loadSession"
     | "cancelPendingSessionLoad"
-    | "ensureMakoMainSession"
+    | "ensureHiveMainSession"
     | "clearSession"
     | "initSession"
     | "setTitle"
@@ -635,7 +636,7 @@ export function createSessionStore(
           });
         } catch (error) {
           const recoverableRace =
-            error instanceof KrustyApiError
+            error instanceof MitsuroApiError
             && (error.status === 404 || error.status === 409);
           if (recoverableRace && get().isStreaming) {
             queueLocally(optimisticId);
@@ -691,11 +692,11 @@ export function createSessionStore(
       const streamGeneration = ++streamAttachmentGeneration;
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration;
-      const finishConnectSpan = beginKrustyPerformanceSpan(
+      const finishConnectSpan = beginMitsuroPerformanceSpan(
         'stream.connect',
         state.sessionId ?? undefined,
       );
-      const releaseStreamConnection = trackKrustyPerformanceResource(
+      const releaseStreamConnection = trackMitsuroPerformanceResource(
         'stream_connections',
       );
 
@@ -788,13 +789,13 @@ export function createSessionStore(
               sendOptionHasTargetBranch || requestedTargetBranch
                 ? requestedTargetBranch
                 : undefined,
-            model: effectiveSessionType === "mako" ? undefined : state.model ?? undefined,
+            model: effectiveSessionType === "hive" ? undefined : state.model ?? undefined,
             model_key:
-              effectiveSessionType === "mako" ? undefined : state.modelKey ?? undefined,
+              effectiveSessionType === "hive" ? undefined : state.modelKey ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode:
-              effectiveSessionType === "mako" ? undefined : state.permissionMode,
+              effectiveSessionType === "hive" ? undefined : state.permissionMode,
             mode: effectiveSessionType === "code" ? state.mode : undefined,
           },
           callbacks,
@@ -840,11 +841,11 @@ export function createSessionStore(
       }
     },
 
-    // -- ensureMakoMainSession ----------------------------------------------
+    // -- ensureHiveMainSession ----------------------------------------------
 
-    async ensureMakoMainSession() {
+    async ensureHiveMainSession() {
       try {
-        const main = await client.ensureMakoMain();
+        const main = await client.ensureHiveMain();
         const mainId = main.session_id?.trim();
         if (!mainId) {
           set({
@@ -854,7 +855,7 @@ export function createSessionStore(
           return null;
         }
 
-        if (get().sessionId === mainId && get().sessionType === "mako") {
+        if (get().sessionId === mainId && get().sessionType === "hive") {
           // Already on companion — soft refresh without interrupting a stream.
           if (!get().isStreaming) {
             await get().loadSession(mainId, true);
@@ -866,9 +867,9 @@ export function createSessionStore(
           get().stopStreaming();
         }
         await get().loadSession(mainId);
-        // Guarantee sessionType is mako even if list metadata lags.
-        if (get().sessionId === mainId && get().sessionType !== "mako") {
-          set({ sessionType: "mako" });
+        // Guarantee sessionType is hive even if list metadata lags.
+        if (get().sessionId === mainId && get().sessionType !== "hive") {
+          set({ sessionType: "hive" });
         }
         return mainId;
       } catch (err) {
@@ -891,11 +892,11 @@ export function createSessionStore(
           if (existing && !isNewSelectionIntent) {
             return existing;
           }
-          const finishOpenSpan = beginKrustyPerformanceSpan(
+          const finishOpenSpan = beginMitsuroPerformanceSpan(
             'session.open',
             sessionId,
           );
-          const releaseRequest = trackKrustyPerformanceResource(
+          const releaseRequest = trackMitsuroPerformanceResource(
             'session_requests',
           );
 
@@ -1021,7 +1022,7 @@ export function createSessionStore(
               error: null,
             });
             try {
-              storage.set("krusty-permission-mode", optimistic.permissionMode);
+              storage.set("mitsuro-permission-mode", optimistic.permissionMode);
             } catch {
               /* ignore */
             }
@@ -1060,7 +1061,9 @@ export function createSessionStore(
               && client.getSessionState
             ) {
               try {
-                const softState = await client.getSessionState(sessionId);
+                const softState = await client.getSessionState(sessionId, {
+                  includeDelegatedHistory: true,
+                });
                 if (
                   selectionGeneration !== sessionSelectionGeneration
                   || get().sessionId !== sessionId
@@ -1095,7 +1098,7 @@ export function createSessionStore(
             }
 
             const { data, serverStateResult } = await (async () => {
-              const finishFetchDecodeSpan = beginKrustyPerformanceSpan(
+              const finishFetchDecodeSpan = beginMitsuroPerformanceSpan(
                 'session.fetch_decode',
               );
               try {
@@ -1112,7 +1115,7 @@ export function createSessionStore(
             }
 
             const previousMessages = get().messages;
-            const finishMessageTransformSpan = beginKrustyPerformanceSpan(
+            const finishMessageTransformSpan = beginMitsuroPerformanceSpan(
               'session.snapshot_transform',
             );
             let messageTransform;
@@ -1130,11 +1133,11 @@ export function createSessionStore(
             } finally {
               finishMessageTransformSpan();
             }
-            recordKrustyPerformanceMetric(
+            recordMitsuroPerformanceMetric(
               'session.snapshot_max_slice',
               { durationMs: messageTransform.maxSliceDurationMs },
             );
-            recordKrustyPerformanceMetric(
+            recordMitsuroPerformanceMetric(
               'session.snapshot_yields',
               { count: messageTransform.yieldCount },
             );
@@ -1161,7 +1164,7 @@ export function createSessionStore(
 
             const previousModel = get().model;
             const previousModelKey = get().modelKey;
-            const finishSnapshotPublishSpan = beginKrustyPerformanceSpan(
+            const finishSnapshotPublishSpan = beginMitsuroPerformanceSpan(
               'session.snapshot_publish',
             );
             const snapshot = (() => {
@@ -1184,6 +1187,7 @@ export function createSessionStore(
                   ),
                   serverState?.delegated_tools,
                   serverState?.recent_delegated_runs,
+                  serverState?.delegated_run_summaries,
                 );
 
                 set((s) => {
@@ -1252,7 +1256,7 @@ export function createSessionStore(
             })();
             try {
               storage.set(
-                "krusty-permission-mode",
+                "mitsuro-permission-mode",
                 serverState?.permission_mode ?? snapshot.permissionMode,
               );
             } catch {
@@ -1301,7 +1305,7 @@ export function createSessionStore(
               selectionGeneration === sessionSelectionGeneration
               && get().sessionId === sessionId
             ) {
-              const finishCacheSpan = beginKrustyPerformanceSpan(
+              const finishCacheSpan = beginMitsuroPerformanceSpan(
                 'session.cache_compact',
               );
               try {
@@ -1396,7 +1400,7 @@ export function createSessionStore(
       sessionId: string,
       title: string,
       permissionMode?: PermissionMode,
-      sessionType?: import("@krusty/api").SessionType,
+      sessionType?: import("@mitsuro/api").SessionType,
     ) {
       const current = get();
       sessionSelectionGeneration += 1;
@@ -1408,7 +1412,7 @@ export function createSessionStore(
       stopPresenceTransport(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
       try {
-        storage.set("krusty-permission-mode", nextPermissionMode);
+        storage.set("mitsuro-permission-mode", nextPermissionMode);
       } catch {
         /* ignore */
       }
@@ -1583,7 +1587,7 @@ export function createSessionStore(
         const newMode: PermissionMode =
           s.permissionMode === "supervised" ? "autonomous" : "supervised";
         try {
-          storage.set("krusty-permission-mode", newMode);
+          storage.set("mitsuro-permission-mode", newMode);
         } catch {
           /* ignore */
         }
@@ -1620,11 +1624,11 @@ export function createSessionStore(
       const isStreamAttached = () =>
         streamGeneration === streamAttachmentGeneration
         && get().sessionId === state.sessionId;
-      const finishConnectSpan = beginKrustyPerformanceSpan(
+      const finishConnectSpan = beginMitsuroPerformanceSpan(
         'stream.connect',
         state.sessionId,
       );
-      const releaseStreamConnection = trackKrustyPerformanceResource(
+      const releaseStreamConnection = trackMitsuroPerformanceResource(
         'stream_connections',
       );
       get().startStatePolling(state.sessionId);
@@ -1769,7 +1773,7 @@ export function createSessionStore(
 
     startStatePolling(sessionId: string) {
       get().stopStatePolling();
-      releaseStatePollingResource = trackKrustyPerformanceResource(
+      releaseStatePollingResource = trackMitsuroPerformanceResource(
         'state_polling',
       );
       const generation = statePollingGeneration;

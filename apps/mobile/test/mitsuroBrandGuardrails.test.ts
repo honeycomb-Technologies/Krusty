@@ -54,12 +54,12 @@ Deno.test("platform identity is Mitsuro without breaking compatibility IDs", asy
   const expo = config.expo;
 
   assert(expo.name === "Mitsuro", "the installed app display name must be Mitsuro");
-  assert(expo.slug === "krusty", "the existing Expo slug remains a compatibility ID");
+  assert(expo.slug === "mitsuro", "the Expo slug must use the canonical product identity");
   assert(
     Array.isArray(expo.scheme) &&
       expo.scheme[0] === "mitsuro" &&
       expo.scheme.includes("krusty"),
-    "Mitsuro must be the canonical deep-link scheme while krusty remains compatible",
+    "Mitsuro must be the canonical deep-link scheme while the prior scheme remains compatible",
   );
   assert(
     expo.splash?.backgroundColor === "#0e0e11",
@@ -118,7 +118,7 @@ Deno.test("legacy mascot components are no longer app entry points", async () =>
   const joined = surfaces.join("\n");
 
   assert(!joined.includes("CrabIcon"), "composer must not expose the crab mascot");
-  assert(!joined.includes("MakoSharkIcon"), "Hive must not expose the shark mascot");
+  assert(!joined.includes("MakoSharkIcon"), "Hive must not expose the old shark mascot");
   assert(!joined.includes("KrustyLogo"), "empty states must use the Mitsuro logo");
 });
 
@@ -136,7 +136,7 @@ Deno.test("shared product accents keep graphite foundation with violet motion", 
   assert(beam.includes('"violet"'), "running beam must use the violet palette");
   assert(beam.includes("117, 78, 168"), "running beam must retain its deep violet lead");
   assert(!beam.includes("184, 154, 97"), "running beam must not retain the old brass lead");
-  assert(!beam.includes("255, 107, 53"), "running beam must not retain Krusty orange");
+  assert(!beam.includes("255, 107, 53"), "running beam must not retain legacy orange");
   assert(!beam.includes("127, 143, 163"), "running beam must not retain steel-blue chrome");
   assert(webLine.includes("hue-rotate(210deg)"), "web running line must retain its violet hue");
   assert(!webLine.includes("#b89a61"), "web running line must not reintroduce brass");
@@ -156,7 +156,7 @@ Deno.test("app chrome uses shared graphite surfaces", async () => {
     source("../components/chat/ImagePreviewModal.tsx"),
     source("../components/chat/MarkdownContent.tsx"),
     source("../components/chat/PlanTracker.tsx"),
-    source("../components/mako/MakoEditorModal.tsx"),
+    source("../components/hive/HiveEditorModal.tsx"),
   ]);
   const joined = surfaces.join("\n");
 

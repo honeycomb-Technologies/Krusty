@@ -37,12 +37,12 @@ import {
 } from "./transcriptRows";
 import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
-import type { ChatMessage } from "@krusty/api";
-import type { SessionType } from "@krusty/api";
+import type { ChatMessage } from "@mitsuro/api";
+import type { SessionType } from "@mitsuro/api";
 import {
-  beginKrustyPerformanceSpan,
-  recordKrustyPerformanceMetric,
-} from "@krusty/state";
+  beginMitsuroPerformanceSpan,
+  recordMitsuroPerformanceMetric,
+} from "@mitsuro/state";
 import { summarizeTranscriptRenderBudget } from "./transcriptRenderBudget";
 
 const MAX_COMMITTED_TRANSCRIPT_CACHES = 4;
@@ -260,7 +260,7 @@ function ChatTranscriptComponent({
           && previous.isStreaming === isStreaming
           ? "hit"
           : "tail";
-      const finishDeriveSpan = beginKrustyPerformanceSpan(
+      const finishDeriveSpan = beginMitsuroPerformanceSpan(
         "transcript.derive",
         `${sessionType}:${cacheState}`,
       );
@@ -328,16 +328,16 @@ function ChatTranscriptComponent({
   );
   useEffect(() => {
     if (isStreaming || !visibleLatestTurnBudget) return;
-    recordKrustyPerformanceMetric("transcript.visible_messages", {
+    recordMitsuroPerformanceMetric("transcript.visible_messages", {
       count: visibleLatestTurnBudget.messageCount,
     });
-    recordKrustyPerformanceMetric("transcript.visible_render_parts", {
+    recordMitsuroPerformanceMetric("transcript.visible_render_parts", {
       count: visibleLatestTurnBudget.renderPartCount,
     });
-    recordKrustyPerformanceMetric("transcript.visible_tools", {
+    recordMitsuroPerformanceMetric("transcript.visible_tools", {
       count: visibleLatestTurnBudget.toolCount,
     });
-    recordKrustyPerformanceMetric("transcript.visible_markdown_characters", {
+    recordMitsuroPerformanceMetric("transcript.visible_markdown_characters", {
       count: visibleLatestTurnBudget.markdownCharacterCount,
     });
   }, [isStreaming, visibleLatestTurnBudget]);
@@ -446,7 +446,7 @@ function ChatTranscriptComponent({
     finishFirstPaint();
     const generation = firstPaintGenerationRef.current + 1;
     firstPaintGenerationRef.current = generation;
-    finishFirstPaintSpanRef.current = beginKrustyPerformanceSpan(
+    finishFirstPaintSpanRef.current = beginMitsuroPerformanceSpan(
       "transcript.first_paint",
       transcriptCacheKey,
     );
@@ -763,7 +763,7 @@ function ChatTranscriptComponent({
       return;
     }
 
-    // Identity key includes mode so chat/code/mako shells stay independent.
+    // Identity key includes mode so chat/code/hive shells stay independent.
     const selectionKey = `${scrollStateKey}::${sessionId}`;
     if (loadedSessionIdRef.current === selectionKey) {
       return;

@@ -102,6 +102,7 @@ export interface SessionStateResponse {
 	live_partial_assistant?: PartialAssistantState | null;
 	delegated_tools?: DelegatedToolStateResponse[];
 	recent_delegated_runs?: DelegatedRunResponse[];
+	delegated_run_summaries?: DelegatedRunSummaryResponse[];
 	last_event_sequence?: number | null;
 }
 
@@ -526,7 +527,12 @@ export interface ImageContent {
 // ============================================================================
 
 export type DelegatedToolKind = "explore" | "plan" | "verify" | "build";
-export type DelegatedProgressStatus = "running" | "complete" | "failed";
+export type DelegatedProgressStatus =
+	| "running"
+	| "complete"
+	| "degraded"
+	| "cancelled"
+	| "failed";
 export type DelegatedRunStage =
 	| "created"
 	| "running"
@@ -557,7 +563,17 @@ export interface DelegatedProgressEvent {
 export interface DelegatedAgentState {
 	taskId: string;
 	name: string;
-	status: "pending" | "running" | "complete" | "failed";
+	status:
+		| "pending"
+		| "running"
+		| "complete"
+		| "degraded"
+		| "cancelled"
+		| "failed";
+	success?: boolean;
+	usableEvidence?: boolean;
+	degradedSuccess?: boolean;
+	termination?: string;
 	outcomeReason?: string;
 	toolCount: number;
 	tokens: number;
@@ -570,13 +586,15 @@ export interface DelegatedAgentState {
 
 export interface DelegatedArtifactState {
 	kind: DelegatedToolKind;
+	name?: string;
+	capabilities?: Array<"read" | "write" | "execute">;
 	delegatedRunId?: string;
 	stage?: DelegatedRunStage;
 	thinking?: string;
 	message?: string;
 	investigationSummary?: string;
 	humanReview?: string;
-	outcome?: "success" | "partial" | "failed";
+	outcome?: "success" | "partial" | "failed" | "cancelled";
 	confidence?: "high" | "medium" | "low";
 	structuralCoverage?: "high" | "medium" | "low";
 	semanticCoverage?: "high" | "medium" | "low";
@@ -586,6 +604,7 @@ export interface DelegatedArtifactState {
 	agentCount?: number;
 	usableAgents?: number;
 	degradedAgents?: number;
+	cancelledAgents?: number;
 	successfulAgents?: number;
 	failedAgents?: number;
 	filesExaminedCount?: number;
@@ -641,17 +660,29 @@ export interface DelegatedRunResponse {
 	model?: string | null;
 	resumable: boolean;
 	resumed_from_run_id?: string | null;
+	child_name?: string | null;
+	capabilities?: Array<"read" | "write" | "execute">;
 	target_scope: DelegatedRunScopeResponse[];
 	human_review?: string | null;
 	artifact?: Record<string, unknown> | null;
 	updated_at: string;
 }
 
+export interface DelegatedRunSummaryResponse {
+	delegated_run_id: string;
+	parent_tool_call_id: string;
+	kind: DelegatedToolKind;
+	stage: DelegatedRunStage;
+	child_name?: string | null;
+	capabilities?: Array<"read" | "write" | "execute">;
+	updated_at: string;
+}
+
 // ============================================================================
-// Mako Types
+// Hive Types
 // ============================================================================
 
-export type MakoRuntimeStatus =
+export type HiveRuntimeStatus =
 	| "idle"
 	| "running"
 	| "sleeping"
@@ -659,14 +690,14 @@ export type MakoRuntimeStatus =
 	| "paused"
 	| "error"
 	| "cancelled";
-export type MakoHomeStatus =
+export type HiveHomeStatus =
 	| "awake"
 	| "sleeping"
 	| "paused"
 	| "blocked"
 	| "idle";
-export type MakoRunPriority = "low" | "normal" | "high";
-export type MakoChannelKind =
+export type HiveRunPriority = "low" | "normal" | "high";
+export type HiveChannelKind =
 	| "main_thread"
 	| "mobile_push"
 	| "crew"
@@ -674,7 +705,7 @@ export type MakoChannelKind =
 	| "email"
 	| "webhook"
 	| "unknown";
-export type MakoChannelStatus =
+export type HiveChannelStatus =
 	| "ready"
 	| "configured"
 	| "attention"
@@ -684,8 +715,8 @@ export type AutonomousTaskStatus =
 	| "in_progress"
 	| "completed"
 	| "failed";
-export type MakoDiagnosticSeverity = "info" | "warning" | "critical";
-export type MakoRunDiagnosticKind =
+export type HiveDiagnosticSeverity = "info" | "warning" | "critical";
+export type HiveRunDiagnosticKind =
 	| "awaiting_approval"
 	| "awaiting_input"
 	| "failed"
@@ -694,16 +725,16 @@ export type MakoRunDiagnosticKind =
 	| "stale_active"
 	| "stale_waiting"
 	| "stale_queued";
-export type MakoHealthState = "healthy" | "attention" | "degraded";
-export type MakoQueuePressure = "calm" | "busy" | "attention";
+export type HiveHealthState = "healthy" | "attention" | "degraded";
+export type HiveQueuePressure = "calm" | "busy" | "attention";
 
-export interface MakoDispatchResponse {
+export interface HiveDispatchResponse {
 	session_id: string;
 	status: string;
 }
 
-/** Singleton companion chat for the Mako surface (not a job/run session). */
-export interface MakoMainResponse {
+/** Singleton companion chat for the Hive surface (not a job/run session). */
+export interface HiveMainResponse {
 	session_id: string;
 	title: string;
 	session_type: SessionType;
@@ -712,15 +743,15 @@ export interface MakoMainResponse {
 	agent_state: string;
 }
 
-export type MakoScheduleStatus =
+export type HiveScheduleStatus =
 	| "enabled"
 	| "paused"
 	| "completed"
 	| "cancelled";
 
-export type MakoScheduleOverlapPolicy = "skip" | "queue_one" | "allow";
+export type HiveScheduleOverlapPolicy = "skip" | "queue_one" | "allow";
 
-export type MakoScheduleWeekday =
+export type HiveScheduleWeekday =
 	| "sunday"
 	| "monday"
 	| "tuesday"
@@ -729,10 +760,10 @@ export type MakoScheduleWeekday =
 	| "friday"
 	| "saturday";
 
-export type MakoMonthlyDayPolicy = "skip" | "last_day";
+export type HiveMonthlyDayPolicy = "skip" | "last_day";
 
 /** Tagged recurrence payload matching server `RecurrenceV1`. */
-export type MakoRecurrenceV1 =
+export type HiveRecurrenceV1 =
 	| { kind: "once"; at: string }
 	| { kind: "daily"; start_date: string; time: string }
 	| { kind: "weekdays"; start_date: string; time: string }
@@ -740,56 +771,56 @@ export type MakoRecurrenceV1 =
 			kind: "weekly";
 			start_date: string;
 			time: string;
-			weekdays: MakoScheduleWeekday[];
+			weekdays: HiveScheduleWeekday[];
 	  }
 	| {
 			kind: "monthly";
 			start_date: string;
 			time: string;
 			day: number;
-			invalid_day_policy: MakoMonthlyDayPolicy;
+			invalid_day_policy: HiveMonthlyDayPolicy;
 	  };
 
-export interface MakoDstPolicy {
+export interface HiveDstPolicy {
 	gap: "shift_forward" | "skip";
 	fold: "first" | "second";
 }
 
-export interface MakoMisfireConfig {
+export interface HiveMisfireConfig {
 	policy: "skip" | "fire_once" | "catch_up";
 	grace_secs: number;
 	catch_up_limit: number;
 }
 
-export interface MakoRetryPolicy {
+export interface HiveRetryPolicy {
 	max_attempts: number;
 	base_delay_secs: number;
 	max_delay_secs: number;
 	jitter: "none" | "full";
 }
 
-/** Durable schedule commitment for the Mako Schedule secondary surface. */
-export interface MakoSchedule {
+/** Durable schedule commitment for the Hive Schedule secondary surface. */
+export interface HiveSchedule {
 	id: string;
 	controller_id: string;
 	title: string;
 	summary: string;
 	objective: string;
-	recurrence: MakoRecurrenceV1;
+	recurrence: HiveRecurrenceV1;
 	timezone: string;
-	dst_policy: MakoDstPolicy;
+	dst_policy: HiveDstPolicy;
 	next_fire_at?: string | null;
 	last_scheduled_for?: string | null;
-	status: MakoScheduleStatus;
+	status: HiveScheduleStatus;
 	priority: number;
 	project_dir?: string | null;
 	model?: string | null;
 	model_key?: ModelKey | null;
 	model_catalog_revision?: string | null;
 	crew_slug?: string | null;
-	misfire: MakoMisfireConfig;
-	overlap_policy: MakoScheduleOverlapPolicy;
-	retry: MakoRetryPolicy;
+	misfire: HiveMisfireConfig;
+	overlap_policy: HiveScheduleOverlapPolicy;
+	retry: HiveRetryPolicy;
 	revision: number;
 	created_by: string;
 	created_at: string;
@@ -797,42 +828,42 @@ export interface MakoSchedule {
 }
 
 /** User-scoped schedule response with the owning session needed by mutations. */
-export interface MakoGlobalSchedule extends MakoSchedule {
+export interface HiveGlobalSchedule extends HiveSchedule {
 	controller_session_id: string;
 }
 
 /** Response envelope returned by create and status-mutation schedule routes. */
-export interface MakoScheduleMutationResponse {
+export interface HiveScheduleMutationResponse {
 	schedule_id: string;
 	revision: number;
-	status: MakoScheduleStatus;
+	status: HiveScheduleStatus;
 }
 
-export interface MakoScheduleWriteRequest {
+export interface HiveScheduleWriteRequest {
 	title: string;
 	summary?: string;
 	objective: string;
-	recurrence: MakoRecurrenceV1;
+	recurrence: HiveRecurrenceV1;
 	timezone: string;
-	dst_policy?: MakoDstPolicy;
+	dst_policy?: HiveDstPolicy;
 	priority?: number;
 	project_dir?: string | null;
 	model?: string | null;
 	model_key?: ModelKey | null;
 	crew_slug?: string | null;
-	misfire?: MakoMisfireConfig;
-	overlap_policy?: MakoScheduleOverlapPolicy;
-	retry?: MakoRetryPolicy;
+	misfire?: HiveMisfireConfig;
+	overlap_policy?: HiveScheduleOverlapPolicy;
+	retry?: HiveRetryPolicy;
 }
 
-export interface MakoDispatchOptions {
+export interface HiveDispatchOptions {
 	projectDir?: string;
 	/** Legacy model slug retained for older servers. */
 	model?: string;
-	/** Exact provider/auth/transport identity for the durable Mako run. */
+	/** Exact provider/auth/transport identity for the durable Hive run. */
 	modelKey?: ModelKey;
 	startAt?: string;
-	priority?: MakoRunPriority;
+	priority?: HiveRunPriority;
 	crewSlug?: string | null;
 }
 
@@ -908,59 +939,59 @@ export interface AutonomousTask {
 	result?: string | null;
 }
 
-export interface MakoRuntimeState {
+export interface HiveRuntimeState {
 	session_id: string;
-	status: MakoRuntimeStatus;
+	status: HiveRuntimeStatus;
 	next_wake_at?: string | null;
 	sleep_reason?: string | null;
 	last_error?: string | null;
 	current_run_id?: string | null;
 	last_wake_reason?: string | null;
 	crew_slug?: string | null;
-	priority: MakoRunPriority;
+	priority: HiveRunPriority;
 	updated_at: string;
 }
 
-export interface MakoSessionSummary {
+export interface HiveSessionSummary {
 	session_id: string;
 	title: string;
 	updated_at: string;
 	project_dir?: string | null;
 	target_branch?: string | null;
 	agent_state: string;
-	runtime?: MakoRuntimeState | null;
+	runtime?: HiveRuntimeState | null;
 }
 
-export interface MakoSessionStatus {
+export interface HiveSessionStatus {
 	session_id: string;
 	session_type: SessionType;
 	title: string;
 	tasks: AutonomousTask[];
 	agent_state: string;
-	runtime?: MakoRuntimeState | null;
-	cadence: MakoCadenceSummary;
+	runtime?: HiveRuntimeState | null;
+	cadence: HiveCadenceSummary;
 }
 
-export interface MakoCurrentRunSummary {
+export interface HiveCurrentRunSummary {
 	session_id: string;
 	title: string;
 	updated_at: string;
 	project_dir?: string | null;
 	target_branch?: string | null;
 	agent_state: string;
-	runtime?: MakoRuntimeState | null;
+	runtime?: HiveRuntimeState | null;
 	pending_tasks: number;
 	in_progress_tasks: number;
 	completed_tasks: number;
 	failed_tasks: number;
 	blocked_tasks: number;
-	cadence: MakoCadenceSummary;
-	diagnostic?: MakoRunDiagnostic | null;
+	cadence: HiveCadenceSummary;
+	diagnostic?: HiveRunDiagnostic | null;
 }
 
-export interface MakoRunDiagnostic {
-	kind: MakoRunDiagnosticKind;
-	severity: MakoDiagnosticSeverity;
+export interface HiveRunDiagnostic {
+	kind: HiveRunDiagnosticKind;
+	severity: HiveDiagnosticSeverity;
 	summary: string;
 	detail: string;
 	last_activity_at?: string | null;
@@ -970,7 +1001,7 @@ export interface MakoRunDiagnostic {
 	failure_streak: number;
 }
 
-export interface MakoPendingApproval {
+export interface HivePendingApproval {
 	session_id: string;
 	session_title: string;
 	project_dir?: string | null;
@@ -979,10 +1010,10 @@ export interface MakoPendingApproval {
 	tool_name: string;
 	arguments: unknown;
 	requested_at: string;
-	priority: MakoRunPriority;
+	priority: HiveRunPriority;
 }
 
-export type MakoAttentionItemKind =
+export type HiveAttentionItemKind =
 	| "approval_required"
 	| "input_required"
 	| "run_completed"
@@ -992,12 +1023,12 @@ export type MakoAttentionItemKind =
 	| "scheduled_run_completed"
 	| "delegated_task_completed";
 
-export type MakoAttentionSection = "needs_action" | "updates";
+export type HiveAttentionSection = "needs_action" | "updates";
 
-export interface MakoAttentionItem {
+export interface HiveAttentionItem {
 	id: string;
-	kind: MakoAttentionItemKind;
-	section: MakoAttentionSection;
+	kind: HiveAttentionItemKind;
+	section: HiveAttentionSection;
 	title: string;
 	summary: string;
 	detail: string;
@@ -1014,14 +1045,14 @@ export interface MakoAttentionItem {
 	thread_message_id?: string | null;
 }
 
-export interface MakoAttentionResponse {
-	items: MakoAttentionItem[];
+export interface HiveAttentionResponse {
+	items: HiveAttentionItem[];
 	unread_count: number;
 	badge_count: number;
 }
 
-export interface MakoStatusSummary {
-	home_status: MakoHomeStatus;
+export interface HiveStatusSummary {
+	home_status: HiveHomeStatus;
 	total_count: number;
 	running_count: number;
 	sleeping_count: number;
@@ -1035,7 +1066,7 @@ export interface MakoStatusSummary {
 	next_wake_at?: string | null;
 }
 
-export interface MakoKnowledgeHealthSummary {
+export interface HiveKnowledgeHealthSummary {
 	scope_count: number;
 	healthy_scope_count: number;
 	missing_snapshot_count: number;
@@ -1043,7 +1074,7 @@ export interface MakoKnowledgeHealthSummary {
 	latest_snapshot_at?: string | null;
 }
 
-export interface MakoDaemonSummary {
+export interface HiveDaemonSummary {
 	uptime_secs: number;
 	active_runtime_count: number;
 	scheduled_wake_count: number;
@@ -1051,7 +1082,7 @@ export interface MakoDaemonSummary {
 	recoverable_session_count: number;
 }
 
-export interface MakoDiagnosticsSummary {
+export interface HiveDiagnosticsSummary {
 	degraded_count: number;
 	stalled_count: number;
 	overdue_wake_count: number;
@@ -1059,67 +1090,67 @@ export interface MakoDiagnosticsSummary {
 	open_run_count: number;
 	attention_run_count: number;
 	due_soon_wake_count: number;
-	health_state: MakoHealthState;
-	queue_pressure: MakoQueuePressure;
+	health_state: HiveHealthState;
+	queue_pressure: HiveQueuePressure;
 	latest_trace_at?: string | null;
-	daemon: MakoDaemonSummary;
-	knowledge: MakoKnowledgeHealthSummary;
+	daemon: HiveDaemonSummary;
+	knowledge: HiveKnowledgeHealthSummary;
 }
 
-export interface MakoCadenceSummary {
+export interface HiveCadenceSummary {
 	tick_interval_secs: number;
 	max_ticks: number;
 }
 
-export interface MakoCurrentResponse {
-	status: MakoStatusSummary;
-	diagnostics: MakoDiagnosticsSummary;
-	runs: MakoCurrentRunSummary[];
-	approvals: MakoPendingApproval[];
+export interface HiveCurrentResponse {
+	status: HiveStatusSummary;
+	diagnostics: HiveDiagnosticsSummary;
+	runs: HiveCurrentRunSummary[];
+	approvals: HivePendingApproval[];
 }
 
-export interface MakoHomeDocument {
+export interface HiveHomeDocument {
 	file_name: string;
 	content: string;
 	preview: string;
 }
 
-export interface MakoCrewMember {
+export interface HiveCrewMember {
 	slug: string;
-	identity?: MakoHomeDocument | null;
-	soul?: MakoHomeDocument | null;
-	memory?: MakoHomeDocument | null;
+	identity?: HiveHomeDocument | null;
+	soul?: HiveHomeDocument | null;
+	memory?: HiveHomeDocument | null;
 }
 
-export interface MakoHomeResponse {
-	soul?: MakoHomeDocument | null;
-	identity?: MakoHomeDocument | null;
-	heartbeat?: MakoHomeDocument | null;
-	memory?: MakoHomeDocument | null;
-	channels?: MakoHomeDocument | null;
-	crew: MakoCrewMember[];
+export interface HiveHomeResponse {
+	soul?: HiveHomeDocument | null;
+	identity?: HiveHomeDocument | null;
+	heartbeat?: HiveHomeDocument | null;
+	memory?: HiveHomeDocument | null;
+	channels?: HiveHomeDocument | null;
+	crew: HiveCrewMember[];
 	crew_count: number;
 }
 
-export type MakoHomeDocumentKind =
+export type HiveHomeDocumentKind =
 	| "soul"
 	| "identity"
 	| "heartbeat"
 	| "memory"
 	| "channels";
-export type MakoCrewDocumentKind = "identity" | "soul" | "memory";
-export type MakoCrewRuntimeStatus = "idle" | "running" | "waiting" | "degraded";
+export type HiveCrewDocumentKind = "identity" | "soul" | "memory";
+export type HiveCrewRuntimeStatus = "idle" | "running" | "waiting" | "degraded";
 
-export interface MakoBootstrapResponse {
+export interface HiveBootstrapResponse {
 	ok: boolean;
 	created_files: string[];
-	home: MakoHomeResponse;
+	home: HiveHomeResponse;
 }
 
-export interface MakoCrewRuntimeMember {
+export interface HiveCrewRuntimeMember {
 	slug: string;
 	known_to_home: boolean;
-	status: MakoCrewRuntimeStatus;
+	status: HiveCrewRuntimeStatus;
 	active_run_count: number;
 	recent_run_count: number;
 	failed_run_count: number;
@@ -1128,32 +1159,32 @@ export interface MakoCrewRuntimeMember {
 	completed_task_count: number;
 	failed_task_count: number;
 	latest_activity_at?: string | null;
-	identity?: MakoHomeDocument | null;
-	soul?: MakoHomeDocument | null;
-	memory?: MakoHomeDocument | null;
+	identity?: HiveHomeDocument | null;
+	soul?: HiveHomeDocument | null;
+	memory?: HiveHomeDocument | null;
 }
 
-export interface MakoCrewResponse {
-	members: MakoCrewRuntimeMember[];
+export interface HiveCrewResponse {
+	members: HiveCrewRuntimeMember[];
 }
 
-export interface MakoChannelItem {
+export interface HiveChannelItem {
 	id: string;
 	label: string;
-	kind: MakoChannelKind;
+	kind: HiveChannelKind;
 	source: string;
 	enabled: boolean;
-	status: MakoChannelStatus;
+	status: HiveChannelStatus;
 	detail: string;
 }
 
-export interface MakoChannelsResponse {
-	items: MakoChannelItem[];
+export interface HiveChannelsResponse {
+	items: HiveChannelItem[];
 	apns_configured: boolean;
 	apns_device_count: number;
 }
 
-export interface MakoRecoverDaemonResponse {
+export interface HiveRecoverDaemonResponse {
 	ok: boolean;
 	recovered_count: number;
 }
@@ -1200,7 +1231,7 @@ export interface MobileDiagnosticUploadResponse {
 	dropped_attributes: number;
 }
 
-export interface MakoRunWakeEvent {
+export interface HiveRunWakeEvent {
 	id: string;
 	timestamp: string;
 	title: string;
@@ -1327,7 +1358,7 @@ export type StreamEvent =
 	| { type: "turn_complete"; turn: number; has_more: boolean }
 	| { type: "finish"; session_id: string; stop_reason: string }
 	| { type: "error"; error: string }
-	// Mako autonomous agent events
+	// Hive autonomous agent events
 	| { type: "user_message"; title?: string; message: string; level: string }
 	| { type: "agent_sleeping"; duration_secs: number; reason: string }
 	| { type: "tick_injected"; tick_number: number }
@@ -1397,7 +1428,7 @@ export interface StreamCallbacks {
 	onTitleUpdate: (title: string) => void;
 	onFinish: (sessionId: string) => void;
 	onError: (error: string) => void;
-	// Mako autonomous agent callbacks
+	// Hive autonomous agent callbacks
 	onUserMessage?: (
 		title: string | undefined,
 		message: string,
@@ -1583,7 +1614,7 @@ export interface ModelKey {
 }
 
 export interface ModelInfo {
-	/** Absent only when reading an older Krusty server response. */
+	/** Absent only when reading an older Mitsuro server response. */
 	key?: ModelKey | null;
 	id: string;
 	display_name: string;
@@ -1624,7 +1655,7 @@ export type FastMode = "priority" | "anthropic_fast";
 export interface ModelsResponse {
 	models: ModelInfo[];
 	default_model: string | null;
-	/** Exact default selection; absent only on older Krusty servers. */
+	/** Exact default selection; absent only on older Mitsuro servers. */
 	default_model_key?: ModelKey | null;
 }
 
@@ -1730,7 +1761,7 @@ export interface SkillInfo {
 // ============================================================================
 
 export type SessionMode = "build" | "plan";
-export type SessionType = "chat" | "code" | "mako";
+export type SessionType = "chat" | "code" | "hive";
 export type PermissionMode = "supervised" | "autonomous";
 export type WorkspaceMode = "neutral" | "selected" | "created";
 export type ThinkingLevel =

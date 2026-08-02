@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/identity-env.sh"
 
-BASE_URL="${KRUSTY_BASE_URL:-http://localhost:3000}"
-AUDIT_ROOT="${KRUSTY_AUDIT_ROOT:-$(pwd)/target/server-audit}"
-TEMP_PORT="${KRUSTY_AUDIT_PORT:-43111}"
+BASE_URL="${MITSURO_BASE_URL:-http://localhost:3000}"
+AUDIT_ROOT="${MITSURO_AUDIT_ROOT:-$(pwd)/target/server-audit}"
+TEMP_PORT="${MITSURO_AUDIT_PORT:-43111}"
 
 PASS_COUNT=0
 WARN_COUNT=0
@@ -13,13 +14,13 @@ RESPONSE_FILE=""
 RESPONSE_STATUS=""
 HTTP_SERVER_PID=""
 CODE_SESSION_ID=""
-MAKO_SESSION_ID=""
+HIVE_SESSION_ID=""
 HOOK_ID=""
 APNS_DEVICE_TOKEN="audit-device-token"
 # Use an inert path on a real browser push origin. The server intentionally
 # rejects arbitrary hosts to prevent SSRF, and this subscription is removed
 # before the audit exercises push delivery.
-PUSH_ENDPOINT="https://fcm.googleapis.com/fcm/send/krusty-audit"
+PUSH_ENDPOINT="https://fcm.googleapis.com/fcm/send/mitsuro-audit"
 # SEC1-encoded NIST P-256 generator point and a 16-byte base64url auth
 # secret. These are public audit fixtures, not credentials.
 PUSH_P256DH="BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
@@ -284,11 +285,11 @@ assert_status 200 "git worktrees endpoint"
 skip "git checkout endpoint" "skipped to avoid mutating repository branch state during audit"
 
 AUDIT_FILE="$AUDIT_ROOT/files/probe.txt"
-request PUT "/api/files?path=$(urlencode "$AUDIT_FILE")" "$(jq -nc '{content: "krusty-audit"}')"
+request PUT "/api/files?path=$(urlencode "$AUDIT_FILE")" "$(jq -nc '{content: "mitsuro-audit"}')"
 assert_status 200 "file write endpoint"
 request GET "/api/files?path=$(urlencode "$AUDIT_FILE")"
 assert_status 200 "file read endpoint"
-assert_json_eq '.content' 'krusty-audit' "file read content"
+assert_json_eq '.content' 'mitsuro-audit' "file read content"
 request GET "/api/files/tree?root=$(urlencode "$AUDIT_ROOT")&depth=2"
 assert_status 200 "file tree endpoint"
 request GET "/api/files/browse?path=$(urlencode "$AUDIT_ROOT")"
@@ -301,35 +302,35 @@ assert_status 200 "credential provider endpoint"
 skip "credential set endpoint" "skipped to avoid mutating configured provider secrets"
 skip "credential delete endpoint" "skipped to avoid mutating configured provider secrets"
 
-request GET /api/mako/current
-assert_status 200 "mako current endpoint"
-request POST /api/mako/dispatch "$(jq -nc \
-  --arg task 'Audit Mako route health' \
-  --arg project_dir "$AUDIT_ROOT/projects/mako" \
+request GET /api/hive/current
+assert_status 200 "hive current endpoint"
+request POST /api/hive/dispatch "$(jq -nc \
+  --arg task 'Audit Hive route health' \
+  --arg project_dir "$AUDIT_ROOT/projects/hive" \
   '{task: $task, project_dir: $project_dir, priority: "normal"}')"
 if [[ "$RESPONSE_STATUS" == "200" || "$RESPONSE_STATUS" == "201" ]]; then
-  pass "mako dispatch endpoint"
-  MAKO_SESSION_ID="$(json '.session_id')"
+  pass "hive dispatch endpoint"
+  HIVE_SESSION_ID="$(json '.session_id')"
 else
-  fail "mako dispatch endpoint" "expected HTTP 200/201, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
+  fail "hive dispatch endpoint" "expected HTTP 200/201, got $RESPONSE_STATUS with body $(cat "$RESPONSE_FILE")"
 fi
 
-request GET /api/mako/sessions
-assert_status 200 "mako sessions list endpoint"
-if [[ -n "$MAKO_SESSION_ID" ]]; then
-  request GET "/api/mako/sessions/$MAKO_SESSION_ID/status"
-  assert_status 200 "mako session status endpoint"
-  request POST "/api/mako/sessions/$MAKO_SESSION_ID/message" "$(jq -nc '{message: "Audit follow-up"}')"
-  assert_status 200 "mako send message endpoint"
-  request POST "/api/mako/sessions/$MAKO_SESSION_ID/priority" "$(jq -nc '{priority: "high"}')"
-  assert_status 200 "mako priority endpoint"
-  request POST "/api/mako/sessions/$MAKO_SESSION_ID/schedule" "$(jq -nc --arg start_at "$(date -u -d '+10 minutes' '+%Y-%m-%dT%H:%M:%SZ')" '{start_at: $start_at}')"
-  assert_status 200 "mako schedule endpoint"
-  request POST "/api/mako/sessions/$MAKO_SESSION_ID/pause" '{}'
-  assert_status 200 "mako pause endpoint"
-  request POST "/api/mako/sessions/$MAKO_SESSION_ID/resume" '{}'
-  assert_status 200 "mako resume endpoint"
-  skip "mako events endpoint" "skipped because SSE observation is long-lived and already covered by status/control endpoints in this audit"
+request GET /api/hive/sessions
+assert_status 200 "hive sessions list endpoint"
+if [[ -n "$HIVE_SESSION_ID" ]]; then
+  request GET "/api/hive/sessions/$HIVE_SESSION_ID/status"
+  assert_status 200 "hive session status endpoint"
+  request POST "/api/hive/sessions/$HIVE_SESSION_ID/message" "$(jq -nc '{message: "Audit follow-up"}')"
+  assert_status 200 "hive send message endpoint"
+  request POST "/api/hive/sessions/$HIVE_SESSION_ID/priority" "$(jq -nc '{priority: "high"}')"
+  assert_status 200 "hive priority endpoint"
+  request POST "/api/hive/sessions/$HIVE_SESSION_ID/schedule" "$(jq -nc --arg start_at "$(date -u -d '+10 minutes' '+%Y-%m-%dT%H:%M:%SZ')" '{start_at: $start_at}')"
+  assert_status 200 "hive schedule endpoint"
+  request POST "/api/hive/sessions/$HIVE_SESSION_ID/pause" '{}'
+  assert_status 200 "hive pause endpoint"
+  request POST "/api/hive/sessions/$HIVE_SESSION_ID/resume" '{}'
+  assert_status 200 "hive resume endpoint"
+  skip "hive events endpoint" "skipped because SSE observation is long-lived and already covered by status/control endpoints in this audit"
 fi
 
 request GET /api/mcp
@@ -464,9 +465,9 @@ skip "oauth exchange endpoint" "skipped because it requires a real authorization
 skip "oauth revoke endpoint" "skipped to avoid deleting any live OAuth token"
 skip "oauth callback endpoint" "skipped because it is part of a real browser OAuth flow"
 
-if [[ -n "$MAKO_SESSION_ID" ]]; then
-  request DELETE "/api/mako/sessions/$MAKO_SESSION_ID"
-  assert_status_any "mako cancel endpoint" 200 204
+if [[ -n "$HIVE_SESSION_ID" ]]; then
+  request DELETE "/api/hive/sessions/$HIVE_SESSION_ID"
+  assert_status_any "hive cancel endpoint" 200 204
 fi
 
 if [[ -n "$CODE_SESSION_ID" ]]; then

@@ -59,6 +59,26 @@ describe("KrustyClient request errors", () => {
 });
 
 describe("KrustyClient content-free request diagnostics", () => {
+	it("requests delegated history only for full session hydration", async () => {
+		const urls: string[] = [];
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: async (input) => {
+				urls.push(String(input));
+				return Response.json({});
+			},
+		});
+
+		await client.getSessionState("session-id");
+		await client.getSessionState("session-id", {
+			includeDelegatedHistory: true,
+		});
+
+		expect(new URL(urls[0] as string).search).toBe("");
+		expect(new URL(urls[1] as string).searchParams.get("include_delegated_history"))
+			.toBe("true");
+	});
+
 	it("reports a sanitized route family and terminal timing", async () => {
 		const events: Array<{
 			name: string;

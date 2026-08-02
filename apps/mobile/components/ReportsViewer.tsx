@@ -24,7 +24,7 @@ import { DetailPaneSkeleton, ListRowsSkeleton } from './ui/Skeleton';
 import { useConnection } from '../hooks/useConnection';
 import { ReportDetailContent } from './reports/ReportDetailContent';
 import { reportSummariesFromResponse } from './reports/reportResponse';
-import type { ReportSummary, Report } from '@krusty/api';
+import type { ReportSummary, Report } from '@mitsuro/api';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const PANEL_HEIGHT = SCREEN_HEIGHT * 0.88;

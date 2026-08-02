@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
     echo "usage: $0 <protected-release-tag> <artifact-directory> <output-formula>" >&2
-    echo "example: $0 v0.8.0 artifacts artifacts/homebrew/krusty.rb" >&2
+    echo "example: $0 v0.8.0 artifacts artifacts/homebrew/mitsuro.rb" >&2
 }
 
 if [[ $# -ne 3 ]]; then
@@ -27,7 +27,7 @@ fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/../.." && pwd)
-template="$script_dir/krusty.rb"
+template="$script_dir/mitsuro.rb"
 version=${tag_name#v}
 
 if [[ ! -f "$template" ]]; then
@@ -43,13 +43,13 @@ package_version=$(
         --manifest-path "$repo_root/Cargo.toml" |
         ruby -rjson -e '
             packages = JSON.parse(STDIN.read).fetch("packages")
-            matches = packages.select { |package| package.fetch("name") == "krusty" }
-            abort "expected exactly one krusty package in Cargo metadata" unless matches.length == 1
+            matches = packages.select { |package| package.fetch("name") == "mitsuro" }
+            abort "expected exactly one mitsuro package in Cargo metadata" unless matches.length == 1
             puts matches.first.fetch("version")
         '
 )
 if [[ "$package_version" != "$version" ]]; then
-    echo "release tag $tag_name does not match krusty package version $package_version" >&2
+    echo "release tag $tag_name does not match mitsuro package version $package_version" >&2
     exit 1
 fi
 
@@ -67,7 +67,7 @@ sha256_file() {
 checksum_for_artifact() {
     local target=$1
     local extension=$2
-    local archive_name="krusty-$target.$extension"
+    local archive_name="mitsuro-$target.$extension"
     local checksum_name="$archive_name.sha256"
     local archive_path=""
     local checksum_path=""
@@ -135,7 +135,7 @@ checksum_for_artifact x86_64-pc-windows-msvc zip >/dev/null
 
 output_dir=$(dirname -- "$output_formula")
 mkdir -p -- "$output_dir"
-temporary_formula=$(mktemp "$output_dir/.krusty-formula.XXXXXX")
+temporary_formula=$(mktemp "$output_dir/.mitsuro-formula.XXXXXX")
 trap 'rm -f -- "$temporary_formula"' EXIT
 
 awk \
@@ -165,7 +165,7 @@ for target in \
     x86_64-apple-darwin \
     aarch64-unknown-linux-gnu \
     x86_64-unknown-linux-gnu; do
-    grep -Fq "/releases/download/$tag_name/krusty-$target.tar.gz\"" "$temporary_formula"
+    grep -Fq "/releases/download/$tag_name/mitsuro-$target.tar.gz\"" "$temporary_formula"
 done
 
 ruby -c "$temporary_formula" >/dev/null
@@ -173,4 +173,4 @@ chmod 0644 "$temporary_formula"
 mv -- "$temporary_formula" "$output_formula"
 trap - EXIT
 
-echo "Rendered Homebrew formula for $tag_name (krusty $package_version): $output_formula"
+echo "Rendered Homebrew formula for $tag_name (mitsuro $package_version): $output_formula"

@@ -1,4 +1,4 @@
-import type { ContentBlock } from '@krusty/api';
+import type { ContentBlock } from '@mitsuro/api';
 
 import {
   MAX_MESSAGE_CONTENT_LENGTH,
@@ -213,7 +213,7 @@ function applyStoredContentBlock(
     const status: ToolCall['status'] = toolResult
       ? delegated?.outcome === 'partial'
         ? 'partial'
-        : delegated?.outcome === 'failed'
+        : delegated?.outcome === 'failed' || delegated?.outcome === 'cancelled'
           ? 'error'
           : toolResult.isError
             ? 'error'

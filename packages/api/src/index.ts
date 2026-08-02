@@ -1,9 +1,11 @@
 export * from './types';
 export {
-	KrustyApiError,
-	KrustyClient,
-	type KrustyClientConfig,
-	type KrustyRequestDiagnostic,
-	type KrustyRequestDiagnosticOutcome,
+	MitsuroApiError,
+	MitsuroClient,
+	type HiveTransportMode,
+	type MitsuroClientConfig,
+	type MitsuroRequestDiagnostic,
+	type MitsuroRequestDiagnosticOutcome,
 } from './client';
+export * from './compatibility';
 export * from './thinking';

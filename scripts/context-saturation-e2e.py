@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Saturate one live Krusty project through compaction, then test Terra High."""
+"""Saturate one live Mitsuro project through compaction, then test Terra High."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ ORIGIN_AXIOM = "atlas-preserves-first-batch-after-compaction"
 
 def _load_harness() -> Any:
     path = Path(__file__).with_name("harness-e2e-loop.py")
-    spec = importlib.util.spec_from_file_location("krusty_harness_e2e", path)
+    spec = importlib.util.spec_from_file_location("mitsuro_harness_e2e", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load harness helpers from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -270,7 +270,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     project_dir = args.root / "context-atlas"
     project_dir.mkdir()
     (project_dir / "corpus").mkdir()
-    api = HARNESS.KrustyApi(base_url, args.timeout)
+    api = HARNESS.MitsuroApi(base_url, args.timeout)
 
     grok = HARNESS.select_stable_exact_model(
         api, args.grok_model, provider_id=args.grok_provider, timeout=60

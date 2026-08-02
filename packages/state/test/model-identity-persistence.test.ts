@@ -1,4 +1,4 @@
-import type { KrustyClient, ModelKey } from '@krusty/api';
+import type { MitsuroClient, ModelKey } from '@mitsuro/api';
 import {
   persistCurrentModel,
   persistSessionModel,
@@ -40,7 +40,7 @@ Deno.test('session and default persistence forward exact model identity', async 
       defaults.push({ model, key });
       return { ok: true };
     },
-  } as unknown as KrustyClient;
+  } as unknown as MitsuroClient;
   const sessionsStore = {
     getState: () => ({
       loadSessions: () => {
@@ -87,7 +87,7 @@ Deno.test('legacy model persistence remains slug-only compatible', async () => {
       defaults.push({ model, key });
       return { ok: true };
     },
-  } as unknown as KrustyClient;
+  } as unknown as MitsuroClient;
 
   await persistSessionModel(
     client,

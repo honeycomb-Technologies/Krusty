@@ -1,7 +1,7 @@
 import { memo, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 import { ChatTranscript } from "../../../components/chat/ChatTranscript";
 import { MitsuroWordmark } from "../../../components/brand";

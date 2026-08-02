@@ -9,7 +9,7 @@ import type {
   WorkflowCommand,
   WorkflowMutation,
   WorkspaceMode,
-} from '@krusty/api';
+} from '@mitsuro/api';
 
 export interface ToolCall {
   id: string;
@@ -31,7 +31,17 @@ export interface ToolCall {
 export interface DelegatedAgentState {
   taskId: string;
   name: string;
-  status: 'pending' | 'running' | 'complete' | 'failed';
+  status:
+    | 'pending'
+    | 'running'
+    | 'complete'
+    | 'degraded'
+    | 'cancelled'
+    | 'failed';
+  success?: boolean;
+  usableEvidence?: boolean;
+  degradedSuccess?: boolean;
+  termination?: string;
   outcomeReason?: string;
   toolCount: number;
   tokens: number;
@@ -44,13 +54,15 @@ export interface DelegatedAgentState {
 
 export interface DelegatedArtifactState {
   kind: DelegatedToolKind;
+  name?: string;
+  capabilities?: Array<'read' | 'write' | 'execute'>;
   delegatedRunId?: string;
   stage?: DelegatedRunStage;
   thinking?: string;
   message?: string;
   investigationSummary?: string;
   humanReview?: string;
-  outcome?: 'success' | 'partial' | 'failed';
+  outcome?: 'success' | 'partial' | 'failed' | 'cancelled';
   confidence?: 'high' | 'medium' | 'low';
   structuralCoverage?: 'high' | 'medium' | 'low';
   semanticCoverage?: 'high' | 'medium' | 'low';
@@ -60,6 +72,7 @@ export interface DelegatedArtifactState {
   agentCount?: number;
   usableAgents?: number;
   degradedAgents?: number;
+  cancelledAgents?: number;
   successfulAgents?: number;
   failedAgents?: number;
   filesExaminedCount?: number;
@@ -184,10 +197,10 @@ export interface SessionStoreState {
    */
   cancelPendingSessionLoad: () => void;
   /**
-   * Ensure and load the durable per-user Mako companion session.
-   * Does not create a new job/run session — resolves GET/POST /mako/main.
+   * Ensure and load the durable per-user Hive companion session.
+   * Does not create a new job/run session — resolves GET/POST /hive/main.
    */
-  ensureMakoMainSession: () => Promise<string | null>;
+  ensureHiveMainSession: () => Promise<string | null>;
   clearSession: () => void;
   initSession: (
     sessionId: string,

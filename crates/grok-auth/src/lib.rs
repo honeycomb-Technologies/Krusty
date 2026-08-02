@@ -1,13 +1,13 @@
 //! Modular xAI / Grok authentication library.
 //!
-//! Designed to be dropped into other Rust harnesses (Krusty, custom agents, etc.)
+//! Designed to be dropped into other Rust harnesses (Mitsuro, custom agents, etc.)
 //! so you can share login state with the official `grok` CLI and use Grok models
 //! / agentic capabilities outside of the Grok Build TUI.
 //!
 //! # Key goals
 //! - Full login flows matching the official client (browser OIDC PKCE, device code, external provider, API key).
 //! - **Robust caching**: in-memory hot cache + on-disk `~/.grok/auth.json` (exact format for interoperability),
-//!   advisory file locking for multi-process safety (grok CLI + Krusty + other harnesses),
+//!   advisory file locking for multi-process safety (grok CLI + Mitsuro + other harnesses),
 //!   atomic writes, proactive refresh with configurable buffer.
 //! - Easy to get an authenticated `reqwest::Client` with the correct `Authorization: Bearer ...`
 //!   and `x-grok-client-*` headers the backend expects.
@@ -24,7 +24,7 @@
 //! - Writes are done to `auth.json.tmp` then renamed (atomic on POSIX).
 //! - A small "key_prefix" is kept for logs (never log full tokens).
 //!
-//! See `examples/krusty_auth.rs` and the README for integration patterns.
+//! See `examples/mitsuro_auth.rs` and the README for integration patterns.
 
 pub mod client;
 pub mod config;

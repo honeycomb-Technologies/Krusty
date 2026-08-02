@@ -148,8 +148,8 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
   );
   assert(
     screen.includes("sessionType={activeMode}")
-      && !screen.includes('activeMode === "mako" ? ('),
-    "Chat, Code, and Mako must reconcile through one stable mobile transcript tree",
+      && !screen.includes('activeMode === "hive" ? ('),
+    "Chat, Code, and Hive must reconcile through one stable mobile transcript tree",
   );
   assert(
     !actions.includes("requestedTabRef"),

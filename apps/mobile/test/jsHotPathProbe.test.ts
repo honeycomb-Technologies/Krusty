@@ -13,7 +13,9 @@ Deno.test('JS hot-path probing stays explicit, sampled, and bounded', async () =
   );
 
   assert(
-    source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE !== '1'"),
+    source.includes("EXPO_PUBLIC_MITSURO_JS_HOTPATH_PROBE === '1'") &&
+      source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1'") &&
+      source.includes('if (!enabled) return'),
     'the builtin wrapper must remain disabled unless a profiling build explicitly enables it',
   );
   assert(
@@ -26,7 +28,7 @@ Deno.test('JS hot-path probing stays explicit, sampled, and bounded', async () =
     'probe aggregation must stay bounded between reports',
   );
   assert(
-    source.includes('KrustyDiagnosticsModule?.recordJsHotPathProbe(payload)'),
+    source.includes('MitsuroDiagnosticsModule?.recordJsHotPathProbe(payload)'),
     'Release probes must use the bounded native diagnostics log rather than a stripped JS console',
   );
 });

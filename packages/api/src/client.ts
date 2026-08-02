@@ -38,26 +38,26 @@ import type {
 	MemoryType,
 	MemorySnapshotResponse,
 	PromoteReportToMemoryResponse,
-	MakoAttentionResponse,
-	MakoDispatchOptions,
-	MakoDispatchResponse,
-	MakoMainResponse,
-	MakoGlobalSchedule,
-	MakoSchedule,
-	MakoScheduleMutationResponse,
-	MakoScheduleWriteRequest,
-	MakoBootstrapResponse,
-	MakoCrewDocumentKind,
-	MakoCrewResponse,
-	MakoChannelsResponse,
-	MakoCurrentResponse,
-	MakoHomeDocumentKind,
-	MakoHomeResponse,
-	MakoRecoverDaemonResponse,
-	MakoRunPriority,
-	MakoSessionSummary,
+	HiveAttentionResponse,
+	HiveDispatchOptions,
+	HiveDispatchResponse,
+	HiveMainResponse,
+	HiveGlobalSchedule,
+	HiveSchedule,
+	HiveScheduleMutationResponse,
+	HiveScheduleWriteRequest,
+	HiveBootstrapResponse,
+	HiveCrewDocumentKind,
+	HiveCrewResponse,
+	HiveChannelsResponse,
+	HiveCurrentResponse,
+	HiveHomeDocumentKind,
+	HiveHomeResponse,
+	HiveRecoverDaemonResponse,
+	HiveRunPriority,
+	HiveSessionSummary,
 	PermissionMode,
-	MakoSessionStatus,
+	HiveSessionStatus,
 	ModelKey,
 	ApnsRegisterResponse,
 	ApnsStatusResponse,
@@ -67,6 +67,12 @@ import type {
 		MobileDiagnosticUploadBatch,
 		MobileDiagnosticUploadResponse,
 	} from "./types";
+import {
+	encodeLegacyRequestIdentity,
+	isLegacyRouteFallbackStatus,
+	legacyHiveApiPath,
+	normalizeLegacyResponseIdentity,
+} from './legacy-wire';
 
 type UsageStreamEvent = Extract<StreamEvent, { type: "usage" }>;
 
@@ -94,6 +100,8 @@ export function normalizeUsageMetrics(event: UsageStreamEvent): UsageMetrics {
 }
 
 const STREAM_ACTIVITY_TIMEOUT = 240_000;
+const MITSURO_WIRE_VERSION_HEADER = "X-Mitsuro-Wire-Version";
+const MITSURO_WIRE_VERSION = "2";
 
 function monotonicNow(): number {
 	return globalThis.performance?.now?.() ?? Date.now();
@@ -135,7 +143,7 @@ function requestDiagnosticName(path: string): string {
 	if (route.startsWith("/ports") || route.startsWith("/settings/preview")) {
 		return "api.ports";
 	}
-	if (route.startsWith("/mako")) return "api.mako";
+	if (route.startsWith("/hive")) return "api.hive";
 	if (route.startsWith("/git")) return "api.git";
 	if (route.startsWith("/files")) return "api.files";
 	if (route.startsWith("/apns") || route.startsWith("/push")) {
@@ -164,54 +172,67 @@ function apiErrorMessage(body: string, fallback: string): string {
 	return body;
 }
 
-export interface KrustyClientConfig {
+export interface MitsuroClientConfig {
 	baseUrl: string;
 	token?: string;
 	/** Custom fetch implementation for environments without streaming support (e.g. React Native). */
 	fetchImpl?: typeof fetch;
 	/** Content-free request lifecycle observer for app-owned diagnostics. */
-	requestObserver?: (event: KrustyRequestDiagnostic) => void;
+	requestObserver?: (event: MitsuroRequestDiagnostic) => void;
+	/** Route generation for mixed-version Hive servers. Defaults to safe auto-detection. */
+	hiveTransport?: HiveTransportMode;
 }
 
-export type KrustyRequestDiagnosticOutcome =
+export type HiveTransportMode = 'auto' | 'canonical' | 'legacy';
+
+export type MitsuroRequestDiagnosticOutcome =
 	| "start"
 	| "complete"
 	| "cancel"
 	| "error";
 
-export interface KrustyRequestDiagnostic {
+export interface MitsuroRequestDiagnostic {
 	name: string;
-	outcome: KrustyRequestDiagnosticOutcome;
+	outcome: MitsuroRequestDiagnosticOutcome;
 	durationMs?: number;
 	code?: string;
 }
 
-export class KrustyApiError extends Error {
+export class MitsuroApiError extends Error {
 	constructor(
 		public readonly status: number,
 		message: string,
 		public readonly responseBody: string,
 	) {
 		super(`API ${status}: ${message}`);
-		this.name = "KrustyApiError";
+		this.name = "MitsuroApiError";
 	}
 }
 
-export class KrustyClient {
+export class MitsuroClient {
 	private baseUrl: string;
 	private token: string | undefined;
 	private fetchFn: typeof fetch;
-	private requestObserver: KrustyClientConfig["requestObserver"];
+	private requestObserver: MitsuroClientConfig["requestObserver"];
+	private resolvedHiveTransport: Exclude<HiveTransportMode, 'auto'> | null;
+	private hiveTransportProbe: Promise<Exclude<HiveTransportMode, 'auto'>> | null = null;
 
-	constructor(config: KrustyClientConfig) {
+	constructor(config: MitsuroClientConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
 		this.token = config.token;
 		this.fetchFn = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
 		this.requestObserver = config.requestObserver;
+		this.resolvedHiveTransport =
+			config.hiveTransport === 'legacy' || config.hiveTransport === 'canonical'
+				? config.hiveTransport
+				: null;
 	}
 
 	private headers(): Record<string, string> {
-		const h: Record<string, string> = { "Content-Type": "application/json" };
+		const h: Record<string, string> = {
+			"Content-Type": "application/json",
+			[MITSURO_WIRE_VERSION_HEADER]: MITSURO_WIRE_VERSION,
+		};
 		if (this.token) {
 			h["Authorization"] = `Bearer ${this.token}`;
 		}
@@ -222,19 +243,19 @@ export class KrustyClient {
 		path: string,
 		options: RequestInit = {},
 	): Promise<T> {
-		const url = `${this.baseUrl}/api${path}`;
 		const diagnosticName = requestDiagnosticName(path);
 		const startedAt = monotonicNow();
 		this.observeRequest(diagnosticName, "start");
 		let response: Response;
 		try {
-			response = await this.fetchFn(url, {
+			const requestOptions = {
 				...options,
 				headers: {
 					...this.headers(),
 					...(options.headers as Record<string, string>),
 				},
-			});
+			};
+			response = await this.fetchWithHiveCompatibility(path, requestOptions);
 		} catch (error) {
 			this.observeRequest(
 				diagnosticName,
@@ -254,11 +275,14 @@ export class KrustyClient {
 				startedAt,
 				httpStatusClass(response.status),
 			);
-			throw new KrustyApiError(response.status, message, text);
+			throw new MitsuroApiError(response.status, message, text);
 		}
 
 		try {
-			const result = await response.json() as T;
+			const result = normalizeLegacyResponseIdentity(
+				path,
+				await response.json(),
+			) as T;
 			this.observeRequest(
 				diagnosticName,
 				"complete",
@@ -277,9 +301,116 @@ export class KrustyClient {
 		}
 	}
 
+	private async fetchWithHiveCompatibility(
+		path: string,
+		options: RequestInit,
+	): Promise<Response> {
+		const legacyPath = legacyHiveApiPath(path);
+		if (!legacyPath) {
+			return this.fetchFn(`${this.baseUrl}/api${path}`, options);
+		}
+		if (this.resolvedHiveTransport === 'legacy') {
+			return this.fetchFn(`${this.baseUrl}/api${legacyPath}`, options);
+		}
+		if (this.resolvedHiveTransport === 'canonical') {
+			return this.fetchFn(`${this.baseUrl}/api${path}`, options);
+		}
+
+		const method = (options.method ?? 'GET').toUpperCase();
+		const canRetryWithoutReplayingMutation = method === 'GET' || method === 'HEAD';
+		if (!canRetryWithoutReplayingMutation) {
+			const transport = await this.detectHiveTransport(options.signal);
+			const selectedPath = transport === 'legacy' ? legacyPath : path;
+			return this.fetchFn(`${this.baseUrl}/api${selectedPath}`, options);
+		}
+
+		const canonicalResponse = await this.fetchFn(
+			`${this.baseUrl}/api${path}`,
+			options,
+		);
+		if (!isLegacyRouteFallbackStatus(canonicalResponse.status)) {
+			this.resolvedHiveTransport = 'canonical';
+			return canonicalResponse;
+		}
+		const legacyResponse = await this.fetchFn(
+			`${this.baseUrl}/api${legacyPath}`,
+			options,
+		);
+		if (!isLegacyRouteFallbackStatus(legacyResponse.status)) {
+			this.resolvedHiveTransport = 'legacy';
+			return legacyResponse;
+		}
+		return canonicalResponse;
+	}
+
+	private detectHiveTransport(
+		signal?: AbortSignal | null,
+	): Promise<Exclude<HiveTransportMode, 'auto'>> {
+		if (this.resolvedHiveTransport) {
+			return Promise.resolve(this.resolvedHiveTransport);
+		}
+		if (this.hiveTransportProbe) return this.hiveTransportProbe;
+
+		const probe = (async (): Promise<'canonical' | 'legacy'> => {
+			const headers = this.headers();
+			const canonicalCapability = await this.fetchFn(
+				`${this.baseUrl}/api/hive/capabilities`,
+				{ method: 'GET', headers, signal },
+			);
+			if (!isLegacyRouteFallbackStatus(canonicalCapability.status)) {
+				return 'canonical';
+			}
+			const legacyCapability = await this.fetchFn(
+				`${this.baseUrl}/api/mako/capabilities`,
+				{ method: 'GET', headers, signal },
+			);
+			if (!isLegacyRouteFallbackStatus(legacyCapability.status)) {
+				return 'legacy';
+			}
+
+			// Pre-bridge servers do not expose a capability route. Fall back to
+			// read-only session lists rather than the state-creating `/main` route.
+			const canonicalSessions = await this.fetchFn(
+				`${this.baseUrl}/api/hive/sessions`,
+				{ method: 'GET', headers, signal },
+			);
+			if (!isLegacyRouteFallbackStatus(canonicalSessions.status)) {
+				return 'canonical';
+			}
+			const legacySessions = await this.fetchFn(
+				`${this.baseUrl}/api/mako/sessions`,
+				{ method: 'GET', headers, signal },
+			);
+			return isLegacyRouteFallbackStatus(legacySessions.status)
+				? 'canonical'
+				: 'legacy';
+		})();
+		this.hiveTransportProbe = probe;
+		return probe.then((transport) => {
+			this.resolvedHiveTransport = transport;
+			return transport;
+		}).finally(() => {
+			if (this.hiveTransportProbe === probe) this.hiveTransportProbe = null;
+		});
+	}
+
+	private async encodeRequestIdentityForServer<
+		T extends Record<string, unknown>,
+	>(
+		body: T,
+		sessionType: SessionType | undefined,
+		signal?: AbortSignal,
+	): Promise<T> {
+		if (sessionType !== 'hive') return body;
+		const transport = await this.detectHiveTransport(signal);
+		return transport === 'legacy'
+			? encodeLegacyRequestIdentity(body)
+			: body;
+	}
+
 	private observeRequest(
 		name: string,
-		outcome: KrustyRequestDiagnosticOutcome,
+		outcome: MitsuroRequestDiagnosticOutcome,
 		startedAt?: number,
 		code?: string,
 	): void {
@@ -448,16 +579,20 @@ export class KrustyClient {
 		sessionType?: SessionType,
 		permissionMode?: PermissionMode,
 	): Promise<SessionResponse> {
-		return this.request("/sessions", {
-			method: "POST",
-			body: JSON.stringify({
+		const body = await this.encodeRequestIdentityForServer(
+			{
 				title: title ?? undefined,
 				project_dir: projectDir ?? undefined,
 				target_branch: targetBranch ?? undefined,
 				workspace_mode: workspaceMode ?? undefined,
 				session_type: sessionType ?? undefined,
 				permission_mode: permissionMode ?? undefined,
-			}),
+			},
+			sessionType,
+		);
+		return this.request("/sessions", {
+			method: "POST",
+			body: JSON.stringify(body),
 		});
 	}
 
@@ -483,8 +618,14 @@ export class KrustyClient {
 		await this.request(`/sessions/${id}`, { method: "DELETE" });
 	}
 
-	async getSessionState(id: string): Promise<SessionStateResponse> {
-		return this.request(`/sessions/${id}/state`);
+	async getSessionState(
+		id: string,
+		options?: { includeDelegatedHistory?: boolean },
+	): Promise<SessionStateResponse> {
+		const query = options?.includeDelegatedHistory
+			? "?include_delegated_history=true"
+			: "";
+		return this.request(`/sessions/${id}/state${query}`);
 	}
 
 	async getWorkflow(id: string): Promise<WorkflowSnapshot | null> {
@@ -917,12 +1058,12 @@ export class KrustyClient {
 		return this.request(`/memories/snapshot${q}`);
 	}
 
-	// Mako
-	async dispatchMako(
+	// Hive
+	async dispatchHive(
 		task: string,
-		options?: MakoDispatchOptions,
-	): Promise<MakoDispatchResponse> {
-		return this.request("/mako/dispatch", {
+		options?: HiveDispatchOptions,
+	): Promise<HiveDispatchResponse> {
+		return this.request("/hive/dispatch", {
 			method: "POST",
 			body: JSON.stringify({
 				task,
@@ -936,57 +1077,57 @@ export class KrustyClient {
 		});
 	}
 
-	/** Ensure/get the durable singleton Mako companion chat for this user. */
-	async getMakoMain(): Promise<MakoMainResponse> {
-		return this.request("/mako/main");
+	/** Ensure/get the durable singleton Hive companion chat for this user. */
+	async getHiveMain(): Promise<HiveMainResponse> {
+		return this.request("/hive/main");
 	}
 
-	/** Same as getMakoMain — POST is accepted for ensure semantics. */
-	async ensureMakoMain(): Promise<MakoMainResponse> {
-		return this.request("/mako/main", { method: "POST" });
+	/** Same as getHiveMain — POST is accepted for ensure semantics. */
+	async ensureHiveMain(): Promise<HiveMainResponse> {
+		return this.request("/hive/main", { method: "POST" });
 	}
 
 	/**
-	 * User-scoped global schedule list for the Mako Schedule secondary surface.
+	 * User-scoped global schedule list for the Hive Schedule secondary surface.
 	 * Ordered by next fire time across all of the caller's controllers.
 	 */
-	async listMakoSchedules(options?: {
+	async listHiveSchedules(options?: {
 		limit?: number;
-	}): Promise<MakoGlobalSchedule[]> {
+	}): Promise<HiveGlobalSchedule[]> {
 		const params: string[] = [];
 		if (options?.limit != null) {
 			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
 		}
 		const q = params.length > 0 ? `?${params.join("&")}` : "";
-		return this.request(`/mako/schedules${q}`);
+		return this.request(`/hive/schedules${q}`);
 	}
 
-	/** List schedules attached to a specific Mako controller session. */
-	async listMakoSessionSchedules(
+	/** List schedules attached to a specific Hive controller session. */
+	async listHiveSessionSchedules(
 		sessionId: string,
 		options?: { limit?: number },
-	): Promise<MakoSchedule[]> {
+	): Promise<HiveSchedule[]> {
 		const params: string[] = [];
 		if (options?.limit != null) {
 			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
 		}
 		const q = params.length > 0 ? `?${params.join("&")}` : "";
 		return this.request(
-			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules${q}`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules${q}`,
 		);
 	}
 
-	async createMakoSchedule(
+	async createHiveSchedule(
 		sessionId: string,
-		request: MakoScheduleWriteRequest,
+		request: HiveScheduleWriteRequest,
 		options?: { idempotencyKey?: string },
-	): Promise<MakoScheduleMutationResponse> {
+	): Promise<HiveScheduleMutationResponse> {
 		const headers: Record<string, string> = {};
 		if (options?.idempotencyKey) {
 			headers["Idempotency-Key"] = options.idempotencyKey;
 		}
 		return this.request(
-			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules`,
 			{
 				method: "POST",
 				headers,
@@ -995,12 +1136,12 @@ export class KrustyClient {
 		);
 	}
 
-	async pauseMakoSchedule(
+	async pauseHiveSchedule(
 		sessionId: string,
 		scheduleId: string,
 		revision: number,
 		options?: { idempotencyKey?: string },
-	): Promise<MakoScheduleMutationResponse> {
+	): Promise<HiveScheduleMutationResponse> {
 		const headers: Record<string, string> = {
 			"If-Match": `"${revision}"`,
 		};
@@ -1008,17 +1149,17 @@ export class KrustyClient {
 			headers["Idempotency-Key"] = options.idempotencyKey;
 		}
 		return this.request(
-			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
 			{ method: "POST", headers },
 		);
 	}
 
-	async resumeMakoSchedule(
+	async resumeHiveSchedule(
 		sessionId: string,
 		scheduleId: string,
 		revision: number,
 		options?: { idempotencyKey?: string },
-	): Promise<MakoScheduleMutationResponse> {
+	): Promise<HiveScheduleMutationResponse> {
 		const headers: Record<string, string> = {
 			"If-Match": `"${revision}"`,
 		};
@@ -1026,18 +1167,18 @@ export class KrustyClient {
 			headers["Idempotency-Key"] = options.idempotencyKey;
 		}
 		return this.request(
-			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
 			{ method: "POST", headers },
 		);
 	}
 
-	async getMakoCurrent(): Promise<MakoCurrentResponse> {
-		return this.request("/mako/current");
+	async getHiveCurrent(): Promise<HiveCurrentResponse> {
+		return this.request("/hive/current");
 	}
 
-	async getMakoAttention(options?: {
+	async getHiveAttention(options?: {
 		threadSessionId?: string | null;
-	}): Promise<MakoAttentionResponse> {
+	}): Promise<HiveAttentionResponse> {
 		const params: string[] = [];
 		if (options?.threadSessionId) {
 			params.push(
@@ -1045,54 +1186,54 @@ export class KrustyClient {
 			);
 		}
 		const q = params.length > 0 ? `?${params.join("&")}` : "";
-		return this.request(`/mako/attention${q}`);
+		return this.request(`/hive/attention${q}`);
 	}
 
-	async setMakoAttentionRead(
+	async setHiveAttentionRead(
 		itemId: string,
 		read: boolean,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/attention/${encodeURIComponent(itemId)}/read`, {
+		return this.request(`/hive/attention/${encodeURIComponent(itemId)}/read`, {
 			method: "POST",
 			body: JSON.stringify({ read }),
 		});
 	}
 
-	async setMakoAttentionCleared(
+	async setHiveAttentionCleared(
 		itemId: string,
 		cleared: boolean,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/attention/${encodeURIComponent(itemId)}/clear`, {
+		return this.request(`/hive/attention/${encodeURIComponent(itemId)}/clear`, {
 			method: "POST",
 			body: JSON.stringify({ cleared }),
 		});
 	}
 
-	async getMakoHome(): Promise<MakoHomeResponse> {
-		return this.request("/mako/home");
+	async getHiveHome(): Promise<HiveHomeResponse> {
+		return this.request("/hive/home");
 	}
 
-	async bootstrapMakoHome(): Promise<MakoBootstrapResponse> {
-		return this.request("/mako/home/bootstrap", { method: "POST" });
+	async bootstrapHiveHome(): Promise<HiveBootstrapResponse> {
+		return this.request("/hive/home/bootstrap", { method: "POST" });
 	}
 
-	async updateMakoHomeDocument(
-		kind: MakoHomeDocumentKind,
+	async updateHiveHomeDocument(
+		kind: HiveHomeDocumentKind,
 		content: string,
-	): Promise<MakoHomeResponse> {
-		return this.request(`/mako/home/${encodeURIComponent(kind)}`, {
+	): Promise<HiveHomeResponse> {
+		return this.request(`/hive/home/${encodeURIComponent(kind)}`, {
 			method: "PUT",
 			body: JSON.stringify({ content }),
 		});
 	}
 
-	async updateMakoCrewDocument(
+	async updateHiveCrewDocument(
 		slug: string,
-		kind: MakoCrewDocumentKind,
+		kind: HiveCrewDocumentKind,
 		content: string,
-	): Promise<MakoHomeResponse> {
+	): Promise<HiveHomeResponse> {
 		return this.request(
-			`/mako/home/crew/${encodeURIComponent(slug)}/${encodeURIComponent(kind)}`,
+			`/hive/home/crew/${encodeURIComponent(slug)}/${encodeURIComponent(kind)}`,
 			{
 				method: "PUT",
 				body: JSON.stringify({ content }),
@@ -1100,85 +1241,85 @@ export class KrustyClient {
 		);
 	}
 
-	async getMakoCrew(): Promise<MakoCrewResponse> {
-		return this.request("/mako/crew");
+	async getHiveCrew(): Promise<HiveCrewResponse> {
+		return this.request("/hive/crew");
 	}
 
-	async getMakoChannels(): Promise<MakoChannelsResponse> {
-		return this.request("/mako/channels");
+	async getHiveChannels(): Promise<HiveChannelsResponse> {
+		return this.request("/hive/channels");
 	}
 
-	async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {
-		return this.request("/mako/daemon/recover", { method: "POST" });
+	async recoverHiveDaemon(): Promise<HiveRecoverDaemonResponse> {
+		return this.request("/hive/daemon/recover", { method: "POST" });
 	}
 
-	async listMakoSessions(): Promise<MakoSessionSummary[]> {
-		return this.request("/mako/sessions");
+	async listHiveSessions(): Promise<HiveSessionSummary[]> {
+		return this.request("/hive/sessions");
 	}
 
-	async getMakoSessionStatus(id: string): Promise<MakoSessionStatus> {
-		return this.request(`/mako/sessions/${id}/status`);
+	async getHiveSessionStatus(id: string): Promise<HiveSessionStatus> {
+		return this.request(`/hive/sessions/${id}/status`);
 	}
 
-	async sendMakoMessage(
+	async sendHiveMessage(
 		id: string,
 		message: string,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/message`, {
+		return this.request(`/hive/sessions/${id}/message`, {
 			method: "POST",
 			body: JSON.stringify({ message }),
 		});
 	}
 
-	async scheduleMakoSession(
+	async scheduleHiveSession(
 		id: string,
 		startAt: string,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/schedule`, {
+		return this.request(`/hive/sessions/${id}/schedule`, {
 			method: "POST",
 			body: JSON.stringify({ start_at: startAt }),
 		});
 	}
 
-	async setMakoSessionPriority(
+	async setHiveSessionPriority(
 		id: string,
-		priority: MakoRunPriority,
+		priority: HiveRunPriority,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/priority`, {
+		return this.request(`/hive/sessions/${id}/priority`, {
 			method: "POST",
 			body: JSON.stringify({ priority }),
 		});
 	}
 
-	async setMakoSessionCrew(
+	async setHiveSessionCrew(
 		id: string,
 		crewSlug?: string | null,
 	): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/crew`, {
+		return this.request(`/hive/sessions/${id}/crew`, {
 			method: "POST",
 			body: JSON.stringify({ crew_slug: crewSlug ?? null }),
 		});
 	}
 
-	async pauseMakoSession(id: string): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/pause`, { method: "POST" });
+	async pauseHiveSession(id: string): Promise<SimpleOkResponse> {
+		return this.request(`/hive/sessions/${id}/pause`, { method: "POST" });
 	}
 
-	async resumeMakoSession(id: string): Promise<SimpleOkResponse> {
-		return this.request(`/mako/sessions/${id}/resume`, { method: "POST" });
+	async resumeHiveSession(id: string): Promise<SimpleOkResponse> {
+		return this.request(`/hive/sessions/${id}/resume`, { method: "POST" });
 	}
 
-	async cancelMakoSession(id: string): Promise<void> {
-		await this.request(`/mako/sessions/${id}`, { method: "DELETE" });
+	async cancelHiveSession(id: string): Promise<void> {
+		await this.request(`/hive/sessions/${id}`, { method: "DELETE" });
 	}
 
-	async observeMakoSession(
+	async observeHiveSession(
 		id: string,
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
 	): Promise<void> {
 		return this.streamSSERequest(
-			`/mako/sessions/${id}/events`,
+			`/hive/sessions/${id}/events`,
 			"GET",
 			undefined,
 			callbacks,
@@ -1195,7 +1336,12 @@ export class KrustyClient {
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
 	): Promise<void> {
-		return this.streamSSERequest("/chat", "POST", request, callbacks, signal);
+		const body = await this.encodeRequestIdentityForServer(
+			request as ChatRequest & Record<string, unknown>,
+			request.session_type,
+			signal,
+		);
+		return this.streamSSERequest("/chat", "POST", body, callbacks, signal);
 	}
 
 	async streamToolResult(
@@ -1219,13 +1365,12 @@ export class KrustyClient {
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
 	): Promise<void> {
-		const url = `${this.baseUrl}/api${path}`;
 		const diagnosticName = "api.stream";
 		const startedAt = monotonicNow();
 		this.observeRequest(diagnosticName, "start");
 		let response: Response;
 		try {
-			response = await this.fetchFn(url, {
+			const requestOptions: RequestInit = {
 				method,
 				headers: {
 					...this.headers(),
@@ -1233,7 +1378,8 @@ export class KrustyClient {
 				},
 				body: body ? JSON.stringify(body) : undefined,
 				signal,
-			});
+			};
+			response = await this.fetchWithHiveCompatibility(path, requestOptions);
 		} catch (error) {
 			this.observeRequest(
 				diagnosticName,
@@ -1479,7 +1625,7 @@ export class KrustyClient {
 			case "error":
 				callbacks.onError(event.error);
 				break;
-			// Mako autonomous agent events
+			// Hive autonomous agent events
 			case "user_message":
 				callbacks.onUserMessage?.(event.title, event.message, event.level);
 				break;

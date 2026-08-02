@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/identity-env.sh"
 
-HOST="${KRUSTY_MACBOOK_TAILSCALE_HOST:-${KRUSTY_MAC_HOST:-haleys-macbook-air}}"
-SSH_USER="${KRUSTY_MACBOOK_SSH_USER:-${KRUSTY_MAC_USER:-}}"
-SSH_KEY="${KRUSTY_MACBOOK_SSH_KEY:-${KRUSTY_MAC_SSH_KEY:-}}"
+HOST="${MITSURO_MACBOOK_TAILSCALE_HOST:-${MITSURO_MAC_HOST:-haleys-macbook-air}}"
+SSH_USER="${MITSURO_MACBOOK_SSH_USER:-${MITSURO_MAC_USER:-}}"
+SSH_KEY="${MITSURO_MACBOOK_SSH_KEY:-${MITSURO_MAC_SSH_KEY:-}}"
 SSH_TARGET="${SSH_USER:+$SSH_USER@}$HOST"
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
 if [[ -n "$SSH_KEY" ]]; then
 	SSH_OPTIONS+=(-i "$SSH_KEY" -o IdentitiesOnly=yes)
 fi
 
-printf '== Krusty MacBook reachability check ==\n'
+printf '== Mitsuro MacBook reachability check ==\n'
 printf 'tailscale host: %s\n' "$HOST"
 
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -28,7 +29,7 @@ else
 fi
 
 if [[ -z "$SSH_USER" ]]; then
-	printf 'ssh: skipped. Set KRUSTY_MACBOOK_SSH_USER=<mac-user> or KRUSTY_MAC_USER=<mac-user> to test SSH.\n'
+	printf 'ssh: skipped. Set MITSURO_MACBOOK_SSH_USER=<mac-user> or MITSURO_MAC_USER=<mac-user> to test SSH.\n'
 	exit 0
 fi
 

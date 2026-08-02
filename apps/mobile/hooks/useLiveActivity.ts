@@ -8,9 +8,9 @@ import {
 } from './presentationCadence';
 import { useConnection } from './useConnection';
 import {
-  beginKrustyPerformanceSpan,
-  trackKrustyPerformanceResource,
-} from '@krusty/state';
+  beginMitsuroPerformanceSpan,
+  trackMitsuroPerformanceResource,
+} from '@mitsuro/state';
 import { recordLiveActivityDiagnostic } from '../diagnostics/mobileDiagnostics';
 
 // Native-only imports — loaded dynamically to avoid crash on web
@@ -221,11 +221,11 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     pendingUpdateUrgentRef.current = false;
     updateInFlightRef.current = true;
     lastUpdateStartedAtRef.current = Date.now();
-    const finishUpdateSpan = beginKrustyPerformanceSpan(
+    const finishUpdateSpan = beginMitsuroPerformanceSpan(
       'live_activity.update',
       sessionIdRef.current ?? undefined,
     );
-    const releaseUpdateResource = trackKrustyPerformanceResource(
+    const releaseUpdateResource = trackMitsuroPerformanceResource(
       'live_activity_updates',
     );
 

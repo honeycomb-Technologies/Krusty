@@ -41,5 +41,5 @@ default = ["oidc-login"]
 oidc-login = []          # enables browser/device OIDC flows (always on for now)
 
 [[example]]
-name = "krusty_auth"
-path = "examples/krusty_auth.rs"
+name = "mitsuro_auth"
+path = "examples/mitsuro_auth.rs"

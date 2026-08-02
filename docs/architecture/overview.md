@@ -16,19 +16,19 @@ Mitsuro exposes the same core engine through four different surfaces. They all s
 
 ### 1. Terminal UI (TUI)
 
-The flagship interface. Run `krusty` in your terminal and you get a full-featured chat interface built with Ratatui. It has syntax-highlighted code blocks, streaming responses, markdown rendering, 29 color themes, and a slash command system for everything from switching models to managing plugins. You can attach files, open an embedded terminal, scroll through conversation history, and toggle between plan mode (where the AI designs before it acts) and build mode (where it executes).
+The flagship interface. Run `mitsuro` in your terminal and you get a full-featured chat interface built with Ratatui. It has syntax-highlighted code blocks, streaming responses, markdown rendering, 29 color themes, and a slash command system for everything from switching models to managing plugins. You can attach files, open an embedded terminal, scroll through conversation history, and toggle between plan mode (where the AI designs before it acts) and build mode (where it executes).
 
 This is the interface for engineers who live in the terminal. It's fast, keyboard-driven, and designed for deep coding sessions.
 
 ### 2. Web Server & API
 
-Run `krusty serve` and the binary launches an HTTP server with an embedded web frontend. The same React-based UI that powers the mobile app gets served directly from the binary — no separate frontend deployment needed. The API exposes REST endpoints and SSE streaming for chat, plus WebSocket support for terminal emulation.
+Run `mitsuro serve` and the binary launches an HTTP server with an embedded web frontend. The same React-based UI that powers the mobile app gets served directly from the binary — no separate frontend deployment needed. The API exposes REST endpoints and SSE streaming for chat, plus WebSocket support for terminal emulation.
 
 This is the interface for when you want a graphical UI, or when you need to access Mitsuro from another device on your network. If Tailscale is installed, it automatically configures remote HTTPS access so you can reach your Mitsuro instance from anywhere.
 
 ### 3. Editor Integration (ACP)
 
-Run `krusty acp` and it becomes an Agent Client Protocol server that communicates over JSON-RPC via stdin/stdout. This lets code editors — Zed, Neovim, JetBrains, and others — spawn Mitsuro as a subprocess and interact with it through a standardized protocol. The editor sends prompts and receives structured responses, including tool calls that the editor can render natively.
+Run `mitsuro acp` and it becomes an Agent Client Protocol server that communicates over JSON-RPC via stdin/stdout. This lets code editors — Zed, Neovim, JetBrains, and others — spawn Mitsuro as a subprocess and interact with it through a standardized protocol. The editor sends prompts and receives structured responses, including tool calls that the editor can render natively.
 
 This is the interface for when you want AI assistance without leaving your editor.
 
@@ -70,15 +70,15 @@ The project is organized as a Rust workspace with three crates, plus TypeScript 
 
 ```
 crates/
-  krusty-core/     The shared library. Everything the orchestrator needs: AI clients,
+  mitsuro-core/     The shared library. Everything the orchestrator needs: AI clients,
                    tool registry, storage, ACP server, MCP client, extensions, auth,
                    planning, skills, plugins. This is where the brain lives.
 
-  krusty-cli/      The binary. Entry point (main.rs), TUI implementation, serve mode
+  mitsuro-cli/      The binary. Entry point (main.rs), TUI implementation, serve mode
                    setup. This is the executable you install and run.
 
-  krusty-server/   The HTTP API. Axum-based web server with REST routes, WebSocket
-                   terminal, push notifications, and Mako runtime management. Gets
+  mitsuro-server/   The HTTP API. Axum-based web server with REST routes, WebSocket
+                   terminal, push notifications, and Hive runtime management. Gets
                    compiled into the CLI binary.
 
 apps/
@@ -94,7 +94,7 @@ packages/
   ui/              Design tokens and theme definitions shared between mobile and desktop.
 ```
 
-The key insight is that `krusty-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Hive all import `krusty-core` and use the same orchestrator, the same tools, and the same storage.
+The key insight is that `mitsuro-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Hive all import `mitsuro-core` and use the same orchestrator, the same tools, and the same storage.
 
 ## Multi-Provider AI
 
@@ -115,7 +115,7 @@ A few architectural choices worth noting:
 
 **Single binary distribution.** The entire system — Rust backend, web frontend, SQLite database — ships as one executable. No Docker, no microservices, no separate database server. You install it and it works. The web frontend is literally embedded in the binary at compile time.
 
-**Local-first.** Everything runs on your machine and your data stays on your machine. Sessions are stored in SQLite at `~/.krusty/`. API keys are encrypted locally. There's no cloud service in the middle (unless you choose to use OpenRouter or similar).
+**Local-first.** Everything runs on your machine and your data stays on your machine. Sessions are stored in SQLite at `~/.mitsuro/`. API keys are encrypted locally. There's no cloud service in the middle (unless you choose to use OpenRouter or similar).
 
 **Presentation-agnostic core.** The orchestrator loop is completely decoupled from how you interact with it. This means adding a new interface (say, a Slack bot or a VS Code extension) requires writing only the thin presentation layer — the entire agent capability comes for free.
 

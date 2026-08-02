@@ -7,7 +7,7 @@ const KNOWN_LABELS = new Set([
   'active', 'background', 'inactive', 'unknown',
   'start', 'complete', 'cancel', 'error', 'mount', 'ready', 'terminate', 'reload', 'unmount',
   'connecting', 'connected', 'disconnected',
-  'chat', 'code', 'mako', 'browser', 'terminal', 'html_preview',
+  'chat', 'code', 'hive', 'browser', 'terminal', 'html_preview',
   'diagnostics.ready', 'native.payloads', 'stress.start', 'stress.stop', 'stress.expired',
   'pending.recovered', 'js.drift', 'js.longtask', 'interaction', 'mode.change',
   'app.launch', 'new_chat.shell', 'new_chat.session_bind', 'session.open',
@@ -24,7 +24,7 @@ const KNOWN_LABELS = new Set([
   'api.sessions.state', 'api.sessions.workflow', 'api.sessions.presence',
   'api.sessions.action', 'api.sessions.directories',
   'api.models', 'api.credentials', 'api.auth',
-  'api.mcp', 'api.skills', 'api.ports', 'api.mako', 'api.git', 'api.files',
+  'api.mcp', 'api.skills', 'api.ports', 'api.hive', 'api.git', 'api.files',
   'api.notifications', 'api.mobile_diagnostics', 'api.stream', 'api.other',
   'http.2xx', 'http.3xx', 'http.4xx', 'http.5xx', 'http.unknown',
   'network.error', 'request.abort', 'decode.error',
@@ -32,8 +32,8 @@ const KNOWN_LABELS = new Set([
   'session_requests', 'toolbox_requests', 'live_activity_updates',
   'root', '(tabs)', '(tabs)>index', '(tabs)>sessions', '(tabs)>settings',
   'settings', 'onboarding', 'navigation-preview', 'dynamic',
-  'chat->chat', 'chat->code', 'chat->mako', 'code->chat', 'code->code', 'code->mako',
-  'mako->chat', 'mako->code', 'mako->mako',
+  'chat->chat', 'chat->code', 'chat->hive', 'code->chat', 'code->code', 'code->hive',
+  'hive->chat', 'hive->code', 'hive->hive',
 ]);
 
 /**

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  KrustyClient,
+  MitsuroClient,
   type ChatRequest,
   type SessionResponse,
   type SessionStateResponse,
@@ -166,8 +166,8 @@ function makeHarness(initialSession: SessionResponse = makeSession()) {
 
 test("API client createSession serializes target_branch for project opens", async () => {
   const captures: Array<{ url: string; init: RequestInit }> = [];
-  const client = new KrustyClient({
-    baseUrl: "https://krusty.invalid",
+  const client = new MitsuroClient({
+    baseUrl: "https://mitsuro.invalid",
     fetchImpl: makeCapturingFetch(captures),
   });
 
@@ -180,7 +180,7 @@ test("API client createSession serializes target_branch for project opens", asyn
   );
 
   const request = captures[0];
-  assert.equal(request?.url, "https://krusty.invalid/api/sessions");
+  assert.equal(request?.url, "https://mitsuro.invalid/api/sessions");
   assert.equal(request?.init.method, "POST");
   assert.deepEqual(JSON.parse(String(request?.init.body)), {
     project_dir: "/repo/app",
@@ -193,15 +193,15 @@ test("API client createSession serializes target_branch for project opens", asyn
 
 test("API client updateSession serializes explicit target_branch clear", async () => {
   const captures: Array<{ url: string; init: RequestInit }> = [];
-  const client = new KrustyClient({
-    baseUrl: "https://krusty.invalid/",
+  const client = new MitsuroClient({
+    baseUrl: "https://mitsuro.invalid/",
     fetchImpl: makeCapturingFetch(captures),
   });
 
   await client.updateSession("session-1", { target_branch: null });
 
   const request = captures[0];
-  assert.equal(request?.url, "https://krusty.invalid/api/sessions/session-1");
+  assert.equal(request?.url, "https://mitsuro.invalid/api/sessions/session-1");
   assert.equal(request?.init.method, "PATCH");
   assert.deepEqual(JSON.parse(String(request?.init.body)), {
     target_branch: null,
@@ -251,23 +251,23 @@ test("explicit projectDir send option also becomes workingDir when workingDir is
 
 test("loading a session snapshot persists targetBranch in workspace state", async () => {
   const initialSession = makeSession({
-    id: "mako-run-1",
-    session_type: "mako",
+    id: "hive-run-1",
+    session_type: "hive",
     project_dir: "/repo/app",
     working_dir: "/repo/app",
     workspace_mode: "selected",
-    target_branch: "feature/mako-run",
+    target_branch: "feature/hive-run",
   });
   const { storage, workspace, sessionStore } = makeHarness(initialSession);
 
   try {
-    await sessionStore.getState().loadSession("mako-run-1");
+    await sessionStore.getState().loadSession("hive-run-1");
 
     assert.equal(workspace.getState().directory, "/repo/app");
-    assert.equal(workspace.getState().targetBranch, "feature/mako-run");
+    assert.equal(workspace.getState().targetBranch, "feature/hive-run");
     assert.equal(
-      JSON.parse(storage.get("krusty:workspace") ?? "{}").targetBranch,
-      "feature/mako-run",
+      JSON.parse(storage.get("mitsuro:workspace") ?? "{}").targetBranch,
+      "feature/hive-run",
     );
   } finally {
     sessionStore.getState().cleanup();

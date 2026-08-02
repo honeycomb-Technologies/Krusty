@@ -1,4 +1,4 @@
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 import {
   buildToolDiffPresentation,
   isDiffTool,
@@ -95,7 +95,7 @@ export function presentTool(
   const diff = isDiffTool(name) ? buildToolDiffPresentation(toolCall) : null;
   const summary = buildSummary(family, toolCall, args, diff);
   const meta = buildMeta(family, toolCall, diff);
-  const label = buildLabel(family, name, args);
+  const label = buildLabel(family, name, args, toolCall.delegated?.name);
   const canExpand = canExpandTool(family, toolCall, diff);
   // Keep completion presentation sticky: no sudden peek/tail growth that reflows siblings.
   // Users can still expand intentionally for full diffs/logs.
@@ -212,14 +212,9 @@ function isDelegatedName(
     return true;
   }
   if (normalized === "agent") {
-    const agentType =
-      typeof args?.agent_type === "string" ? args.agent_type.toLowerCase() : "";
-    return (
-      agentType === "explore" ||
-      agentType === "plan" ||
-      agentType === "verify" ||
-      agentType === "build"
-    );
+    // The current API is name + instructions + capabilities. agent_type is a
+    // compatibility label, not the discriminator for whether this is a child.
+    return true;
   }
   return false;
 }
@@ -254,6 +249,7 @@ function buildLabel(
   family: ToolFamily,
   name: string,
   args: Record<string, unknown>,
+  delegatedName?: string,
 ): string {
   if (family === "bash") return "bash";
   if (family === "edit") {
@@ -278,9 +274,7 @@ function buildLabel(
   }
   if (family === "delegated") {
     if (name === "agent") {
-      const agentType =
-        typeof args.agent_type === "string" ? args.agent_type : "agent";
-      return agentType;
+      return firstString(args.name, delegatedName, args.agent_type) || "agent";
     }
     return name.toLowerCase();
   }
@@ -323,6 +317,7 @@ function buildSummary(
       delegated?.message ||
       delegated?.investigationSummary ||
       delegated?.humanReview ||
+      firstString(args.instructions) ||
       firstString(args.prompt) ||
       toolCall.output ||
       delegated?.kind ||
@@ -373,19 +368,36 @@ function buildMeta(
 
   if (family === "delegated") {
     const delegated = toolCall.delegated;
-    if (!delegated) return undefined;
+    const rawCapabilities = Array.isArray(toolCall.arguments?.capabilities)
+      ? toolCall.arguments.capabilities
+      : toolCall.delegated?.capabilities ?? [];
+    const capabilities = rawCapabilities
+      ? rawCapabilities.filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0,
+        )
+      : [];
+    const capabilityLabel = capabilities.length > 0
+      ? capabilities.map((capability) => capability.toLowerCase()).join(" + ")
+      : undefined;
+    const delegatedStateLabel = delegated?.stage === "degraded"
+      || delegated?.stage === "cancelled"
+      ? delegated.stage
+      : delegated?.outcome ?? delegated?.stage;
     return [
-      delegated.outcome ?? delegated.stage,
-      delegated.agentCount !== undefined
+      capabilityLabel,
+      delegatedStateLabel,
+      delegated?.agentCount !== undefined
         ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? "" : "s"}`
         : undefined,
-      delegated.failedAgents ? `${delegated.failedAgents} failed` : undefined,
-      delegated.filesExaminedCount !== undefined
+      delegated?.degradedAgents ? `${delegated.degradedAgents} degraded` : undefined,
+      delegated?.cancelledAgents ? `${delegated.cancelledAgents} cancelled` : undefined,
+      delegated?.failedAgents ? `${delegated.failedAgents} failed` : undefined,
+      delegated?.filesExaminedCount !== undefined
         ? `${delegated.filesExaminedCount} paths`
         : undefined,
     ]
       .filter(Boolean)
-      .join(" · ");
+      .join(" · ") || undefined;
   }
 
   return undefined;

@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ActivityIndicator, View, Text, Pressable, StyleSheet, Platform } from 'react-native';
 import { Plus, RefreshCw, X } from 'lucide-react-native';
 import type { WebViewProps } from 'react-native-webview';
-import type { PortEntry, PreviewSettings } from '@krusty/api';
-import { trackKrustyPerformanceResource } from '@krusty/state';
+import type { PortEntry, PreviewSettings } from '@mitsuro/api';
+import { trackMitsuroPerformanceResource } from '@mitsuro/state';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
@@ -113,7 +113,7 @@ function NativeBrowser({ visible }: { visible: boolean }) {
     if (!client) return Promise.resolve();
     if (loadPromiseRef.current) return loadPromiseRef.current;
 
-    const releaseRequest = trackKrustyPerformanceResource('toolbox_requests');
+    const releaseRequest = trackMitsuroPerformanceResource('toolbox_requests');
     if (background) {
       setRefreshing(true);
     } else {

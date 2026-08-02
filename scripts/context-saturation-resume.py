@@ -46,7 +46,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     original = json.loads(original_path.read_text())
     session_id = args.session_id or original.get("grok_session_id")
     HARNESS.require(isinstance(session_id, str) and bool(session_id), "Grok session ID absent")
-    api = HARNESS.KrustyApi(base_url, args.timeout)
+    api = HARNESS.MitsuroApi(base_url, args.timeout)
 
     grok = HARNESS.select_stable_exact_model(
         api, args.grok_model, provider_id="grok", timeout=60

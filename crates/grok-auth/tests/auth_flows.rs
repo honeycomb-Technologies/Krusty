@@ -54,7 +54,7 @@ async fn load_prefers_configured_oidc_entry_from_disk() -> Result<(), Box<dyn Er
     let dir = tempdir()?;
     let auth_file = dir.path().join("auth.json");
     let issuer = "https://issuer.example";
-    let client_id = "krusty-client";
+    let client_id = "mitsuro-client";
     let preferred_key = format!("{issuer}::{client_id}");
 
     let mut entries = HashMap::new();
@@ -114,7 +114,7 @@ async fn expired_oidc_entry_refreshes_and_updates_auth_file() -> Result<(), Box<
         );
         assert_eq!(
             params.get("client_id").map(String::as_str),
-            Some("krusty-client")
+            Some("mitsuro-client")
         );
 
         Json(json!({
@@ -142,7 +142,7 @@ async fn expired_oidc_entry_refreshes_and_updates_auth_file() -> Result<(), Box<
 
     let dir = tempdir()?;
     let auth_file = dir.path().join("auth.json");
-    let client_id = "krusty-client";
+    let client_id = "mitsuro-client";
     let issuer_key = format!("{issuer}::{client_id}");
     let mut entries = HashMap::new();
     entries.insert(
@@ -216,7 +216,7 @@ async fn client_builder_sends_auth_and_client_version_headers() -> Result<(), Bo
     };
     let client = ClientBuilder::new()
         .with_token(token)
-        .with_client_version("krusty-test")
+        .with_client_version("mitsuro-test")
         .build()?;
 
     let body: serde_json::Value = client
@@ -228,7 +228,7 @@ async fn client_builder_sends_auth_and_client_version_headers() -> Result<(), Bo
         .await?;
 
     assert_eq!(body["authorization"], "Bearer secret-token");
-    assert_eq!(body["client_version"], "krusty-test");
+    assert_eq!(body["client_version"], "mitsuro-test");
     assert!(body["user_agent"]
         .as_str()
         .unwrap_or_default()
@@ -264,28 +264,28 @@ fn merge_toml_and_auth_url_helpers_work() -> Result<(), Box<dyn Error>> {
         r#"
         [grok_com_config.oidc]
         issuer = "https://issuer.example"
-        client_id = "krusty-client"
+        client_id = "mitsuro-client"
 
         [auth]
         auth_provider_command = "/usr/bin/provider"
-        auth_provider_label = "Krusty Corp"
+        auth_provider_label = "Mitsuro Corp"
         "#,
     )?;
 
     assert_eq!(cfg.oidc_issuer.as_deref(), Some("https://issuer.example"));
-    assert_eq!(cfg.oidc_client_id.as_deref(), Some("krusty-client"));
+    assert_eq!(cfg.oidc_client_id.as_deref(), Some("mitsuro-client"));
     assert_eq!(
         cfg.auth_provider_command.as_deref(),
         Some("/usr/bin/provider")
     );
-    assert_eq!(cfg.auth_provider_label.as_deref(), Some("Krusty Corp"));
+    assert_eq!(cfg.auth_provider_label.as_deref(), Some("Mitsuro Corp"));
 
     let challenge = grok_auth::oidc::pkce_challenge("test-verifier");
     assert_eq!(challenge, "JBbiqONGWPaAmwXk_8bT6UnlPfrn65D32eZlJS-zGG0");
 
     let auth_url = grok_auth::oidc::build_auth_url(
         "https://issuer.example/authorize",
-        "krusty-client",
+        "mitsuro-client",
         "http://127.0.0.1:1234/callback",
         &["openid".to_string(), "api:access".to_string()],
         "state-123",
@@ -296,7 +296,7 @@ fn merge_toml_and_auth_url_helpers_work() -> Result<(), Box<dyn Error>> {
     assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
     assert_eq!(
         query.get("client_id").map(String::as_str),
-        Some("krusty-client")
+        Some("mitsuro-client")
     );
     assert_eq!(
         query.get("redirect_uri").map(String::as_str),

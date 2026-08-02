@@ -407,7 +407,7 @@ Deno.test('MetricKit v2 uploads retain only bounded symbolication fields', () =>
           frames: [{
             ...{ address: '0xfeedface' },
             binaryUuid: '70b89f27-1634-3580-a695-57cdb41d7743',
-            binaryName: 'Krusty',
+            binaryName: 'Mitsuro',
             offset: '18446744073709551615',
             sampleCount: 1_000_000,
           }],
@@ -453,7 +453,7 @@ Deno.test('MetricKit v2 uploads reject invalid types and aggregate bounds', () =
       threadAttributed: false,
       frames: [{
         binaryUuid: '70b89f27-1634-3580-a695-57cdb41d7743',
-        binaryName: 'Krusty',
+        binaryName: 'Mitsuro',
         offset: '0',
         sampleCount: 1,
       }],

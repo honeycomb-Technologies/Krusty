@@ -1,16 +1,21 @@
-# Mitsuro Desktop
+# Krusty Desktop
 
-This directory is reserved for desktop packaging around the React/Expo web client.
+Desktop-first Krusty product.
 
-## Scope
-- Native wrapper and packaging
-- OS integration (notifications, file dialogs, autostart)
-- Local connection configuration for the Mitsuro self-hosted runtime (`krusty-server` compatibility crate)
+## Layout
 
-## Active Scaffold
-- `shell/` contains a Tauri wrapper targeting `apps/mobile`.
+- `ui/` — desktop product surface (Expo web, desktop IA)
+- `shell/` — Tauri host, packaging, embedded/reused server bootstrap
 
-## Local Run
+## Dev
+
+```bash
+cd apps/desktop/ui
+bun install
+bun run web
+```
+
+Or full native shell:
 
 ```bash
 cd apps/desktop/shell
@@ -18,12 +23,5 @@ bun install
 bun run dev
 ```
 
-Build:
-
-```bash
-bun run build
-```
-
-Linux packages are generated at:
-- `apps/desktop/shell/src-tauri/target/release/bundle/deb/*.deb`
-- `apps/desktop/shell/src-tauri/target/release/bundle/rpm/*.rpm`
+Desktop UI owns plane rail / context rail / canvas / utility host.
+Mobile remains mobile-first and is reused as a component source, not as the desktop shell.

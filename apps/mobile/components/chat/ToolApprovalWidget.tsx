@@ -1,7 +1,7 @@
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { ShieldAlert, ShieldCheck, ShieldX, Check, X } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 
 interface ToolApprovalWidgetProps {
   toolCall: ToolCall;

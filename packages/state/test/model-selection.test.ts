@@ -1,4 +1,4 @@
-import type { ModelInfo, ModelKey } from '@krusty/api';
+import type { ModelInfo, ModelKey } from '@mitsuro/api';
 import {
   findModelByKey,
   isModelUsable,

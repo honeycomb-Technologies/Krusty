@@ -12,7 +12,7 @@ This document explains what each one does, how it works internally, and how to c
 
 MCP is an open standard that lets AI systems discover and use tools exposed by external servers. Instead of building every capability directly into Mitsuro, MCP lets you point Mitsuro at a server that provides tools, resources, and prompts over a standardized protocol. Mitsuro acts as an MCP client -- it connects to MCP servers, discovers what they offer, and makes those tools available to the agent just like built-in tools.
 
-The implementation lives in `crates/krusty-core/src/mcp/`, built on the `rmcp` SDK.
+The implementation lives in `crates/mitsuro-core/src/mcp/`, built on the `rmcp` SDK.
 
 ### Transport
 
@@ -31,7 +31,7 @@ The HTTP transport is a custom `StreamableHttpClient` implementation handling PO
 
 ### Configuration
 
-MCP configuration is layered. Package-provided fragments are defaults, `~/.krusty/mcp.json` overrides packages, and `<project>/.mcp.json` has the highest precedence. The format uses `mcpServers` as the top-level key, with each server defined by name:
+MCP configuration is layered. Package-provided fragments are defaults, `~/.mitsuro/mcp.json` overrides packages, and `<project>/.mcp.json` has the highest precedence. The format uses `mcpServers` as the top-level key, with each server defined by name:
 
 ```json
 {
@@ -58,7 +58,7 @@ MCP configuration is layered. Package-provided fragments are defaults, `~/.krust
         "scopes": ["repo:read", "repo:write"],
         "clientName": "Mitsuro"
       },
-      "headers": { "X-Client": "krusty" },
+      "headers": { "X-Client": "mitsuro" },
       "envHeaders": { "X-Team-Key": "MY_TEAM_KEY" }
     }
   }
@@ -137,7 +137,7 @@ extensions, skills, MCP configuration, hooks, and assets. Standalone release
 artifacts are publisher-signed; npm and explicitly selected local packages have
 separate, visible unsigned trust levels.
 
-The plugin system lives in `crates/krusty-core/src/plugins/`.
+The plugin system lives in `crates/mitsuro-core/src/plugins/`.
 
 ### The Plugin Manifest
 
@@ -188,7 +188,7 @@ fail closed.
 
 Plugin trust is enforced through ed25519 cryptographic signatures. Before a plugin is installed, Mitsuro verifies two things:
 
-1. **Publisher allowlist.** The plugin's publisher must appear in the trust policy (`~/.krusty/plugins/trust/allowlist.toml`). If the publisher isn't trusted, installation is rejected with a message to add them first.
+1. **Publisher allowlist.** The plugin's publisher must appear in the trust policy (`~/.mitsuro/plugins/trust/allowlist.toml`). If the publisher isn't trusted, installation is rejected with a message to add them first.
 
 2. **Artifact integrity and release-envelope binding.** The downloaded
    artifact's SHA-256 hash must match the manifest declaration. Its Ed25519
@@ -208,10 +208,10 @@ that current on-disk bytes were rechecked, so it does not alone produce a
 
 ### Installation and Lifecycle
 
-The `PluginManager` manages the full plugin lifecycle under `~/.krusty/plugins/`:
+The `PluginManager` manages the full plugin lifecycle under `~/.mitsuro/plugins/`:
 
 ```
-~/.krusty/plugins/
+~/.mitsuro/plugins/
   installed/
     .staging/     # Incomplete transactions; safe to reconcile
     .managed/     # Immutable, manager-owned package snapshots
@@ -257,7 +257,7 @@ security boundary.
 
 Plans are Mitsuro's answer to complex, multi-step tasks. When a task is too large to tackle in a single pass -- a feature that touches multiple files across several subsystems, a refactor that needs to happen in stages, or an investigation that branches into several directions -- plans break the work into phases, each phase into numbered tasks, and each task into something the agent can execute and check off.
 
-The plan system lives in `crates/krusty-core/src/plan/`.
+The plan system lives in `crates/mitsuro-core/src/plan/`.
 
 ### Plan Mode vs. Build Mode
 
@@ -302,7 +302,7 @@ The plan system recognizes task completion through multiple patterns in the agen
 
 Plans have a strict 1:1 relationship with sessions. Each session can have at most one plan, and the plan is stored in SQLite with a foreign key to the session. When a session is deleted, its plan is automatically removed via CASCADE. The `PlanManager` provides the full CRUD interface: create, load, update, abandon, and query.
 
-Legacy plans that were stored as markdown files in `~/.krusty/plans/` are automatically migrated to the database on first access.
+Legacy plans that were stored as markdown files in `~/.mitsuro/plans/` are automatically migrated to the database on first access.
 
 Plans track progress at multiple levels. Each phase knows how many of its tasks are complete. The plan itself reports total progress and auto-detects when all tasks are finished. A completed plan is no longer considered "active" and won't be injected into the agent's context.
 
@@ -314,14 +314,14 @@ Users interact with plans through the `/plan` slash command. It triggers plan mo
 
 Skills are the simplest extensibility layer -- they're just files on disk that get loaded into the agent's context when invoked. A skill is a collection of domain-specific instructions, best practices, workflows, and examples written in Markdown with YAML frontmatter. When a skill is active, its content becomes part of what the agent knows and follows.
 
-The skills system lives in `crates/krusty-core/src/skills/`.
+The skills system lives in `crates/mitsuro-core/src/skills/`.
 
 ### Skill Format
 
 Each skill is a directory containing a `SKILL.md` file:
 
 ```
-~/.krusty/skills/
+~/.mitsuro/skills/
   rust-patterns/
     SKILL.md
   git-workflow/
@@ -337,7 +337,7 @@ The `SKILL.md` file starts with YAML frontmatter declaring the skill's identity:
 name: rust-patterns
 description: Idiomatic Rust patterns and best practices
 version: 1.0.0
-author: krusty
+author: mitsuro
 tags:
   - rust
   - patterns
@@ -356,13 +356,13 @@ Skills can include additional files beyond `SKILL.md`. The `load_skill_file` fun
 
 ### Discovery and Loading
 
-The `SkillsManager` scans compatible user roots (`~/.krusty/skills`, `~/.agents/skills`, `~/.pi/agent/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`) plus matching project roots (`.krusty`, `.agents`, `.pi`, `.claude`, `.codex`, and `.opencode`). Project discovery walks upward from the working directory through the git worktree boundary (or filesystem root outside a worktree). Pi roots additionally accept direct Markdown skills; package roots are scanned recursively. Package lifecycle code supplies its complete enabled snapshot through `set_package_roots`, so disable, update, and uninstall remove stale contributions immediately.
+The `SkillsManager` scans compatible user roots (`~/.mitsuro/skills`, `~/.agents/skills`, `~/.pi/agent/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`) plus matching project roots (`.mitsuro`, `.agents`, `.pi`, `.claude`, `.codex`, and `.opencode`). Project discovery walks upward from the working directory through the git worktree boundary (or filesystem root outside a worktree). Pi roots additionally accept direct Markdown skills; package roots are scanned recursively. Package lifecycle code supplies its complete enabled snapshot through `set_package_roots`, so disable, update, and uninstall remove stale contributions immediately.
 
 Precedence is deterministic: nearest project definitions override farther project definitions, project overrides user roots, user roots override packages, and native Mitsuro roots win ties within the same scope. Every rejected definition, invalid policy, and shadowed duplicate appears in the diagnostics catalog instead of disappearing into debug logs.
 
 The manager keeps an in-memory catalog but fingerprints definitions and policy files on normal reads. Edits, additions, removals, and policy changes are detected without requiring a restart; `refresh()` remains available as an explicit force-rescan.
 
-Per-skill policy is stored in `.krusty/skills-policy.json`. The nearest project
+Per-skill policy is stored in `.mitsuro/skills-policy.json`. The nearest project
 file wins field-by-field among project files, but project policy composes
 monotonically with the user policy: a repository may change `allow` to `ask` or
 `deny`, and may disable a skill, but it cannot re-enable or loosen a user-level

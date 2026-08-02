@@ -1,6 +1,7 @@
 # The Terminal UI
 
-> **Legacy surface:** the terminal UI remains functional but is intentionally excluded from the Mitsuro v1 visual conversion. Its current mascot, ASCII, color, and theme behavior are documented here as-is until the planned ground-up TUI rebuild.
+> **Supported surface:** the terminal UI uses Mitsuro identity and shares the
+> same Agent, Hive, provider, storage, and tool contracts as the other clients.
 
 Mitsuro's terminal interface is built on Ratatui and crossterm. It runs inside any modern terminal emulator, renders at 60fps when animations are active, and supports everything from mouse-driven scrolling to gamepad input. This document walks through how the interface is structured, how it processes events, and how the various subsystems fit together.
 
@@ -276,7 +277,7 @@ On Unix platforms, the `GamepadHandler` uses gilrs for controller support. It po
 
 ### Managed Plugins
 
-The `ManagedPlugin` type represents installable plugins loaded from `~/.krusty/plugins`. Each has a descriptor with ID, name, version, publisher, description, and render mode. The plugin manager handles installation, updates, and enable/disable state. A global registry tracks installed plugin descriptors, and the plugin catalog is polled every 2 seconds for state changes.
+The `ManagedPlugin` type represents installable plugins loaded from `~/.mitsuro/plugins`. Each has a descriptor with ID, name, version, publisher, description, and render mode. The plugin manager handles installation, updates, and enable/disable state. A global registry tracks installed plugin descriptors, and the plugin catalog is polled every 2 seconds for state changes.
 
 ### The Plugin Window
 

@@ -1,4 +1,4 @@
-import type { ToolCall } from "@krusty/api";
+import type { ToolCall } from "@mitsuro/api";
 import { diffLines, diffWordsWithSpace } from "diff";
 
 export type ToolDiffRowKind = "addition" | "deletion" | "metadata" | "context";
@@ -392,7 +392,7 @@ function countPatchChanges(patch: string): {
   return { additions, deletions };
 }
 
-/** Convert Krusty's apply_patch envelope into a display-only unified patch. */
+/** Convert Mitsuro's apply_patch envelope into a display-only unified patch. */
 function convertApplyPatchToUnified(patch?: string): string | undefined {
   if (!patch?.includes("*** Begin Patch")) return undefined;
 

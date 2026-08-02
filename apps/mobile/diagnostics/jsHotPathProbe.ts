@@ -1,4 +1,4 @@
-import KrustyDiagnosticsModule from '../modules/krusty-diagnostics';
+import MitsuroDiagnosticsModule from '../modules/mitsuro-diagnostics';
 
 const ARRAY_FROM_SAMPLE_EVERY = 1_024;
 const NETWORK_STACK_SAMPLE_EVERY = 256;
@@ -7,7 +7,7 @@ const MAX_REPORTED_CALLSITES = 8;
 const MAX_REPORTED_NETWORK_CALLS = 4;
 
 interface JsHotPathProbeGlobal {
-  __KRUSTY_JS_HOT_PATH_PROBE_INSTALLED__?: boolean;
+  __MITSURO_JS_HOT_PATH_PROBE_INSTALLED__?: boolean;
   __rctDeviceEventEmitter?: {
     emit(eventType: string, ...args: unknown[]): void;
     listenerCount?(eventType: string): number;
@@ -39,11 +39,14 @@ interface NetworkCallCount {
  * in every 1,024 Array.from calls and emits bounded aggregate callsite counts.
  */
 export function installJsHotPathProbe(): void {
-  if (process.env.EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE !== '1') return;
+  const enabled =
+    process.env.EXPO_PUBLIC_MITSURO_JS_HOTPATH_PROBE === '1' ||
+    process.env.EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1';
+  if (!enabled) return;
 
   const root = globalThis as typeof globalThis & JsHotPathProbeGlobal;
-  if (root.__KRUSTY_JS_HOT_PATH_PROBE_INSTALLED__) return;
-  root.__KRUSTY_JS_HOT_PATH_PROBE_INSTALLED__ = true;
+  if (root.__MITSURO_JS_HOT_PATH_PROBE_INSTALLED__) return;
+  root.__MITSURO_JS_HOT_PATH_PROBE_INSTALLED__ = true;
 
   const originalArrayFrom = Array.from;
   const callsites = new Map<string, number>();
@@ -165,7 +168,7 @@ export function installJsHotPathProbe(): void {
       nativeEvents: rankedNativeEvents,
       networkCalls: rankedNetworkCalls,
     });
-    KrustyDiagnosticsModule?.recordJsHotPathProbe(payload);
+    MitsuroDiagnosticsModule?.recordJsHotPathProbe(payload);
     callsites.clear();
     nativeEvents.clear();
     networkCalls.clear();

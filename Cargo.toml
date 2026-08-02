@@ -2,8 +2,8 @@
 resolver = "2"
 members = ["crates/*"]
 
-# Default to running krusty-cli
-default-members = ["crates/krusty-cli"]
+# Default to running mitsuro-cli
+default-members = ["crates/mitsuro-cli"]
 
 [profile.release]
 lto = true

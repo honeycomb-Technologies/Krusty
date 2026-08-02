@@ -16,7 +16,7 @@ import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { SessionListSkeleton } from '../../components/ui/Skeleton';
 import { GlassCard } from '../../components/ui/GlassCard';
-import type { SessionResponse } from '@krusty/api';
+import type { SessionResponse } from '@mitsuro/api';
 
 export default function SessionsScreen() {
   const { theme } = useThemeContext();

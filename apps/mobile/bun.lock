@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "@krusty/mobile",
+      "name": "@mitsuro/mobile",
       "dependencies": {
         "@expo/ui": "~55.0.17",
         "@lottiefiles/dotlottie-react": "^0.13.5",
@@ -18,6 +18,7 @@
         "@xterm/addon-fit": "^0.11.0",
         "diff": "9.0.0",
         "expo": "~55.0.28",
+        "expo-application": "~55.0.17",
         "expo-blur": "~55.0.16",
         "expo-build-properties": "~55.0.16",
         "expo-clipboard": "~55.0.15",

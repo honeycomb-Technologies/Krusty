@@ -3047,134 +3047,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "krusty-core"
-version = "0.9.11"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "chrono-tz",
- "dashmap",
- "dirs 6.0.0",
- "ed25519-dalek",
- "flate2",
- "fs2",
- "futures",
- "git2",
- "glob",
- "globset",
- "grok-auth",
- "hmac",
- "http",
- "httpdate",
- "ignore",
- "image",
- "libc",
- "moka",
- "netstat2",
- "once_cell",
- "parking_lot",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "reqwest 0.13.2",
- "rmcp",
- "rusqlite",
- "rustls",
- "scopeguard",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "shell-words",
- "similar",
- "sse-stream",
- "tar",
- "thiserror 2.0.18",
- "tiny_http",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tokio-util",
- "toml 0.8.2",
- "tracing",
- "url",
- "uuid",
- "walkdir",
- "wasmparser 0.222.1",
- "wasmtime",
- "wasmtime-wasi",
- "which",
- "xz2",
- "zip",
-]
-
-[[package]]
-name = "krusty-desktop"
-version = "0.9.11"
-dependencies = [
- "krusty-core",
- "krusty-server",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "krusty-mako-protocol"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "libc",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "krusty-server"
-version = "0.9.11"
-dependencies = [
- "anyhow",
- "axum",
- "base64ct",
- "chrono",
- "dirs 6.0.0",
- "fs2",
- "futures",
- "jsonwebtoken",
- "krusty-core",
- "krusty-mako-protocol",
- "mime_guess",
- "portable-pty",
- "regex",
- "reqwest 0.12.28",
- "rust-embed",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "web-push-native",
-]
-
-[[package]]
 name = "kuchikiki"
 version = "0.8.8-speedreader"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3535,6 +3407,138 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mitsuro-core"
+version = "0.9.20"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "dashmap",
+ "dirs 6.0.0",
+ "ed25519-dalek",
+ "flate2",
+ "fs2",
+ "futures",
+ "git2",
+ "glob",
+ "globset",
+ "grok-auth",
+ "hmac",
+ "http",
+ "httpdate",
+ "ignore",
+ "image",
+ "libc",
+ "moka",
+ "netstat2",
+ "once_cell",
+ "parking_lot",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "reqwest 0.13.2",
+ "rmcp",
+ "rusqlite",
+ "rustls",
+ "scopeguard",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shell-words",
+ "similar",
+ "sse-stream",
+ "tar",
+ "thiserror 2.0.18",
+ "tiny_http",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml 0.8.2",
+ "tracing",
+ "url",
+ "uuid",
+ "walkdir",
+ "wasmparser 0.222.1",
+ "wasmtime",
+ "wasmtime-wasi",
+ "which",
+ "windows-sys 0.59.0",
+ "xz2",
+ "zip",
+]
+
+[[package]]
+name = "mitsuro-desktop"
+version = "0.9.20"
+dependencies = [
+ "fs2",
+ "libc",
+ "mitsuro-core",
+ "mitsuro-server",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mitsuro-hive-protocol"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "libc",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mitsuro-server"
+version = "0.9.20"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64ct",
+ "chrono",
+ "dirs 6.0.0",
+ "fs2",
+ "futures",
+ "jsonwebtoken",
+ "mime_guess",
+ "mitsuro-core",
+ "mitsuro-hive-protocol",
+ "portable-pty",
+ "regex",
+ "reqwest 0.12.28",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "web-push-native",
 ]
 
 [[package]]

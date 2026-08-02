@@ -6,18 +6,18 @@ This document explains how Mitsuro is built, tested, and distributed across all 
 
 The Rust side of Mitsuro is organized as a Cargo workspace with seven Mitsuro crates plus the `grok-auth` support crate. The primary runtime boundaries are:
 
-- **krusty-cli** (`crates/krusty-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `krusty-core` and `krusty-server`.
-- **krusty-core** (`crates/krusty-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
-- **krusty-server** (`crates/krusty-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
-- **krusty-mako** (`crates/krusty-mako`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
-- **krusty-mako-protocol** (`crates/krusty-mako-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
-- **krusty-client** and **krusty-client-state** -- Typed transport and shared client-state boundaries.
+- **mitsuro-cli** (`crates/mitsuro-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `mitsuro-core` and `mitsuro-server`.
+- **mitsuro-core** (`crates/mitsuro-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
+- **mitsuro-server** (`crates/mitsuro-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
+- **mitsuro-hive** (`crates/mitsuro-hive`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
+- **mitsuro-hive-protocol** (`crates/mitsuro-hive-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
+- **mitsuro-client** and **mitsuro-client-state** -- Typed transport and shared client-state boundaries.
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
-The product-facing Mitsuro crates and desktop bundle currently share version
-`0.8.2` and edition 2021. The internal Hive daemon/protocol crates have their
-own `0.1.0` package versions; release tags are validated against the `krusty`
+The product-facing Mitsuro crates and desktop bundle share a coordinated
+release version. The internal Hive daemon/protocol crates keep independent
+package versions; release tags are validated dynamically against the `mitsuro`
 package version.
 
 ## Build commands
@@ -41,6 +41,7 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 
 | Job | What it does |
 |---|---|
+| **Canonical Identity** | Exact compatibility-name audit plus `install.sh` migration, publication, health, and rollback fixtures |
 | **Rust Check** | `cargo check --workspace` -- fast compilation check without producing binaries |
 | **Rust Test** | `cargo test --workspace` -- runs the full test suite |
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
@@ -66,7 +67,14 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.8.2`). Before packaging, the release workflow calls `.github/workflows/client-quality.yml`; no release build starts unless the API streaming/error contracts, shared-state type-check/tests, mobile TypeScript check, and Expo web export all pass. The remaining release workflow (`.github/workflows/release.yml`) has three artifact stages:
+Releases are triggered by pushing a semantic-version Git tag that matches `v*`.
+Before packaging, the release workflow calls
+`.github/workflows/client-quality.yml`; no release build starts unless the API
+streaming/error contracts, shared-state type-check/tests, mobile TypeScript
+check, and Expo web export all pass. Its prerequisite canonical-identity job
+also runs the exact-name policy and `sh install.sh --self-test`; the Rust test
+job remains the authority for the SQLite migration implementation itself. The remaining release workflow
+(`.github/workflows/release.yml`) has three artifact stages:
 
 **1. Build matrix.** A matrix job compiles release binaries for five targets:
 
@@ -78,11 +86,40 @@ Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.
 | `aarch64-apple-darwin` | `macos-latest` |
 | `x86_64-pc-windows-msvc` | `windows-latest` |
 
+### Transition updater bridge
+
+Canonical release archives are named `mitsuro-<target>.tar.gz` (or `.zip` on
+Windows). During the announced command transition, release CI also publishes
+`krusty-x86_64-pc-windows-msvc.zip` with an independently named checksum
+manifest. The two ZIPs are intentionally not byte-identical: each updater
+requires exactly one member with its expected filename. The canonical archive
+contains only `mitsuro.exe`; the old archive contains only `krusty.exe`, whose
+payload is byte-for-byte the full `mitsuro.exe` rather than the normal thin
+command forwarder. This lets the old Windows single-binary updater install a
+self-contained bridge binary without a canonical sibling. Homebrew, AUR,
+documentation, and all new installs use the Mitsuro archive names.
+
+Unix does not publish old archive aliases. Its prior self-update path already
+fails closed and directs users to fetch the current `install.sh`; an old saved
+installer would reject the canonical unit layout and cannot perform the offline
+state-authority handoff safely. An upgrade originating from that deprecated
+self-updater or shell-installer path must therefore download the current
+canonical installer. Homebrew and AUR are separate package-manager paths and
+must follow the explicit offline migration guidance below before first startup;
+they do not execute `install.sh` implicitly.
+
+The Windows transition archive alias and command forwarders may be retired only
+after the announced support window has elapsed, the minimum installed version
+is a bridge-aware release, updater compatibility tests no longer require the
+old asset name, rollback and recovery instructions no longer depend on it, and
+the release owner explicitly approves the removal. Removing an alias is a
+release contract change, not routine naming cleanup.
+
 Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Mitsuro in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
 
 **2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
 
-**3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `krusty` Cargo package version, verifies all five platform archive checksum manifests against their archives, renders `.github/homebrew/krusty.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists the exact five platform archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
+**3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `mitsuro` Cargo package version, verifies all five canonical platform archive checksum manifests and the Windows compatibility pair against their archives, renders `.github/homebrew/mitsuro.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists those six exact archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
 
 The publish job fails closed unless GitHub reports the release tag as protected (`github.ref_protected == true`). The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
 
@@ -96,15 +133,60 @@ The fastest way to install Mitsuro is the one-liner:
 curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Mitsuro/main/install.sh | sh
 ```
 
-The script (`install.sh`) detects the host OS and architecture, fetches the latest release from the GitHub API, downloads the exact archive and its required SHA-256 manifest, verifies the manifest record and archive before extraction, and rejects unsafe archive paths or entry types. On Unix it stages an immutable release containing `krusty`, `krusty-mako`, and the service units, then switches one managed release pointer; a service reload/restart failure restores the prior binary and unit set. Existing direct installs are retained as a rollback release, and releases are not pruned automatically. On default Linux installs the units are linked into `~/.config/systemd/user`; custom `INSTALL_DIR` values deliberately skip automatic unit management. Windows remains a verified standalone-binary install. The script supports Linux (x86_64, aarch64), macOS (Intel and Apple Silicon), and Windows under MSYS/Cygwin. If the install directory is not already in `PATH`, it prints the line you need to add to your shell config.
+The script (`install.sh`) detects the host OS and architecture, fetches the latest release from the GitHub API, downloads the exact archive and its required SHA-256 manifest, verifies the manifest record and archive before extraction, and rejects unsafe archive paths or entry types. On Unix it stages an immutable release containing `mitsuro`, `mitsuro-hive`, and the service units, then switches one managed release pointer; a service reload/restart failure restores the prior binary and unit set. Existing direct and previous-identity installs are retained as immutable rollback releases, and releases are not pruned automatically. On default Linux installs the units are linked into `~/.config/systemd/user` and execute the selected `.mitsuro-current` binaries by exact path; custom `INSTALL_DIR` values deliberately skip automatic unit management. On Windows the installer requires the canonical one-entry `mitsuro.exe` archive, stages both command names before publication, and rolls the pair back together if either publication or verification fails. The script supports Linux (x86_64, aarch64), macOS (Intel and Apple Silicon), and Windows under MSYS/Cygwin. If the install directory is not already in `PATH`, it prints the line you need to add to your shell config.
 
-Installer rollback does not reverse a database migration performed by a briefly
-started service. Back up and verify the database before a production upgrade,
-and exercise the offline installer fixture after changing installer logic:
+The Windows direct-install path is deliberately binary-only: it does not move,
+copy, or start state. If the previous state root exists, stop every Mitsuro CLI,
+TUI, desktop, server, and Hive process from both generations and run
+`mitsuro migrate-identity --confirm-offline` before the first normal startup.
+The migration command holds the SQLite writer fence, creates and validates the
+canonical snapshot, atomically publishes the new root, and preserves the old
+root as rollback authority. Do not start either generation between installing
+the binaries and completing that command.
+
+On Linux, the shell installer performs that same explicit offline migration
+only after it quiesces the supervised services and proves through same-user
+procfs inspection
+that no CLI, TUI, desktop, server, or Hive process from either generation is
+still running and that no same-user process holds either the previous or
+canonical database, WAL, or SHM file. Its preflight
+records the source database and WAL digests without checkpointing either file;
+the canonical migration binary owns the writer fence and verified online
+backup. The installer accepts only the regular, at-most-16-KiB
+`.identity-migration-v2` receipt with its exact five ordered LF-terminated
+fields, exact previous-root path, bounded timestamps/sizes, lowercase SHA-256
+authority fingerprints, and internally consistent WAL tuple. Installer
+rollback quarantines the failed canonical root and reselects
+the unchanged old root. After restart, activation requires the exact selected
+executables in `/proc`, an authenticated Hive ping, and the server PID-bound
+`/health` response, not merely `systemctl is-active`. Exercise the
+offline installer fixture after changing installer logic:
 
 ```bash
 sh install.sh --self-test
 ```
+
+The preserved previous state root and previous release directories are
+**recovery-only** after cutover. The installer redirects normal command aliases
+and managed units, but no continuous lock can prevent the same user from
+directly executing an archived binary or previous-generation desktop app.
+Never launch one except as part of a coordinated rollback, even if canonical
+Mitsuro appears stopped: an uncoordinated launch can create split authority or
+mutate the preserved source so the canonical restart check fails closed. A
+deliberate rollback must stop and prove quiescence of every canonical CLI, TUI,
+desktop, server, and Hive process before selecting the previous release and
+state together. Do not substitute an ad-hoc recursive `chmod`; a safe freeze
+would require a versioned cross-platform permission, ACL, and xattr manifest
+plus an atomic validated thaw transaction.
+
+macOS has no Linux-compatible procfs authority proof, so the shell installer
+fails closed instead of attempting an automatic state cutover. It retains the
+verified staged release and prints that release's exact `mitsuro
+migrate-identity --confirm-offline` command. Stop every process from both
+generations, run the printed physical command, and then rerun the installer.
+Do not start Mitsuro between those steps. Windows publishes the command pair
+first and then requires the same explicit offline command through the installed
+`mitsuro.exe`; it never migrates state during binary installation.
 
 You can pin a specific version by setting `VERSION` before running the script:
 
@@ -114,25 +196,25 @@ curl -fsSL ... | VERSION=v0.8.2 sh
 
 ## Self-hosted systemd service
 
-The checked-in user services run the HTTP control plane and the independent
-Hive autonomous backend from binaries on `PATH`. The HTTP server requires
+The checked-in portable user services run the HTTP control plane and the independent
+Hive autonomous backend from the exact shell-installer authority at
+`~/.local/bin/.mitsuro-current`; their `PATH` is available only to child tools
+and never selects the service executable. The HTTP server requires
 Hive's private socket and fails closed if it cannot complete an authenticated
-daemon handshake. Build both release binaries before installing or restarting
-the units:
+daemon handshake. Use the current shell installer to publish that immutable
+release pointer before installing or restarting the units:
 
 ```bash
-cd apps/mobile && bun install --frozen-lockfile && bun run web:build && cd ../..
-cargo build --release -p krusty -p krusty-mako
 install -d -m755 ~/.config/systemd/user
-install -m644 deploy/systemd/krusty-mako.socket deploy/systemd/krusty-mako.service \
-  deploy/systemd/krusty-serve.service ~/.config/systemd/user/
+install -m644 deploy/systemd/mitsuro-hive.socket deploy/systemd/mitsuro-hive.service \
+  deploy/systemd/mitsuro-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now krusty-mako.socket krusty-serve.service
-systemctl --user is-active krusty-mako.socket krusty-mako.service krusty-serve.service
+systemctl --user enable --now mitsuro-hive.socket mitsuro-serve.service
+systemctl --user is-active mitsuro-hive.socket mitsuro-hive.service mitsuro-serve.service
 curl --fail http://127.0.0.1:3000/health
 ```
 
-`krusty-mako.socket` starts the daemon on demand. Do not run a second manual
+`mitsuro-hive.socket` starts the daemon on demand. Do not run a second manual
 daemon against the same database and socket. For deployment verification,
 confirm the three tracked unit states, an authenticated Hive diagnostics/API
 request through the server, and a restart-recovery test; a successful Cargo
@@ -140,14 +222,16 @@ build alone is not proof that autonomous work is live.
 
 Hive-bearing release archives include these user units. The shell installer
 links them into `~/.config/systemd/user`, and the future Hive-bearing AUR package
-places them in `/usr/lib/systemd/user`. The default hardening grants writes
+renders the service `ExecStart` values to exact `/usr/bin/mitsuro*` paths before
+placing them in `/usr/lib/systemd/user`. Homebrew's service uses its exact
+`opt_bin` path. The default hardening grants writes
 under `~/Work` and
 Mitsuro's state/cache directories; add a user-service drop-in with an additional
 `ReadWritePaths=` entry when autonomous sessions use another project root.
-Homebrew exposes `krusty-mako` through `brew services`; the HTTP server remains
+Homebrew exposes `mitsuro-hive` through `brew services`; the HTTP server remains
 an explicitly configured self-host service.
 
-Hive resolves `.krusty/skills` independently for each run's frozen project
+Hive resolves `.mitsuro/skills` independently for each run's frozen project
 root. Autonomous daemon runs intentionally do not load project `.mcp.json`
 servers yet, and MCP connections made through the HTTP `/mcp` API do not cross
 the process boundary into the daemon. This is fail-closed: project MCP will be
@@ -160,32 +244,56 @@ directory's tools to every project.
 macOS and Linux users with Homebrew can install from the tap:
 
 ```bash
-brew install BurgessTG/tap/krusty
+brew install BurgessTG/tap/mitsuro
 ```
 
-The formula template (`.github/homebrew/krusty.rb`) selects the correct binary archive based on CPU architecture. It supports macOS ARM64, macOS x86_64, Linux ARM64, and Linux x86_64. Release CI deterministically renders the version, URLs, and SHA-256 checksums from the protected tag and its four verified Unix archives, then attaches the fully rendered `krusty.rb` formula to the GitHub Release.
+The formula template (`.github/homebrew/mitsuro.rb`) selects the correct binary archive based on CPU architecture. It supports macOS ARM64, macOS x86_64, Linux ARM64, and Linux x86_64. Release CI deterministically renders the version, URLs, and SHA-256 checksums from the protected tag and its four verified Unix archives, then attaches the fully rendered `mitsuro.rb` formula to the GitHub Release.
 
-This repository does not automatically write to `BurgessTG/homebrew-tap`, so the public tap can trail the latest GitHub Release until a maintainer publishes the generated formula as `Formula/krusty.rb`. That publication is a separate reviewed step. Any future cross-repository automation must be opted into with an explicitly configured token scoped to the tap; the release workflow does not require or assume that secret.
+The binary/state migration above does not prove macOS desktop WebKit
+continuity. Wry does not expose the authoritative WKWebView data directory, so
+Mitsuro deliberately does not copy a guessed Application Support namespace.
+Before retiring previous desktop data, validate cookies, localStorage-backed
+settings, connection state, authentication, and preferences in a signed macOS
+build. Keep the old namespace as recovery evidence until that manual gate
+passes.
+
+Homebrew installs binaries and does not run the shell installer's state handoff.
+If the previous state root exists, keep every old and canonical CLI, TUI,
+desktop, server, and Hive process stopped and run `mitsuro migrate-identity
+--confirm-offline` before the first `mitsuro` startup. A failed or missing
+receipt is not permission to start one generation temporarily.
+
+This repository does not automatically write to `BurgessTG/homebrew-tap`, so the public tap can trail the latest GitHub Release until a maintainer publishes the generated formula as `Formula/mitsuro.rb`. That publication is a separate reviewed step. Any future cross-repository automation must be opted into with an explicitly configured token scoped to the tap; the release workflow does not require or assume that secret.
 
 ### AUR recipe
 
-The repository contains a prepared AUR recipe, but `krusty` is not currently
-published in the AUR. The checked metadata targets legacy release `v0.7.3`,
-which predates the dedicated Hive daemon and therefore installs `krusty` only.
-For the next Hive-bearing stable release, the conditional `PKGBUILD`
-(`aur/PKGBUILD`) will build and install both Mitsuro and Hive plus their systemd
-user units. It downloads the source tarball for the release tag, verifies its
-pinned SHA-256 checksum, builds from source using Cargo with the stable
-toolchain, runs the test suite during the `check()` phase, and installs the
-license. It supports both `x86_64` and `aarch64` architectures. Runtime
-dependencies are `gcc-libs` and `openssl`; the only build dependency is
-`cargo`.
+The repository contains an explicitly unreleased AUR template, and `mitsuro` is
+not currently published in the AUR. No existing tag contains the canonical
+crate/service layout, so `aur/PKGBUILD` deliberately has `pkgver=UNRELEASED`
+with no source URL or checksum and fails before build preparation. This avoids
+presenting an old tag as if it could build the renamed source. Once a new stable
+tag actually exists, `aur/update-release.sh` validates the immutable archive's
+canonical CLI, Hive, transition shims, and service files before writing the
+version, URL, checksum, and generated `.SRCINFO`.
+
+The generated recipe builds and installs both Mitsuro and Hive plus their
+systemd user units. It verifies the pinned source archive, builds with Cargo's
+stable toolchain, runs the test suite during `check()`, and installs the
+license. It supports `x86_64` and `aarch64`; runtime dependencies are
+`gcc-libs` and `openssl`, and the build dependency is `cargo`.
+
+The AUR package also installs binaries and unit files without migrating user
+state. When previous state exists, leave the new units stopped, quiesce every
+process from both generations, and run `mitsuro migrate-identity
+--confirm-offline` before enabling or starting `mitsuro-hive.socket` or
+`mitsuro-serve.service`.
 
 GitHub does not publish the versioned source archive until its tag exists, so
 AUR metadata is updated after the protected release tag is published. Run:
 
 ```bash
-./aur/update-release.sh 0.8.2
+bash aur/check-package-template.sh
+./aur/update-release.sh <released-version>
 cd aur
 makepkg --verifysource -f
 makepkg --printsrcinfo | diff -u .SRCINFO -
@@ -193,7 +301,7 @@ makepkg --printsrcinfo | diff -u .SRCINFO -
 
 The updater accepts stable versions only, downloads over HTTPS, validates every
 archive entry stays beneath the expected top-level directory, verifies the
-source's `krusty` Cargo version matches the requested tag, computes SHA-256
+source's `mitsuro` Cargo version matches the requested tag, computes SHA-256
 locally, and updates both `PKGBUILD` and `.SRCINFO`. Review and publish those two
 files to the AUR repository. Never replace the checksum with `SKIP`; if a
 release tag or its archive changes, checksum verification must fail until a
@@ -211,7 +319,7 @@ pre-build = [
 ]
 ```
 
-This ensures the ARM64 udev headers are available inside the cross-compilation container. The `krusty-core` crate vendors both libgit2 and OpenSSL (via the `vendored-libgit2` and `vendored-openssl` features on the `git2` dependency) specifically to make cross-compilation reliable -- these libraries are compiled from source rather than linked against system copies that may not exist for the target architecture.
+This ensures the ARM64 udev headers are available inside the cross-compilation container. The `mitsuro-core` crate vendors both libgit2 and OpenSSL (via the `vendored-libgit2` and `vendored-openssl` features on the `git2` dependency) specifically to make cross-compilation reliable -- these libraries are compiled from source rather than linked against system copies that may not exist for the target architecture.
 
 In the release workflow, the ARM64 Linux build runs on a native `ubuntu-24.04-arm` GitHub runner rather than using cross-compilation, which avoids the container overhead entirely.
 
@@ -261,13 +369,13 @@ bun run build:all      # All Tauri bundle targets
 bun run build:appimage # AppImage (requires linuxdeploy)
 ```
 
-The Tauri shell depends on `krusty-server` and `krusty-core` directly via path references in its `Cargo.toml`, so the Rust server is compiled into the desktop binary alongside the Tauri runtime.
+The Tauri shell depends on `mitsuro-server` and `mitsuro-core` directly via path references in its `Cargo.toml`, so the Rust server is compiled into the desktop binary alongside the Tauri runtime.
 
 The bundle configuration targets the `DeveloperTool` category and includes icons at multiple resolutions (32px through 512px). Linux-specific settings put the `.deb` package in the `utils` section with `optional` priority.
 
 ## The embedded web frontend
 
-The self-hosted server has a notable trick: the web frontend is compiled directly into the Rust binary at build time using the `rust-embed` crate. In `krusty-server/src/lib.rs`, the `WebAssets` struct is annotated with `#[derive(Embed)]` and pointed at `apps/mobile/dist`:
+The self-hosted server has a notable trick: the web frontend is compiled directly into the Rust binary at build time using the `rust-embed` crate. In `mitsuro-server/src/lib.rs`, the `WebAssets` struct is annotated with `#[derive(Embed)]` and pointed at `apps/mobile/dist`:
 
 ```rust
 #[derive(Embed)]
@@ -295,7 +403,7 @@ During development, you typically want the backend and frontend running simultan
 If you are working on the Rust CLI or core library:
 
 ```bash
-cargo run              # Runs krusty-cli (the default workspace member)
+cargo run              # Runs mitsuro-cli (the default workspace member)
 cargo run --release    # Release mode for performance testing
 cargo test --workspace # Run all tests across all crates
 ```
@@ -311,7 +419,7 @@ To work on the web frontend with live reload:
 
 2. **Start the Rust server** in another terminal:
    ```bash
-   cargo run -p krusty-server
+   cargo run -p mitsuro-server
    ```
 
 The frontend dev server handles hot module replacement. The Rust server serves the API.

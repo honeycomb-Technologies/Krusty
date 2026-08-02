@@ -12,7 +12,7 @@ import type {
   GitChangedFile,
   GitFileDiffResponse,
   GitStatusResponse,
-} from "@krusty/api";
+} from "@mitsuro/api";
 
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";

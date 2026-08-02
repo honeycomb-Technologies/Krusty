@@ -1,6 +1,6 @@
 let ticks = 0;
 
-(globalThis as any).krusty.registerPlugin({
+(globalThis as any).mitsuro.registerPlugin({
 	onActivate() {
 		ticks += 1;
 	},

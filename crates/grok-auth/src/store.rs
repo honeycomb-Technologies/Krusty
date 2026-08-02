@@ -1,7 +1,7 @@
 //! The heart of proper caching for multi-harness use.
 //!
 //! Design goals (copied from real-world usage of the official client):
-//! - Multiple processes (official `grok` + Krusty + other agents) must not corrupt auth.json.
+//! - Multiple processes (official `grok` + Mitsuro + other agents) must not corrupt auth.json.
 //! - Fast path: in-memory token so we don't hit disk on every model call.
 //! - Proactive refresh so a token doesn't die in the middle of a long agent turn.
 //! - Atomic writes + advisory locks.

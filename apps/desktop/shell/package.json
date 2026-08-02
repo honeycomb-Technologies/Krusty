@@ -1,11 +1,12 @@
 {
-  "name": "@krusty/desktop-shell",
-  "version": "0.9.20",
+  "name": "@mitsuro/desktop-shell",
+  "version": "0.1.0",
   "private": true,
   "packageManager": "bun@1.3.0",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
+    "dev:ui": "cd ../ui && bun run web",
     "build": "tauri build --bundles deb,rpm",
     "build:linux": "tauri build --bundles deb,rpm",
     "build:all": "tauri build",

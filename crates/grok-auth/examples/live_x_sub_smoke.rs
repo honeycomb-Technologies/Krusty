@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let client = ClientBuilder::new()
         .with_token(token)
         .with_client_version(&cfg.client_version)
-        .with_header("x-grok-client-identifier", "krusty-grok-auth-smoke")
+        .with_header("x-grok-client-identifier", "mitsuro-grok-auth-smoke")
         .with_header("X-XAI-Token-Auth", "xai-grok-cli")
         .build()?;
 

@@ -15,7 +15,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react-native";
-import type { SessionType } from "@krusty/api";
+import type { SessionType } from "@mitsuro/api";
 
 import { useThemeContext } from "../hooks/useTheme";
 import { useBreakpoint } from "../hooks/useBreakpoint";
@@ -26,8 +26,8 @@ import { ToolboxBrowser } from "./toolbox/ToolboxBrowser";
 import { ToolboxChanges } from "./toolbox/ToolboxChanges";
 import { ToolboxConnections } from "./toolbox/ToolboxConnections";
 import { ReportsContent } from "./ReportsViewer";
-import { MakoScheduleView } from "./mako/MakoScheduleView";
-import { useMakoCurrent } from "./mako/hooks/useMakoCurrent";
+import { HiveScheduleView } from "./hive/HiveScheduleView";
+import { useHiveCurrent } from "./hive/hooks/useHiveCurrent";
 
 interface ToolTab {
   label: string;
@@ -44,7 +44,7 @@ const TOOL_TABS: Record<SessionType, ToolTab[]> = {
     { label: "Terminal", icon: TerminalSquare },
     { label: "Changes", icon: FileCode2 },
   ],
-  mako: [
+  hive: [
     { label: "Schedule", icon: CalendarClock },
   ],
 };
@@ -57,7 +57,7 @@ interface ToolboxPanelProps {
   sessionType: SessionType;
   projectDirectory?: string | null;
   onOpenSettings?: () => void;
-  onOpenMakoRun?: (sessionId: string) => void;
+  onOpenHiveRun?: (sessionId: string) => void;
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
   /**
    * `dock` is the wide-web rail. `overlay` is the shared mobile bottom drawer.
@@ -65,23 +65,23 @@ interface ToolboxPanelProps {
   variant?: "dock" | "overlay";
 }
 
-function MakoToolboxBody({
+function HiveToolboxBody({
   visible,
-  onOpenMakoRun,
+  onOpenHiveRun,
   onOpenProject,
 }: {
   visible: boolean;
-  onOpenMakoRun?: (sessionId: string) => void;
+  onOpenHiveRun?: (sessionId: string) => void;
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => void;
 }) {
-  const current = useMakoCurrent(visible);
-  const openRun = (sessionId: string) => onOpenMakoRun?.(sessionId);
+  const current = useHiveCurrent(visible);
+  const openRun = (sessionId: string) => onOpenHiveRun?.(sessionId);
 
   return (
     <View style={styles.body}>
       {visible ? (
         <View style={styles.tabContent}>
-          <MakoScheduleView
+          <HiveScheduleView
             state={current}
             onSelectRun={openRun}
             onOpenProject={onOpenProject}
@@ -100,7 +100,7 @@ export function ToolboxPanel({
   sessionType,
   projectDirectory,
   onOpenSettings,
-  onOpenMakoRun,
+  onOpenHiveRun,
   onOpenProject,
   variant,
 }: ToolboxPanelProps) {
@@ -110,7 +110,7 @@ export function ToolboxPanel({
   const mode = variant ?? (isDesktop ? "dock" : "overlay");
   const isDock = mode === "dock";
   const tabs = TOOL_TABS[sessionType];
-  const showTabRail = sessionType !== "mako";
+  const showTabRail = sessionType !== "hive";
 
   useEffect(() => {
     if (activeTab >= tabs.length) {
@@ -228,9 +228,9 @@ export function ToolboxPanel({
     );
   } else {
     body = (
-      <MakoToolboxBody
+      <HiveToolboxBody
         visible={visible}
-        onOpenMakoRun={onOpenMakoRun}
+        onOpenHiveRun={onOpenHiveRun}
         onOpenProject={onOpenProject}
       />
     );

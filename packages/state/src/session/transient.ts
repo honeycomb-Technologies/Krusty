@@ -3,7 +3,7 @@ import type {
   PendingInteractionSnapshot as ApiPendingInteractionSnapshot,
   RecoveryToolArguments as ApiRecoveryToolArguments,
   SessionRecoveryState as ApiRecoveryState,
-} from '@krusty/api';
+} from '@mitsuro/api';
 
 import {
   createDelegatedArtifactState,
@@ -137,7 +137,7 @@ function buildRecoveryNotice(recovery: ApiRecoveryState): string {
             ? 'Previous turn ended while tool execution was in progress.'
             : recovery.status === 'streaming'
               ? 'Previous turn ended while the assistant was still streaming.'
-              : 'Previous turn ended before Krusty could safely finalize it.';
+              : 'Previous turn ended before Mitsuro could safely finalize it.';
 
   const details: string[] = [];
   if (recovery.partial_assistant.text.trim()) {

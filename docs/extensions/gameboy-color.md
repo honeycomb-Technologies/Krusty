@@ -6,16 +6,16 @@ Mitsuro ships a built-in **Game Boy Color** plugin (`gameboy-color`) backed by l
 
 The plugin prefers Game Boy-capable libretro cores in this order:
 
-1. `KRUSTY_GAMEBOY_COLOR_CORE` (single core path)
-2. `KRUSTY_RETROARCH_CORE` (legacy single core path)
-3. `KRUSTY_GAMEBOY_COLOR_CORES` (path list of core directories)
-4. `~/.config/krusty/gameboy-color/cores`
+1. `MITSURO_GAMEBOY_COLOR_CORE` (single core path)
+2. `MITSURO_RETROARCH_CORE` (legacy single core path)
+3. `MITSURO_GAMEBOY_COLOR_CORES` (path list of core directories)
+4. `~/.config/mitsuro/gameboy-color/cores`
 5. `~/.config/retroarch/cores`
 6. Packaged app-relative core directories:
    - `gameboy-color/cores`
    - `cores/gameboy-color`
-   - `../share/krusty/gameboy-color/cores`
-   - `../lib/krusty/gameboy-color/cores`
+   - `../share/mitsuro/gameboy-color/cores`
+   - `../lib/mitsuro/gameboy-color/cores`
 7. `/usr/lib/libretro`
 8. `/usr/local/lib/libretro`
 
@@ -25,10 +25,10 @@ Recognized core filenames/hints include `gambatte_libretro.so`, `sameboy_libretr
 
 Mitsuro creates and uses:
 
-- ROMs: `~/.config/krusty/gameboy-color/roms`
-- Per-core system data: `~/.config/krusty/gameboy-color/system`
-- Battery saves: `~/.config/krusty/gameboy-color/saves`
-- Save states: `~/.config/krusty/gameboy-color/states`
+- ROMs: `~/.config/mitsuro/gameboy-color/roms`
+- Per-core system data: `~/.config/mitsuro/gameboy-color/system`
+- Battery saves: `~/.config/mitsuro/gameboy-color/saves`
+- Save states: `~/.config/mitsuro/gameboy-color/states`
 
 ## Hot-reload boundary
 
