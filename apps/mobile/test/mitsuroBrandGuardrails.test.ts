@@ -54,7 +54,19 @@ Deno.test("platform identity is Mitsuro without breaking compatibility IDs", asy
   const expo = config.expo;
 
   assert(expo.name === "Mitsuro", "the installed app display name must be Mitsuro");
-  assert(expo.slug === "mitsuro", "the Expo slug must use the canonical product identity");
+  // Expo project 6e327449-... is still named "krusty" on expo.dev. EAS requires
+  // app.json slug to match that project slug until the Expo project is renamed.
+  // Display name + deep-link schemes remain Mitsuro-canonical.
+  const allowedSlugs = new Set(["mitsuro", "krusty"]);
+  assert(
+    allowedSlugs.has(expo.slug),
+    "the Expo slug must be mitsuro (canonical) or krusty (EAS project transition)",
+  );
+  assert(
+    expo.slug === "mitsuro" ||
+      expo.extra?.eas?.projectId === "6e327449-af3c-4138-b1c4-7ceca2baf243",
+    "krusty slug is only allowed for the frozen EAS projectId during transition",
+  );
   assert(
     Array.isArray(expo.scheme) &&
       expo.scheme[0] === "mitsuro" &&

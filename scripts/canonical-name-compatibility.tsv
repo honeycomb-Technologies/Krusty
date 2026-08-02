@@ -118,9 +118,13 @@ content	apps/mobile/test/identityMigration.test.ts	312	    names.includes("HiveW
 content	apps/mobile/test/identityMigration.test.ts	316	    compatibilityWidget.includes('createWidget("MakoWidget", HiveWidgetView)') &&
 content	apps/mobile/test/identityMigration.test.ts	318	      sync.includes('require("../widgets/MakoWidget")'),
 content	apps/mobile/test/jsHotPathProbe.test.ts	17	      source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1'") &&
-content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	61	      expo.scheme.includes("krusty"),
-content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	121	  assert(!joined.includes("MakoSharkIcon"), "Hive must not expose the old shark mascot");
-content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	122	  assert(!joined.includes("KrustyLogo"), "empty states must use the Mitsuro logo");
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	57	  // Expo project 6e327449-... is still named "krusty" on expo.dev. EAS requires
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	60	  const allowedSlugs = new Set(["mitsuro", "krusty"]);
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	63	    "the Expo slug must be mitsuro (canonical) or krusty (EAS project transition)",
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	68	    "krusty slug is only allowed for the frozen EAS projectId during transition",
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	73	      expo.scheme.includes("krusty"),
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	133	  assert(!joined.includes("MakoSharkIcon"), "Hive must not expose the old shark mascot");
+content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	134	  assert(!joined.includes("KrustyLogo"), "empty states must use the Mitsuro logo");
 content	apps/mobile/widgets/MakoWidget.tsx	5	export default createWidget("MakoWidget", HiveWidgetView);
 content	aur/.SRCINFO	12		provides = krusty
 content	aur/.SRCINFO	13		conflicts = krusty
