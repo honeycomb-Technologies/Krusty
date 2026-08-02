@@ -107,7 +107,7 @@ export default function RootLayout() {
   if (!bootstrapped) {
     return (
       <View style={styles.boot}>
-        <ActivityIndicator color="#ff6b35" />
+        <ActivityIndicator color="#75617e" />
         <Text style={styles.bootText}>Starting Mitsuro Desktop…</Text>
       </View>
     );
