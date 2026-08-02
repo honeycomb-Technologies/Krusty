@@ -163,7 +163,7 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     let session_id = session_manager
         .create_session_for_user_with_config(
-            "Mako pending identity",
+            "Hive pending identity",
             Some("test:model"),
             Some("/work"),
             Some("/work"),
@@ -177,14 +177,14 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
     let db = Database::new(&state.db_path).expect("database should open");
     db.conn()
         .execute_batch(&format!(
-            "INSERT INTO mako_controllers (
+            "INSERT INTO hive_controllers (
                 id, scope_key, session_id, status, timezone, max_concurrent_runs,
                 created_at, updated_at
              ) VALUES (
                 'controller-1', 'session:{session_id}', '{session_id}', 'active', 'UTC', 1,
                 '{now}', '{now}'
              );
-             INSERT INTO mako_runs (
+             INSERT INTO hive_runs (
                 id, controller_id, session_id, kind, objective, config_json, status,
                 priority, available_at, attempt_count, max_attempts, created_at, updated_at
              ) VALUES (
@@ -196,7 +196,7 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
         .expect("durable run should insert");
     db.conn()
         .execute(
-            "INSERT INTO mako_controller_events (
+            "INSERT INTO hive_controller_events (
                 controller_id, sequence, event_type, run_id, payload_json, created_at
              ) VALUES ('controller-1', 1, 'agentic_event', 'durable-run-1', ?1, ?2)",
             (
@@ -238,7 +238,7 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
 
     db.conn()
         .execute(
-            "INSERT INTO mako_controller_events (
+            "INSERT INTO hive_controller_events (
                 controller_id, sequence, event_type, run_id, payload_json, created_at
              ) VALUES ('controller-1', 2, 'tool_approval_queued', 'durable-run-1', ?1, ?2)",
             (

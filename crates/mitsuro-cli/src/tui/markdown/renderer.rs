@@ -40,6 +40,40 @@ fn horizontal_border(width: usize) -> &'static str {
     &HORIZONTAL_BORDER[..chars * 3]
 }
 
+/// Center a fixed-width block (tables, code/diagram boxes) in the available column.
+///
+/// Leading spaces are pure layout — they keep measurement/render rows aligned so
+/// v2 transcript clipping stays correct.
+fn center_block_lines(
+    block_lines: Vec<Line<'static>>,
+    block_width: usize,
+    available_width: usize,
+) -> Vec<Line<'static>> {
+    let pad = available_width.saturating_sub(block_width) / 2;
+    if pad == 0 || block_lines.is_empty() {
+        return block_lines;
+    }
+    let prefix = " ".repeat(pad);
+    block_lines
+        .into_iter()
+        .map(|line| {
+            // Keep intentional blank separators empty so vertical rhythm is unchanged.
+            if line.spans.is_empty()
+                || line
+                    .spans
+                    .iter()
+                    .all(|span| span.content.chars().all(char::is_whitespace))
+            {
+                return line;
+            }
+            let mut spans = Vec::with_capacity(line.spans.len().saturating_add(1));
+            spans.push(Span::raw(prefix.clone()));
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
 /// Convert markdown elements to styled lines with link tracking
 pub fn render_elements_with_links(
     elements: &[MarkdownElement],
@@ -160,12 +194,13 @@ fn render_heading_with_links(
         span.style = span.style.patch(style);
     }
 
-    // Wrap heading content to prevent overflow (base_line + 1 for blank line before)
-    let (wrapped_lines, wrapped_links) = wrap_spans_with_links(spans, width, &links, base_line + 1);
+    // Wrap heading content to prevent overflow (base_line accounts for lead-in blanks).
+    let (wrapped_lines, wrapped_links) = wrap_spans_with_links(spans, width, &links, base_line + 2);
 
-    // Prepend blank line before heading
-    let mut lines = vec![Line::from("")];
+    // Extra breath before headings so section changes read clearly.
+    let mut lines = vec![Line::from(""), Line::from("")];
     lines.extend(wrapped_lines);
+    lines.push(Line::from(""));
 
     (lines, wrapped_links)
 }
@@ -177,111 +212,215 @@ fn render_code_block(
     width: usize,
     theme: &Theme,
 ) {
-    let border_style = Style::default().fg(theme.dim_color);
-    let lang_style = Style::default().fg(theme.dim_color);
-
-    // Get syntax-highlighted lines
     let lang_label = lang.unwrap_or("");
+    // True structural diagrams only (box drawing). Arrow lists are NOT diagrams.
+    let is_diagram = looks_like_diagram(code);
+
+    if is_diagram {
+        render_diagram_block(lines, code, width, theme);
+    } else {
+        // Code / flow fences: left-aligned framed block for contrast.
+        render_framed_code_block(lines, lang_label, code, width, theme);
+    }
+}
+
+/// Structural ascii/box diagrams: centered, no outer frame (they draw their own).
+fn render_diagram_block(lines: &mut Vec<Line<'static>>, code: &str, width: usize, theme: &Theme) {
+    let source_lines: Vec<String> = code
+        .lines()
+        .map(|line| clean_diagram_line(line.trim_end()))
+        .collect();
+    let content_width = source_lines
+        .iter()
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let plain_style = Style::default().fg(theme.text_color);
+    let mut block: Vec<Line<'static>> = source_lines
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                Line::from("")
+            } else {
+                Line::from(Span::styled(line, plain_style))
+            }
+        })
+        .collect();
+    if block.is_empty() {
+        block.push(Line::from(""));
+    }
+    ensure_block_lead_in(lines);
+    lines.extend(center_block_lines(block, content_width, width));
+    push_block_trail(lines);
+}
+
+/// Copyable code / arrow lists / ```text fences: left-aligned with a frame.
+fn render_framed_code_block(
+    lines: &mut Vec<Line<'static>>,
+    lang_label: &str,
+    code: &str,
+    width: usize,
+    theme: &Theme,
+) {
+    let border_style = Style::default().fg(theme.dim_color);
     let highlighted_lines = highlight_code(code, lang_label, theme);
 
-    // Calculate content width from actual code (use raw lines for width calculation)
-    // Avoid .collect() allocation - iterate directly
     let longest_line = code.lines().map(|l| l.width()).max().unwrap_or(0);
+    let box_inner_width = longest_line.max(10).min(width.saturating_sub(4)).max(1);
+    // Total width: │ + space + content + space + │
+    let total_width = box_inner_width.saturating_add(4);
 
-    // Minimum width to fit: " lang " in header (if present)
-    let min_for_lang = if lang_label.is_empty() {
-        0
-    } else {
-        lang_label.width() + 2
-    };
+    let mut block: Vec<Line<'static>> = Vec::new();
 
-    // Box inner width: content area between the │ borders
-    let box_inner_width = longest_line
-        .max(min_for_lang)
-        .max(10) // minimum 10 chars wide
-        .min(width.saturating_sub(4)); // leave room for borders
+    // Header without language label (label was noisy); plain top border only.
+    let header = format!(
+        "{}{}{}",
+        TOP_LEFT,
+        horizontal_border(total_width.saturating_sub(2)),
+        TOP_RIGHT
+    );
+    block.push(Line::from(Span::styled(header, border_style)));
 
-    // Total line width including borders: ╭ + inner + 2 spaces + ╮
-    let total_width = box_inner_width + 4;
-
-    // Header: ╭─ lang ─────╮ or ╭────────────╮
-    let mut header_spans: Vec<Span<'static>> = Vec::new();
-
-    if lang_label.is_empty() {
-        // No language label: ╭────────────╮
-        let header = format!(
-            "{}{}{}",
-            TOP_LEFT,
-            horizontal_border(total_width - 2),
-            TOP_RIGHT
-        );
-        header_spans.push(Span::styled(header, border_style));
-    } else {
-        // With language label: ╭─ lang ─────╮
-        let fill_count = total_width.saturating_sub(5 + lang_label.width());
-
-        header_spans.push(Span::styled(
-            format!("{}{} ", TOP_LEFT, HORIZONTAL),
-            border_style,
-        ));
-        header_spans.push(Span::styled(lang_label.to_string(), lang_style));
-        header_spans.push(Span::styled(
-            format!(" {}{}", horizontal_border(fill_count), TOP_RIGHT),
-            border_style,
-        ));
-    }
-    lines.push(Line::from(header_spans));
-
-    // Code lines with syntax highlighting: │ content │
-    // Zip highlighted spans with raw code lines to avoid index lookups
     for (raw_line, highlighted_spans) in code.lines().zip(highlighted_lines.iter()) {
         let line_width = raw_line.width();
-        let padding = box_inner_width.saturating_sub(line_width);
-
         let mut line_spans = vec![Span::styled(format!("{} ", VERTICAL), border_style)];
 
-        // Add highlighted spans (or truncate if needed)
         if line_width > box_inner_width {
-            // For truncation, fall back to plain text
-            let mut chars = raw_line.chars();
-            let mut result = String::new();
-            let mut w = 0;
-            while w < box_inner_width {
-                if let Some(c) = chars.next() {
-                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-                    if w + cw <= box_inner_width {
-                        result.push(c);
-                        w += cw;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            line_spans.push(Span::styled(result, Style::default().fg(theme.text_color)));
+            line_spans.push(Span::styled(
+                truncate_to_display_width(raw_line, box_inner_width),
+                Style::default().fg(theme.text_color),
+            ));
+            line_spans.push(Span::styled(format!(" {VERTICAL}"), border_style));
         } else {
-            // Use syntax-highlighted spans
-            line_spans.extend(highlighted_spans.clone());
+            let padding = box_inner_width.saturating_sub(line_width);
+            if raw_line.is_empty() {
+                // empty body row
+            } else {
+                line_spans.extend(highlighted_spans.clone());
+            }
+            line_spans.push(Span::styled(
+                format!("{} {VERTICAL}", " ".repeat(padding)),
+                border_style,
+            ));
         }
-
-        line_spans.push(Span::styled(
-            format!("{} {}", " ".repeat(padding), VERTICAL),
-            border_style,
-        ));
-        lines.push(Line::from(line_spans));
+        block.push(Line::from(line_spans));
     }
 
-    // Footer: ╰────────────╯
+    if code.lines().next().is_none() {
+        block.push(Line::from(Span::styled(
+            format!("{} {}{}", VERTICAL, " ".repeat(box_inner_width), VERTICAL),
+            border_style,
+        )));
+    }
+
     let footer = format!(
         "{}{}{}",
         BOTTOM_LEFT,
-        horizontal_border(total_width - 2),
+        horizontal_border(total_width.saturating_sub(2)),
         BOTTOM_RIGHT
     );
-    lines.push(Line::from(Span::styled(footer, border_style)));
+    block.push(Line::from(Span::styled(footer, border_style)));
 
-    lines.push(Line::from("")); // blank after code block
+    ensure_block_lead_in(lines);
+    // Framed code stays left-aligned with prose.
+    lines.extend(block);
+    push_block_trail(lines);
+}
+
+/// True box-drawing / +---+ figures only. Arrow lists (→) are regular text fences.
+fn looks_like_diagram(code: &str) -> bool {
+    let mut box_glyphs = 0usize;
+    for c in code.chars() {
+        if is_box_drawing_glyph(c) {
+            box_glyphs = box_glyphs.saturating_add(1);
+            if box_glyphs >= 4 {
+                return true;
+            }
+        }
+    }
+    // Classic ASCII box diagrams: +---+ / |   |
+    let pluses = code.bytes().filter(|b| *b == b'+').count();
+    let pipes = code.bytes().filter(|b| *b == b'|').count();
+    let dashes = code.bytes().filter(|b| *b == b'-').count();
+    pluses >= 2 && pipes >= 2 && dashes >= 4
+}
+
+fn is_box_drawing_glyph(c: char) -> bool {
+    matches!(
+        c,
+        '─' | '│'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '╭'
+            | '╮'
+            | '╯'
+            | '╰'
+            | '═'
+            | '║'
+            | '╔'
+            | '╗'
+            | '╚'
+            | '╝'
+    )
+}
+
+fn is_vertical_border(c: char) -> bool {
+    matches!(c, '│' | '║' | '|')
+}
+
+fn is_right_corner(c: char) -> bool {
+    matches!(c, '┐' | '┘' | '┤' | '╮' | '╯' | '╗' | '╝' | '╣' | '+')
+}
+
+/// Strip common LLM double-border glitches only. Do not reflow line lengths —
+/// tree diagrams need short connector rows left as-authored.
+fn clean_diagram_line(line: &str) -> String {
+    let mut out = line.to_owned();
+    loop {
+        let before = out.clone();
+        if out.ends_with("│|") || out.ends_with("|│") || out.ends_with("||") {
+            out.pop();
+            continue;
+        }
+        // Trailing orphan ascii pipe after a closed unicode box edge.
+        if let Some(stripped) = out.strip_suffix('|') {
+            let rest = stripped.trim_end();
+            if rest
+                .chars()
+                .last()
+                .is_some_and(|c| is_vertical_border(c) || is_right_corner(c))
+            {
+                out = rest.to_owned();
+                continue;
+            }
+        }
+        if out == before {
+            break;
+        }
+    }
+    out
+}
+
+fn truncate_to_display_width(text: &str, target_width: usize) -> String {
+    let mut result = String::new();
+    let mut w = 0usize;
+    for c in text.chars() {
+        let cw = c.width().unwrap_or(1);
+        if w + cw > target_width {
+            break;
+        }
+        result.push(c);
+        w += cw;
+    }
+    result
 }
 
 /// Render list with link tracking
@@ -454,6 +593,7 @@ fn render_table(
     let top_border = build_border(TOP_LEFT, T_DOWN, TOP_RIGHT);
     let sep_border = build_border(T_RIGHT, CROSS, T_LEFT);
     let bottom_border = build_border(BOTTOM_LEFT, T_UP, BOTTOM_RIGHT);
+    let table_width = top_border.width();
 
     // Helper to render a data row
     // Structure: │ content  │ content  │
@@ -518,31 +658,57 @@ fn render_table(
         Line::from(line_spans)
     };
 
+    let mut block: Vec<Line<'static>> = Vec::new();
+
     // Top border
-    lines.push(Line::from(Span::styled(top_border, border_style)));
+    block.push(Line::from(Span::styled(top_border, border_style)));
 
     // Header row
     if !headers.is_empty() {
-        lines.push(render_row(&header_spans, header_style));
+        block.push(render_row(&header_spans, header_style));
         // Separator between header and data
         if !rows.is_empty() {
-            lines.push(Line::from(Span::styled(sep_border.clone(), border_style)));
+            block.push(Line::from(Span::styled(sep_border.clone(), border_style)));
         }
     }
 
     // Data rows with separators between them
     for (i, row) in row_spans.iter().enumerate() {
-        lines.push(render_row(row, cell_style));
+        block.push(render_row(row, cell_style));
         // Add separator between data rows (not after the last one)
         if i < row_spans.len() - 1 {
-            lines.push(Line::from(Span::styled(sep_border.clone(), border_style)));
+            block.push(Line::from(Span::styled(sep_border.clone(), border_style)));
         }
     }
 
     // Bottom border
-    lines.push(Line::from(Span::styled(bottom_border, border_style)));
+    block.push(Line::from(Span::styled(bottom_border, border_style)));
 
-    lines.push(Line::from("")); // blank after table
+    ensure_block_lead_in(lines);
+    lines.extend(center_block_lines(block, table_width, width));
+    push_block_trail(lines);
+}
+
+fn ensure_block_lead_in(lines: &mut Vec<Line<'static>>) {
+    if lines.is_empty() {
+        return;
+    }
+    // Want two blank rows before centered display blocks when possible.
+    let trailing_blanks = lines
+        .iter()
+        .rev()
+        .take_while(|line| line.spans.iter().all(|s| s.content.trim().is_empty()))
+        .count();
+    for _ in trailing_blanks..2 {
+        lines.push(Line::from(""));
+    }
+}
+
+fn push_block_trail(lines: &mut Vec<Line<'static>>) {
+    // Three blank rows after tables/code so they breathe from following prose.
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
 }
 
 fn render_thematic_break(lines: &mut Vec<Line<'static>>, _width: usize, _theme: &Theme) {

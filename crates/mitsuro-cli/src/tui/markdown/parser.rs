@@ -423,9 +423,13 @@ fn parse_table(events: &[Event<'_>], start: usize) -> (Vec<TableCell>, Vec<Vec<T
             }
             Event::Start(Tag::TableHead) => {
                 in_head = true;
+                current_row.clear();
                 idx += 1;
             }
             Event::End(TagEnd::TableHead) => {
+                if !current_row.is_empty() {
+                    headers = std::mem::take(&mut current_row);
+                }
                 in_head = false;
                 idx += 1;
             }
@@ -494,5 +498,16 @@ mod tests {
         } else {
             panic!("Expected Paragraph");
         }
+    }
+
+    #[test]
+    fn table_head_cells_are_preserved_without_a_table_row_event() {
+        let elements = parse("| Name | State |\n| --- | --- |\n| crab | ready |");
+        let MarkdownElement::Table { headers, rows } = &elements[0] else {
+            panic!("expected table");
+        };
+
+        assert_eq!(headers.len(), 2);
+        assert_eq!(rows.len(), 1);
     }
 }

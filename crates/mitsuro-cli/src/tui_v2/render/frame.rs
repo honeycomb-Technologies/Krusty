@@ -11,6 +11,7 @@ use ratatui::{
 use crate::tui_v2::{
     app::state::UiState,
     components::{
+        attachment_preview::render as render_attachment_preview,
         command_palette::render as render_command_palette,
         conversation::{
             render_context_bar as render_conversation_context, render_decision_dock,
@@ -18,7 +19,6 @@ use crate::tui_v2::{
         },
         file_search::render as render_file_search,
         home::render as render_home,
-        attachment_preview::render as render_attachment_preview,
         model_picker::render as render_model_picker,
         primitive::{
             action_footer::ActionFooter,
@@ -196,8 +196,7 @@ fn render_fullscreen_artifact(
         DisplayPartKind::Thinking { lines, .. } => ("Pulse · thinking", lines.clone()),
         _ => return,
     };
-    let hints = if state.capability.glyph_mode
-        == crate::tui_v2::model::capability::GlyphMode::Ascii
+    let hints = if state.capability.glyph_mode == crate::tui_v2::model::capability::GlyphMode::Ascii
     {
         "PgUp/PgDn scroll | c copy | Esc close"
     } else {
@@ -213,11 +212,7 @@ fn render_fullscreen_artifact(
         .map(|line| Line::styled(line.clone(), Style::default().fg(theme.foreground)))
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(visible).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(visible).style(Style::default().fg(theme.foreground).bg(theme.surface)),
         chrome.body,
     );
 }
@@ -381,6 +376,11 @@ fn render_status_line(
         if let Some(model) = home.and_then(|home| home.model.as_deref()) {
             parts.push(model.to_owned());
         }
+        // Branch is high-signal project context; keep it early so StatusMeta
+        // clipping cannot drop it behind permission / token noise.
+        if let Some(branch) = home.and_then(|home| home.branch.as_deref()) {
+            parts.push(branch.to_owned());
+        }
         if status_width >= 54 {
             if let Some(reasoning) = controls.reasoning.as_deref() {
                 parts.push(reasoning.to_owned());
@@ -397,9 +397,6 @@ fn render_status_line(
             );
         }
         parts.push(controls.permission.clone());
-    }
-    if let Some(branch) = home.and_then(|home| home.branch.as_deref()) {
-        parts.push(branch.to_owned());
     }
     if let Some(tokens) = metadata
         .and_then(|value| value.usage.as_ref())
@@ -505,42 +502,21 @@ fn render_overlay(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::CommandPalette
     ) {
-        render_command_palette(
-            frame,
-            chrome,
-            &state.picker,
-            false,
-            state.capability,
-            theme,
-        );
+        render_command_palette(frame, chrome, &state.picker, false, state.capability, theme);
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::Help
     ) {
-        render_command_palette(
-            frame,
-            chrome,
-            &state.picker,
-            true,
-            state.capability,
-            theme,
-        );
+        render_command_palette(frame, chrome, &state.picker, true, state.capability, theme);
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::ModelPicker
     ) {
-        render_model_picker(
-            frame,
-            chrome,
-            setup,
-            &state.picker,
-            state.capability,
-            theme,
-        );
+        render_model_picker(frame, chrome, setup, &state.picker, state.capability, theme);
         return;
     }
     match overlay.kind {
@@ -556,13 +532,7 @@ fn render_overlay(
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::PlanGoal => {
-            render_plan(
-                frame,
-                chrome.body,
-                plan,
-                state.capability.glyph_mode,
-                theme,
-            );
+            render_plan(frame, chrome.body, plan, state.capability.glyph_mode, theme);
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::ExtensionsCenter => {
@@ -594,13 +564,7 @@ fn render_overlay(
         }
         crate::tui_v2::model::overlay::OverlayKind::AttachmentPreview => {
             if let Some(preview) = state.attachment_preview.as_ref() {
-                render_attachment_preview(
-                    frame,
-                    chrome.body,
-                    preview,
-                    theme,
-                    attachment_image,
-                );
+                render_attachment_preview(frame, chrome.body, preview, theme, attachment_image);
             }
             return;
         }
@@ -678,11 +642,9 @@ fn render_artifact_inspector(
         .map_or(0, |artifact| artifact.inner_scroll)
         .min(u32::from(u16::MAX)) as u16;
     frame.render_widget(
-        Paragraph::new(lines).scroll((offset, 0)).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.surface),
-        ),
+        Paragraph::new(lines)
+            .scroll((offset, 0))
+            .style(Style::default().fg(theme.foreground).bg(theme.surface)),
         area,
     );
 }
