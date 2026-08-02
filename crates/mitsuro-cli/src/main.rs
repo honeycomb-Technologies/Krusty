@@ -18,6 +18,7 @@ use mitsuro_core::{acp, agent, ai, extensions, paths, plan, plugins, process, st
 
 mod serve;
 mod tui;
+mod tui_v2;
 
 /// Mitsuro - AI Coding Assistant
 #[derive(Parser)]
@@ -724,8 +725,9 @@ async fn main() -> Result<()> {
             unreachable!()
         }
         None => {
-            let mut app = tui::App::new().await;
-            app.run().await?;
+            // Full replace: Mitsuro TUI v2 is the default terminal surface.
+            // Legacy v1 remains available as `mitsuro tui-legacy` if re-exposed later.
+            tui_v2::run().await?;
         }
     }
 
