@@ -49,8 +49,9 @@ pub fn render(
     }
 
     let elapsed_ms = splash.local_ms(wall_ms);
-    let complete =
-        splash.settled || !matches!(preference, MotionPreference::Full) || elapsed_ms >= 1_200;
+    let complete = splash.settled
+        || !matches!(preference, MotionPreference::Full)
+        || elapsed_ms >= 1_200;
 
     scenes::render(frame, area, elapsed_ms, complete, glyph_mode, theme);
 }

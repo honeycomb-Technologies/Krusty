@@ -2,16 +2,16 @@ viewport 0 0 50 16 class=Compact route=Home
 region Canvas 0 0 50 16 clip=0 0 50 16
 region ContextBar 0 0 50 1 clip=0 0 50 1
 region TopDivider 0 1 50 0 clip=0 1 50 0
-region Primary 0 1 50 11 clip=0 1 50 11
-region Composer 0 12 50 3 clip=0 12 50 3
-region StatusLine 0 15 50 1 clip=0 15 50 1
-region BottomDivider 0 16 50 0 clip=0 16 50 0
+region Primary 0 1 50 10 clip=0 1 50 10
+region Composer 0 11 50 3 clip=0 11 50 3
+region StatusLine 0 14 50 1 clip=0 14 50 1
+region BottomDivider 0 15 50 1 clip=0 15 50 1
 region ContextIdentity 0 0 19 1 clip=0 0 19 1
 region ContextStatus 19 0 12 1 clip=19 0 12 1
 region ContextMeta 31 0 19 1 clip=31 0 19 1
-region ComposerField 0 12 50 3 clip=0 12 50 3
-region StatusMeta 0 15 30 1 clip=0 15 30 1
-region ActionFooter 30 15 20 1 clip=30 15 20 1
-interaction composer 0 12 50 3 Focus(Composer)
-interaction composer-scroll 0 12 50 3 Scroll(Composer)
-focus 0 12 50 3
+region ComposerField 0 11 50 3 clip=0 11 50 3
+region StatusMeta 0 14 30 1 clip=0 14 30 1
+region ActionFooter 30 14 20 1 clip=30 14 20 1
+interaction composer 0 11 50 3 Focus(Composer)
+interaction composer-scroll 0 11 50 3 Scroll(Composer)
+focus 0 11 50 3

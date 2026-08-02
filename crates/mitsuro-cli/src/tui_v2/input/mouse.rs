@@ -9,7 +9,9 @@ use ratatui::layout::{Position, Rect};
 
 use crate::tui_v2::{
     app::reducer::UiAction,
-    layout::snapshot::{InteractionIntent, LayoutSnapshot, ScrollRegionId, SelectionPoint},
+    layout::snapshot::{
+        InteractionIntent, LayoutSnapshot, ScrollRegionId, SelectionPoint,
+    },
     model::focus::FocusTarget,
 };
 
@@ -184,8 +186,8 @@ fn resolve_left_down(snapshot: &LayoutSnapshot, position: Position) -> Option<Mo
 }
 
 fn resolve_left_drag(snapshot: &LayoutSnapshot, position: Position) -> Option<MouseResolution> {
-    if let Some(field) =
-        snapshot.region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerField)
+    if let Some(field) = snapshot
+        .region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerField)
     {
         // Composer is typically full-width under the stream. Only treat the drag
         // as composer selection when the pointer is *vertically* over the field.
@@ -271,18 +273,22 @@ fn scroll_region_height(snapshot: &LayoutSnapshot, region: &ScrollRegionId) -> u
             .unwrap_or(4),
         ScrollRegionId::ComposerAssist => snapshot
             .region(crate::tui_v2::layout::snapshot::LayoutRegionId::ComposerAutocomplete)
-            .map(|rect| rect.height.saturating_sub(4).max(1))
+            .map(|rect| {
+                rect.height
+                    .saturating_sub(
+                        crate::tui_v2::components::primitive::assist_chrome::ASSIST_CHROME_ROWS,
+                    )
+                    .max(1)
+            })
             .unwrap_or(8),
     }
 }
 
 fn hover_link(snapshot: &LayoutSnapshot, position: Position) -> Option<String> {
-    snapshot
-        .hit_test(position)
-        .and_then(|hit| match &hit.intent {
-            InteractionIntent::OpenLink(url) => Some(url.clone()),
-            _ => None,
-        })
+    snapshot.hit_test(position).and_then(|hit| match &hit.intent {
+        InteractionIntent::OpenLink(url) => Some(url.clone()),
+        _ => None,
+    })
 }
 
 pub fn contains_point(area: Rect, column: u16, row: u16) -> bool {
@@ -463,8 +469,12 @@ mod tests {
             source: 0..12,
             column_offsets: (0..=12).collect(),
         }];
-        snapshot.transcript.viewport =
-            Rect::new(composer.x, 0, composer.width.max(40), composer.y.max(8));
+        snapshot.transcript.viewport = Rect::new(
+            composer.x,
+            0,
+            composer.width.max(40),
+            composer.y.max(8),
+        );
 
         let resolution = resolve_mouse(
             &snapshot,

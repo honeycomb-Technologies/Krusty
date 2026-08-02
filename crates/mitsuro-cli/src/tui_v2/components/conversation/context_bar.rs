@@ -2,7 +2,7 @@
 //!
 //! Top row, three bands:
 //! - Left: git diff (+N −M) · agent context (used/max)
-//! - Center: animated working pulse (live run only)
+//! - Center: intentionally empty — global “working” is the bottom purple edge
 //! - Right: session title · project  (original placement)
 //!
 //! Title is clickable: click → edit → Enter saves, Esc cancels.
@@ -17,11 +17,9 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui_v2::{
-    app::state::{AgentRunState, UiState},
-    components::primitive::status_glyph::{StatusGlyph, StatusKind},
+    app::state::UiState,
     layout::snapshot::{LayoutRegionId, LayoutSnapshot},
     model::conversation::ConversationMetadata,
-    motion::preference::MotionPreference,
     presentation::theme::SemanticTheme,
     services::HomeSnapshot,
 };
@@ -84,32 +82,10 @@ pub fn render_context_bar(
         identity,
     );
 
-    // ── Center: animated working ──────────────────────────────────────
+    // ── Center: empty (working lives on the bottom purple edge rail) ──
     if let Some(status) = status {
-        if matches!(state.agent_run, AgentRunState::Running) && status.width > 0 {
-            let phase = if matches!(state.appearance.motion.preference, MotionPreference::Full) {
-                state.appearance.motion.clock.frame(4, 140)
-            } else {
-                // Reduced motion: still advance slowly via elapsed clock.
-                state.appearance.motion.clock.frame(4, 400)
-            };
-            let pulse = StatusGlyph {
-                kind: StatusKind::Running,
-                phase,
-            }
-            .span(state.capability, theme);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    pulse,
-                    Span::raw(" "),
-                    Span::styled("working", Style::default().fg(theme.foreground_muted)),
-                ]))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(theme.foreground_muted)),
-                status,
-            );
-        } else if status.width > 0 {
-            // Keep the band painted with canvas so nothing from a prior frame sticks.
+        if status.width > 0 {
+            // Clear the band so prior “working” paint never sticks.
             frame.render_widget(
                 Paragraph::new("").style(Style::default().fg(theme.foreground_muted)),
                 status,
@@ -157,7 +133,11 @@ pub fn render_context_bar(
             .filter(|p| !p.is_empty());
         let mut right = Vec::new();
         right.push(Span::styled(
-            truncate_to_width(title, usize::from(meta.width.saturating_sub(4)).max(8), "…"),
+            truncate_to_width(
+                title,
+                usize::from(meta.width.saturating_sub(4)).max(8),
+                "…",
+            ),
             Style::default()
                 .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),

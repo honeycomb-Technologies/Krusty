@@ -1,7 +1,11 @@
 //! Live `LoopEvent` projection.
 
 use mitsuro_core::{
-    agent::{loop_events::LoopStopReason, LoopEvent},
+    agent::{
+        loop_events::LoopStopReason,
+        subagent::{AgentProgressStatus},
+        DelegatedProgressEvent, LoopEvent,
+    },
     ai::types::Citation,
 };
 
@@ -374,13 +378,20 @@ impl ConversationProjection {
             } => {
                 let key = format!("delegated:{delegated_run_id}");
                 let tool = self.upsert_tool(&key, "agent", ToolStatus::Running, false);
-                tool.arguments.fields = vec![crate::tui_v2::model::artifact::ArtifactField {
-                    key: "agent_type".to_owned(),
-                    value: agent_type,
-                }];
+                tool.arguments.fields = vec![
+                    crate::tui_v2::model::artifact::ArtifactField {
+                        key: "agent_type".to_owned(),
+                        value: agent_type.clone(),
+                    },
+                    crate::tui_v2::model::artifact::ArtifactField {
+                        key: "description".to_owned(),
+                        value: description.clone(),
+                    },
+                ];
+                // Seed an expandable live stream panel (child lines fill in via progress).
                 tool.artifact = ArtifactModel {
                     content: ArtifactContent::Text(BoundedText {
-                        text: description,
+                        text: format!("· {agent_type}  {description}\n  waiting for children…"),
                         omitted_bytes: 0,
                     }),
                     ..ArtifactModel::default()
@@ -403,11 +414,40 @@ impl ConversationProjection {
                     },
                     false,
                 );
-                tool.arguments.fields = vec![crate::tui_v2::model::artifact::ArtifactField {
-                    key: "agent_type".to_owned(),
-                    value: agent_type,
-                }];
-                tool.artifact = parse_tool_output("agent", &summary, false);
+                tool.arguments.fields = vec![
+                    crate::tui_v2::model::artifact::ArtifactField {
+                        key: "agent_type".to_owned(),
+                        value: agent_type,
+                    },
+                    crate::tui_v2::model::artifact::ArtifactField {
+                        key: "description".to_owned(),
+                        value: summary.lines().next().unwrap_or("done").to_owned(),
+                    },
+                ];
+                // Prefer keeping the live child stream if we already have one;
+                // append the final summary as a footer.
+                let prior = match &tool.artifact.content {
+                    ArtifactContent::Text(text) if !text.text.trim().is_empty() => {
+                        Some(text.text.clone())
+                    }
+                    _ => None,
+                };
+                let body = if let Some(prior) = prior {
+                    if prior.contains(summary.trim()) {
+                        prior
+                    } else {
+                        format!("{prior}\n──\n{summary}")
+                    }
+                } else {
+                    summary
+                };
+                tool.artifact = ArtifactModel {
+                    content: ArtifactContent::Text(bound_text(
+                        &body,
+                        super::tool_output::LIVE_ARTIFACT_BYTES,
+                    )),
+                    ..ArtifactModel::default()
+                };
             }
             LoopEvent::UserMessage {
                 title,
@@ -514,6 +554,144 @@ impl ConversationProjection {
         self.presentation.live_turn_id = None;
     }
 }
+
+/// Merge a live child-agent progress tick into the parent `agent` tool stream.
+pub(super) fn apply_delegated_progress(
+    projection: &mut ConversationProjection,
+    event: &DelegatedProgressEvent,
+) {
+    let delegated_key = format!("delegated:{}", event.delegated_run_id);
+    let keys = [
+        delegated_key.clone(),
+        event.tool_call_id.clone(),
+        format!("delegated:{}", event.tool_call_id),
+    ];
+    let existing = keys
+        .iter()
+        .find(|key| projection.tool_locations.contains_key(key.as_str()))
+        .cloned();
+    let key = existing.unwrap_or(delegated_key);
+    let tool = projection.upsert_tool(&key, "agent", ToolStatus::Running, false);
+    update_agent_stream(tool, event);
+    // Dual-index so completion events keyed either way still hit this row.
+    if let Some(loc) = projection.tool_locations.get(&key).copied() {
+        projection
+            .tool_locations
+            .insert(format!("delegated:{}", event.delegated_run_id), loc);
+        projection
+            .tool_locations
+            .insert(event.tool_call_id.clone(), loc);
+    }
+}
+
+fn update_agent_stream(
+    tool: &mut crate::tui_v2::model::conversation::ToolPart,
+    event: &DelegatedProgressEvent,
+) {
+    let progress = &event.progress;
+    let display_name = progress
+        .identity
+        .as_ref()
+        .map(|id| id.display_name())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            if progress.name.is_empty() {
+                progress.task_id.clone()
+            } else {
+                progress.name.clone()
+            }
+        });
+    let action = progress
+        .current_action
+        .as_deref()
+        .or(progress.completion_summary.as_deref())
+        .unwrap_or(match progress.status {
+            AgentProgressStatus::Running => "working…",
+            AgentProgressStatus::Complete => "done",
+            AgentProgressStatus::Failed => "failed",
+        });
+
+    // Growing chat log (dialog + tool use), not a single status line.
+    let prior = match &tool.artifact.content {
+        ArtifactContent::Text(text) => text.text.clone(),
+        _ => String::new(),
+    };
+    let mut lines: Vec<String> = prior
+        .lines()
+        .filter(|line| {
+            // Drop the seed placeholder once real stream starts.
+            !line.contains("waiting for children")
+        })
+        .map(str::to_owned)
+        .collect();
+
+    // Section header when this child first appears.
+    let section = format!("── {display_name} ──");
+    if !lines.iter().any(|line| line == &section) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(section);
+    }
+
+    // Core AgentProgress no longer streams per-line agent prose on the progress
+    // object; surface the latest action / completion summary instead.
+    if let Some(action) = progress
+        .completion_summary
+        .as_deref()
+        .or(progress.current_action.as_deref())
+    {
+        let formatted = action.trim();
+        if !formatted.is_empty()
+            && lines.last().map(String::as_str) != Some(formatted)
+        {
+            for chunk in formatted.lines() {
+                lines.push(chunk.to_owned());
+            }
+        }
+    }
+
+    let body = lines.join("\n");
+    tool.artifact = ArtifactModel {
+        content: ArtifactContent::Text(bound_text(
+            &body,
+            super::tool_output::LIVE_ARTIFACT_BYTES,
+        )),
+        ..ArtifactModel::default()
+    };
+
+    if matches!(
+        progress.status,
+        AgentProgressStatus::Running | AgentProgressStatus::Complete
+    ) {
+        tool.status = match progress.status {
+            AgentProgressStatus::Failed => ToolStatus::Failed,
+            AgentProgressStatus::Complete if progress.completion_summary.is_none() => {
+                // Keep Running until AgentBackgroundCompleted for multi-child runs.
+                ToolStatus::Running
+            }
+            _ => ToolStatus::Running,
+        };
+    }
+
+    // Collapsed-row summary tracks latest activity.
+    if let Some(field) = tool
+        .arguments
+        .fields
+        .iter_mut()
+        .find(|field| field.key == "description")
+    {
+        field.value = format!("{display_name}: {action}");
+    } else {
+        tool.arguments
+            .fields
+            .push(crate::tui_v2::model::artifact::ArtifactField {
+                key: "description".to_owned(),
+                value: format!("{display_name}: {action}"),
+            });
+    }
+}
+
 
 fn map_citation(citation: Citation) -> CitationModel {
     CitationModel {

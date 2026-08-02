@@ -102,7 +102,11 @@ pub fn render(
     }
     if list_area.height > 0 {
         frame.render_widget(
-            Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.surface)),
+            Paragraph::new(lines).style(
+                Style::default()
+                    .fg(theme.foreground)
+                    .bg(theme.surface),
+            ),
             list_area,
         );
     }

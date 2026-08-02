@@ -118,8 +118,8 @@ impl LayoutEngine {
                     request.viewport,
                 ),
             ]);
-            // Three-band context bar: left chrome · center working · right title.
-            // Center stays reserved so the working pulse has a stable home.
+            // Three-band context bar: left chrome · empty center · right title.
+            // Global working indicator is the bottom purple edge rail.
             let bar = geometry.context_bar;
             let center_w = if bar.width >= 36 {
                 14u16.min(bar.width / 4).max(10)
@@ -131,7 +131,12 @@ impl LayoutEngine {
             let side = bar.width.saturating_sub(center_w) / 2;
             let right_w = bar.width.saturating_sub(side).saturating_sub(center_w);
             let context_identity = Rect::new(bar.x, bar.y, side, bar.height);
-            let context_status = Rect::new(bar.x.saturating_add(side), bar.y, center_w, bar.height);
+            let context_status = Rect::new(
+                bar.x.saturating_add(side),
+                bar.y,
+                center_w,
+                bar.height,
+            );
             let context_meta = Rect::new(
                 bar.x.saturating_add(side).saturating_add(center_w),
                 bar.y,
@@ -209,10 +214,9 @@ impl LayoutEngine {
                 request.viewport,
             ));
             if request.composer_autocomplete_rows > 0 {
-                // Body rows + titleless popup chrome (border×2 + footer shelf×2).
+                // Body rows + titleless popup chrome (border top + bottom only).
                 let body_rows = request.composer_autocomplete_rows.clamp(1, 12);
-                let chrome =
-                    crate::tui_v2::components::primitive::assist_chrome::ASSIST_CHROME_ROWS;
+                let chrome = crate::tui_v2::components::primitive::assist_chrome::ASSIST_CHROME_ROWS;
                 let autocomplete_height = body_rows
                     .saturating_add(chrome)
                     .min(geometry.primary.height);
@@ -289,7 +293,11 @@ impl LayoutEngine {
                         intent: InteractionIntent::Focus(FocusTarget::PlanDock),
                     });
                     if let Some(gap) = dock.gap {
-                        regions.push(region(LayoutRegionId::DockDivider, gap, request.viewport));
+                        regions.push(region(
+                            LayoutRegionId::DockDivider,
+                            gap,
+                            request.viewport,
+                        ));
                     }
                     if dock.plugin.height > 0 {
                         regions.push(region(
@@ -462,15 +470,15 @@ impl LayoutEngine {
                     // top and bottom so the rail does not smash the dock frame.
                     let channel_left = geometry.primary.right();
                     let channel_right = inspector.x;
-                    let sb_x =
-                        centered_scrollbar_x(channel_left, channel_right).unwrap_or(channel_left);
+                    let sb_x = centered_scrollbar_x(channel_left, channel_right)
+                        .unwrap_or(channel_left);
                     let inset = 1u16.min(inspector.height.saturating_sub(2) / 2);
                     let sb_y = inspector.y.saturating_add(inset);
-                    let sb_h = inspector
-                        .height
-                        .saturating_sub(inset.saturating_mul(2))
-                        .max(1);
-                    (transcript_area, Some(Rect::new(sb_x, sb_y, 1, sb_h)))
+                    let sb_h = inspector.height.saturating_sub(inset.saturating_mul(2)).max(1);
+                    (
+                        transcript_area,
+                        Some(Rect::new(sb_x, sb_y, 1, sb_h)),
+                    )
                 } else {
                     // No dock: pad · track with equal outer breath; height follows
                     // the full stream column with the same 1-cell end breath.
@@ -551,7 +559,12 @@ impl LayoutEngine {
                         .iter()
                         .find(|measured| measured.key.part_id == part.part_id)
                     {
-                        append_link_interactions(&mut interactions, measured, part, content_area);
+                        append_link_interactions(
+                            &mut interactions,
+                            measured,
+                            part,
+                            content_area,
+                        );
                     }
                 }
                 if transcript_request.new_content_count > 0 && content_area.height > 0 {

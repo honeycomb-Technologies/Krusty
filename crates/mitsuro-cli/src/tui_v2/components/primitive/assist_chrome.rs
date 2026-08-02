@@ -1,31 +1,28 @@
 //! Composer-assist panel chrome (slash / `@` pickers).
 //!
-//! Popup Option-B format: focused purple border + footer shelf with centered
-//! hints — but **no title** on the top edge.
+//! Clean title-less popup: focused purple border only, scrollable list body.
+//! No footer bar / hint shelf — keeps `/` and `@` menus uncluttered.
 
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::Style,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear},
     Frame,
 };
 
 use crate::tui_v2::{
-    components::primitive::overlay_chrome::{paint_crossbar, FOOTER_SHELF_ROWS},
     layout::snapshot::intersect,
     model::capability::CapabilityProfile,
     presentation::{symbols::ASCII_BORDER, theme::SemanticTheme},
 };
 
-/// Outer border + shelf chrome overhead (top, bottom, crossbar, hints).
-pub const ASSIST_CHROME_ROWS: u16 = 4;
+/// Outer border overhead (top + bottom only).
+pub const ASSIST_CHROME_ROWS: u16 = 2;
 /// Horizontal inset inside the border so rows do not kiss the frame.
 pub const CONTENT_INSET: u16 = 1;
 
-#[derive(Clone, Copy, Debug)]
-pub struct AssistChrome<'a> {
-    pub hints: &'a str,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AssistChrome;
 
 /// Geometry after chrome paint.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -35,7 +32,7 @@ pub struct AssistChromeLayout {
     pub body: Rect,
 }
 
-impl AssistChrome<'_> {
+impl AssistChrome {
     pub fn render(
         self,
         frame: &mut Frame,
@@ -56,7 +53,7 @@ impl AssistChrome<'_> {
         } else {
             ASCII_BORDER
         };
-        // Title-less block — same border family as floating popups.
+        // Title-less, footer-less block — border only.
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(border_set)
@@ -67,43 +64,9 @@ impl AssistChrome<'_> {
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
 
-        if inner.is_empty() {
-            return AssistChromeLayout {
-                outer: area,
-                body: inner,
-            };
-        }
-
-        let shelf_rows = FOOTER_SHELF_ROWS.min(inner.height);
-        let body_height = inner.height.saturating_sub(shelf_rows);
-        let body = Rect::new(inner.x, inner.y, inner.width, body_height);
-
-        if shelf_rows >= 1 {
-            let shelf_y = inner.y.saturating_add(body_height);
-            paint_crossbar(frame, area, shelf_y, theme, capability);
-        }
-        if shelf_rows >= 2 {
-            let hints_area = Rect::new(
-                inner.x,
-                inner.y.saturating_add(body_height.saturating_add(1)),
-                inner.width,
-                1,
-            );
-            frame.render_widget(
-                Paragraph::new(self.hints)
-                    .alignment(Alignment::Center)
-                    .style(
-                        Style::default()
-                            .fg(theme.foreground_muted)
-                            .bg(theme.surface),
-                    ),
-                hints_area,
-            );
-        }
-
         AssistChromeLayout {
             outer: area,
-            body: inset(body, CONTENT_INSET),
+            body: inset(inner, CONTENT_INSET),
         }
     }
 }

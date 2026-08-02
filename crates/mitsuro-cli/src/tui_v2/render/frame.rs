@@ -9,9 +9,8 @@ use ratatui::{
 };
 
 use crate::tui_v2::{
-    app::state::UiState,
+    app::state::{AgentRunState, UiState},
     components::{
-        attachment_preview::render as render_attachment_preview,
         command_palette::render as render_command_palette,
         conversation::{
             render_context_bar as render_conversation_context, render_decision_dock,
@@ -19,12 +18,14 @@ use crate::tui_v2::{
         },
         file_search::render as render_file_search,
         home::render as render_home,
+        attachment_preview::render as render_attachment_preview,
         model_picker::render as render_model_picker,
         primitive::{
             action_footer::ActionFooter,
             input_field::InputField,
             overlay_chrome::OverlayChrome,
             surface::{BorderMode, Surface, SurfaceLevel},
+            working_edge::render_working_edge,
         },
         service_inspector::{
             render_appearance, render_extensions, render_plan, render_processes,
@@ -134,12 +135,22 @@ pub fn render_preview(
     if layout.region(LayoutRegionId::Inspector).is_some() {
         render_workspace_sidebar(frame, layout, state, plan, state.capability, theme);
     }
-    render_divider(
-        frame,
-        required_region(layout, LayoutRegionId::BottomDivider),
-        capability,
-        theme,
-    );
+    // Bottom purple comet edge while the agent is running (Toad-style thin line).
+    // Idle: leave the reserved row as canvas (no divider paint).
+    if matches!(state.agent_run, AgentRunState::Running) {
+        if let Some(edge) = layout.region(LayoutRegionId::BottomDivider) {
+            if !edge.is_empty() {
+                render_working_edge(
+                    frame,
+                    edge,
+                    state.appearance.motion.clock,
+                    theme,
+                    capability.glyph_mode,
+                    capability.color_depth,
+                );
+            }
+        }
+    }
     if let Some(autocomplete) = layout.region(LayoutRegionId::ComposerAutocomplete) {
         if state.composer.autocomplete_open {
             render_slash_autocomplete(frame, autocomplete, state, theme);
@@ -193,10 +204,11 @@ fn render_fullscreen_artifact(
     };
     let (title, lines): (&str, Vec<String>) = match &part.kind {
         DisplayPartKind::Tool(tool) => (tool.label.as_str(), tool.plain_lines()),
-        DisplayPartKind::Thinking { lines, .. } => ("Pulse · thinking", lines.clone()),
+        DisplayPartKind::Thinking { lines, .. } => ("thinking", lines.clone()),
         _ => return,
     };
-    let hints = if state.capability.glyph_mode == crate::tui_v2::model::capability::GlyphMode::Ascii
+    let hints = if state.capability.glyph_mode
+        == crate::tui_v2::model::capability::GlyphMode::Ascii
     {
         "PgUp/PgDn scroll | c copy | Esc close"
     } else {
@@ -212,7 +224,11 @@ fn render_fullscreen_artifact(
         .map(|line| Line::styled(line.clone(), Style::default().fg(theme.foreground)))
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(visible).style(Style::default().fg(theme.foreground).bg(theme.surface)),
+        Paragraph::new(visible).style(
+            Style::default()
+                .fg(theme.foreground)
+                .bg(theme.surface),
+        ),
         chrome.body,
     );
 }
@@ -361,52 +377,27 @@ fn render_status_line(
         };
 
     let status_meta = required_region(layout, LayoutRegionId::StatusMeta);
-    let status_width = layout
-        .region(LayoutRegionId::StatusLine)
-        .map(|region| region.width)
-        .unwrap_or(status_meta.width);
-    let mut parts = Vec::with_capacity(8);
+    // Quiet control strip: model · reasoning · permission only.
+    // (No build/plan mode, branch, tokens, fast, or attention noise.)
+    let mut parts = Vec::with_capacity(3);
     if !matches!(state.route, crate::tui_v2::app::route::AppRoute::Setup) {
-        parts.push(
-            metadata
-                .and_then(|metadata| metadata.mode.as_deref())
-                .unwrap_or("build")
-                .to_owned(),
-        );
         if let Some(model) = home.and_then(|home| home.model.as_deref()) {
             parts.push(model.to_owned());
         }
-        // Branch is high-signal project context; keep it early so StatusMeta
-        // clipping cannot drop it behind permission / token noise.
-        if let Some(branch) = home.and_then(|home| home.branch.as_deref()) {
-            parts.push(branch.to_owned());
+        if let Some(reasoning) = controls
+            .reasoning
+            .as_deref()
+            .map(status_reasoning_word)
+            .filter(|word| !word.is_empty())
+        {
+            parts.push(reasoning);
         }
-        if status_width >= 54 {
-            if let Some(reasoning) = controls.reasoning.as_deref() {
-                parts.push(reasoning.to_owned());
-            }
+        let permission = status_permission_word(&controls.permission);
+        if !permission.is_empty() {
+            parts.push(permission);
         }
-        if status_width >= 68 && controls.fast_available {
-            parts.push(
-                if controls.fast_enabled {
-                    "fast"
-                } else {
-                    "standard"
-                }
-                .to_owned(),
-            );
-        }
-        parts.push(controls.permission.clone());
     }
-    if let Some(tokens) = metadata
-        .and_then(|value| value.usage.as_ref())
-        .map(|usage| compact_count(usage.total_tokens))
-    {
-        parts.push(format!("{tokens} tokens"));
-    }
-    if metadata.is_some_and(|value| value.last_error.is_some()) {
-        parts.push("attention".to_owned());
-    }
+    let _ = metadata;
     let status = if parts.is_empty() {
         String::new()
     } else {
@@ -429,13 +420,25 @@ fn render_status_line(
     );
 }
 
-fn compact_count(value: usize) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}m", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
+/// Status-line reasoning token: short word only (`high`, not `reasoning high`).
+fn status_reasoning_word(label: &str) -> String {
+    let trimmed = label.trim();
+    let word = trimmed
+        .strip_prefix("reasoning ")
+        .unwrap_or(trimmed)
+        .trim();
+    if word.eq_ignore_ascii_case("off") || word.eq_ignore_ascii_case("none") {
+        return String::new();
+    }
+    word.to_ascii_lowercase()
+}
+
+fn status_permission_word(permission: &str) -> String {
+    match permission.trim().to_ascii_lowercase().as_str() {
+        "autonomous" | "auto" => "autonomous".to_owned(),
+        "supervised" | "manual" => "supervised".to_owned(),
+        other if other.is_empty() => String::new(),
+        other => other.to_owned(),
     }
 }
 
@@ -502,21 +505,42 @@ fn render_overlay(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::CommandPalette
     ) {
-        render_command_palette(frame, chrome, &state.picker, false, state.capability, theme);
+        render_command_palette(
+            frame,
+            chrome,
+            &state.picker,
+            false,
+            state.capability,
+            theme,
+        );
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::Help
     ) {
-        render_command_palette(frame, chrome, &state.picker, true, state.capability, theme);
+        render_command_palette(
+            frame,
+            chrome,
+            &state.picker,
+            true,
+            state.capability,
+            theme,
+        );
         return;
     }
     if matches!(
         overlay.kind,
         crate::tui_v2::model::overlay::OverlayKind::ModelPicker
     ) {
-        render_model_picker(frame, chrome, setup, &state.picker, state.capability, theme);
+        render_model_picker(
+            frame,
+            chrome,
+            setup,
+            &state.picker,
+            state.capability,
+            theme,
+        );
         return;
     }
     match overlay.kind {
@@ -532,7 +556,13 @@ fn render_overlay(
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::PlanGoal => {
-            render_plan(frame, chrome.body, plan, state.capability.glyph_mode, theme);
+            render_plan(
+                frame,
+                chrome.body,
+                plan,
+                state.capability.glyph_mode,
+                theme,
+            );
             return;
         }
         crate::tui_v2::model::overlay::OverlayKind::ExtensionsCenter => {
@@ -564,7 +594,13 @@ fn render_overlay(
         }
         crate::tui_v2::model::overlay::OverlayKind::AttachmentPreview => {
             if let Some(preview) = state.attachment_preview.as_ref() {
-                render_attachment_preview(frame, chrome.body, preview, theme, attachment_image);
+                render_attachment_preview(
+                    frame,
+                    chrome.body,
+                    preview,
+                    theme,
+                    attachment_image,
+                );
             }
             return;
         }
@@ -642,9 +678,11 @@ fn render_artifact_inspector(
         .map_or(0, |artifact| artifact.inner_scroll)
         .min(u32::from(u16::MAX)) as u16;
     frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((offset, 0))
-            .style(Style::default().fg(theme.foreground).bg(theme.surface)),
+        Paragraph::new(lines).scroll((offset, 0)).style(
+            Style::default()
+                .fg(theme.foreground)
+                .bg(theme.surface),
+        ),
         area,
     );
 }

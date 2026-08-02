@@ -12,3 +12,4 @@ pub mod scroll_region;
 pub mod status_glyph;
 pub mod surface;
 pub mod text_style;
+pub mod working_edge;

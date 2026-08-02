@@ -44,7 +44,7 @@ mod tests {
         assert_eq!(snapshot.height, 16);
         snapshot.assert_contains("┌┬┐");
         snapshot.assert_contains("Ask Agent");
-        snapshot.assert_contains("build");
+        snapshot.assert_contains("autonomous");
         snapshot.assert_contains("Ctrl+Q quit");
         assert!(
             !snapshot.text().contains("recent conversations"),
@@ -176,10 +176,11 @@ mod tests {
         assert_eq!(
             viewport_actual,
             [
-                ("50x16", "d9f085e32e43f428"),
-                ("80x24", "9cd77d4bdacafb27"),
-                ("120x36", "ef82ad8710044f80"),
-                ("160x48", "2c202895f167a1fd"),
+                ("50x16", "7d7a5ae24bb0a125"),
+                ("80x24", "93ad4e887b3785b4"),
+                ("120x36", "1e8ead9e47a559bb"),
+                ("160x48", "cae8b48fca412efc"),
+
             ]
             .into_iter()
             .map(|(label, fingerprint)| (label.to_owned(), fingerprint.to_owned()))
@@ -188,11 +189,11 @@ mod tests {
         assert_eq!(
             appearance_actual,
             [
-                ("dark-full", "fb120c2c707def39"),
-                ("light-reduced", "a1373e8ce26cc3d5"),
-                ("adaptive-ansi16", "7c199a51e0cad562"),
-                ("high-contrast", "6cf6e9fd47b2aeb0"),
-                ("monochrome-ascii", "e0d079e144085df4"),
+                ("dark-full", "f8874e234e2cba36"),
+                ("light-reduced", "633d15ecc9e5a768"),
+                ("adaptive-ansi16", "9527bb8f537e4e7b"),
+                ("high-contrast", "9a7b684831b9f85b"),
+                ("monochrome-ascii", "eae43edfcbec993c"),
             ]
             .into_iter()
             .map(|(label, fingerprint)| (label.to_owned(), fingerprint.to_owned()))
@@ -398,11 +399,11 @@ mod tests {
         assert_eq!(
             actual,
             [
-                ("50x16", "810ad01a1769fc36"),
-                ("80x24", "b8f6798c08d47acf"),
-                ("120x36", "74c658820dd5c2be"),
-                ("160x48", "13c058070b740ccf"),
-                ("80x24-ascii", "182f43977769c73d"),
+                ("50x16", "6601a93753bed6fd"),
+                ("80x24", "a4e5b9f5e97a80d2"),
+                ("120x36", "42cc114730b6eaa3"),
+                ("160x48", "da5edaac89adf93c"),
+                ("80x24-ascii", "5b4eff449f77fb1d"),
             ]
             .into_iter()
             .map(|(label, fingerprint)| (label.to_owned(), fingerprint.to_owned()))
@@ -578,11 +579,9 @@ mod tests {
             // Discover max scroll via follow-live frame then walk every offset.
             state.transcript.follow_live = true;
             let live = RenderHarness::new(width, height).draw_conversation(&state, &presentation);
-            let max = live
-                .layout
-                .transcript
-                .total_height
-                .saturating_sub(u32::from(live.layout.transcript.viewport.height));
+            let max = live.layout.transcript.total_height.saturating_sub(u32::from(
+                live.layout.transcript.viewport.height,
+            ));
             state.transcript.follow_live = false;
             for offset in 0..=max {
                 state.transcript.scroll_rows = offset;

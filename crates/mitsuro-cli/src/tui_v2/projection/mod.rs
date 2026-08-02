@@ -70,6 +70,32 @@ impl ConversationProjection {
         self.presentation.metadata.title = title;
     }
 
+    /// Live sub-agent / explore-build progress → parent agent tool stream panel.
+    pub fn apply_delegated_progress(
+        &mut self,
+        event: &mitsuro_core::agent::DelegatedProgressEvent,
+    ) {
+        live::apply_delegated_progress(self, event);
+    }
+
+    /// Restore context-window chrome after session open from durable token_count.
+    pub fn set_usage_from_token_count(&mut self, token_count: Option<usize>) {
+        let Some(tokens) = token_count.filter(|n| *n > 0) else {
+            self.presentation.metadata.usage = None;
+            return;
+        };
+        self.presentation.metadata.usage =
+            Some(crate::tui_v2::model::conversation::UsageSnapshot {
+                prompt_tokens: tokens,
+                input_tokens: tokens,
+                completion_tokens: 0,
+                reasoning_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                total_tokens: tokens,
+            });
+    }
+
     pub fn into_presentation(self) -> ConversationPresentation {
         self.presentation
     }
@@ -367,7 +393,10 @@ impl ConversationProjection {
                             "askuserquestion" | "planconfirm" | "plan_confirm"
                         );
                         if interactive
-                            && matches!(part.status, ToolStatus::Pending | ToolStatus::Receiving)
+                            && matches!(
+                                part.status,
+                                ToolStatus::Pending | ToolStatus::Receiving
+                            )
                             && matches!(
                                 status,
                                 ToolStatus::AwaitingApproval | ToolStatus::Interrupted

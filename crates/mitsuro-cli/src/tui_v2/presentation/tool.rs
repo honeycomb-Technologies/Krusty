@@ -64,8 +64,8 @@ impl ArtifactViewCache {
     }
 
     fn insert(&mut self, key: u64, value: CachedArtifactView) {
-        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(key) {
-            e.insert(value);
+        if self.map.contains_key(&key) {
+            self.map.insert(key, value);
             return;
         }
         while self.map.len() >= self.cap {
@@ -146,6 +146,8 @@ pub enum ArtifactPanelKind {
     Diff,
     /// Live shell transcript.
     Terminal,
+    /// Sub-agent live chat (dialog + tool use), scrollable like main stream.
+    AgentChat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +201,8 @@ fn classify_tool(part: &ToolPart) -> (ArtifactPanelKind, Option<String>) {
     let name = part.name.to_ascii_lowercase();
     match name.as_str() {
         "bash" | "shell" | "terminal" => (ArtifactPanelKind::Terminal, None),
+        // Delegated sub-agents: scrollable chat of dialog + tool use.
+        "agent" | "subagent" => (ArtifactPanelKind::AgentChat, None),
         "read" | "read_file" => {
             let path = field(part, "path")
                 .or_else(|| field(part, "file_path"))
@@ -244,10 +248,12 @@ fn resolve_artifact_view(
     classified: ArtifactPanelKind,
     classified_lang: Option<String>,
 ) -> (ArtifactPanelKind, Arc<Vec<ArtifactLine>>, Option<String>) {
-    // Terminal/generic stream often; caching would thrash. Build cheap lines only.
+    // Terminal / agent chat / generic stream often; caching would thrash.
     if matches!(
         classified,
-        ArtifactPanelKind::Terminal | ArtifactPanelKind::Generic
+        ArtifactPanelKind::Terminal
+            | ArtifactPanelKind::AgentChat
+            | ArtifactPanelKind::Generic
     ) {
         let (kind, lines, language) = build_artifact_view(part);
         return (kind, Arc::new(lines), language.or(classified_lang));
@@ -367,6 +373,7 @@ fn tool_summary(part: &ToolPart) -> String {
         "pattern",
         "query",
         "description",
+        "agent_type",
         "url",
     ];
     for preferred in PRIORITY {
@@ -395,7 +402,13 @@ fn tool_summary(part: &ToolPart) -> String {
 
 fn status_label(part: &ToolPart) -> &'static str {
     let interactive = is_interactive_tool(&part.name);
+    let agent = is_agent_tool(&part.name);
     match part.status {
+        // Agent tools: Pending is usually "accepted, about to run / already in flight"
+        // under parallel tool calls — never "queued" (that reads like a backlog).
+        ToolStatus::Receiving if agent => "starting",
+        ToolStatus::Pending if agent => "starting",
+        ToolStatus::Running if agent => "running",
         ToolStatus::Receiving => "receiving",
         ToolStatus::Pending if interactive => "waiting",
         ToolStatus::Pending => "queued",
@@ -413,10 +426,14 @@ fn status_label(part: &ToolPart) -> &'static str {
 
 fn status_kind(part: &ToolPart) -> StatusKind {
     let interactive = is_interactive_tool(&part.name);
+    let agent = is_agent_tool(&part.name);
     match part.status {
         ToolStatus::Receiving | ToolStatus::Running => StatusKind::Running,
         // Interactive prompts need attention, not a spinner.
         ToolStatus::Pending if interactive => StatusKind::AwaitingAuthority,
+        // Agents + ordinary tools: Pending still spins — parallel batches sit here
+        // until each tool hits ToolExecuting / background_started.
+        ToolStatus::Pending if agent => StatusKind::Running,
         ToolStatus::Pending => StatusKind::Running,
         ToolStatus::AwaitingApproval => StatusKind::AwaitingAuthority,
         ToolStatus::Approved => StatusKind::Idle,
@@ -424,6 +441,13 @@ fn status_kind(part: &ToolPart) -> StatusKind {
         ToolStatus::Failed => StatusKind::Failed,
         ToolStatus::Denied | ToolStatus::Interrupted => StatusKind::Cancelled,
     }
+}
+
+fn is_agent_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "agent" | "subagent"
+    )
 }
 
 fn is_interactive_tool(name: &str) -> bool {
@@ -465,7 +489,10 @@ fn artifact_text(part: &ToolPart) -> Option<&str> {
 fn build_artifact_view(part: &ToolPart) -> (ArtifactPanelKind, Vec<ArtifactLine>, Option<String>) {
     let name = part.name.to_ascii_lowercase();
     match name.as_str() {
-        "bash" | "shell" | "terminal" => (ArtifactPanelKind::Terminal, terminal_lines(part), None),
+        "bash" | "shell" | "terminal" => {
+            (ArtifactPanelKind::Terminal, terminal_lines(part), None)
+        }
+        "agent" | "subagent" => (ArtifactPanelKind::AgentChat, agent_chat_lines(part), None),
         "read" | "read_file" => {
             let path = field(part, "path")
                 .or_else(|| field(part, "file_path"))
@@ -503,6 +530,35 @@ fn build_artifact_view(part: &ToolPart) -> (ArtifactPanelKind, Vec<ArtifactLine>
             None,
         ),
     }
+}
+
+/// Chat-style lines for an expanded sub-agent stream.
+fn agent_chat_lines(part: &ToolPart) -> Vec<ArtifactLine> {
+    let text = artifact_text(part).unwrap_or("");
+    if text.is_empty() {
+        return vec![ArtifactLine::plain(
+            ArtifactLineKind::Meta,
+            "  (no stream yet — expand while the agent runs)",
+        )];
+    }
+    text.lines()
+        .map(|line| {
+            let kind = if line.starts_with("assistant") {
+                ArtifactLineKind::Plain
+            } else if line.starts_with('✓') || line.starts_with("+") {
+                ArtifactLineKind::Add
+            } else if line.starts_with('×') || line.starts_with('x') {
+                ArtifactLineKind::Remove
+            } else if line.starts_with("──") || line.starts_with("  think") {
+                ArtifactLineKind::Meta
+            } else if line.starts_with('·') || line.starts_with("tool") {
+                ArtifactLineKind::Header
+            } else {
+                ArtifactLineKind::Plain
+            };
+            ArtifactLine::plain(kind, line)
+        })
+        .collect()
 }
 
 fn terminal_lines(part: &ToolPart) -> Vec<ArtifactLine> {
@@ -558,15 +614,10 @@ fn code_read_lines(part: &ToolPart, language: Option<&str>) -> Vec<ArtifactLine>
             let body = &text.text;
             let source_lines: Vec<&str> = body.lines().collect();
             let body_len = source_lines.len() as u32;
-            let end_line = start_line.saturating_add(body_len.saturating_sub(1));
+            let end_line = start_line.saturating_add(body_len.saturating_sub(1).max(0));
             lines.push(ArtifactLine::plain(
                 ArtifactLineKind::Header,
-                file_scope_header(
-                    path,
-                    start_line,
-                    end_line,
-                    part.artifact.provenance.total_lines,
-                ),
+                file_scope_header(path, start_line, end_line, part.artifact.provenance.total_lines),
             ));
             let highlighted = language.map(|lang| highlight_roles(body, lang));
             let count = source_lines

@@ -44,9 +44,7 @@ impl ComposerBuffer {
     }
 
     pub fn set_cursor(&mut self, byte: usize) {
-        self.cursor = self
-            .content
-            .floor_char_boundary(byte.min(self.content.len()));
+        self.cursor = self.content.floor_char_boundary(byte.min(self.content.len()));
         self.sync_preferred_column(self.wrap_width_hint());
     }
 
@@ -61,17 +59,12 @@ impl ComposerBuffer {
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
-        self.selection
-            .map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+        self.selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
     }
 
     pub fn set_selection(&mut self, start: usize, end: usize) {
-        let start = self
-            .content
-            .floor_char_boundary(start.min(self.content.len()));
-        let end = self
-            .content
-            .floor_char_boundary(end.min(self.content.len()));
+        let start = self.content.floor_char_boundary(start.min(self.content.len()));
+        let end = self.content.floor_char_boundary(end.min(self.content.len()));
         self.selection = Some((start, end));
         self.cursor = end;
     }
@@ -186,10 +179,7 @@ impl ComposerBuffer {
     pub fn delete_to_line_end(&mut self, width: usize) {
         let lines = self.wrapped_lines(width);
         let (line, _) = self.visual_cursor(&lines);
-        let end = lines
-            .get(line)
-            .map(|l| l.src_end)
-            .unwrap_or(self.content.len());
+        let end = lines.get(line).map(|l| l.src_end).unwrap_or(self.content.len());
         let cursor = self.cursor();
         if cursor < end {
             self.content.drain(cursor..end);
@@ -267,16 +257,13 @@ impl ComposerBuffer {
                 self.cursor = self.content[..self.cursor]
                     .char_indices()
                     .next_back()
-                    .map_or(
-                        row.src_start,
-                        |(i, ch)| {
-                            if ch == '\n' {
-                                i
-                            } else {
-                                self.cursor
-                            }
-                        },
-                    );
+                    .map_or(row.src_start, |(i, ch)| {
+                        if ch == '\n' {
+                            i
+                        } else {
+                            self.cursor
+                        }
+                    });
             }
             self.sync_preferred_column(width);
             self.ensure_cursor_visible(width, 4);
@@ -511,7 +498,7 @@ mod tests {
         let mut buf = ComposerBuffer::new();
         buf.insert_str("hello world\nxy");
         buf.set_cursor(buf.content().len()); // end of "xy"
-                                             // preferred col ~ 2
+        // preferred col ~ 2
         buf.move_up(80, 4);
         // should land near column 2 of first line ("ll" area)
         assert!(buf.cursor() < "hello world".len());

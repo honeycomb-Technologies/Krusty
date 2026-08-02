@@ -223,7 +223,10 @@ impl MouseUiState {
         self.edge_scroll.clear();
     }
 
-    pub fn begin_selection(&mut self, point: crate::tui_v2::layout::snapshot::SelectionPoint) {
+    pub fn begin_selection(
+        &mut self,
+        point: crate::tui_v2::layout::snapshot::SelectionPoint,
+    ) {
         self.scrollbar_drag = None;
         self.selecting_composer = false;
         self.composer_selection = None;
@@ -235,7 +238,10 @@ impl MouseUiState {
         });
     }
 
-    pub fn drag_selection(&mut self, point: crate::tui_v2::layout::snapshot::SelectionPoint) {
+    pub fn drag_selection(
+        &mut self,
+        point: crate::tui_v2::layout::snapshot::SelectionPoint,
+    ) {
         if !self.selecting {
             return;
         }
@@ -436,6 +442,18 @@ impl ComposerUiState {
         self.refresh_assist();
     }
 
+    /// Empty the input bar entirely (Ctrl+C): text, selection, assist, viewport.
+    pub fn clear_all(&mut self) {
+        self.fullscreen = false;
+        self.autocomplete_open = false;
+        self.autocomplete_selected = 0;
+        self.file_search_open = false;
+        self.file_search_selected = 0;
+        self.follow_cursor = true;
+        self.buffer.clear();
+        self.refresh_assist();
+    }
+
     pub fn clear_to_line_start_width(&mut self, width: usize) {
         let (w, rows) = self.active_metrics(80, 6);
         let width = width.max(1).max(w);
@@ -531,7 +549,8 @@ impl ComposerUiState {
         self.field_width = width.max(1);
         self.field_rows = visible_rows.max(1);
         if forward {
-            self.buffer.move_down(self.field_width, self.field_rows);
+            self.buffer
+                .move_down(self.field_width, self.field_rows);
         } else {
             self.buffer.move_up(self.field_width, self.field_rows);
         }
@@ -629,9 +648,12 @@ impl ComposerUiState {
         self.follow_cursor = true;
         self.field_width = width.max(1);
         self.field_rows = visible_rows.max(1);
-        let byte = self
-            .buffer
-            .byte_from_click(column, row, self.field_width, self.field_rows);
+        let byte = self.buffer.byte_from_click(
+            column,
+            row,
+            self.field_width,
+            self.field_rows,
+        );
         self.buffer.set_cursor(byte);
         self.buffer
             .ensure_cursor_visible(self.field_width, self.field_rows);
@@ -654,7 +676,8 @@ impl ComposerUiState {
     }
 
     fn refresh_assist(&mut self) {
-        self.autocomplete_open = !crate::tui_v2::input::slash::suggestions(self.text()).is_empty();
+        self.autocomplete_open =
+            !crate::tui_v2::input::slash::suggestions(self.text()).is_empty();
         self.autocomplete_selected = 0;
         self.file_search_open = !self.autocomplete_open
             && crate::tui_v2::input::file_search::active_query(self.text(), self.cursor_byte())
@@ -769,6 +792,8 @@ pub struct DockUiState {
     pub plan_ratio_percent: u8,
     /// Plugin well is the active interaction target.
     pub plugin_focused: bool,
+    /// Vertical scroll offset (rows) inside the plan dock body.
+    pub plan_scroll: u16,
 }
 
 impl Default for DockUiState {
@@ -776,6 +801,7 @@ impl Default for DockUiState {
         Self {
             plan_ratio_percent: 42,
             plugin_focused: false,
+            plan_scroll: 0,
         }
     }
 }
@@ -783,6 +809,12 @@ impl Default for DockUiState {
 impl DockUiState {
     pub fn plan_ratio(&self) -> f32 {
         f32::from(self.plan_ratio_percent.clamp(20, 80)) / 100.0
+    }
+
+    pub fn scroll_plan(&mut self, delta: i32, content_rows: u16, visible_rows: u16) {
+        let max = content_rows.saturating_sub(visible_rows.max(1));
+        let next = i32::from(self.plan_scroll).saturating_add(delta);
+        self.plan_scroll = next.clamp(0, i32::from(max)) as u16;
     }
 }
 

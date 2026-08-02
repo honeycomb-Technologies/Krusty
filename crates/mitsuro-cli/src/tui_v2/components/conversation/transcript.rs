@@ -42,16 +42,16 @@ pub fn render_transcript(
     measured: &[Arc<MeasuredPart>],
     theme: SemanticTheme,
 ) {
+    // Animate every live/running row — parallel agent tools must all spin,
+    // not just the most recently started one.
     let animated = display
         .parts
         .iter()
-        .rev()
         .filter(|part| match &part.kind {
             DisplayPartKind::Tool(tool) => tool.status == StatusKind::Running,
             DisplayPartKind::Thinking { status, .. } => *status == StatusKind::Running,
             _ => false,
         })
-        .take(1)
         .map(|part| part.id.clone())
         .collect::<HashSet<_>>();
     for part_layout in &layout.transcript.parts {
@@ -139,19 +139,9 @@ fn apply_selection_highlight(
     let (mut a, mut b, start_off, end_off) = match (start_idx, end_idx) {
         (Some(s), Some(e)) => {
             if s <= e {
-                (
-                    s,
-                    e,
-                    selection.start.source_offset,
-                    selection.end.source_offset,
-                )
+                (s, e, selection.start.source_offset, selection.end.source_offset)
             } else {
-                (
-                    e,
-                    s,
-                    selection.end.source_offset,
-                    selection.start.source_offset,
-                )
+                (e, s, selection.end.source_offset, selection.start.source_offset)
             }
         }
         _ => return,
@@ -167,7 +157,10 @@ fn apply_selection_highlight(
             row.source.start
         };
         let hi = if index == b {
-            end_off.saturating_add(1).min(row.source.end).max(lo)
+            end_off
+                .saturating_add(1)
+                .min(row.source.end)
+                .max(lo)
         } else {
             row.source.end
         };
@@ -196,7 +189,10 @@ fn apply_selection_highlight(
     let _ = (&mut a, &mut b);
 }
 
-fn column_for_offset(row: &crate::tui_v2::layout::snapshot::SelectionRow, offset: usize) -> usize {
+fn column_for_offset(
+    row: &crate::tui_v2::layout::snapshot::SelectionRow,
+    offset: usize,
+) -> usize {
     if row.column_offsets.is_empty() {
         return offset.saturating_sub(row.source.start);
     }
@@ -254,7 +250,7 @@ fn render_part(
                 layout,
                 measured,
                 ExpandableContent {
-                    family: "Pulse",
+                    family: "",
                     summary: "thinking",
                     metadata: "",
                     status: *status,
@@ -300,8 +296,12 @@ fn render_part(
 }
 
 fn clip_row_range(clip_rows: &std::ops::Range<u32>, len: usize) -> std::ops::Range<usize> {
-    let end = usize::try_from(clip_rows.end).unwrap_or(len).min(len);
-    let start = usize::try_from(clip_rows.start).unwrap_or(end).min(end);
+    let end = usize::try_from(clip_rows.end)
+        .unwrap_or(len)
+        .min(len);
+    let start = usize::try_from(clip_rows.start)
+        .unwrap_or(end)
+        .min(end);
     start..end
 }
 
@@ -377,7 +377,23 @@ fn render_expandable(
                     phase: if animate
                         && matches!(state.appearance.motion.preference, MotionPreference::Full)
                     {
-                        state.appearance.motion.clock.frame(4, 140)
+                        let frames = crate::tui_v2::presentation::symbols::Symbols::for_mode(
+                            state.capability.glyph_mode,
+                        )
+                        .pulse_frames
+                        .len()
+                        .max(1);
+                        // Per-row phase offset so parallel agents don't look locked together.
+                        let base = state.appearance.motion.clock.frame(
+                            frames,
+                            crate::tui_v2::presentation::symbols::RUNNING_FRAME_INTERVAL_MS,
+                        );
+                        let salt = layout
+                            .part_id
+                            .as_str()
+                            .bytes()
+                            .fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+                        base.wrapping_add(salt) % frames
                     } else {
                         0
                     },
@@ -413,9 +429,11 @@ fn render_expandable(
                 .unwrap_or("");
             render_thinking_row(frame, area, line, theme);
         } else {
-            let content_offset = if content.panel_kind
-                == crate::tui_v2::presentation::tool::ArtifactPanelKind::Terminal
-            {
+            let content_offset = if matches!(
+                content.panel_kind,
+                crate::tui_v2::presentation::tool::ArtifactPanelKind::Terminal
+                    | crate::tui_v2::presentation::tool::ArtifactPanelKind::AgentChat
+            ) {
                 let artifact = state
                     .artifacts
                     .get(&layout.part_id)
@@ -500,10 +518,7 @@ fn render_user_bubble(
     let horizontal_chrome = 2u16.saturating_add(USER_BUBBLE_SIDE_PAD.saturating_mul(2));
     let bubble_width = u16::try_from(content_width.saturating_add(usize::from(horizontal_chrome)))
         .unwrap_or(area.width)
-        .clamp(
-            horizontal_chrome.saturating_add(1),
-            area.width.max(horizontal_chrome.saturating_add(1)),
-        );
+        .clamp(horizontal_chrome.saturating_add(1), area.width.max(horizontal_chrome.saturating_add(1)));
     let bubble_x = area
         .x
         .saturating_add(area.width.saturating_sub(bubble_width));

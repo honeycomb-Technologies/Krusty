@@ -78,8 +78,6 @@ impl PartialEq for MeasuredPart {
     }
 }
 
-impl Eq for MeasuredPart {}
-
 impl MeasuredPart {
     pub fn height(&self) -> u32 {
         self.rows.len().try_into().unwrap_or(u32::MAX)
@@ -240,7 +238,10 @@ impl Default for MeasurementCache {
     }
 }
 
-fn measure_from_markdown_lines(key: MeasurementKey, rendered: RenderedMarkdown) -> MeasuredPart {
+fn measure_from_markdown_lines(
+    key: MeasurementKey,
+    rendered: RenderedMarkdown,
+) -> MeasuredPart {
     let mut rows = Vec::with_capacity(rendered.lines.len().max(1));
     let mut cursor = 0_usize;
     for line in &rendered.lines {

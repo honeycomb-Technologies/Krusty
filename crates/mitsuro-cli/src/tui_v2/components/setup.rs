@@ -187,9 +187,7 @@ pub fn render(
         ));
     }
 
-    let content_height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .min(area.height);
+    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX).min(area.height);
     let content_width = CONTENT_WIDTH.min(area.width.saturating_sub(2)).max(1);
     let content = Rect::new(
         area.x

@@ -87,9 +87,7 @@ pub fn render(
         ));
     } else {
         let reserved = usize::from(picker.error.is_some());
-        let available = usize::from(list_area.height)
-            .saturating_sub(reserved)
-            .max(1);
+        let available = usize::from(list_area.height).saturating_sub(reserved).max(1);
         let selected = picker.selected.min(matches.len().saturating_sub(1));
         let start = selected.saturating_sub(available.saturating_sub(1));
         for (index, session) in matches.iter().enumerate().skip(start).take(available) {
@@ -125,7 +123,11 @@ pub fn render(
     }
     if list_area.height > 0 {
         frame.render_widget(
-            Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.surface)),
+            Paragraph::new(lines).style(
+                Style::default()
+                    .fg(theme.foreground)
+                    .bg(theme.surface),
+            ),
             list_area,
         );
     }

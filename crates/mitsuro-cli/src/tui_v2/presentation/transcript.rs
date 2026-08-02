@@ -212,7 +212,11 @@ fn with_user_bubble_chrome(measured: &MeasuredPart) -> MeasuredPart {
     // top border, content…, bottom border
     rows.push(empty(0));
     rows.extend(measured.rows.iter().cloned());
-    let tail = measured.rows.last().map(|row| row.source_end).unwrap_or(0);
+    let tail = measured
+        .rows
+        .last()
+        .map(|row| row.source_end)
+        .unwrap_or(0);
     rows.push(empty(tail));
     MeasuredPart {
         key: measured.key.clone(),
@@ -254,13 +258,11 @@ fn display_part(
                 .lines()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            // Prefer explicit UI state. When absent: open while streaming or
-            // whenever the thought has body text so Pulse never looks empty.
+            // Collapsed by default; expand only via explicit UI state (click/toggle).
             let expanded = force_materialize.is_some_and(|id| id == &thinking.id)
-                || artifact_state.get(&thinking.id).map_or_else(
-                    || thinking.streaming || !lines.is_empty(),
-                    |state| state.expanded || state.fullscreen,
-                );
+                || artifact_state
+                    .get(&thinking.id)
+                    .is_some_and(|state| state.expanded || state.fullscreen);
             // Cap tall thoughts to a scrollable window (same spirit as bash).
             let rows = if expanded {
                 thinking_panel_rows(lines.len().max(1), viewport_height)
@@ -269,7 +271,7 @@ fn display_part(
             };
             display(
                 thinking.id.clone(),
-                expandable_measurement("Pulse thinking", expanded, rows),
+                expandable_measurement("thinking", expanded, rows),
                 DisplayPartKind::Thinking {
                     status: if thinking.streaming {
                         StatusKind::Running
@@ -286,19 +288,24 @@ fn display_part(
             // Diff/code: full packed body when expanded.
             // Bash: fixed terminal window that live-tails (does not grow unboundedly).
             let rows = match tool_display.panel_kind {
-                crate::tui_v2::presentation::tool::ArtifactPanelKind::Terminal => {
-                    terminal_panel_rows(
+                crate::tui_v2::presentation::tool::ArtifactPanelKind::Terminal
+                | crate::tui_v2::presentation::tool::ArtifactPanelKind::AgentChat => {
+                    terminal_panel_rows(tool_display.artifact_lines.len(), viewport_height, expanded)
+                }
+                crate::tui_v2::presentation::tool::ArtifactPanelKind::Diff
+                | crate::tui_v2::presentation::tool::ArtifactPanelKind::Code => {
+                    panel_rows(
                         tool_display.artifact_lines.len(),
                         viewport_height,
                         expanded,
                     )
                 }
-                crate::tui_v2::presentation::tool::ArtifactPanelKind::Diff
-                | crate::tui_v2::presentation::tool::ArtifactPanelKind::Code => {
-                    panel_rows(tool_display.artifact_lines.len(), viewport_height, expanded)
-                }
                 crate::tui_v2::presentation::tool::ArtifactPanelKind::Generic => {
-                    panel_rows(tool_display.artifact_lines.len(), viewport_height, false)
+                    panel_rows(
+                        tool_display.artifact_lines.len(),
+                        viewport_height,
+                        false,
+                    )
                 }
             };
             let measurement =

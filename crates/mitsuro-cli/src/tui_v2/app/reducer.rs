@@ -34,6 +34,8 @@ pub enum UiAction {
     ComposerBackspace,
     ComposerDeletePreviousWord,
     ComposerClearToLineStart,
+    /// Clear the entire composer input (Ctrl+C).
+    ComposerClear,
     ComposerMoveLeft,
     ComposerMoveRight,
     ComposerMoveLineStart,
@@ -141,6 +143,12 @@ pub fn reduce(state: &mut UiState, action: UiAction) -> Vec<UiEffect> {
                 state.composer.field_width = width;
                 state.composer.field_rows = rows;
                 state.composer.clear_to_line_start();
+            }
+            Vec::new()
+        }
+        UiAction::ComposerClear => {
+            if state.focus.is_composer() {
+                state.composer.clear_all();
             }
             Vec::new()
         }

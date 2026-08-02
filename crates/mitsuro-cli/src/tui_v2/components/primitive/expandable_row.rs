@@ -75,16 +75,18 @@ impl ExpandableRow<'_> {
             Span::raw(" ".repeat(usize::from(self.indent))),
             self.status.span(capability, theme),
             Span::raw(" "),
-            Span::styled(
+        ];
+        if !self.family.is_empty() {
+            spans.push(Span::styled(
                 truncate_to_width(self.family, family_width, "…"),
                 TextRole::Label.style(theme),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                truncate_to_width(self.summary, summary_width, "…"),
-                TextRole::Body.style(theme),
-            ),
-        ];
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            truncate_to_width(self.summary, summary_width, "…"),
+            TextRole::Body.style(theme),
+        ));
         if metadata_width > 0 {
             spans.push(Span::styled(
                 format!(" {}", self.metadata.unwrap_or_default()),

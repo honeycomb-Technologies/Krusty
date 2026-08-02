@@ -73,7 +73,7 @@ pub fn parse_tool_output(name: &str, output: &str, historical: bool) -> Artifact
     }
 }
 
-/// Unwrap Mitsuro history + tool envelopes into panel-ready artifact content.
+/// Unwrap Krusty history + tool envelopes into panel-ready artifact content.
 pub fn artifact_from_tool_value(
     name: &str,
     value: &Value,
@@ -205,8 +205,7 @@ fn extract_family_payload(
             }
         }
         "web_fetch" | "fetch" => {
-            if let Some(content) =
-                first_string(value, data, &["content", "text", "body", "preview"])
+            if let Some(content) = first_string(value, data, &["content", "text", "body", "preview"])
             {
                 return text_artifact(content, limit, historical, warning);
             }
@@ -339,7 +338,8 @@ fn read_provenance(root: &Value, data: Option<&Value>) -> ArtifactProvenance {
         path: first_string(root, data, &["file_path", "path"]).map(str::to_owned),
         start_line: u32_at(source, "start_line").or_else(|| u32_at(root, "start_line")),
         total_lines: u32_at(source, "total_lines").or_else(|| u32_at(root, "total_lines")),
-        lines_returned: u32_at(source, "lines_returned").or_else(|| u32_at(root, "lines_returned")),
+        lines_returned: u32_at(source, "lines_returned")
+            .or_else(|| u32_at(root, "lines_returned")),
     }
 }
 

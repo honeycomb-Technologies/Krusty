@@ -10,8 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use mitsuro_core::{
     agent::{
         plan_handler::parse_plan_confirm_choice, run_compaction_pipeline, AgentCancellation,
-        AgentConfig, CompactionManager, CompactionRequest, CompactionTrigger, LoopEvent, LoopInput,
-        OrchestratorServices, RunProvenance, RunSpecBuilder,
+        AgentConfig, CompactionManager, CompactionRequest, CompactionTrigger, DelegatedProgressEvent,
+        LoopEvent, LoopInput, OrchestratorServices, RunProvenance, RunSpecBuilder,
     },
     ai::{
         client::{config::AnthropicAdaptiveEffort, AiClient, CallOptions, CodexReasoningEffort},
@@ -135,6 +135,8 @@ pub struct LoadedSession {
     pub title: String,
     pub messages: Vec<ModelMessage>,
     pub recovery: Option<SessionRecoveryState>,
+    /// Last persisted agent context size (sessions.token_count).
+    pub token_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +156,15 @@ pub struct PlanSnapshot {
     pub completed_steps: usize,
     pub total_steps: usize,
     pub current_step: Option<String>,
+    /// Ordered plan steps for the dock checklist (bullet list, not numbered).
+    pub steps: Vec<PlanStepRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanStepRow {
+    pub description: String,
+    pub done: bool,
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,6 +223,8 @@ pub struct StartedRun {
     pub title: String,
     pub events: mpsc::UnboundedReceiver<LoopEvent>,
     pub input: mpsc::UnboundedSender<LoopInput>,
+    /// Live sub-agent / explore-build progress while the parent turn runs.
+    pub delegated_progress: mpsc::UnboundedReceiver<DelegatedProgressEvent>,
 }
 
 pub struct PreparedInput {
@@ -537,6 +550,8 @@ impl RuntimeServices {
         let mode_aware_code_tools = options.tools.is_some();
         let db_path = paths::config_dir().join("mitsuro.db");
         let ai_client = Arc::new(client);
+        let (delegated_progress_tx, delegated_progress_rx) =
+            mpsc::unbounded_channel::<DelegatedProgressEvent>();
         let run_spec = RunSpecBuilder::new(
             RunProvenance::Tui,
             session_id.clone(),
@@ -551,6 +566,7 @@ impl RuntimeServices {
         .initial_work_mode(self.work_mode)
         .mode_aware_code_tools(mode_aware_code_tools)
         .generate_title(message_to_persist.is_some() && conversation.len() <= 1)
+        .delegated_progress_tx(Some(delegated_progress_tx))
         .call_options(options)
         .build(ai_client.as_ref())?;
         let runtime = OrchestratorServices {
@@ -572,6 +588,7 @@ impl RuntimeServices {
             title,
             events,
             input,
+            delegated_progress: delegated_progress_rx,
         })
     }
 
@@ -778,7 +795,7 @@ impl RuntimeServices {
         let db_path = paths::config_dir().join("mitsuro.db");
 
         // Prefer durable workflow Goal + steps (canonical plan surface).
-        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path) {
+        if let Ok(manager) = mitsuro_core::workflow::WorkflowManager::new(db_path.clone()) {
             if let Ok(Some(snapshot)) = manager.get_snapshot(session_id) {
                 let completed_steps = snapshot
                     .steps
@@ -793,7 +810,19 @@ impl RuntimeServices {
                     .find(|step| {
                         step.status == mitsuro_core::workflow::WorkflowStepStatus::InProgress
                     })
-                    .map(|step| format!("{} · {}", step.display_key, step.description));
+                    .map(|step| step.description.clone());
+                let steps = snapshot
+                    .steps
+                    .iter()
+                    .map(|step| {
+                        use mitsuro_core::workflow::WorkflowStepStatus;
+                        PlanStepRow {
+                            description: step.description.clone(),
+                            done: matches!(step.status, WorkflowStepStatus::Completed),
+                            active: matches!(step.status, WorkflowStepStatus::InProgress),
+                        }
+                    })
+                    .collect();
                 // Show even when steps are empty (goal created, plan proposed later).
                 return Some(PlanSnapshot {
                     title: snapshot.goal.title,
@@ -802,6 +831,7 @@ impl RuntimeServices {
                     completed_steps,
                     total_steps: snapshot.steps.len(),
                     current_step,
+                    steps,
                 });
             }
         }
@@ -823,6 +853,19 @@ impl RuntimeServices {
             .iter()
             .find(|task| !task.completed)
             .map(|task| task.description.clone());
+        let steps: Vec<PlanStepRow> = tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| PlanStepRow {
+                description: task.description.clone(),
+                done: task.completed,
+                active: !task.completed
+                    && tasks
+                        .iter()
+                        .position(|candidate| !candidate.completed)
+                        == Some(index),
+            })
+            .collect();
         Some(PlanSnapshot {
             title: plan.title.clone(),
             objective: plan
@@ -834,6 +877,7 @@ impl RuntimeServices {
             completed_steps,
             total_steps: tasks.len(),
             current_step,
+            steps,
         })
     }
 
@@ -1029,11 +1073,24 @@ impl RuntimeServices {
         self.current_session_id = Some(session.id.clone());
         self.work_mode = session.work_mode;
         self.permission_mode = session.permission_mode;
+        // Session working_dir is runtime source-of-truth for git/project chrome.
+        if let Some(dir) = session
+            .working_dir
+            .as_deref()
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from)
+        {
+            if dir != self.working_dir {
+                self.working_dir = dir;
+                self.project_entries = index_project_entries(&self.working_dir);
+            }
+        }
         Ok(LoadedSession {
             session_id: session.id,
             title: session.title,
             messages,
             recovery,
+            token_count: session.token_count,
         })
     }
 
@@ -1561,21 +1618,21 @@ impl RuntimeServices {
             .session_manager
             .as_ref()
             .ok_or_else(|| anyhow!("Session storage is unavailable."))?;
-        manager
-            .load_session_messages(session_id)?
-            .into_iter()
-            .filter(|(role, _)| role == "user" || role == "assistant")
-            .map(|(role, content)| {
-                Ok(ModelMessage {
-                    role: if role == "assistant" {
-                        Role::Assistant
-                    } else {
-                        Role::User
-                    },
-                    content: serde_json::from_str(&content)?,
-                })
-            })
-            .collect()
+        let mut messages = Vec::new();
+        for (role, content) in manager.load_session_messages(session_id)? {
+            if role != "user" && role != "assistant" {
+                continue;
+            }
+            messages.push(ModelMessage {
+                role: if role == "assistant" {
+                    Role::Assistant
+                } else {
+                    Role::User
+                },
+                content: serde_json::from_str(&content)?,
+            });
+        }
+        Ok(messages)
     }
 }
 
@@ -1770,19 +1827,15 @@ fn create_ai_client(services: &AppServices, metadata: &ModelMetadata) -> Option<
     let credential = if metadata.provider == ProviderId::Anthropic {
         mitsuro_core::auth::resolve_anthropic_auth(&services.credential_store).credential
     } else if metadata.provider == ProviderId::OpenAI {
-        crate::tui_support::auth::resolve_openai_auth_for_metadata(
-            metadata,
-            &services.credential_store,
-        )
-        .credential
+        crate::tui_support::auth::resolve_openai_auth_for_metadata(metadata, &services.credential_store)
+            .credential
     } else if metadata.provider == ProviderId::Grok {
         mitsuro_core::auth::resolve_grok_auth(&services.credential_store).credential
     } else {
         services.credential_store.get_auth(&metadata.provider)
     }?;
 
-    let config =
-        crate::tui_support::auth::create_client_config(metadata, &services.credential_store);
+    let config = crate::tui_support::auth::create_client_config(metadata, &services.credential_store);
     AiClient::new_with_resolved_model(config, credential, metadata.resolve_runtime()).ok()
 }
 
@@ -1975,6 +2028,6 @@ mod tests {
                 Some(motion)
             );
         }
-        assert_eq!(parse_theme_kind("mitsuro"), None);
+        assert_eq!(parse_theme_kind("krusty"), None);
     }
 }

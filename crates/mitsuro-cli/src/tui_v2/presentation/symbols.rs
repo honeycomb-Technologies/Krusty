@@ -15,6 +15,9 @@ pub const ASCII_BORDER: border::Set = border::Set {
     horizontal_bottom: "-",
 };
 
+/// Cadence for cascade / running-tool braille (~14 fps).
+pub const RUNNING_FRAME_INTERVAL_MS: u64 = 70;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Symbols {
     pub divider: &'static str,
@@ -26,7 +29,9 @@ pub struct Symbols {
     pub paused: &'static str,
     pub collapsed: &'static str,
     pub expanded: &'static str,
-    pub pulse_frames: &'static [&'static str; 4],
+    /// Running-tool animation (cascade braille). Terminal status after done:
+    /// `success` / `failure` / `warning` — not these frames.
+    pub pulse_frames: &'static [&'static str],
     pub wait_frames: &'static [&'static str; 4],
 }
 
@@ -43,7 +48,11 @@ impl Symbols {
                 paused: "Ⅱ",
                 collapsed: "›",
                 expanded: "⌄",
-                pulse_frames: &["·", "◦", "•", "◦"],
+                // Cascade: left column fills → right fills → drain.
+                pulse_frames: &[
+                    "⠁", "⠃", "⠇", "⡇", "⡏", "⡟", "⡿", "⣿", "⢿", "⣻", "⣽", "⣾", "⣷",
+                    "⣧", "⣇", "⡄", "⢀", " ",
+                ],
                 wait_frames: &["·  ", "·· ", "···", " ··"],
             },
             GlyphMode::Ascii => Self {
@@ -56,7 +65,8 @@ impl Symbols {
                 paused: "=",
                 collapsed: ">",
                 expanded: "v",
-                pulse_frames: &[".", "o", "O", "o"],
+                // Ascii stand-in for cascade fill/drain.
+                pulse_frames: &[".", ":", "|", "H", "#", "H", "|", ":", ".", " "],
                 wait_frames: &[".  ", ".. ", "...", " .."],
             },
         }
