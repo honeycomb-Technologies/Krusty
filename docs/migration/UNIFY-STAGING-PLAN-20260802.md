@@ -331,7 +331,7 @@ cargo fmt --all -- --check
 
 ## Appendix — Phase 6 freeze record (2026-08-02)
 
-**Authority tip:** `c022d532` (`c022d532c25d9d03b4c42d8cf88ce6e420e2667a`) on `codex/release-staging-20260801`  
+**Authority tip:** `9922454a` (`9922454a57d884922cedf98a3d2c080ebc78dcd6`) on `codex/release-staging-20260801`  
 **Remote:** `origin` → `honeycomb-Technologies/Mitsuro`
 
 ### Validation (AGENTS required)
