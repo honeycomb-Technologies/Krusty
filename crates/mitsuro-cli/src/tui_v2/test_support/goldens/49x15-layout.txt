@@ -1,0 +1,4 @@
+viewport 0 0 49 15 class=TooSmall route=Home
+region Canvas 0 0 49 15 clip=0 0 49 15
+region ResizeMessage 0 0 49 15 clip=0 0 49 15
+focus none
