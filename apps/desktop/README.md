@@ -1,10 +1,10 @@
-# Krusty Desktop
+# Mitsuro Desktop
 
-Desktop-first Krusty product.
+Desktop-first Mitsuro product surface (workstation shell).
 
 ## Layout
 
-- `ui/` — desktop product surface (Expo web, desktop IA)
+- `ui/` — desktop product UI (Expo web, plane rails, browser/terminal panes, Hive plane)
 - `shell/` — Tauri host, packaging, embedded/reused server bootstrap
 
 ## Dev

@@ -1,43 +1,48 @@
 # Desktop Shell (Tauri)
 
-This wraps the Expo web app surface as a native desktop app.
+Native host for the Mitsuro desktop UI (`apps/desktop/ui`).
 
 ## Dev Flow
-1. Run desktop shell (`bun run dev`) in this folder.
-2. Tauri will automatically run the Expo web dev server from `apps/mobile`.
 
-The shell loads `http://localhost:5173` during development.
+1. From this folder: `bun install` then `bun run dev`.
+2. Tauri runs the desktop UI web surface (see `tauri.conf.json` `beforeDevCommand` / `devUrl`).
 
 ## Linux Build Flow
+
 1. Install dependencies:
    - Bun 1.3+
    - Rust stable
    - GTK/WebKit build dependencies for your distro (`webkit2gtk`, `gtk3`, `libayatana-appindicator`, `patchelf`)
-2. Build packages in this folder:
+2. Build packages:
    - `bun install`
    - `bun run build`
 
-`tauri.conf.json` points `frontendDist` at `../../mobile/dist`.
-
 Build outputs:
+
 - `src-tauri/target/release/bundle/deb/*.deb`
 - `src-tauri/target/release/bundle/rpm/*.rpm`
 
-## Linux Install + Run
-- Debian/Ubuntu:
-  - `sudo apt install "./src-tauri/target/release/bundle/deb/Krusty Desktop_0.8.1_amd64.deb"`
-- Fedora/RHEL:
-  - `sudo dnf install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
-- openSUSE:
-  - `sudo zypper install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
+Package names follow Tauri `productName` (**Mitsuro**, version from `tauri.conf.json`).
 
-After install, launch with:
-- `krusty-desktop`
+## Linux Install + Run
+
+After install, launch the Mitsuro desktop app from your desktop environment or the
+binary name produced by the bundle (typically `mitsuro-desktop` / product name Mitsuro).
 
 If your Wayland compositor has dmabuf issues, force X11 fallback:
-- `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 krusty-desktop`
+
+```bash
+GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 mitsuro-desktop
+```
 
 ## Bundle Notes
+
 - `bun run build` / `bun run build:linux` creates Linux `.deb` and `.rpm`.
 - `bun run build:all` attempts all bundle formats.
 - `bun run build:appimage` builds AppImage only and requires `linuxdeploy`.
+
+## Identity
+
+- Canonical desktop id: `io.mitsuro.desktop`
+- Legacy web-data ids are handled only by the desktop identity compatibility path
+  (`io.krusty.desktop` / early `dev.krusty.desktop`) for offline migration — not product branding.

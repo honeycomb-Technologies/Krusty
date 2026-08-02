@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "@krusty/desktop-shell",
+      "name": "@mitsuro/desktop-shell",
       "devDependencies": {
         "@tauri-apps/cli": "^2.2.5",
       },

@@ -35,14 +35,7 @@ content	.gitignore	91	.krusty/
 content	AGENTS.md	20	- The supported terminal command is `mitsuro`. The deprecated `krusty` command remains a tested compatibility alias for the announced transition window; removing it requires the migration cutover criteria to pass.
 content	README.md	39	| **Terminal** | Interactive coding via the modern Mitsuro TUI (`mitsuro` / `krusty` alias) |
 content	README.md	90	`mitsuro` is the primary command. The deprecated `krusty` command remains a
-content	apps/desktop/README.md	1	# Krusty Desktop
-content	apps/desktop/README.md	3	Desktop-first Krusty product.
-content	apps/desktop/shell/README.md	28	  - `sudo apt install "./src-tauri/target/release/bundle/deb/Krusty Desktop_0.8.1_amd64.deb"`
-content	apps/desktop/shell/README.md	30	  - `sudo dnf install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
-content	apps/desktop/shell/README.md	32	  - `sudo zypper install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.1-1.x86_64.rpm"`
-content	apps/desktop/shell/README.md	35	- `krusty-desktop`
-content	apps/desktop/shell/README.md	38	- `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 krusty-desktop`
-content	apps/desktop/shell/bun.lock	6	      "name": "@krusty/desktop-shell",
+content	apps/desktop/shell/README.md	48	  (`io.krusty.desktop` / early `dev.krusty.desktop`) for offline migration — not product branding.
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	12	const LEGACY_DESKTOP_ID: &str = "io.krusty.desktop";
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	13	const EARLY_DEVELOPMENT_DESKTOP_ID: &str = "dev.krusty.desktop";
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	183	        "window.__MITSURO_SERVER_URL='http://localhost:{0}';window.__MITSURO_SERVER_TOKEN='local';window.__KRUSTY_SERVER_URL='http://localhost:{0}';window.__KRUSTY_SERVER_TOKEN='local';",
