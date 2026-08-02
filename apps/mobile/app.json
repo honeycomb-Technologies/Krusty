@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mitsuro",
     "slug": "mitsuro",
-    "version": "0.9.21",
+    "version": "0.9.22",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
@@ -34,7 +34,7 @@
       "config": {
         "usesNonExemptEncryption": false
       },
-      "buildNumber": "274"
+      "buildNumber": "275"
     },
     "android": {
       "package": "io.krusty.mobile",

@@ -1,6 +1,6 @@
 [package]
 name = "mitsuro-server"
-version = "0.9.21"
+version = "0.9.22"
 edition = "2021"
 description = "Self-hosted Mitsuro API server library"
 

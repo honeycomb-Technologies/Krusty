@@ -3602,7 +3602,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-core"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-server"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "anyhow",
  "axum",
