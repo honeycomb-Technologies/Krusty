@@ -21,15 +21,15 @@ content	.github/workflows/release.yml	116	          # The old Windows updater ex
 content	.github/workflows/release.yml	118	          cp mitsuro.exe krusty.exe
 content	.github/workflows/release.yml	119	          cmp -s mitsuro.exe krusty.exe
 content	.github/workflows/release.yml	120	          7z a ../../../krusty-${{ matrix.target }}.zip krusty.exe
-content	.github/workflows/release.yml	123	          sha256sum krusty-${{ matrix.target }}.zip > krusty-${{ matrix.target }}.zip.sha256
-content	.github/workflows/release.yml	131	            krusty-${{ matrix.target }}.*
-content	.github/workflows/release.yml	196	            find artifacts -type f -name 'krusty-*.tar.gz*' -print
-content	.github/workflows/release.yml	205	          compatibility_name=krusty-x86_64-pc-windows-msvc.zip
-content	.github/workflows/release.yml	227	            "${compatibility_matches[0]}" krusty.exe <<'PY'
-content	.github/workflows/release.yml	310	              krusty-x86_64-pc-windows-msvc.zip | \
-content	.github/workflows/release.yml	311	              krusty-x86_64-pc-windows-msvc.zip.sha256 | \
-content	.github/workflows/release.yml	338	            krusty-x86_64-pc-windows-msvc.zip
-content	.github/workflows/release.yml	339	            krusty-x86_64-pc-windows-msvc.zip.sha256
+content	.github/workflows/release.yml	127	            "krusty-${{ matrix.target }}.zip"; do
+content	.github/workflows/release.yml	138	            krusty-${{ matrix.target }}.*
+content	.github/workflows/release.yml	203	            find artifacts -type f -name 'krusty-*.tar.gz*' -print
+content	.github/workflows/release.yml	212	          compatibility_name=krusty-x86_64-pc-windows-msvc.zip
+content	.github/workflows/release.yml	235	            "${compatibility_matches[0]}" krusty.exe <<'PY'
+content	.github/workflows/release.yml	318	              krusty-x86_64-pc-windows-msvc.zip | \
+content	.github/workflows/release.yml	319	              krusty-x86_64-pc-windows-msvc.zip.sha256 | \
+content	.github/workflows/release.yml	346	            krusty-x86_64-pc-windows-msvc.zip
+content	.github/workflows/release.yml	347	            krusty-x86_64-pc-windows-msvc.zip.sha256
 content	.gitignore	28	**/.krusty-shadow/
 content	.gitignore	91	.krusty/
 content	AGENTS.md	20	- The supported terminal command is `mitsuro`. The deprecated `krusty` command remains a tested compatibility alias for the announced transition window; removing it requires the migration cutover criteria to pass.

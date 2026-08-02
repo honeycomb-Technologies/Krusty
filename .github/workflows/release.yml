@@ -119,8 +119,15 @@ jobs:
           cmp -s mitsuro.exe krusty.exe
           7z a ../../../krusty-${{ matrix.target }}.zip krusty.exe
           cd ../../..
-          sha256sum mitsuro-${{ matrix.target }}.zip > mitsuro-${{ matrix.target }}.zip.sha256
-          sha256sum krusty-${{ matrix.target }}.zip > krusty-${{ matrix.target }}.zip.sha256
+          # Force text-mode manifests (two spaces). Some Windows/Git-Bash
+          # sha256sum builds emit binary-mode "hash *name", which breaks the
+          # release validator that expects the portable text form.
+          for archive in \
+            "mitsuro-${{ matrix.target }}.zip" \
+            "krusty-${{ matrix.target }}.zip"; do
+            digest=$(sha256sum "$archive" | awk "{ print \$1 }")
+            printf "%s  %s\n" "$digest" "$archive" > "${archive}.sha256"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -214,7 +221,8 @@ jobs:
             manifest_path="$archive_path.sha256"
             test -f "$manifest_path"
             test "$(awk 'NF { count++ } END { print count + 0 }' "$manifest_path")" -eq 1
-            grep -Eq "^[0-9a-f]{64}  \\*?$archive_name$" "$manifest_path"
+            # Accept GNU text ("hash  name") and binary ("hash *name") forms.
+            grep -Eq "^[0-9a-f]{64}(  | \\*)$archive_name$" "$manifest_path"
             expected_digest=$(awk 'NF { print $1; exit }' "$manifest_path")
             actual_digest=$(sha256sum "$archive_path" | awk '{ print $1 }')
             test "$expected_digest" = "$actual_digest"
