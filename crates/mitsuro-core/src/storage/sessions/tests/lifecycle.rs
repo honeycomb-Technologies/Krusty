@@ -140,7 +140,7 @@ fn create_linked_session_preserves_workspace_contract() {
             WorkspaceMode::Created,
             Some(user_id),
             Some("feature/mobile-intent"),
-            SessionType::Mako,
+            SessionType::Hive,
         )
         .expect("Failed to create parent session");
     let pinch_ctx = empty_pinch_context(&parent_session_id);
@@ -162,7 +162,7 @@ fn create_linked_session_preserves_workspace_contract() {
         .expect("Failed to load child session")
         .expect("Child session should exist");
 
-    assert_eq!(child_session.session_type, SessionType::Mako);
+    assert_eq!(child_session.session_type, SessionType::Hive);
     assert_eq!(child_session.working_dir.as_deref(), Some("/tmp/worktree"));
     assert_eq!(
         child_session.project_dir.as_deref(),

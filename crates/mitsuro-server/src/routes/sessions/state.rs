@@ -18,13 +18,13 @@ use crate::AppState;
 const RECENT_DELEGATED_ARTIFACT_LIMIT: usize = 20;
 const DELEGATED_HYDRATION_SUMMARY_LIMIT: usize = 10_000;
 
-fn core_delegated_stage_is_terminal(stage: krusty_core::agent::DelegatedRunStage) -> bool {
+fn core_delegated_stage_is_terminal(stage: mitsuro_core::agent::DelegatedRunStage) -> bool {
     matches!(
         stage,
-        krusty_core::agent::DelegatedRunStage::Complete
-            | krusty_core::agent::DelegatedRunStage::Degraded
-            | krusty_core::agent::DelegatedRunStage::Failed
-            | krusty_core::agent::DelegatedRunStage::Cancelled
+        mitsuro_core::agent::DelegatedRunStage::Complete
+            | mitsuro_core::agent::DelegatedRunStage::Degraded
+            | mitsuro_core::agent::DelegatedRunStage::Failed
+            | mitsuro_core::agent::DelegatedRunStage::Cancelled
     )
 }
 

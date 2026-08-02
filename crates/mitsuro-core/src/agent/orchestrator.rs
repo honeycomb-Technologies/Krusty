@@ -39,7 +39,7 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, DelegatedRunRecord, DelegatedRunStore, MakoProfileSnapshot, PartialAssistantState,
+    Database, DelegatedRunRecord, DelegatedRunStore, HiveProfileSnapshot, PartialAssistantState,
     PendingInteractionSnapshot, ProjectSettings, RecoveryStatus, SessionManager, SessionType,
     WorkMode,
 };
@@ -548,9 +548,9 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) session_id: String,
     pub(crate) working_dir: PathBuf,
     pub(crate) project_dir: Option<PathBuf>,
-    pub(crate) mako_crew_slug: Option<String>,
+    pub(crate) hive_crew_slug: Option<String>,
     /// Database-owned Mako identity frozen once at run start.
-    pub(crate) mako_profile: Option<Arc<MakoProfileSnapshot>>,
+    pub(crate) hive_profile: Option<Arc<HiveProfileSnapshot>>,
     pub(crate) session_type: SessionType,
     pub(crate) permission_mode: PermissionMode,
     /// Optional explicit per-turn execution capability. `None` preserves the
@@ -579,8 +579,8 @@ impl Default for OrchestratorConfig {
             session_id: String::new(),
             working_dir: PathBuf::new(),
             project_dir: None,
-            mako_crew_slug: None,
-            mako_profile: None,
+            hive_crew_slug: None,
+            hive_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             execution_tool_allowlist: None,
@@ -648,7 +648,7 @@ fn session_type_name(session_type: SessionType) -> &'static str {
     match session_type {
         SessionType::Chat => "chat",
         SessionType::Code => "code",
-        SessionType::Mako => "mako",
+        SessionType::Hive => "hive",
     }
 }
 
@@ -658,15 +658,15 @@ fn inject_runtime_context(
     session_id: &str,
     working_dir: &Path,
     project_dir: Option<&Path>,
-    mako_crew_slug: Option<&str>,
-    mako_profile: Option<&MakoProfileSnapshot>,
+    hive_crew_slug: Option<&str>,
+    hive_profile: Option<&HiveProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context_with_mako_profile(
+    context::inject_context_with_hive_profile(
         conversation,
         db_path,
         session_id,
@@ -676,9 +676,9 @@ fn inject_runtime_context(
         skills_manager,
         model,
         Some(session_type_name(session_type)),
-        mako_crew_slug,
+        hive_crew_slug,
         user_id,
-        mako_profile,
+        hive_profile,
     )
 }
 
@@ -766,8 +766,8 @@ impl AgenticOrchestrator {
             session_id,
             working_dir,
             project_dir,
-            mako_crew_slug,
-            mako_profile,
+            hive_crew_slug,
+            hive_profile,
             session_type,
             permission_mode,
             execution_tool_allowlist,
@@ -1002,8 +1002,8 @@ impl AgenticOrchestrator {
                 &session_id,
                 &working_dir,
                 project_dir.as_deref(),
-                mako_crew_slug.as_deref(),
-                mako_profile.as_deref(),
+                hive_crew_slug.as_deref(),
+                hive_profile.as_deref(),
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
@@ -1522,7 +1522,7 @@ impl AgenticOrchestrator {
             // completed tool call or polluting canonical conversation history.
             empty_completion_recovery_pending = false;
             let empty_completion =
-                if loop_guard_landing.is_some() || session_type == SessionType::Mako {
+                if loop_guard_landing.is_some() || session_type == SessionType::Hive {
                     EmptyCompletionAction::None
                 } else {
                     empty_completion_action(
@@ -3529,7 +3529,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_runtime_context_applies_mako_session_identity() -> anyhow::Result<()> {
+    fn inject_runtime_context_applies_hive_session_identity() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
         let repo = temp.path();
         fs::create_dir_all(repo.join(".git"))?;
@@ -3545,7 +3545,7 @@ mod tests {
         }];
         let db_path = repo.join("krusty.db");
 
-        let mako_injected = inject_runtime_context(
+        let hive_injected = inject_runtime_context(
             &conversation,
             &db_path,
             "session-id",
@@ -3556,7 +3556,7 @@ mod tests {
             WorkMode::Build,
             &skills,
             None,
-            SessionType::Mako,
+            SessionType::Hive,
             None,
         );
         let code_injected = inject_runtime_context(
@@ -3574,7 +3574,7 @@ mod tests {
             None,
         );
 
-        assert!(mako_injected.iter().any(|message| {
+        assert!(hive_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
                 Content::Text { text }

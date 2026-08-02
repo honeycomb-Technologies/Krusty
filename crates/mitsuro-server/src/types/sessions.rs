@@ -5,7 +5,7 @@ use mitsuro_core::storage::{
     SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
@@ -60,6 +60,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::SessionTypeResponse;
+    use crate::legacy_identity::SessionWireFormat;
+    use mitsuro_core::storage::SessionType;
+
     use serde_json::json;
 
     use super::UpdateSessionRequest;
@@ -86,6 +90,25 @@ mod tests {
                 .as_ref()
                 .and_then(|branch| branch.as_deref()),
             Some("feature/mobile-continuation")
+        );
+    }
+
+    #[test]
+    fn generic_session_type_projection_is_typed_and_negotiated() {
+        let legacy = SessionTypeResponse::new(SessionType::Hive, SessionWireFormat::Legacy);
+        let canonical = SessionTypeResponse::new(SessionType::Hive, SessionWireFormat::Canonical);
+        assert_eq!(serde_json::to_value(legacy).expect("legacy wire"), "mako");
+        assert_eq!(
+            serde_json::to_value(canonical).expect("canonical wire"),
+            "hive"
+        );
+        assert_eq!(
+            serde_json::to_value(SessionTypeResponse::new(
+                SessionType::Code,
+                SessionWireFormat::Legacy
+            ))
+            .expect("code wire"),
+            "code"
         );
     }
 }
@@ -131,7 +154,7 @@ pub struct SessionResponse {
     pub working_dir: Option<String>,
     pub project_dir: Option<String>,
     pub workspace_mode: WorkspaceMode,
-    pub session_type: SessionType,
+    pub session_type: SessionTypeResponse,
     pub mode: WorkMode,
     pub model: Option<String>,
     pub model_key: Option<ModelKey>,
@@ -140,8 +163,46 @@ pub struct SessionResponse {
     pub permission_mode: PermissionMode,
 }
 
-impl From<SessionInfo> for SessionResponse {
-    fn from(s: SessionInfo) -> Self {
+#[derive(Debug, Clone, Copy)]
+pub struct SessionTypeResponse {
+    value: SessionType,
+    wire_format: crate::legacy_identity::SessionWireFormat,
+}
+
+impl SessionTypeResponse {
+    fn new(value: SessionType, wire_format: crate::legacy_identity::SessionWireFormat) -> Self {
+        Self { value, wire_format }
+    }
+}
+
+impl Serialize for SessionTypeResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match (self.value, self.wire_format) {
+            (SessionType::Hive, crate::legacy_identity::SessionWireFormat::Legacy) => {
+                crate::legacy_identity::HIVE_SESSION_TYPE
+            }
+            (SessionType::Hive, crate::legacy_identity::SessionWireFormat::Canonical) => "hive",
+            (SessionType::Chat, _) => "chat",
+            (SessionType::Code, _) => "code",
+        };
+        serializer.serialize_str(value)
+    }
+}
+
+impl PartialEq<SessionType> for SessionTypeResponse {
+    fn eq(&self, other: &SessionType) -> bool {
+        self.value == *other
+    }
+}
+
+impl SessionResponse {
+    pub(crate) fn from_session(
+        s: SessionInfo,
+        wire_format: crate::legacy_identity::SessionWireFormat,
+    ) -> Self {
         Self {
             id: s.id,
             title: s.title,
@@ -151,7 +212,7 @@ impl From<SessionInfo> for SessionResponse {
             working_dir: s.working_dir,
             project_dir: s.project_dir,
             workspace_mode: s.workspace_mode,
-            session_type: s.session_type,
+            session_type: SessionTypeResponse::new(s.session_type, wire_format),
             mode: s.work_mode,
             model: s.model,
             model_key: s.model_key,
@@ -159,6 +220,12 @@ impl From<SessionInfo> for SessionResponse {
             target_branch: s.target_branch,
             permission_mode: s.permission_mode,
         }
+    }
+}
+
+impl From<SessionInfo> for SessionResponse {
+    fn from(s: SessionInfo) -> Self {
+        Self::from_session(s, crate::legacy_identity::SessionWireFormat::Canonical)
     }
 }
 

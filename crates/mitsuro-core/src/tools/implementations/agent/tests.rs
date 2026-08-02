@@ -296,7 +296,7 @@ fn background_agent_requires_chat_or_code_parent_session() {
             WorkspaceMode::Selected,
             None,
             None,
-            SessionType::Mako,
+            SessionType::Hive,
         )
         .expect("hive session");
     let runtime = AgentRuntimeManager::default();

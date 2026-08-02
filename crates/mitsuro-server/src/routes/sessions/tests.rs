@@ -79,7 +79,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-            mako_runtime: crate::hive_runtime::MakoRuntimeManager::new(),
+            hive_runtime: crate::hive_runtime::HiveRuntimeManager::new(),
         },
         temp_dir,
     )
@@ -274,7 +274,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             working_dir: None,
             workspace_mode: None,
             target_branch: None,
-            session_type: Some(SessionType::Mako),
+            session_type: Some(SessionType::Hive),
             permission_mode: None,
         }),
     )
@@ -283,7 +283,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
 
     let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     assert!(manager
-        .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Mako)
+        .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Hive)
         .expect("sessions should list")
         .is_empty());
     let session_id = manager
@@ -295,7 +295,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             WorkspaceMode::Selected,
             Some("alice"),
             None,
-            SessionType::Mako,
+            SessionType::Hive,
         )
         .expect("test Mako session should create");
 

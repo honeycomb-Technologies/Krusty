@@ -187,6 +187,79 @@ pub fn read_clipboard_text() -> Option<String> {
     None
 }
 
+
+/// Write text to the system clipboard.
+///
+/// On Linux prefers native tools (`wl-copy` / `xclip` / `xsel`) so the
+/// selection persists after the process exits; falls back to arboard.
+pub fn write_clipboard_text(text: &str) -> bool {
+    use std::io::Write;
+
+    #[cfg(target_os = "linux")]
+    {
+        let is_wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|s| s == "wayland")
+            .unwrap_or(false)
+            || std::env::var("WAYLAND_DISPLAY").is_ok();
+
+        if is_wayland {
+            if let Ok(mut child) = std::process::Command::new("wl-copy")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                    drop(stdin);
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return true;
+                }
+            }
+        } else if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+                drop(stdin);
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return true;
+            }
+        } else if let Ok(mut child) = std::process::Command::new("xsel")
+            .args(["--clipboard", "--input"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+                drop(stdin);
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return true;
+            }
+        }
+    }
+
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if clipboard.set_text(text).is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::looks_like_non_text_paste;

@@ -770,7 +770,7 @@ mod tests {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-            mako_runtime: crate::hive_runtime::MakoRuntimeManager::new(),
+            hive_runtime: crate::hive_runtime::HiveRuntimeManager::new(),
         };
         (state, temp, workspace)
     }

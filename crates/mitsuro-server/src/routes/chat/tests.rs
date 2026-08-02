@@ -80,7 +80,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-            mako_runtime: crate::hive_runtime::MakoRuntimeManager::new(),
+            hive_runtime: crate::hive_runtime::HiveRuntimeManager::new(),
         },
         temp_dir,
     )
@@ -170,7 +170,7 @@ async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
             WorkspaceMode::Selected,
             None,
             None,
-            SessionType::Mako,
+            SessionType::Hive,
         )
         .expect("session should create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -273,7 +273,7 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             WorkspaceMode::Selected,
             None,
             None,
-            SessionType::Mako,
+            SessionType::Hive,
         )
         .expect("session should create");
 
@@ -289,7 +289,7 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
             target_branch: None,
-            session_type: Some(SessionType::Mako),
+            session_type: Some(SessionType::Hive),
             model: Some("test:model".into()),
             model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,

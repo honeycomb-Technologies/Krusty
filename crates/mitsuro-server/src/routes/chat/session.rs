@@ -10,7 +10,7 @@ use mitsuro_core::ai::providers::ProviderId;
 use mitsuro_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
 use mitsuro_core::plan::{has_active_workflow_or_plan, PlanManager};
 use mitsuro_core::storage::{
-    Database, MakoRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
+    Database, HiveRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
     WorkspaceMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
@@ -48,7 +48,7 @@ pub(super) struct ChatSessionContext {
     pub(super) session_type: SessionType,
     pub(super) permission_mode: PermissionMode,
     pub(super) execution_tool_allowlist: Option<std::collections::HashSet<String>>,
-    pub(super) mako_crew_slug: Option<String>,
+    pub(super) hive_crew_slug: Option<String>,
     pub(super) user_id: Option<String>,
     pub(super) guard: OwnedMutexGuard<()>,
 }
@@ -154,7 +154,7 @@ pub(super) async fn prepare_chat_route_session(
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
             let session = load_owned_session(&sm, id, user)?;
-            if session.session_type == SessionType::Mako && req.target_branch.is_some() {
+            if session.session_type == SessionType::Hive && req.target_branch.is_some() {
                 return Err(AppError::Conflict(
                     "Hive target branches are background-service-owned and cannot be changed through /chat"
                         .into(),
@@ -167,7 +167,7 @@ pub(super) async fn prepare_chat_route_session(
             Ok(PreparedChatRouteSession {
                 session_id: id.to_string(),
                 is_first_message: messages.is_empty(),
-                pending_model_update: (session.session_type != SessionType::Mako)
+                pending_model_update: (session.session_type != SessionType::Hive)
                     .then(|| {
                         requested_model
                             .persisted()
@@ -817,7 +817,7 @@ pub(super) async fn setup_chat_session_with_guard(
         fast_mode_format,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt()),
-            SessionType::Mako => system_prompt_for_session(SessionType::Mako),
+            SessionType::Hive => system_prompt_for_session(SessionType::Hive),
             SessionType::Code => None, // uses default Krusty coding assistant prompt
         },
         ..Default::default()
@@ -826,8 +826,8 @@ pub(super) async fn setup_chat_session_with_guard(
         apply_thinking_config(effective_thinking_level, &mut options);
     }
 
-    let mako_runtime = if session.session_type == SessionType::Mako {
-        MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
+    let hive_runtime = if session.session_type == SessionType::Hive {
+        HiveRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
     } else {
         None
     };
@@ -844,7 +844,7 @@ pub(super) async fn setup_chat_session_with_guard(
         session_type: session.session_type,
         permission_mode: session.permission_mode,
         execution_tool_allowlist: None,
-        mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
+        hive_crew_slug: hive_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,
     })

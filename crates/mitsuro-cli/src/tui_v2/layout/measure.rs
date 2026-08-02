@@ -61,13 +61,24 @@ pub struct MeasuredRow {
     pub column_offsets: Vec<usize>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MeasuredPart {
     pub key: MeasurementKey,
     pub rows: Vec<MeasuredRow>,
     pub markdown: Option<RenderedMarkdown>,
     pub weight: usize,
 }
+
+impl PartialEq for MeasuredPart {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.rows == other.rows
+            && self.weight == other.weight
+            && self.markdown.is_some() == other.markdown.is_some()
+    }
+}
+
+impl Eq for MeasuredPart {}
 
 impl MeasuredPart {
     pub fn height(&self) -> u32 {

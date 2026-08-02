@@ -168,7 +168,7 @@ fn start_chat_run(
     permission_mode: PermissionMode,
     generate_title: bool,
 ) -> Result<StartedChatRun, AppError> {
-    if ctx.session_type == SessionType::Mako {
+    if ctx.session_type == SessionType::Hive {
         return Err(AppError::BadGateway(
             "Hive execution is owned by its background service".to_string(),
         ));
@@ -186,7 +186,7 @@ fn start_chat_run(
         ctx.session_type,
     )
     .project_dir(ctx.project_dir)
-    .mako_crew_slug(ctx.mako_crew_slug.clone())
+    .hive_crew_slug(ctx.hive_crew_slug.clone())
     .permission_mode(permission_mode)
     .execution_tool_allowlist(ctx.execution_tool_allowlist)
     .user_id(ctx.user_id.clone())

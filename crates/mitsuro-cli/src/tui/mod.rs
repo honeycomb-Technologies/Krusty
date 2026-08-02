@@ -2,8 +2,8 @@
 
 pub mod animation;
 pub mod app;
-mod app_builder;
-mod auth;
+pub(crate) mod app_builder;
+pub(crate) mod auth;
 pub mod blocks;
 pub mod components;
 pub mod graphics;
