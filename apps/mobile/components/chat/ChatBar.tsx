@@ -54,6 +54,7 @@ import {
   estimateCompactInputHeight,
   resolveComposerBarHeight,
   resolveComposerInputHeight,
+  resolveMeasuredInputContentHeight,
   resolveNextInputContentHeight,
   shouldExpandComposerHeight,
 } from './composerGrowth';
@@ -1219,8 +1220,9 @@ function ChatBarComponent(props: ChatBarProps) {
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
   // Soft wrap never inserts `\n`. Keep the character-wrap estimate live so it
-  // can open the field when iOS contentSize is still capped to the one-line
-  // view height. Estimates may grow after measurement; they must not shrink.
+  // can *open* the field when iOS contentSize is still capped to one line.
+  // After a real multi-line measure, measured owns grow/shrink — estimates must
+  // not keep a tall ratchet that only clears when the draft is emptied.
   useEffect(() => {
     if (!text) {
       hasMeasuredContentHeightRef.current = false;
@@ -1229,14 +1231,18 @@ function ChatBarComponent(props: ChatBarProps) {
       return;
     }
     const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
-    setInputContentHeight((current) =>
-      resolveNextInputContentHeight({
+    setInputContentHeight((current) => {
+      const measuredAuthoritative =
+        hasMeasuredContentHeightRef.current &&
+        current > INPUT_LINE_HEIGHT + 1;
+      return resolveNextInputContentHeight({
         current,
         next: nextHeight,
         source: 'estimate',
         hasMeasured: hasMeasuredContentHeightRef.current,
-      }),
-    );
+        measuredAuthoritative,
+      });
+    });
   }, [compactInputWidth, text]);
 
   // Hysteresis: expand and collapse at different thresholds so wrap-boundary
@@ -1433,25 +1439,21 @@ function ChatBarComponent(props: ChatBarProps) {
                       setInputContentHeight(0);
                       return;
                     }
-                    // Prefer the larger of measured vs estimate. Soft wrap often
-                    // reports a view-capped contentSize (~one line) until the
-                    // field is already tall enough; estimate opens that path.
-                    // Measured can still grow past the estimate for real fonts.
-                    const measured = Math.ceil(
-                      event.nativeEvent.contentSize.height,
-                    );
+                    // Normalize padding/view-inflated contentSize, floor at the
+                    // soft-wrap estimate, then merge. Raw measured height alone
+                    // double-counts expanded padding and thrash-steps the bar
+                    // between visual lines 2 and 3.
                     const estimated = estimateCompactInputHeight(
                       textRef.current,
                       compactInputWidth,
                     );
-                    const nextHeight = Math.max(measured, estimated);
                     hasMeasuredContentHeightRef.current = true;
                     setInputContentHeight((current) =>
-                      resolveNextInputContentHeight({
+                      resolveMeasuredInputContentHeight({
                         current,
-                        next: nextHeight,
-                        source: 'measured',
-                        hasMeasured: true,
+                        measuredHeight: event.nativeEvent.contentSize.height,
+                        estimatedHeight: estimated,
+                        currentlyExpanded: composerExpanded,
                       }),
                     );
                   }}

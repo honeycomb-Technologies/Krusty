@@ -8,9 +8,11 @@ import {
   INPUT_LINE_HEIGHT,
   countVisualLinesForSegment,
   estimateCompactInputHeight,
+  normalizeMeasuredContentHeight,
   resolveComposerBarHeight,
   resolveComposerContentHeight,
   resolveComposerInputHeight,
+  resolveMeasuredInputContentHeight,
   resolveNextInputContentHeight,
   shouldExpandComposerHeight,
 } from '../components/chat/composerGrowth';
@@ -172,7 +174,7 @@ Deno.test('expand/collapse thresholds use hysteresis around wrap boundaries', ()
   );
 });
 
-Deno.test('estimate may grow after measurement but must not shrink', () => {
+Deno.test('estimate opens soft wrap but does not pin a tall floor', () => {
   // Soft wrap: first measured sample is often still ~one line while the view
   // is clamped. Estimate must still be allowed to open the field.
   const grown = resolveNextInputContentHeight({
@@ -183,15 +185,18 @@ Deno.test('estimate may grow after measurement but must not shrink', () => {
   });
   assert(grown === 44, `estimate must grow after measurement, got ${grown}`);
 
+  // Once multi-line measured content is authoritative, estimates must not
+  // shrink the bar — measured samples own shrink (or empty-text reset).
   const blockedShrink = resolveNextInputContentHeight({
     current: 66,
     next: 22,
     source: 'estimate',
     hasMeasured: true,
+    measuredAuthoritative: true,
   });
   assert(
     blockedShrink === 66,
-    `estimate must not shrink after measurement, got ${blockedShrink}`,
+    `estimate must not shrink once measured is authoritative, got ${blockedShrink}`,
   );
 
   const bootstrapShrink = resolveNextInputContentHeight({
@@ -203,6 +208,19 @@ Deno.test('estimate may grow after measurement but must not shrink', () => {
   assert(
     bootstrapShrink === 22,
     `estimate may shrink before measurement, got ${bootstrapShrink}`,
+  );
+
+  // Still single-line bootstrap: estimate may follow the draft down.
+  const preAuthShrink = resolveNextInputContentHeight({
+    current: 44,
+    next: 22,
+    source: 'estimate',
+    hasMeasured: true,
+    measuredAuthoritative: false,
+  });
+  assert(
+    preAuthShrink === 22,
+    `estimate may shrink before multi-line measure, got ${preAuthShrink}`,
   );
 
   const measured = resolveNextInputContentHeight({
@@ -242,5 +260,190 @@ Deno.test('input height always tracks content so soft wrap can remeasure', () =>
   assert(
     resolveComposerInputHeight(INPUT_LINE_HEIGHT, false) === INPUT_LINE_HEIGHT,
     'collapsed single-line input stays one row without expanded padding',
+  );
+});
+
+Deno.test('padding-inclusive contentSize normalizes to pure line-stack height', () => {
+  const pad = INPUT_EXPANDED_VERTICAL_PADDING * 2;
+  const twoLines = INPUT_LINE_HEIGHT * 2;
+  const threeLines = INPUT_LINE_HEIGHT * 3;
+
+  // Expanded field: native often reports text + vertical padding.
+  const normalizedTwo = normalizeMeasuredContentHeight(twoLines + pad, {
+    currentlyExpanded: true,
+    estimatedHeight: twoLines,
+  });
+  assert(
+    normalizedTwo === twoLines,
+    `expected pad stripped to ${twoLines}, got ${normalizedTwo}`,
+  );
+
+  const normalizedThree = normalizeMeasuredContentHeight(threeLines + pad, {
+    currentlyExpanded: true,
+    estimatedHeight: threeLines,
+  });
+  assert(
+    normalizedThree === threeLines,
+    `expected pad stripped to ${threeLines}, got ${normalizedThree}`,
+  );
+
+  // Pure text samples must pass through unchanged.
+  assert(
+    normalizeMeasuredContentHeight(twoLines, {
+      currentlyExpanded: true,
+      estimatedHeight: twoLines,
+    }) === twoLines,
+    'pure two-line measure must not strip',
+  );
+});
+
+Deno.test('measured path stabilizes 2→3 line padding thrash', () => {
+  const pad = INPUT_EXPANDED_VERTICAL_PADDING * 2;
+  const twoLines = INPUT_LINE_HEIGHT * 2;
+  const threeLines = INPUT_LINE_HEIGHT * 3;
+
+  // Simulate the thrash loop: pure ↔ padded contentSize at two lines, then
+  // advance to three. Heights must stay line-aligned and bar steps 68 → 90.
+  let content = resolveMeasuredInputContentHeight({
+    current: INPUT_LINE_HEIGHT,
+    measuredHeight: twoLines + pad,
+    estimatedHeight: twoLines,
+    currentlyExpanded: false,
+  });
+  assert(content === twoLines, `two-line open should settle at ${twoLines}, got ${content}`);
+
+  // Oscillating pad-inflated samples must not inflate stored content.
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: twoLines,
+    estimatedHeight: twoLines,
+    currentlyExpanded: true,
+  });
+  assert(content === twoLines, `pure remeasure must stay at ${twoLines}, got ${content}`);
+
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: twoLines + pad,
+    estimatedHeight: twoLines,
+    currentlyExpanded: true,
+  });
+  assert(
+    content === twoLines,
+    `padded remeasure must not re-inflate past ${twoLines}, got ${content}`,
+  );
+
+  // Sub-half-line measured shrink noise is ignored.
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: twoLines - 8,
+    estimatedHeight: twoLines,
+    currentlyExpanded: true,
+  });
+  assert(
+    content === twoLines,
+    `sub-line measured shrink must be ignored, got ${content}`,
+  );
+
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: threeLines + pad,
+    estimatedHeight: threeLines,
+    currentlyExpanded: true,
+  });
+  assert(content === threeLines, `three-line step should settle at ${threeLines}, got ${content}`);
+
+  const barTwo = resolveComposerBarHeight(twoLines, false, COMPOSER_PILL_HEIGHT, true);
+  const barThree = resolveComposerBarHeight(threeLines, false, COMPOSER_PILL_HEIGHT, true);
+  assert(
+    barTwo === twoLines + pad + INPUT_GROWTH_CHROME,
+    `expected stable two-line bar 68, got ${barTwo}`,
+  );
+  assert(
+    barThree === threeLines + pad + INPUT_GROWTH_CHROME,
+    `expected stable three-line bar 90, got ${barThree}`,
+  );
+  assert(barThree - barTwo === INPUT_LINE_HEIGHT, `2→3 bar step must be one line, got ${barThree - barTwo}`);
+});
+
+Deno.test('measured shrink of a full line still collapses content', () => {
+  // Real line deletion (22px) must still shrink; only sub-half-line noise is sticky.
+  const shrunk = resolveNextInputContentHeight({
+    current: INPUT_LINE_HEIGHT * 3,
+    next: INPUT_LINE_HEIGHT * 2,
+    source: 'measured',
+    hasMeasured: true,
+  });
+  assert(
+    shrunk === INPUT_LINE_HEIGHT * 2,
+    `full-line measured shrink must apply, got ${shrunk}`,
+  );
+
+  const sticky = resolveNextInputContentHeight({
+    current: INPUT_LINE_HEIGHT * 2,
+    next: INPUT_LINE_HEIGHT * 2 - 8,
+    source: 'measured',
+    hasMeasured: true,
+  });
+  assert(
+    sticky === INPUT_LINE_HEIGHT * 2,
+    `8px measured shrink must stick at current, got ${sticky}`,
+  );
+});
+
+Deno.test('measured path shrinks with draft instead of estimate floor', () => {
+  const pad = INPUT_EXPANDED_VERTICAL_PADDING * 2;
+  const oneLine = INPUT_LINE_HEIGHT;
+  const twoLines = INPUT_LINE_HEIGHT * 2;
+  const threeLines = INPUT_LINE_HEIGHT * 3;
+  const fourLines = INPUT_LINE_HEIGHT * 4;
+
+  // Regression: flooring measured at estimate kept the bar at max until the
+  // draft was fully cleared. Measured multi-line samples must win on shrink.
+  let content = resolveMeasuredInputContentHeight({
+    current: oneLine,
+    measuredHeight: fourLines + pad,
+    estimatedHeight: fourLines,
+    currentlyExpanded: true,
+  });
+  assert(content === fourLines, `open at four lines, got ${content}`);
+
+  // Estimate still claims four lines (stale aggressive wrap), measured says three.
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: threeLines + pad,
+    estimatedHeight: fourLines,
+    currentlyExpanded: true,
+  });
+  assert(
+    content === threeLines,
+    `measured three-line shrink must beat stale estimate floor, got ${content}`,
+  );
+
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: twoLines,
+    estimatedHeight: threeLines,
+    currentlyExpanded: true,
+  });
+  assert(content === twoLines, `measured two-line shrink, got ${content}`);
+
+  content = resolveMeasuredInputContentHeight({
+    current: content,
+    measuredHeight: oneLine,
+    estimatedHeight: oneLine,
+    currentlyExpanded: true,
+  });
+  assert(content === oneLine, `measured one-line shrink, got ${content}`);
+
+  // Soft-wrap stall: measured stuck at one line while estimate needs two.
+  const opened = resolveMeasuredInputContentHeight({
+    current: oneLine,
+    measuredHeight: oneLine,
+    estimatedHeight: twoLines,
+    currentlyExpanded: false,
+  });
+  assert(
+    opened === twoLines,
+    `clamped one-line measure must open via estimate bootstrap, got ${opened}`,
   );
 });

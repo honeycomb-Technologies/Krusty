@@ -27,6 +27,167 @@ export const COMPOSER_EXPAND_THRESHOLD = INPUT_LINE_HEIGHT + 4;
 export const COMPOSER_COLLAPSE_THRESHOLD = INPUT_LINE_HEIGHT + 1;
 /** Ignore tiny content-size jitter from iOS UITextView measurement noise. */
 export const COMPOSER_HEIGHT_EPSILON = 1;
+/**
+ * Ignore measured shrinks smaller than half a line. Padding/view remeasures
+ * often bounce 8–16px without a real line change; full line steps stay intact.
+ */
+export const COMPOSER_MEASURED_SHRINK_MIN = INPUT_LINE_HEIGHT / 2;
+
+/** Max content-box height (line stack only, no expanded padding / bar chrome). */
+export function maxComposerContentHeight(): number {
+  return (
+    COMPOSER_MAX_HEIGHT -
+    INPUT_GROWTH_CHROME -
+    INPUT_EXPANDED_VERTICAL_PADDING * 2
+  );
+}
+
+/**
+ * Snap a content-box height to whole visual lines.
+ * Keeps bar steps on a stable 22px grid instead of fractional thrash.
+ */
+export function snapContentHeightToLines(contentHeight: number): number {
+  if (contentHeight <= 0) return 0;
+  const maxContent = maxComposerContentHeight();
+  const lines = Math.max(
+    1,
+    Math.round(contentHeight / INPUT_LINE_HEIGHT),
+  );
+  return Math.min(maxContent, lines * INPUT_LINE_HEIGHT);
+}
+
+/**
+ * Normalize a native `contentSize.height` sample to content-box height.
+ *
+ * The expanded TextInput applies vertical padding *inside* its explicit height.
+ * On iOS/Android, `onContentSizeChange` often reports text + that padding (or
+ * tracks the view box). Feeding that straight back into height math double-counts
+ * pad and produces oversized empty space under the draft.
+ *
+ * Returns line-stack height only — never includes expanded vertical padding.
+ */
+export function normalizeMeasuredContentHeight(
+  measuredHeight: number,
+  options: {
+    currentlyExpanded?: boolean;
+    estimatedHeight?: number;
+  } = {},
+): number {
+  if (measuredHeight <= 0) return 0;
+
+  const maxContent = maxComposerContentHeight();
+  const pad = INPUT_EXPANDED_VERTICAL_PADDING * 2;
+  const estimated = Math.max(0, options.estimatedHeight ?? 0);
+  const raw = Math.ceil(measuredHeight);
+
+  const pure = Math.min(maxContent, raw);
+  const stripped = Math.min(maxContent, Math.max(0, raw - pad));
+
+  const nearestLines = (value: number) =>
+    Math.max(
+      INPUT_LINE_HEIGHT,
+      Math.round(value / INPUT_LINE_HEIGHT) * INPUT_LINE_HEIGHT,
+    );
+
+  const strippedLines = nearestLines(Math.max(INPUT_LINE_HEIGHT, stripped));
+  const distance = (a: number, b: number) => Math.abs(a - b);
+
+  // Raw sample sits on (N lines + pad) while stripped sits on N lines.
+  const rawLooksLikePaddedLines =
+    stripped >= INPUT_LINE_HEIGHT - COMPOSER_HEIGHT_EPSILON &&
+    distance(stripped, strippedLines) <= 3 &&
+    distance(raw, strippedLines + pad) <= 3;
+
+  // Prefer the candidate closer to the soft-wrap estimate.
+  const strippedCloserToEstimate =
+    estimated > 0 &&
+    distance(stripped, estimated) + COMPOSER_HEIGHT_EPSILON <
+      distance(pure, estimated);
+
+  // View-capped / oversize samples that only fit after stripping pad.
+  const pureOvershootsMax =
+    raw > maxContent && stripped <= maxContent + COMPOSER_HEIGHT_EPSILON;
+
+  // Expanded field + estimate already multi-line: pad-inflated pure sample.
+  const expandedPaddedOvershoot =
+    options.currentlyExpanded === true &&
+    estimated > COMPOSER_EXPAND_THRESHOLD &&
+    pure > estimated + pad / 2 &&
+    distance(stripped, estimated) <= INPUT_LINE_HEIGHT / 2;
+
+  // Expanded field reporting near the current view height rather than text.
+  // contentSize that lands on contentBox+pad while estimate is shorter is view tracking.
+  const looksLikeViewHeight =
+    options.currentlyExpanded === true &&
+    estimated > 0 &&
+    pure >= estimated + pad - COMPOSER_HEIGHT_EPSILON &&
+    pure <= estimated + pad + INPUT_LINE_HEIGHT / 2 + COMPOSER_HEIGHT_EPSILON;
+
+  const shouldStrip =
+    rawLooksLikePaddedLines ||
+    strippedCloserToEstimate ||
+    pureOvershootsMax ||
+    expandedPaddedOvershoot ||
+    looksLikeViewHeight;
+
+  const contentBox = shouldStrip ? stripped : pure;
+  return snapContentHeightToLines(
+    Math.min(maxContent, Math.max(0, contentBox)),
+  );
+}
+
+/**
+ * Whether a measured sample still looks single-line-clamped while the draft
+ * clearly needs more rows (classic iOS soft-wrap stall).
+ */
+export function measuredLooksSoftWrapClamped(
+  normalizedMeasured: number,
+  estimatedHeight: number,
+): boolean {
+  return (
+    normalizedMeasured > 0 &&
+    normalizedMeasured <= INPUT_LINE_HEIGHT + COMPOSER_HEIGHT_EPSILON &&
+    estimatedHeight > COMPOSER_EXPAND_THRESHOLD
+  );
+}
+
+/**
+ * Full measured-sample pipeline.
+ *
+ * Standard auto-grow model (iOS/RN):
+ * - Width is fixed by layout; text wraps inside that width.
+ * - Height follows contentSize (content-box), min one line, max composer cap.
+ *
+ * Estimate is only a bootstrap when iOS keeps contentSize stuck at one line
+ * while soft wrap already needs more. Once measured is multi-line (or not
+ * clamped), measured is authoritative for both grow and shrink.
+ *
+ * Do NOT floor measured at estimate forever — that ratcheted the bar tall and
+ * refused to shrink until the draft was fully cleared.
+ */
+export function resolveMeasuredInputContentHeight(options: {
+  current: number;
+  measuredHeight: number;
+  estimatedHeight: number;
+  currentlyExpanded: boolean;
+}): number {
+  const estimated = Math.max(0, options.estimatedHeight);
+  const normalized = normalizeMeasuredContentHeight(options.measuredHeight, {
+    currentlyExpanded: options.currentlyExpanded,
+    estimatedHeight: estimated,
+  });
+
+  const next = measuredLooksSoftWrapClamped(normalized, estimated)
+    ? snapContentHeightToLines(estimated)
+    : normalized;
+
+  return resolveNextInputContentHeight({
+    current: options.current,
+    next,
+    source: 'measured',
+    hasMeasured: true,
+  });
+}
 
 /**
  * Count visual lines for one hard-break segment using word-aware packing.
@@ -106,7 +267,7 @@ export function estimateCompactInputHeight(
     0,
   );
   return Math.min(
-    COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME - INPUT_EXPANDED_VERTICAL_PADDING * 2,
+    maxComposerContentHeight(),
     visualLineCount * INPUT_LINE_HEIGHT,
   );
 }
@@ -126,16 +287,30 @@ export function shouldExpandComposerHeight(
  *
  * Soft-wrap edge: after the first single-line contentSize sample, iOS often
  * keeps reporting ~one line while the view height is clamped. Estimates must
- * still be allowed to *grow* so the field can open; they must not *shrink*
- * after measurement (that reintroduced thrash).
+ * still be allowed to *grow* so the field can open.
+ *
+ * After a real multi-line (or non-clamped) measure, measured is authoritative
+ * for shrink. Estimates may still grow to open a soft-wrap stall, but they
+ * must not keep the bar ratcheted tall after the draft shortens.
  */
 export function resolveNextInputContentHeight(options: {
   current: number;
   next: number;
   source: 'estimate' | 'measured';
   hasMeasured: boolean;
+  /**
+   * When true, measured content is multi-line / unclamped and owns height.
+   * Estimates then only grow (soft-wrap bootstrap), never pin a tall floor.
+   */
+  measuredAuthoritative?: boolean;
 }): number {
-  const { current, next, source, hasMeasured } = options;
+  const {
+    current,
+    next,
+    source,
+    hasMeasured,
+    measuredAuthoritative = false,
+  } = options;
   if (next <= 0) return 0;
 
   if (Math.abs(next - current) <= COMPOSER_HEIGHT_EPSILON) {
@@ -145,12 +320,18 @@ export function resolveNextInputContentHeight(options: {
   if (source === 'estimate') {
     // Always allow estimate growth (soft wrap / paste before remeasure).
     if (next > current) return next;
-    // Estimates may shrink only before a real measurement exists.
-    if (!hasMeasured) return next;
+    // Before measurement, or while still single-line bootstrap, estimates may
+    // shrink with the draft. Once multi-line measured content exists, shrink
+    // is owned by measured samples (or empty-text reset) — never by estimate.
+    if (!hasMeasured || !measuredAuthoritative) return next;
     return current;
   }
 
-  // Measured samples grow and shrink (with epsilon already applied).
+  // Measured samples grow freely. Ignore sub-half-line shrinks — those are
+  // almost always padding/view remeasure noise between stable line steps.
+  if (next < current && current - next < COMPOSER_MEASURED_SHRINK_MIN) {
+    return current;
+  }
   return next;
 }
 
@@ -161,7 +342,7 @@ export function resolveNextInputContentHeight(options: {
 export function resolveComposerContentHeight(contentHeight: number): number {
   if (contentHeight <= 0) return INPUT_LINE_HEIGHT;
   return Math.min(
-    COMPOSER_MAX_HEIGHT - INPUT_GROWTH_CHROME - INPUT_EXPANDED_VERTICAL_PADDING * 2,
+    maxComposerContentHeight(),
     Math.max(INPUT_LINE_HEIGHT, contentHeight),
   );
 }
