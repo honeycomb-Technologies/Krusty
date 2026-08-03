@@ -95,9 +95,11 @@ const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
 const STREAM_STICK_MIN_INTERVAL_MS = 32;
 /** One delayed measurement pass after stream layout settles. */
 const STREAM_STICK_FALLBACK_MS = 120;
-/** Keep cold mode activation bounded; older turns enter only as the user scrolls up. */
-const INITIAL_HISTORICAL_TURN_COUNT = 1;
-const HISTORICAL_TURN_PAGE_SIZE = 2;
+/** Keep cold mode activation bounded; older turns enter only as the user scrolls up.
+ *  Prior defaults (1 / 2) made long chats look like earlier messages were deleted
+ *  once the live turn advanced. Keep a usable recent window mounted by default. */
+const INITIAL_HISTORICAL_TURN_COUNT = 24;
+const HISTORICAL_TURN_PAGE_SIZE = 16;
 
 interface CachedTranscriptScrollState {
   offset: number;
@@ -363,17 +365,24 @@ function ChatTranscriptComponent({
       }
 
       let count = Math.min(current.count, historicalTurns.length);
-      if (
-        historicalTurns.length > current.sourceLength
-        && current.preserveRevealedWindow
-      ) {
-        // Keep deliberately revealed rows mounted when the former live turn
-        // becomes historical. Default auto-follow stays bounded at one row;
-        // only an explicit upward page/scroll target grows with new turns.
-        count = Math.min(
-          historicalTurns.length,
-          current.count + historicalTurns.length - current.sourceLength,
-        );
+      if (historicalTurns.length > current.sourceLength) {
+        if (current.preserveRevealedWindow) {
+          // Keep deliberately revealed rows mounted when the former live turn
+          // becomes historical. Explicit upward page/scroll targets grow with
+          // new turns so older context does not vanish mid-session.
+          count = Math.min(
+            historicalTurns.length,
+            current.count + historicalTurns.length - current.sourceLength,
+          );
+        } else {
+          // Auto-follow keeps the newest recent window mounted (not a single
+          // row). Without this, finishing a turn unmounts earlier messages and
+          // looks like conversation text was deleted.
+          count = Math.min(
+            historicalTurns.length,
+            Math.max(count, initialHistoricalTurnCount),
+          );
+        }
       } else if (count === 0 && initialHistoricalTurnCount > 0) {
         count = initialHistoricalTurnCount;
       }

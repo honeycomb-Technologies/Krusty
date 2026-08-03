@@ -54,7 +54,9 @@ interface StreamCallbackDependencies {
 function appendBounded(existing: string, delta: string, max: number): string {
 	const next = existing + delta;
 	if (next.length <= max) return next;
-	return next.slice(next.length - max);
+	// Keep the start of the stream. Tail-slicing deleted early prose mid-turn and
+	// made long assistant replies look like earlier text was erased while tools ran.
+	return next.slice(0, max);
 }
 
 function appendRenderPart(ref: AssistantMessageRef, part: ChatRenderPart) {
