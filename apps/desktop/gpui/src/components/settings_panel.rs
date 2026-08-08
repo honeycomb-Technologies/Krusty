@@ -11,6 +11,7 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
+use mitsuro_desktop_backend::BackendKind;
 
 use crate::app::{AccountSession, MitsuroApp, SettingsNavGroup, SettingsSection, UiConnection};
 use crate::theme;
@@ -2059,6 +2060,12 @@ fn hooks_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
 
 fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let chip = app.connection().chip_label().to_string();
+    let detail = app
+        .connection()
+        .detail()
+        .unwrap_or("No transport detail available")
+        .to_string();
+    let active = app.active_backend_kind();
     let servers: Vec<_> = app.mcp_servers().iter().cloned().collect();
     div()
         .id("settings-connections")
@@ -2066,27 +2073,42 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
         .flex_col()
         .gap(px(22.0))
         .max_w(px(720.0))
-        .child(group_label("App-server"))
+        .child(group_label("Agent backend"))
+        .child(
+            settings_card()
+                .child(backend_choice_row(
+                    BackendKind::MitsuroHttp,
+                    "Mitsuro server",
+                    "Native sessions, Hive, schedules, files, skills, and extensions over HTTP/SSE",
+                    active,
+                    app.connection(),
+                    cx,
+                ))
+                .child(card_divider())
+                .child(backend_choice_row(
+                    BackendKind::CodexStdio,
+                    "ChatGPT / Codex",
+                    "Managed local Codex app-server process over stdio",
+                    active,
+                    app.connection(),
+                    cx,
+                )),
+        )
+        .child(group_label("Connection"))
         .child(
             settings_card()
                 .child(info_row("Status", &chip))
                 .child(card_divider())
-                .child(toggle_row(
-                    "Auto-reconnect",
-                    "Retry app-server when the socket drops",
-                    "auto_reconnect",
-                    true,
-                    app,
-                    cx,
+                .child(info_row(
+                    "Active transport",
+                    active
+                        .map(MitsuroApp::backend_display_name)
+                        .unwrap_or("None"),
                 ))
                 .child(card_divider())
-                .child(action_row(
-                    "Refresh status",
-                    "Re-probe connection and account",
-                    "Refresh",
-                    "refresh-conn",
-                    cx,
-                )),
+                .child(info_row("Detail", &detail))
+                .child(card_divider())
+                .child(reconnect_backend_row(cx)),
         )
         .child(group_label("MCP servers"))
         .child(
@@ -2112,13 +2134,188 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                     ))
                 })
                 .child(card_divider())
-                .child(action_row(
+                .child(unavailable_action_row(
                     "Add server",
                     "Connect to a custom MCP (stdio or HTTP)",
-                    "Add",
-                    "mcp-add-server",
-                    cx,
+                    "Not wired",
                 )),
+        )
+}
+
+fn backend_choice_row(
+    kind: BackendKind,
+    title: &str,
+    subtitle: &str,
+    active: Option<BackendKind>,
+    connection: &UiConnection,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let selected = active == Some(kind);
+    let state = if selected {
+        connection.chip_label()
+    } else {
+        "Switch"
+    };
+    let title = title.to_owned();
+    let subtitle = subtitle.to_owned();
+    div()
+        .id(SharedId(format!("backend-choice-{}", kind.id())))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(13.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(move |app, _, _, cx| app.switch_backend(kind, cx)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(subtitle),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(9.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(if selected {
+                    theme::hex_alpha(0x3b82f6, 0.16)
+                } else {
+                    colors.bg_button_secondary
+                })
+                .text_xs()
+                .font_weight(if selected {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    colors.accent
+                } else {
+                    colors.text_secondary
+                })
+                .child(state),
+        )
+}
+
+fn reconnect_backend_row(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("reconnect-backend")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Reconnect"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Restart the selected transport and reload its catalogs"),
+                ),
+        )
+        .child(
+            div()
+                .id("reconnect-backend-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|app, _, _, cx| app.reconnect_backend(cx)))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text_secondary)
+                        .child("Reconnect"),
+                ),
+        )
+}
+
+fn unavailable_action_row(title: &str, subtitle: &str, label: &str) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title.to_owned()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(subtitle.to_owned()),
+                ),
+        )
+        .child(
+            div()
+                .px(px(9.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(colors.bg_button_secondary)
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label.to_owned()),
         )
 }
 

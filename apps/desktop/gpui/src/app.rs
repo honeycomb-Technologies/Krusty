@@ -759,6 +759,23 @@ impl AccountSession {
         }
     }
 
+    pub fn empty(source: &'static str) -> Self {
+        Self {
+            signed_in: false,
+            email_display: None,
+            plan_label: None,
+            usage: GetAccountTokenUsageResponse {
+                summary: Default::default(),
+                daily_usage_buckets: None,
+            },
+            rate_limits: GetAccountRateLimitsResponse {
+                rate_limits: Default::default(),
+            },
+            login_stub_detail: None,
+            source,
+        }
+    }
+
     pub fn primary_used_percent(&self) -> i32 {
         self.rate_limits
             .rate_limits
@@ -854,6 +871,8 @@ pub struct MitsuroApp {
     search_input: Entity<InputState>,
     search_query: String,
     backend: Option<Arc<DesktopBackend>>,
+    /// Rejects stale async bootstrap results after an in-app backend switch.
+    backend_generation: u64,
     preferences: DesktopPreferences,
     fixture: Option<Arc<FixtureBackend>>,
     turn_in_progress: bool,
@@ -1123,6 +1142,7 @@ impl MitsuroApp {
             search_input,
             search_query: String::new(),
             backend: None,
+            backend_generation: 0,
             preferences: preferences.clone(),
             fixture: Some(Arc::clone(&fixture)),
             turn_in_progress: false,
@@ -1211,6 +1231,63 @@ impl MitsuroApp {
 
     pub fn connection(&self) -> &UiConnection {
         &self.connection
+    }
+
+    pub fn active_backend_kind(&self) -> Option<BackendKind> {
+        self.backend
+            .as_ref()
+            .map(|backend| backend.kind())
+            .or(self.preferences.selected_backend)
+    }
+
+    pub fn backend_display_name(kind: BackendKind) -> &'static str {
+        match kind {
+            BackendKind::MitsuroHttp => "Mitsuro server",
+            BackendKind::CodexStdio => "ChatGPT / Codex",
+            BackendKind::CodexWebSocket => "Codex WebSocket",
+            BackendKind::Fixture => "Offline fixtures",
+        }
+    }
+
+    pub fn switch_backend(&mut self, kind: BackendKind, cx: &mut Context<Self>) {
+        if self.active_backend_kind() == Some(kind)
+            && matches!(
+                self.connection,
+                UiConnection::Ready { .. } | UiConnection::Connecting
+            )
+        {
+            self.status_line =
+                format!("{} is already selected.", Self::backend_display_name(kind)).into();
+            cx.notify();
+            return;
+        }
+        self.preferences.remember_backend(kind);
+        self.save_preferences_best_effort();
+        self.pending_start_thread = self
+            .preferences
+            .selected_session
+            .as_ref()
+            .map(BackendSessionId::qualified);
+        let selection = match kind {
+            BackendKind::MitsuroHttp => BackendSelection::MitsuroHttp,
+            BackendKind::CodexStdio => BackendSelection::CodexStdio,
+            BackendKind::CodexWebSocket => BackendSelection::CodexWebSocket,
+            BackendKind::Fixture => BackendSelection::Fixture,
+        };
+        self.connect_backend_selection(selection, cx);
+    }
+
+    pub fn reconnect_backend(&mut self, cx: &mut Context<Self>) {
+        let kind = self
+            .active_backend_kind()
+            .unwrap_or(BackendKind::MitsuroHttp);
+        let selection = match kind {
+            BackendKind::MitsuroHttp => BackendSelection::MitsuroHttp,
+            BackendKind::CodexStdio => BackendSelection::CodexStdio,
+            BackendKind::CodexWebSocket => BackendSelection::CodexWebSocket,
+            BackendKind::Fixture => BackendSelection::Fixture,
+        };
+        self.connect_backend_selection(selection, cx);
     }
 
     pub fn status_line(&self) -> &SharedString {
@@ -3363,21 +3440,34 @@ impl MitsuroApp {
     fn kick_account_refresh(&mut self, cx: &mut Context<Self>) {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
+        let generation = self.backend_generation;
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
+                            if backend.kind() == BackendKind::MitsuroHttp {
+                                let empty = AccountSession::empty("mitsuro-http");
+                                return Ok::<_, String>((
+                                    None,
+                                    empty.usage,
+                                    empty.rate_limits,
+                                    "mitsuro-http",
+                                ));
+                            }
                             let acc = backend.account_read(GetAccountParams::default()).await.ok();
                             let usage = backend
                                 .account_usage_read()
                                 .await
-                                .unwrap_or_else(|_| fixture_demo_usage());
-                            let limits = backend
-                                .account_rate_limits_read()
-                                .await
-                                .unwrap_or_else(|_| fixture_demo_rate_limits());
+                                .unwrap_or_else(|_| AccountSession::empty("app-server").usage);
+                            let limits =
+                                backend
+                                    .account_rate_limits_read()
+                                    .await
+                                    .unwrap_or_else(|_| {
+                                        AccountSession::empty("app-server").rate_limits
+                                    });
                             return Ok::<_, String>((
                                 acc.and_then(|r| r.account),
                                 usage,
@@ -3407,6 +3497,9 @@ impl MitsuroApp {
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
                 if let Ok((account, usage, limits, source)) = result {
                     app.apply_account_snapshot(account, usage, limits, source, None);
                 }
@@ -3934,11 +4027,16 @@ impl MitsuroApp {
     }
 
     pub fn voice_promo_visible(&self) -> bool {
-        !self.dismiss_voice_promo && self.is_calm_stage()
+        !self.dismiss_voice_promo
+            && self.is_calm_stage()
+            && matches!(self.connection, UiConnection::Fixture | UiConnection::Demo)
     }
 
     pub fn usage_card_visible(&self) -> bool {
-        !self.dismiss_usage_card && self.is_calm_stage()
+        !self.dismiss_usage_card
+            && self.is_calm_stage()
+            && self.account.source == "app-server"
+            && self.account.is_rate_limited_out()
     }
 
     /// Profile row label for sidebar footer / Settings.
@@ -3952,22 +4050,16 @@ impl MitsuroApp {
                 return SharedString::from(name.to_string());
             }
         }
-        if self.account.source == "fixture" || self.account.signed_in {
-            // Prefer friendly fixture identity over masked email.
-            if self.account.source == "fixture"
-                || self
-                    .account
-                    .email_display
-                    .as_deref()
-                    .is_some_and(|e| e.contains('@'))
-            {
-                return SharedString::from(mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME);
-            }
-            if let Some(email) = self.account.email_display.as_deref() {
-                return SharedString::from(email.to_string());
-            }
+        if self.account.source == "fixture" {
+            return SharedString::from(mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME);
         }
-        SharedString::from(mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME)
+        if self.account.signed_in {
+            return SharedString::from("ChatGPT account");
+        }
+        if self.active_backend_kind() == Some(BackendKind::MitsuroHttp) {
+            return SharedString::from("Mitsuro");
+        }
+        SharedString::from("Account")
     }
 
     /// Plan chip for profile footer (e.g. "Pro"). Empty when unknown.
@@ -5671,6 +5763,33 @@ impl MitsuroApp {
         .detach();
     }
 
+    fn clear_live_backend_state(&mut self, kind: BackendKind) {
+        self.threads.clear();
+        self.selected_thread = None;
+        self.selected_chat_thread = None;
+        self.selected_codex_thread = None;
+        self.models.clear();
+        self.selected_model_id = None;
+        self.config_snippet = SharedString::from("");
+        self.skills.clear();
+        self.mcp_servers.clear();
+        self.plugins.clear();
+        self.goals.clear();
+        self.selected_goal = None;
+        self.goals_are_live_hive = false;
+        self.hive_snapshot = None;
+        self.scheduled_tasks = None;
+        self.background_processes.clear();
+        self.terminal = TerminalSession::idle(kind.id());
+        self.files = FilesSession::new(kind.id());
+        self.pending_approval = None;
+        self.fixture_resume = None;
+        self.active_turn_id = None;
+        self.turn_cancel = None;
+        self.turn_in_progress = false;
+        self.account = AccountSession::empty(kind.id());
+    }
+
     fn bootstrap_backend(&mut self, cx: &mut Context<Self>) {
         let selection = match self.preferred_backend_selection() {
             Ok(selection) => selection,
@@ -5680,15 +5799,25 @@ impl MitsuroApp {
                 return;
             }
         };
+        self.connect_backend_selection(selection, cx);
+    }
+
+    fn connect_backend_selection(&mut self, selection: BackendSelection, cx: &mut Context<Self>) {
         if matches!(selection, BackendSelection::Fixture) {
+            self.backend = None;
             self.connection = UiConnection::Fixture;
             self.status_line = "Fixture backend selected explicitly.".into();
+            self.bootstrap_fixture(cx);
             return;
         }
         if matches!(selection, BackendSelection::CodexWebSocket) {
-            self.connection = UiConnection::Fixture;
+            self.backend = None;
+            self.connection = UiConnection::Error {
+                message: "codex-ws is not implemented".to_owned(),
+            };
             self.status_line =
                 "codex-ws is not implemented yet; use codex-stdio or mitsuro-http.".into();
+            cx.notify();
             return;
         }
         let backend = match selection {
@@ -5697,9 +5826,12 @@ impl MitsuroApp {
                 match DesktopBackend::mitsuro_from_env() {
                     Ok(backend) => backend,
                     Err(error) => {
-                        self.connection = UiConnection::Fixture;
+                        self.connection = UiConnection::Error {
+                            message: error.to_string(),
+                        };
                         self.status_line =
                             format!("Mitsuro backend configuration error: {error}").into();
+                        cx.notify();
                         return;
                     }
                 }
@@ -5707,17 +5839,31 @@ impl MitsuroApp {
             BackendSelection::CodexWebSocket | BackendSelection::Fixture => unreachable!(),
         };
         let backend = Arc::new(backend);
+        let previous_backend = self.backend.take();
+        self.backend_generation = self.backend_generation.wrapping_add(1);
+        let generation = self.backend_generation;
         let backend_label = backend.kind().id();
         self.backend = Some(Arc::clone(&backend));
+        self.clear_live_backend_state(backend.kind());
         self.connection = UiConnection::Connecting;
         self.status_line = format!("Connecting to {backend_label}…").into();
+        cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { connect_list_auth_and_models(backend) })
+                .background_spawn(async move {
+                    if let Some(previous) = previous_backend {
+                        let runner = Arc::clone(&previous);
+                        let _ = previous.block_on(async move { runner.disconnect().await });
+                    }
+                    connect_list_auth_and_models(backend)
+                })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
                 match result {
                     Ok(bootstrap) => {
                         let BackendBootstrap {
@@ -5767,13 +5913,9 @@ impl MitsuroApp {
                             // Default: leave selected_thread None → calm home hero.
                             // Override via MITSURO_START_THREAD / START_MODE=thread-open.
                         }
-                        if models.is_empty() {
-                            app.apply_models(fixture_demo_models());
-                        } else {
-                            app.apply_models(
-                                models.into_iter().map(model_info_from_product).collect(),
-                            );
-                        }
+                        app.apply_models(
+                            models.into_iter().map(model_info_from_product).collect(),
+                        );
                         if let Some(snip) = config_snip {
                             app.apply_config_snippet(snip);
                         }
@@ -5883,30 +6025,12 @@ impl MitsuroApp {
                         }
                     }
                     Err(message) => {
-                        eprintln!("[mitsuro] App-server connect failed: {message}");
-                        // Fall back to fixture mode for offline chrome + streaming.
-                        app.connection = UiConnection::Fixture;
-                        app.apply_models(fixture_demo_models());
-                        app.apply_config_snippet(fixture_demo_config().settings_snippet());
-                        app.apply_skills(
-                            fixture_demo_skills()
-                                .data
-                                .into_iter()
-                                .flat_map(|e| e.skills)
-                                .collect(),
-                        );
-                        app.apply_mcp_servers(fixture_demo_mcp_servers().data);
-                        app.apply_plugins(
-                            fixture_demo_plugins()
-                                .marketplaces
-                                .into_iter()
-                                .flat_map(|m| m.plugins)
-                                .collect(),
-                        );
-                        app.status_line = format!(
-                            "App-server unavailable ({message}); fixture models + turns enabled."
-                        )
-                        .into();
+                        eprintln!("[mitsuro] backend connect failed: {message}");
+                        app.connection = UiConnection::Error {
+                            message: message.clone(),
+                        };
+                        app.account = AccountSession::empty("unavailable");
+                        app.status_line = format!("Backend unavailable · {message}").into();
                     }
                 }
                 cx.notify();
