@@ -24,14 +24,17 @@ use crate::environment::{
     EnvironmentStatusParams, EnvironmentStatusResponse,
 };
 use crate::extensions::{
-    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpServerToolCallParams,
-    McpServerToolCallResponse, PluginInstalledParams, PluginInstalledResponse, PluginListParams,
-    PluginListResponse, PluginReadParams, PluginReadResponse,
+    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpAuthStatus, McpServerInfo,
+    McpServerStatus, McpServerToolCallParams, McpServerToolCallResponse, PluginAuthPolicy,
+    PluginAvailability, PluginInstallPolicy, PluginInstalledParams, PluginInstalledResponse,
+    PluginInterface, PluginListParams, PluginListResponse, PluginMarketplaceEntry,
+    PluginReadParams, PluginReadResponse, PluginSource, PluginSummary,
 };
 use crate::fs::{
-    FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryParams, FsReadDirectoryResponse,
-    FsReadFileParams, FsReadFileResponse, FuzzyFileSearchParams, FuzzyFileSearchResponse,
-    FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
+    fuzzy_score_name, FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadDirectoryResponse, FsReadFileParams, FsReadFileResponse,
+    FuzzyFileSearchMatchType, FuzzyFileSearchParams, FuzzyFileSearchResponse,
+    FuzzyFileSearchResult, FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
@@ -42,11 +45,11 @@ use crate::process::{
 };
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelInfo, ModelListParams,
-    ModelListResponse, SkillsListParams, SkillsListResponse, ThreadArchiveParams,
-    ThreadArchiveResponse, ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
-    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams,
-    ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ModelListResponse, SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse,
+    ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams, ThreadDeleteResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
     ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
     ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
@@ -331,6 +334,33 @@ fn session_json(session: &mitsuro_client::SessionInfo) -> Value {
     })
 }
 
+fn collect_fuzzy_matches(
+    root: &str,
+    query: &str,
+    entries: Vec<mitsuro_client::FileTreeEntry>,
+    matches: &mut Vec<FuzzyFileSearchResult>,
+) {
+    for entry in entries {
+        if let Some((score, indices)) = fuzzy_score_name(query, &entry.name) {
+            matches.push(FuzzyFileSearchResult {
+                root: root.to_owned(),
+                path: entry.path.clone(),
+                match_type: if entry.is_dir {
+                    FuzzyFileSearchMatchType::Directory
+                } else {
+                    FuzzyFileSearchMatchType::File
+                },
+                file_name: entry.name,
+                score,
+                indices: Some(indices),
+            });
+        }
+        if let Some(children) = entry.children {
+            collect_fuzzy_matches(root, query, children, matches);
+        }
+    }
+}
+
 #[async_trait]
 impl AgentBackend for MitsuroServerBackend {
     fn name(&self) -> &'static str {
@@ -356,6 +386,12 @@ impl AgentBackend for MitsuroServerBackend {
                 | "turn/start"
                 | "turn/interrupt"
                 | "model/list"
+                | "skills/list"
+                | "fs/readDirectory"
+                | "fs/readFile"
+                | "fuzzyFileSearch"
+                | "mcpServerStatus/list"
+                | "plugin/list"
         )
     }
 
@@ -575,9 +611,28 @@ impl AgentBackend for MitsuroServerBackend {
     }
 
     async fn skills_list(&self, _params: SkillsListParams) -> Result<SkillsListResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::skills_list — not implemented".into(),
-        ))
+        let skills = self
+            .client
+            .list_skills()
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?
+            .into_iter()
+            .map(|skill| SkillMetadata {
+                name: skill.name,
+                description: skill.description,
+                enabled: skill.enabled,
+                path: skill.path,
+                scope: skill.source,
+                short_description: None,
+            })
+            .collect();
+        Ok(SkillsListResponse {
+            data: vec![SkillsListEntry {
+                cwd: String::new(),
+                skills,
+                errors: Vec::new(),
+            }],
+        })
     }
 
     async fn turn_start(&self, _params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -626,17 +681,35 @@ impl AgentBackend for MitsuroServerBackend {
 
     async fn fs_read_directory(
         &self,
-        _params: FsReadDirectoryParams,
+        params: FsReadDirectoryParams,
     ) -> Result<FsReadDirectoryResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::fs_read_directory — not implemented".into(),
-        ))
+        let tree = self
+            .client
+            .file_tree(&params.path, 1)
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(FsReadDirectoryResponse {
+            entries: tree
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    if entry.is_dir {
+                        FsReadDirectoryEntry::directory(entry.name)
+                    } else {
+                        FsReadDirectoryEntry::file(entry.name)
+                    }
+                })
+                .collect(),
+        })
     }
 
-    async fn fs_read_file(&self, _params: FsReadFileParams) -> Result<FsReadFileResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::fs_read_file — not implemented".into(),
-        ))
+    async fn fs_read_file(&self, params: FsReadFileParams) -> Result<FsReadFileResponse> {
+        let file = self
+            .client
+            .read_file(&params.path)
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(FsReadFileResponse::from_text(&file.content))
     }
 
     async fn fs_get_metadata(&self, _params: FsGetMetadataParams) -> Result<FsGetMetadataResponse> {
@@ -647,11 +720,25 @@ impl AgentBackend for MitsuroServerBackend {
 
     async fn fuzzy_file_search(
         &self,
-        _params: FuzzyFileSearchParams,
+        params: FuzzyFileSearchParams,
     ) -> Result<FuzzyFileSearchResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::fuzzy_file_search — not implemented".into(),
-        ))
+        let mut files = Vec::new();
+        for root in &params.roots {
+            let tree = self
+                .client
+                .file_tree(root, 10)
+                .await
+                .map_err(|error| AgentError::Other(error.to_string()))?;
+            collect_fuzzy_matches(root, &params.query, tree.entries, &mut files);
+        }
+        files.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        files.truncate(200);
+        Ok(FuzzyFileSearchResponse { files })
     }
 
     async fn fuzzy_file_search_session_start(
@@ -685,9 +772,42 @@ impl AgentBackend for MitsuroServerBackend {
         &self,
         _params: ListMcpServerStatusParams,
     ) -> Result<ListMcpServerStatusResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::mcp_server_status_list — not implemented".into(),
-        ))
+        let data = self
+            .client
+            .list_mcp_servers()
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?
+            .into_iter()
+            .map(|server| McpServerStatus {
+                name: server.name.clone(),
+                server_info: Some(McpServerInfo {
+                    name: server.name,
+                    version: String::new(),
+                    title: None,
+                    description: Some(server.status),
+                    website_url: None,
+                }),
+                tools: server
+                    .tools
+                    .into_iter()
+                    .filter_map(|tool| {
+                        let name = tool.get("name")?.as_str()?.to_owned();
+                        Some((name, tool))
+                    })
+                    .collect(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                auth_status: if server.connected {
+                    McpAuthStatus::Unsupported
+                } else {
+                    McpAuthStatus::NotLoggedIn
+                },
+            })
+            .collect();
+        Ok(ListMcpServerStatusResponse {
+            data,
+            next_cursor: None,
+        })
     }
 
     async fn mcp_server_tool_call(
@@ -700,9 +820,57 @@ impl AgentBackend for MitsuroServerBackend {
     }
 
     async fn plugin_list(&self, _params: PluginListParams) -> Result<PluginListResponse> {
-        Err(AgentError::NotImplemented(
-            "MitsuroServerBackend::plugin_list — not implemented".into(),
-        ))
+        let overview = self
+            .client
+            .list_extensions()
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        let plugins = overview
+            .extensions
+            .into_iter()
+            .map(|extension| PluginSummary {
+                id: extension.id,
+                name: extension.name.clone(),
+                source: PluginSource::Local {
+                    path: extension.path,
+                },
+                installed: true,
+                enabled: true,
+                install_policy: PluginInstallPolicy::NotAvailable,
+                auth_policy: PluginAuthPolicy::OnUse,
+                availability: PluginAvailability::Available,
+                version: Some(extension.version.clone()),
+                local_version: Some(extension.version),
+                remote_plugin_id: None,
+                interface: Some(PluginInterface {
+                    display_name: Some(extension.name),
+                    short_description: Some(format!(
+                        "{} tool(s) · {} command(s)",
+                        extension.tools.len(),
+                        extension.commands.len()
+                    )),
+                    category: Some("agent extension".to_owned()),
+                    capabilities: extension
+                        .tools
+                        .into_iter()
+                        .chain(extension.commands)
+                        .collect(),
+                    ..Default::default()
+                }),
+                keywords: vec!["mitsuro".to_owned(), "extension".to_owned()],
+                extra: Default::default(),
+            })
+            .collect();
+        Ok(PluginListResponse {
+            marketplaces: vec![PluginMarketplaceEntry {
+                name: "Mitsuro agent extensions".to_owned(),
+                path: None,
+                plugins,
+                interface: None,
+            }],
+            marketplace_load_errors: overview.diagnostics,
+            featured_plugin_ids: Vec::new(),
+        })
     }
 
     async fn plugin_read(&self, _params: PluginReadParams) -> Result<PluginReadResponse> {
@@ -844,6 +1012,28 @@ mod tests {
             .await
             .expect("model list");
         assert!(!models.data.is_empty());
+        let workspace = std::env::current_dir()
+            .expect("current directory")
+            .display()
+            .to_string();
+        let files = backend
+            .fs_read_directory(FsReadDirectoryParams::new(workspace))
+            .await
+            .expect("file directory");
+        assert!(!files.entries.is_empty());
+        let skills = backend
+            .skills_list(SkillsListParams::default())
+            .await
+            .expect("skills list");
+        assert!(skills.skill_count() > 0);
+        backend
+            .mcp_server_status_list(ListMcpServerStatusParams::default())
+            .await
+            .expect("MCP list");
+        backend
+            .plugin_list(PluginListParams::default())
+            .await
+            .expect("extension list");
         backend.disconnect().await.expect("disconnect");
     }
 }

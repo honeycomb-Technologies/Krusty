@@ -9,10 +9,11 @@ use serde_json::Value;
 
 use crate::sse::{chat_stream_from_response, ChatEventStream};
 use crate::{
-    ChatRequest, CreateSessionRequest, HealthResponse, ModelsResponse, OAuthExchangeRequest,
+    BackgroundProcess, ChatRequest, CreateSessionRequest, ExtensionOverview, FileResponse,
+    FileTreeResponse, HealthResponse, McpServer, ModelsResponse, OAuthExchangeRequest,
     OAuthExchangeResponse, OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse,
     ProviderStatus, ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateResponse,
-    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, ToolApprovalRequest,
+    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
     UpdateServerAccessRequest, UpdateSessionRequest,
 };
 
@@ -39,7 +40,7 @@ impl MitsuroClient {
     }
 
     fn build(base_url: String, bearer_token: Option<&str>) -> Result<Self> {
-        let base_url = normalize_base_url(base_url.into());
+        let base_url = normalize_base_url(base_url);
         let mut headers = HeaderMap::new();
         if let Some(token) = bearer_token {
             let token = token.trim();
@@ -161,6 +162,32 @@ impl MitsuroClient {
         .await
     }
 
+    pub async fn read_file(&self, path: &str) -> Result<FileResponse> {
+        self.get_json_with_query("/files", &[("path", path)]).await
+    }
+
+    pub async fn file_tree(&self, root: &str, depth: usize) -> Result<FileTreeResponse> {
+        let depth = depth.min(10).to_string();
+        self.get_json_with_query("/files/tree", &[("root", root), ("depth", depth.as_str())])
+            .await
+    }
+
+    pub async fn list_skills(&self) -> Result<Vec<SkillInfo>> {
+        self.get_json("/skills").await
+    }
+
+    pub async fn list_extensions(&self) -> Result<ExtensionOverview> {
+        self.get_json("/extensions").await
+    }
+
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
+        self.get_json("/mcp").await
+    }
+
+    pub async fn list_processes(&self) -> Result<Vec<BackgroundProcess>> {
+        self.get_json("/processes").await
+    }
+
     pub async fn server_access(&self) -> Result<ServerAccessResponse> {
         self.get_json("/server/access").await
     }
@@ -261,6 +288,23 @@ impl MitsuroClient {
             .await
             .with_context(|| format!("GET {url}"))?;
         decode_json_response(response, url).await
+    }
+
+    async fn get_json_with_query<T, Q>(&self, path: &str, query: &Q) -> Result<T>
+    where
+        T: DeserializeOwned,
+        Q: serde::Serialize + ?Sized,
+    {
+        let url = self.api_url(path);
+        let response = self
+            .http
+            .get(&url)
+            .query(query)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        decode_json_response(response, &url).await
     }
 
     async fn post_json<T, B>(&self, path: &str, body: &B) -> Result<T>

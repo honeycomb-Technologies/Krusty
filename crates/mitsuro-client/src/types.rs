@@ -2,6 +2,86 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileResponse {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileTreeEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    #[serde(default)]
+    pub children: Option<Vec<FileTreeEntry>>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileTreeResponse {
+    pub root: String,
+    #[serde(default)]
+    pub entries: Vec<FileTreeEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub source: String,
+    pub origin: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionOverview {
+    #[serde(default)]
+    pub extensions: Vec<ExtensionStatus>,
+    #[serde(default)]
+    pub diagnostics: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ExtensionStatus {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub path: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub enabled: bool,
+    pub connected: bool,
+    pub status: String,
+    pub tool_count: usize,
+    #[serde(default)]
+    pub tools: Vec<Value>,
+    #[serde(default)]
+    pub server_info: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BackgroundProcess {
+    pub id: String,
+    pub command: String,
+    pub description: Option<String>,
+    pub pid: Option<u32>,
+    pub status_code: String,
+    pub elapsed_secs: u64,
+    pub error: Option<String>,
+    pub exit_code: Option<i32>,
+    pub working_dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,

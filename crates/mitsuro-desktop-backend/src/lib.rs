@@ -13,6 +13,7 @@ pub mod live_turn;
 pub mod methods;
 pub mod mitsuro;
 pub mod process;
+pub mod product;
 pub mod protocol;
 pub mod types;
 
@@ -89,6 +90,10 @@ pub use process::{
     parse_process_output_delta, ProcessKillParams, ProcessKillResponse, ProcessOutputStream,
     ProcessResizePtyParams, ProcessResizePtyResponse, ProcessSpawnParams, ProcessSpawnResponse,
     ProcessTerminalSize, ProcessWriteStdinParams, ProcessWriteStdinResponse,
+};
+pub use product::{
+    ConversationMessage, CreateSession, MessageRole, ProductBackend, ProductModel,
+    ProductReasoningEffort, ProductTurn, SessionConversation, SessionSummary,
 };
 pub use protocol::{
     command_execution_fields, extract_chat_tail_from_thread, extract_transcript_from_thread,

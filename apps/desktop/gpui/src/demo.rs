@@ -1,7 +1,7 @@
 //! Static demo threads and transcript so the shell is usable offline
 //! without live models or a running app-server.
 
-use mitsuro_desktop_backend::ThreadSummary;
+use mitsuro_desktop_backend::{BackendSessionId, ThreadSummary};
 
 /// One transcript block in the main column (user, assistant, tools, plan, …).
 #[derive(Clone, Debug)]
@@ -194,6 +194,9 @@ impl ThreadSurface {
 #[derive(Clone, Debug)]
 pub struct DemoThread {
     pub summary: ThreadSummary,
+    /// Durable transport origin for live sessions. Local and fixture-only rows
+    /// deliberately have no backend identity.
+    pub backend_session_id: Option<BackendSessionId>,
     pub messages: Vec<DemoMessage>,
     /// Product surface filter (`mode=chat` vs Codex agent threads).
     pub surface: ThreadSurface,
@@ -245,6 +248,7 @@ pub struct DemoGoal {
 pub fn demo_threads() -> Vec<DemoThread> {
     vec![
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-1".into(),
                 name: Some("Refactor GPUI shell chrome".into()),
@@ -299,6 +303,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-2".into(),
                 name: Some("Atlas browser surface".into()),
@@ -321,6 +326,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-3".into(),
                 name: Some("App-server protocol notes".into()),
@@ -345,6 +351,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-4".into(),
                 name: Some("Empty experiment".into()),
@@ -362,6 +369,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-5".into(),
                 name: Some("Core Fix".into()),
@@ -382,6 +390,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-6".into(),
                 name: Some("Rename Mako to Hive and Mitsuro".into()),
@@ -399,6 +408,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![DemoMessage::user("Rename pass."), DemoMessage::assistant("Done.")],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-7".into(),
                 name: Some("Trading Research".into()),
@@ -416,6 +426,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![DemoMessage::user("Research notes."), DemoMessage::assistant("Stub.")],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-8".into(),
                 name: Some("Tape".into()),
@@ -434,6 +445,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
         },
         // Extra dense Recents (bar home fills the left rail)
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-9".into(),
                 name: Some("Audit repo and set up domain".into()),
@@ -451,6 +463,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-10".into(),
                 name: Some("hey".into()),
@@ -468,6 +481,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-11".into(),
                 name: Some("Audit repo and unblock Kline data".into()),
@@ -485,6 +499,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-12".into(),
                 name: Some("I've noticed a major issue with the bridge".into()),
@@ -502,6 +517,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-13".into(),
                 name: Some("I specifically want to use the Bitunix API".into()),
@@ -519,6 +535,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-14".into(),
                 name: Some("I want to create to folder in work, it's".into()),
@@ -536,6 +553,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-15".into(),
                 name: Some("i want to create a browser game, we".into()),
@@ -553,6 +571,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-16".into(),
                 name: Some("Investigate Honey Krusty Update".into()),
@@ -570,6 +589,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-17".into(),
                 name: Some("[Base] You are operating inside the B".into()),
@@ -587,6 +607,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-18".into(),
                 name: Some("currently using krusty, and for sol".into()),
@@ -604,6 +625,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-19".into(),
                 name: Some("The Bullring Work".into()),
@@ -621,6 +643,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-20".into(),
                 name: Some("Krusty Work".into()),
@@ -638,6 +661,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-21".into(),
                 name: Some("https://github.com/blinklabs-io/hand".into()),
@@ -655,6 +679,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-22".into(),
                 name: Some("Sol-Dev Projects".into()),
@@ -672,6 +697,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             messages: vec![],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "demo-home-23".into(),
                 name: Some("honeycomb.dev".into()),
@@ -690,6 +716,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
         },
         // Chat surface (mode=chat) — conversational threads, not coding agent work.
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "chat-1".into(),
                 name: Some("Morning check-in".into()),
@@ -724,6 +751,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "chat-2".into(),
                 name: Some("Travel ideas".into()),
@@ -758,6 +786,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
             ],
         },
         DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: "chat-3".into(),
                 name: Some("What is Mitsuro?".into()),

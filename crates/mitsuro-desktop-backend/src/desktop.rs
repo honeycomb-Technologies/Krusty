@@ -4,13 +4,16 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LiveApprovalBridge,
     LiveTurnOutcome, MitsuroServerBackend, PendingApproval, Result, TurnStartParams,
     TurnStreamEvent,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
     MitsuroHttp,
     CodexStdio,
@@ -25,6 +28,16 @@ impl BackendKind {
             Self::CodexStdio => "codex-stdio",
             Self::CodexWebSocket => "codex-ws",
             Self::Fixture => "fixture",
+        }
+    }
+
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "mitsuro-http" => Some(Self::MitsuroHttp),
+            "codex-stdio" => Some(Self::CodexStdio),
+            "codex-ws" => Some(Self::CodexWebSocket),
+            "fixture" => Some(Self::Fixture),
+            _ => None,
         }
     }
 }
@@ -70,7 +83,10 @@ impl BackendCapabilities {
             approvals: true,
             models: true,
             files: true,
-            processes: true,
+            // The HTTP API can inspect/kill tracked background processes, but it
+            // does not expose the interactive spawn/stdin/PTY contract used by
+            // the native terminal panel.
+            processes: false,
             extensions: true,
             hive: true,
             schedules: true,
@@ -108,7 +124,7 @@ impl BackendSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BackendSessionId {
     pub backend: BackendKind,
     pub raw: String,
@@ -124,6 +140,21 @@ impl BackendSessionId {
 
     pub fn qualified(&self) -> String {
         format!("{}:{}", self.backend.id(), self.raw)
+    }
+
+    pub fn parse_qualified(value: &str) -> Result<Self> {
+        let (backend, raw) = value.split_once(':').ok_or_else(|| {
+            AgentError::Protocol(format!("invalid backend-qualified session id: {value}"))
+        })?;
+        let backend = BackendKind::from_id(backend).ok_or_else(|| {
+            AgentError::Protocol(format!("unknown session backend in id: {value}"))
+        })?;
+        if raw.is_empty() {
+            return Err(AgentError::Protocol(format!(
+                "empty raw session id in: {value}"
+            )));
+        }
+        Ok(Self::new(backend, raw))
     }
 }
 
@@ -288,12 +319,25 @@ mod tests {
             BackendSessionId::new(BackendKind::CodexStdio, "abc").qualified(),
             "codex-stdio:abc"
         );
+        assert_eq!(
+            BackendSessionId::parse_qualified("mitsuro-http:abc").expect("qualified id"),
+            BackendSessionId::new(BackendKind::MitsuroHttp, "abc")
+        );
+        let persisted = serde_json::to_string(&BackendSessionId::new(
+            BackendKind::CodexStdio,
+            "session-42",
+        ))
+        .expect("serialize session identity");
+        let restored: BackendSessionId =
+            serde_json::from_str(&persisted).expect("deserialize session identity");
+        assert_eq!(restored.qualified(), "codex-stdio:session-42");
     }
 
     #[test]
     fn capabilities_do_not_claim_unsupported_cross_backend_features() {
         assert!(!BackendCapabilities::mitsuro().archive);
         assert!(!BackendCapabilities::codex().hive);
+        assert!(!BackendCapabilities::mitsuro().processes);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
     }

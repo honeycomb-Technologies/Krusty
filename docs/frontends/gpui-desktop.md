@@ -37,8 +37,9 @@ discovering auth never authorizes a paid turn.
 | Tool approval | Live | Live | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
 | Fork | Unsupported, capability-gated | Live | Typed fixture |
-| Files/processes | Server contract exists; UI adapter incomplete | Live typed paths | Typed fixture |
-| Extensions/MCP/skills | Server contract exists; UI adapter incomplete | Partially live | Typed fixture |
+| Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
+| Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
+| Extensions/MCP/skills | Live installed extensions, MCP status, and skills | Partially live | Typed fixture |
 | Hive/schedules | Server contract exists; GPUI wiring incomplete | Unsupported | Static/demo UI |
 | Pull requests | No product adapter | No product adapter | Static catalog |
 | Sites | No product adapter | No product adapter | Static catalog |
@@ -59,26 +60,31 @@ success payloads.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
-- Backend session IDs have a namespaced type (`BackendSessionId`). Persisting the
-  namespace in GPUI thread state is still required before mixed-backend lists are
-  enabled.
+- Backend session IDs are namespaced (`BackendSessionId`) and are stored on every
+  live GPUI thread. Session/model/turn flows use the transport-neutral
+  `ProductBackend` contract, and mutations reject a session whose origin differs
+  from the active backend.
+- The current UI still shows one selected backend at a time. A future mixed-backend
+  list must use `BackendSessionId::qualified()` as its row/selection key instead of
+  the raw server ID.
 
 ## Resume here
 
 The next implementation slice should be backend-capability completion, not more
 visual polish:
 
-1. Replace remaining Codex-shaped `AgentBackend` calls with product-domain session,
-   model, turn, file, process, and extension contracts.
-2. Persist `BackendSessionId` in GPUI thread state and settings so sessions remain
-   attached to their originating backend.
-3. Wire Mitsuro files, processes, extensions, skills, Hive, and schedules using the
-   existing server/client contracts.
-4. Add an authenticated Codex WebSocket adapter only if using the already-running
+1. Move the now-live file, MCP, skill, and extension adapters from legacy
+   `AgentBackend` method shapes into explicit product-domain contracts.
+2. Add durable GPUI preference storage for the selected qualified session and
+   selected backend; live thread state already retains origin in memory.
+3. Design the terminal boundary: either add a server-side interactive process
+   spawn/stdin/PTY API or present the existing Mitsuro process catalog as read-only.
+4. Wire Hive and schedules using the existing Mitsuro server contracts.
+5. Add an authenticated Codex WebSocket adapter only if using the already-running
    app-server is a required deployment mode; managed stdio is working now.
-5. Replace or remove PR, Sites, browser/computer, and settings demonstrations one
+6. Replace or remove PR, Sites, browser/computer, and settings demonstrations one
    surface at a time, with contract and GPUI interaction tests.
-6. Split `app.rs` into state/controllers and bounded GPUI views after backend state
+7. Split `app.rs` into state/controllers and bounded GPUI views after backend state
    stops moving.
 
 ## Validation

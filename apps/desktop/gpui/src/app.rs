@@ -16,19 +16,20 @@ use mitsuro_desktop_backend::{
     fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
     fixture_demo_skills, fixture_demo_usage, fixture_login_device_code_response, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, AgentBackend,
-    ApprovalChoice, BackendSelection, CollaborationModeListParams, CollaborationModeMask,
-    ConfigReadParams, DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse,
-    EnvironmentStatusParams, EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend,
-    FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
-    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
-    GetAccountTokenUsageResponse, ListMcpServerStatusParams, LiveApprovalBridge,
-    LoginAccountParams, McpServerStatus, ModelInfo, ModelListParams, PendingApproval, PlanType,
-    PluginListParams, PluginSummary, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, SkillMetadata, SkillsListParams, ThreadArchiveParams,
+    ApprovalChoice, BackendSelection, BackendSessionId, CollaborationModeListParams,
+    CollaborationModeMask, ConfigReadParams, CreateSession, DesktopBackend, EnvironmentInfoParams,
+    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
+    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
+    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, ListMcpServerStatusParams,
+    LiveApprovalBridge, LoginAccountParams, McpServerStatus, MessageRole, ModelInfo,
+    ModelListParams, PendingApproval, PlanType, PluginListParams, PluginSummary, ProcessKillParams,
+    ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend, ProductModel, ProductTurn,
+    ReasoningEffortOption, SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams,
     ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams,
-    ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadReadParams, ThreadSetNameParams,
-    ThreadStartParams, ThreadSummary, ThreadUnarchiveParams, TranscriptRole, TurnInterruptParams,
-    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
+    FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -2023,6 +2024,15 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        if self
+            .live_backend()
+            .is_some_and(|backend| !backend.capabilities().processes)
+        {
+            self.status_line = "Terminal spawn is not supported by the selected backend.".into();
+            self.terminal.status = TerminalSessionStatus::Error;
+            cx.notify();
+            return;
+        }
         let raw = self.terminal_cmd_input.read(cx).value().to_string();
         let cmd = raw.trim().to_string();
         if cmd.is_empty() {
@@ -3882,11 +3892,10 @@ impl MitsuroApp {
                                 .map_err(|e| e.to_string())?;
                             rt.block_on(async {
                                 backend
-                                    .thread_start(ThreadStartParams {
-                                        cwd,
+                                    .create_session(CreateSession {
+                                        working_dir: cwd,
                                         model,
-                                        ephemeral: Some(false),
-                                        ..Default::default()
+                                        ephemeral: false,
                                     })
                                     .await
                                     .map_err(|e| e.to_string())
@@ -3894,12 +3903,14 @@ impl MitsuroApp {
                         })
                         .await;
                     let _ = this.update(cx, |app, cx| match result {
-                        Ok(started) => {
-                            let summary = started.summary();
+                        Ok(session) => {
+                            let backend_session_id = session.id.clone();
+                            let summary = thread_summary_from_session(session);
                             let id = summary.id.clone();
                             app.threads.insert(
                                 0,
                                 DemoThread {
+                                    backend_session_id: Some(backend_session_id),
                                     summary,
                                     surface,
                                     messages: vec![],
@@ -3950,6 +3961,7 @@ impl MitsuroApp {
             ),
         };
         let thread = DemoThread {
+            backend_session_id: None,
             summary: ThreadSummary {
                 id: id.clone(),
                 name: Some(name),
@@ -4191,11 +4203,12 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let live_session_id = self.live_session_id(&id);
         self.threads.retain(|t| t.summary.id != id);
         self.selected_thread = self.threads.first().map(|t| t.summary.id.clone());
         self.status_line = "thread/delete…".into();
 
-        if is_app_server_thread_id(&id) {
+        if let Some(session_id) = live_session_id {
             if let Some(backend) = self.live_backend() {
                 let tid = id.clone();
                 cx.spawn(async move |this, cx| {
@@ -4207,7 +4220,7 @@ impl MitsuroApp {
                                 .map_err(|e| e.to_string())?;
                             rt.block_on(async {
                                 backend
-                                    .thread_delete(ThreadDeleteParams::new(tid.clone()))
+                                    .delete_session(&session_id)
                                     .await
                                     .map_err(|e| e.to_string())?;
                                 Ok::<_, String>(tid)
@@ -4275,6 +4288,7 @@ impl MitsuroApp {
         let fork_id = format!("fork-{}", self.threads.len() + 1);
         let mut forked = source;
         forked.summary.id = fork_id.clone();
+        forked.backend_session_id = None;
         forked.summary.archived = Some(false);
         let base = forked
             .summary
@@ -4310,10 +4324,14 @@ impl MitsuroApp {
                         match result {
                             Ok(resp) => {
                                 let summary = resp.summary();
+                                let backend_session_id = app.live_backend().map(|backend| {
+                                    BackendSessionId::new(backend.kind(), summary.id.clone())
+                                });
                                 if let Some(t) =
                                     app.threads.iter_mut().find(|t| t.summary.id == local_id)
                                 {
                                     t.summary = summary.clone();
+                                    t.backend_session_id = backend_session_id;
                                 }
                                 let forked_id = summary.id.clone();
                                 app.selected_thread = Some(summary.id.clone());
@@ -4403,10 +4421,11 @@ impl MitsuroApp {
 
         let thread_id = self.selected_thread.clone();
         let turn_id = self.active_turn_id.clone();
+        let live_session_id = thread_id.as_deref().and_then(|id| self.live_session_id(id));
 
         // Live path: call turn/interrupt when we know thread + turn ids.
-        if let (Some(backend), Some(tid), Some(turn)) =
-            (self.backend.clone(), thread_id, turn_id.clone())
+        if let (Some(backend), Some(session_id), Some(turn)) =
+            (self.backend.clone(), live_session_id, turn_id.clone())
         {
             cx.spawn(async move |_this, cx| {
                 let _ = cx
@@ -4417,7 +4436,7 @@ impl MitsuroApp {
                             .map_err(|e| e.to_string())?;
                         rt.block_on(async {
                             backend
-                                .turn_interrupt(TurnInterruptParams::new(tid, turn))
+                                .interrupt_session(&session_id, turn)
                                 .await
                                 .map_err(|e| e.to_string())
                         })
@@ -4645,11 +4664,10 @@ impl MitsuroApp {
                         .map_err(|e| e.to_string())?;
                     rt.block_on(async {
                         backend
-                            .thread_start(ThreadStartParams {
-                                cwd,
+                            .create_session(CreateSession {
+                                working_dir: cwd,
                                 model: model_for_start,
-                                ephemeral: Some(false),
-                                ..Default::default()
+                                ephemeral: false,
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -4657,13 +4675,15 @@ impl MitsuroApp {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| match result {
-                Ok(started) => {
-                    let summary = started.summary();
+                Ok(session) => {
+                    let backend_session_id = session.id.clone();
+                    let summary = thread_summary_from_session(session);
                     let new_id = summary.id.clone();
                     // Migrate local thread → server id (preserve user bubble).
                     if let Some(idx) = app.threads.iter().position(|t| t.summary.id == local_id) {
                         let mut t = app.threads.remove(idx);
                         t.summary = summary;
+                        t.backend_session_id = Some(backend_session_id);
                         // Keep messages (user already appended).
                         app.threads.insert(0, t);
                     }
@@ -4697,6 +4717,13 @@ impl MitsuroApp {
         }
     }
 
+    fn live_session_id(&self, ui_id: &str) -> Option<BackendSessionId> {
+        self.threads
+            .iter()
+            .find(|thread| thread.summary.id == ui_id)
+            .and_then(|thread| thread.backend_session_id.clone())
+    }
+
     /// Best-effort `thread/name/set` (live app-server or fixture). UI already updated.
     fn set_thread_name_best_effort(
         &mut self,
@@ -4705,7 +4732,7 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) {
         let tid = thread_id.to_string();
-        if is_app_server_thread_id(&tid) {
+        if let Some(session_id) = self.live_session_id(&tid) {
             if let Some(backend) = self.live_backend() {
                 cx.spawn(async move |_this, cx| {
                     let _ = cx
@@ -4716,7 +4743,7 @@ impl MitsuroApp {
                                 .map_err(|e| e.to_string())?;
                             rt.block_on(async {
                                 backend
-                                    .thread_name_set(ThreadSetNameParams::new(tid, name))
+                                    .rename_session(&session_id, name)
                                     .await
                                     .map_err(|e| e.to_string())
                             })
@@ -4828,6 +4855,14 @@ impl MitsuroApp {
             self.start_fixture_turn(thread_id, cx);
             return;
         };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.turn_in_progress = false;
+            self.status_line =
+                "Live turn refused: the selected thread has no backend-qualified session id."
+                    .into();
+            cx.notify();
+            return;
+        };
 
         // Progressive path: apply events as they arrive; mid-stream approvals
         // surface ApprovalBar and block the turn loop until the user answers.
@@ -4849,7 +4884,6 @@ impl MitsuroApp {
             let _producer = cx.background_spawn({
                 let backend = Arc::clone(&backend);
                 let bridge = Arc::clone(&bridge);
-                let thread_id = thread_id.clone();
                 let text = text.clone();
                 let model = model.clone();
                 let msg_tx = msg_tx;
@@ -4866,10 +4900,12 @@ impl MitsuroApp {
                     });
 
                     let result = backend
-                        .run_turn_with_bridge_blocking(
-                            mitsuro_desktop_backend::TurnStartParams::text_with_model(
-                                thread_id, text, model,
-                            ),
+                        .run_product_turn_with_bridge_blocking(
+                            ProductTurn {
+                                session_id,
+                                text,
+                                model,
+                            },
                             event_tx,
                             bridge,
                             DEFAULT_LIVE_TURN_TIMEOUT,
@@ -5551,8 +5587,9 @@ impl MitsuroApp {
                         if !remote.is_empty() {
                             app.threads = remote
                                 .into_iter()
-                                .map(|summary| DemoThread {
-                                    summary,
+                                .map(|session| DemoThread {
+                                    backend_session_id: Some(session.id.clone()),
+                                    summary: thread_summary_from_session(session),
                                     surface: ThreadSurface::Codex,
                                     messages: vec![],
                                 })
@@ -5563,7 +5600,9 @@ impl MitsuroApp {
                         if models.is_empty() {
                             app.apply_models(fixture_demo_models());
                         } else {
-                            app.apply_models(models);
+                            app.apply_models(
+                                models.into_iter().map(model_info_from_product).collect(),
+                            );
                         }
                         if let Some(snip) = config_snip {
                             app.apply_config_snippet(snip);
@@ -5738,6 +5777,12 @@ impl MitsuroApp {
         thread_id: String,
         cx: &mut Context<Self>,
     ) {
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.status_line =
+                "Session read refused: the thread has no backend-qualified identity.".into();
+            cx.notify();
+            return;
+        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -5747,15 +5792,9 @@ impl MitsuroApp {
                     let tid = thread_id.clone();
                     let b = Arc::clone(&backend);
                     let prepared = backend.block_on(async move {
-                        match b
-                            .thread_read(ThreadReadParams {
-                                thread_id: tid.clone(),
-                                include_turns: Some(true),
-                            })
-                            .await
-                        {
-                            Ok(r) => {
-                                let msgs = r.transcript_messages();
+                        match b.read_session(&session_id).await {
+                            Ok(conversation) => {
+                                let msgs = conversation.messages;
                                 let seen = msgs.len();
                                 eprintln!(
                                     "[mitsuro] thread/read ok id={} tail={} scanned={}",
@@ -5768,8 +5807,8 @@ impl MitsuroApp {
                                     .into_iter()
                                     .map(|m| {
                                         let mut msg = match m.role {
-                                            TranscriptRole::User => DemoMessage::user(m.body),
-                                            TranscriptRole::Assistant => {
+                                            MessageRole::User => DemoMessage::user(m.body),
+                                            MessageRole::Assistant => {
                                                 DemoMessage::assistant(m.body)
                                             }
                                             _ => DemoMessage::assistant(m.body),
@@ -5855,6 +5894,43 @@ fn is_app_server_thread_id(id: &str) -> bool {
         || id.starts_with("chat-")
         || id.starts_with("goal-")
         || id.starts_with("fixture-"))
+}
+
+fn thread_summary_from_session(session: SessionSummary) -> ThreadSummary {
+    ThreadSummary {
+        id: session.id.raw,
+        name: session.title,
+        preview: session.preview,
+        cwd: session.working_dir,
+        created_at: None,
+        updated_at: session.updated_at,
+        model_provider: session.model_provider,
+        ephemeral: Some(session.ephemeral),
+        is_pinned: Some(false),
+        archived: Some(session.archived),
+        raw: None,
+    }
+}
+
+fn model_info_from_product(model: ProductModel) -> ModelInfo {
+    ModelInfo {
+        id: model.id,
+        model: model.model,
+        display_name: model.display_name,
+        description: model.description,
+        hidden: model.hidden,
+        is_default: model.is_default,
+        default_reasoning_effort: model.default_reasoning_effort,
+        supported_reasoning_efforts: model
+            .supported_reasoning_efforts
+            .into_iter()
+            .map(|effort| ReasoningEffortOption {
+                reasoning_effort: effort.effort,
+                description: effort.description,
+            })
+            .collect(),
+        upgrade: model.upgrade,
+    }
 }
 
 /// When set, empty live plugin/MCP/skills catalogs densify with offline demo data.
@@ -6103,9 +6179,9 @@ fn connect_list_auth_and_models(
 ) -> Result<
     (
         mitsuro_desktop_backend::InitializeResponse,
-        Vec<ThreadSummary>,
+        Vec<SessionSummary>,
         bool,
-        Vec<ModelInfo>,
+        Vec<ProductModel>,
         Option<String>,
         Vec<SkillMetadata>,
         Vec<McpServerStatus>,
@@ -6117,26 +6193,15 @@ fn connect_list_auth_and_models(
     let b = Arc::clone(&backend);
     backend.block_on(async move {
         let init = b.connect().await.map_err(|e| format!("initialize: {e}"))?;
-        let list = b
-            .thread_list(ThreadListParams {
-                limit: Some(40),
-                use_state_db_only: Some(true),
-                ..Default::default()
-            })
+        let sessions = b
+            .list_sessions(40)
             .await
-            .map_err(|e| format!("thread/list: {e}"))?;
+            .map_err(|e| format!("sessions: {e}"))?;
         let has_auth = b.has_usable_auth().await;
         // model/list is best-effort — missing method or error falls back to empty
         // (UI seeds fixture demo models).
-        let models = match b
-            .model_list(ModelListParams {
-                limit: Some(100),
-                include_hidden: Some(false),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(resp) => resp.data,
+        let models = match b.list_product_models(100).await {
+            Ok(models) => models,
             Err(_) => Vec::new(),
         };
         // config/read best-effort for Settings snippet.
@@ -6173,7 +6238,7 @@ fn connect_list_auth_and_models(
         };
         Ok((
             init,
-            list.threads(),
+            sessions,
             has_auth,
             models,
             config_snip,

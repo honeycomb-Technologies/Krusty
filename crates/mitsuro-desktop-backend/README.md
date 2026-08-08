@@ -11,16 +11,24 @@ Protocol types and agent backends for the Mitsuro desktop shell.
 | `FixtureBackend` | explicit typed subset | Deterministic development and tests |
 
 All implement [`AgentBackend`](src/backend.rs). [`DesktopBackend`](src/desktop.rs)
-is the desktop selection/capability boundary. `AgentBackend` still contains legacy
-Codex-shaped methods; unsupported methods must return `NotImplemented` and must
-not be represented as working product features.
+is the desktop selection/capability boundary and implements the transport-neutral
+[`ProductBackend`](src/product.rs) session/model/turn contract used by GPUI.
+`AgentBackend` still contains legacy Codex-shaped methods for backend-specific
+surfaces; unsupported methods must return `NotImplemented` and must not be
+represented as working product features.
 
 ## Mitsuro transport
 
 `MitsuroServerBackend` supports health/connection, session list/create/read/rename/delete,
-model list, SSE turn streaming, approvals, and cancellation. Its base URL defaults to
-`http://127.0.0.1:3000` and can be changed with `MITSURO_SERVER_URL`. Remote servers use
+model list, SSE turn streaming, approvals, cancellation, text-file browsing/reading/fuzzy
+search, skills, MCP status, and installed agent-extension discovery. Its base URL defaults
+to `http://127.0.0.1:3000` and can be changed with `MITSURO_SERVER_URL`. Remote servers use
 `MITSURO_SERVER_TOKEN`; the shared client installs it as a bearer header.
+
+The Mitsuro process API can inspect and control processes already tracked by the server,
+but it cannot spawn an interactive PTY. The GPUI terminal therefore disables live spawn
+for Mitsuro instead of substituting fixture output. Codex stdio retains its interactive
+process contract.
 
 ## Transport assumptions (Codex app-server)
 
@@ -91,6 +99,10 @@ Real network turns remain gated by `MITSURO_ALLOW_LIVE_TURN=1` in the desktop sh
 ```bash
 # Unit tests always (mock stdio + fixture parse + progressive mid-stream approval)
 cargo test -p mitsuro-desktop-backend
+
+# Read-only Mitsuro server contract (sessions/models/files/skills/MCP/extensions)
+MITSURO_RUN_SERVER_IT=1 cargo test -p mitsuro-desktop-backend \
+  live_server_read_only_contract -- --nocapture
 
 # Live turn/start only with explicit opt-in (may use paid models):
 MITSURO_ALLOW_LIVE_TURN=1 cargo test -p mitsuro-desktop-backend real_app_server_turn_start
