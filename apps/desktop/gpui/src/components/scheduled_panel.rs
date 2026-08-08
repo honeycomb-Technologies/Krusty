@@ -1,7 +1,4 @@
-//! Scheduled tasks destination — suggestions-first (bar parity), optional Your tasks.
-//!
-//! No schedule/* app-server methods. Suggestions are product chrome (bar-like).
-//! "Your tasks" densifies fixture rows after Create (explicit fixture demo badge).
+//! Scheduled tasks destination with a read-only Mitsuro Hive schedule catalog.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -10,7 +7,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::{MitsuroApp, UiConnection};
+use crate::app::MitsuroApp;
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -65,7 +62,8 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
     let colors = theme::colors();
     let enabled = app.scheduled_enabled().to_vec();
     let show_tasks = app.scheduled_show_tasks();
-    let live = matches!(app.connection(), UiConnection::Ready { .. });
+    let live_tasks = app.scheduled_tasks().map(|tasks| tasks.to_vec());
+    let live = live_tasks.is_some();
 
     div()
         .id("scheduled-panel")
@@ -88,20 +86,26 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                 .px(px(28.0))
                 .pb(px(28.0))
                 .gap(px(18.0))
-                // Bar: suggestions-first; Your tasks only when user densifies via Create.
-                .when(show_tasks, |this| {
+                .when_some(live_tasks, |this, tasks| {
+                    this.child(live_tasks_section(&tasks).into_any_element())
+                })
+                .when(show_tasks && !live, |this| {
                     this.child(tasks_section(&enabled, cx).into_any_element())
                 })
-                .child(suggestions_section(cx)),
+                .child(suggestions_section(live, cx)),
         )
 }
 
 fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     let subtitle = if show_tasks {
-        "Fixture demo tasks · no schedule/* in app-server"
+        if live {
+            "Mitsuro Hive schedules · read-only in this client"
+        } else {
+            "Fixture demo tasks"
+        }
     } else if live {
-        "Suggestions only · product empty tasks while connected (no schedule protocol)"
+        "Mitsuro Hive schedules · no schedules currently visible · read-only"
     } else {
         "Ask Mitsuro to schedule tasks, set reminders, or monitor for updates"
     };
@@ -132,7 +136,7 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
                                 .text_color(colors.text)
                                 .child("Scheduled tasks"),
                         )
-                        .when(show_tasks, |this| {
+                        .when(show_tasks && !live, |this| {
                             this.child(
                                 div()
                                     .px(px(8.0))
@@ -165,19 +169,28 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
                 .h(px(32.0))
                 .px(px(14.0))
                 .rounded(px(999.0))
-                .bg(colors.bg_button_primary)
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_button_primary_hover))
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.set_scheduled_show_tasks(true, cx);
-                    app.set_status_line("Scheduled · fixture demo tasks", cx);
-                }))
+                .bg(if live {
+                    colors.bg_button_secondary
+                } else {
+                    colors.bg_button_primary
+                })
+                .when(!live, |this| {
+                    this.cursor_pointer()
+                        .hover(|s| s.bg(colors.bg_button_primary_hover))
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.request_schedule_creation(None, cx);
+                        }))
+                })
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.fg_button_primary)
-                        .child("Create"),
+                        .text_color(if live {
+                            colors.text_tertiary
+                        } else {
+                            colors.fg_button_primary
+                        })
+                        .child(if live { "Read-only" } else { "Create" }),
                 )
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -214,6 +227,91 @@ fn search_placeholder() -> impl IntoElement {
                 .text_color(colors.text_tertiary)
                 .child("Search scheduled tasks"),
         )
+}
+
+fn live_tasks_section(tasks: &[mitsuro_desktop_backend::ProductSchedule]) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("scheduled-live-tasks")
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child(format!("Your Hive schedules · {}", tasks.len())),
+        )
+        .when(tasks.is_empty(), |this| {
+            this.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(16.0))
+                    .rounded(px(12.0))
+                    .bg(colors.bg_elevated)
+                    .border_1()
+                    .border_color(colors.border)
+                    .text_sm()
+                    .text_color(colors.text_tertiary)
+                    .child("No Hive schedules are currently available."),
+            )
+        })
+        .children(tasks.iter().enumerate().map(|(index, schedule)| {
+            let timing = schedule
+                .next_fire_at
+                .as_deref()
+                .map(|next| format!("next {next}"))
+                .unwrap_or_else(|| "no next occurrence".to_owned());
+            let detail = if schedule.summary.is_empty() {
+                schedule.objective.clone()
+            } else {
+                schedule.summary.clone()
+            };
+            div()
+                .id(("live-schedule", index))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(12.0))
+                .rounded(px(12.0))
+                .bg(colors.bg_elevated)
+                .border_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text)
+                                .child(schedule.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child(format!("{} · {} · {detail}", schedule.status, timing)),
+                        ),
+                )
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(999.0))
+                        .bg(theme::hex_alpha(0xffffff, 0.06))
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .child("read-only"),
+                )
+        }))
 }
 
 fn tasks_section(enabled: &[bool], cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -276,7 +374,7 @@ fn tasks_section(enabled: &[bool], cx: &mut Context<MitsuroApp>) -> impl IntoEle
         )
 }
 
-fn suggestions_section(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn suggestions_section(live: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("scheduled-suggestions")
@@ -294,7 +392,7 @@ fn suggestions_section(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
             SUGGESTIONS
                 .iter()
                 .enumerate()
-                .map(|(i, s)| suggestion_row(i as u64, s, cx).into_any_element())
+                .map(|(i, s)| suggestion_row(i as u64, s, live, cx).into_any_element())
                 .collect::<Vec<_>>(),
         )
 }
@@ -302,6 +400,7 @@ fn suggestions_section(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
 fn suggestion_row(
     index: u64,
     item: &ScheduleItem,
+    live: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -315,12 +414,13 @@ fn suggestion_row(
         .px(px(4.0))
         .py(px(8.0))
         .rounded(px(10.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.set_scheduled_show_tasks(true, cx);
-            app.set_status_line(format!("Scheduled · added suggestion “{name}”"), cx);
-        }))
+        .when(!live, |this| {
+            this.cursor_pointer()
+                .hover(|s| s.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.request_schedule_creation(Some(name), cx);
+                }))
+        })
         .child(
             Icon::empty()
                 .path(item.icon_path)

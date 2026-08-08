@@ -36,7 +36,12 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
             session.status_label(),
             session.backend_label.as_ref(),
         ))
-        .child(command_bar(app, &cmd_input, running, cx))
+        .child(command_bar(
+            &cmd_input,
+            running,
+            app.terminal_interactive_available(),
+            cx,
+        ))
         .child(output_scroll(session.output.as_ref(), handle.as_deref()))
         .child(stdin_bar(app, &stdin_input, running, cx))
         .child(status_footer(status, handle.as_deref(), session.exit_code))
@@ -118,9 +123,9 @@ fn terminal_title_bar(status: &str, backend: &str) -> impl IntoElement {
 }
 
 fn command_bar(
-    _app: &MitsuroApp,
     cmd_input: &gpui::Entity<gpui_component::input::InputState>,
     running: bool,
+    interactive: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -175,7 +180,7 @@ fn command_bar(
                 })
                 .border_1()
                 .border_color(colors.border)
-                .when(!running, |this| {
+                .when(!running && interactive, |this| {
                     this.cursor_pointer()
                         .hover(|s| s.bg(colors.bg_hover))
                         .on_click(cx.listener(|app, _, window, cx| {
@@ -191,7 +196,13 @@ fn command_bar(
                         } else {
                             colors.accent
                         })
-                        .child(if running { "Running" } else { "Start" }),
+                        .child(if running {
+                            "Running"
+                        } else if interactive {
+                            "Start"
+                        } else {
+                            "Read-only"
+                        }),
                 ),
         )
         .child(

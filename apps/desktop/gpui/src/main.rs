@@ -4,6 +4,7 @@ mod app;
 mod browser;
 mod components;
 mod demo;
+mod preferences;
 mod theme;
 
 use std::borrow::Cow;

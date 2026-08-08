@@ -10,10 +10,11 @@ use serde_json::Value;
 use crate::sse::{chat_stream_from_response, ChatEventStream};
 use crate::{
     BackgroundProcess, ChatRequest, CreateSessionRequest, ExtensionOverview, FileResponse,
-    FileTreeResponse, HealthResponse, McpServer, ModelsResponse, OAuthExchangeRequest,
-    OAuthExchangeResponse, OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse,
-    ProviderStatus, ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateResponse,
-    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
+    FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleSummary, McpServer,
+    ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse, OAuthStartRequest,
+    OAuthStartResponse, OAuthStatusResponse, ProviderStatus, ServerAccessResponse,
+    ServerStatusResponse, SessionInfo, SessionStateResponse, SessionWithMessages,
+    SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
     UpdateServerAccessRequest, UpdateSessionRequest,
 };
 
@@ -186,6 +187,14 @@ impl MitsuroClient {
 
     pub async fn list_processes(&self) -> Result<Vec<BackgroundProcess>> {
         self.get_json("/processes").await
+    }
+
+    pub async fn hive_current(&self) -> Result<HiveCurrentResponse> {
+        self.get_json("/hive/current").await
+    }
+
+    pub async fn list_hive_schedules(&self) -> Result<Vec<HiveScheduleSummary>> {
+        self.get_json("/hive/schedules").await
     }
 
     pub async fn server_access(&self) -> Result<ServerAccessResponse> {

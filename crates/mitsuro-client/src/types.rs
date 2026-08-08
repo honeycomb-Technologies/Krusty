@@ -82,6 +82,70 @@ pub struct BackgroundProcess {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveStatusSummary {
+    pub home_status: String,
+    pub total_count: usize,
+    pub running_count: usize,
+    pub sleeping_count: usize,
+    pub scheduled_count: usize,
+    pub paused_count: usize,
+    pub failed_count: usize,
+    pub idle_count: usize,
+    pub pending_approvals_count: usize,
+    pub next_wake_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveRunDiagnostic {
+    pub kind: String,
+    pub severity: String,
+    pub summary: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HiveCurrentRun {
+    pub session_id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub project_dir: Option<String>,
+    pub target_branch: Option<String>,
+    pub agent_state: String,
+    pub runtime: Option<Value>,
+    pub pending_tasks: usize,
+    pub in_progress_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+    pub blocked_tasks: usize,
+    pub diagnostic: Option<HiveRunDiagnostic>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HiveCurrentResponse {
+    pub status: HiveStatusSummary,
+    pub diagnostics: Value,
+    #[serde(default)]
+    pub runs: Vec<HiveCurrentRun>,
+    #[serde(default)]
+    pub approvals: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleSummary {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub next_fire_at: Option<String>,
+    pub status: String,
+    pub timezone: String,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub revision: u64,
+    pub controller_session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -1195,10 +1259,48 @@ fn u64_field(value: &Value, field: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatStreamEvent, FastMode, ModelInfo, ReasoningControl, ReasoningEffort, SessionType,
-        ThinkingLevel,
+        ChatStreamEvent, FastMode, HiveCurrentResponse, HiveScheduleSummary, ModelInfo,
+        ReasoningControl, ReasoningEffort, SessionType, ThinkingLevel,
     };
     use serde_json::json;
+
+    #[test]
+    fn hive_read_models_accept_the_server_control_plane_shape() {
+        let current: HiveCurrentResponse = serde_json::from_value(json!({
+            "status": {
+                "home_status": "idle", "total_count": 1, "running_count": 0,
+                "sleeping_count": 0, "scheduled_count": 0, "paused_count": 0,
+                "failed_count": 0, "idle_count": 1, "pending_approvals_count": 0,
+                "next_wake_at": null, "high_priority_count": 0, "waiting_count": 0
+            },
+            "diagnostics": {"health_state": "healthy"},
+            "runs": [{
+                "session_id": "hive-1", "title": "Audit", "updated_at": "now",
+                "project_dir": null, "target_branch": null, "agent_state": "idle",
+                "runtime": null, "pending_tasks": 0, "in_progress_tasks": 0,
+                "completed_tasks": 2, "failed_tasks": 0, "blocked_tasks": 0,
+                "cadence": {"tick_interval_secs": 60, "max_ticks": 10},
+                "diagnostic": null
+            }],
+            "approvals": []
+        }))
+        .expect("Hive current response");
+        assert_eq!(current.runs[0].session_id, "hive-1");
+
+        let schedules: Vec<HiveScheduleSummary> = serde_json::from_value(json!([{
+            "id": "schedule-1", "controller_id": "controller-1", "title": "Sweep",
+            "summary": "Nightly", "objective": "Inspect", "recurrence": {},
+            "timezone": "UTC", "dst_policy": "skip", "next_fire_at": null,
+            "last_scheduled_for": null, "status": "active", "priority": 0,
+            "project_dir": null, "model": null, "model_key": null,
+            "model_catalog_revision": null, "crew_slug": null, "misfire": {},
+            "overlap_policy": "skip", "retry": {}, "revision": 1,
+            "created_by": "user", "created_at": "now", "updated_at": "now",
+            "controller_session_id": "hive-1"
+        }]))
+        .expect("Hive schedule list");
+        assert_eq!(schedules[0].controller_session_id, "hive-1");
+    }
 
     #[test]
     fn session_type_accepts_deprecated_wire_value_and_emits_canonical_value() {

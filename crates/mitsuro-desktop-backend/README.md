@@ -12,7 +12,8 @@ Protocol types and agent backends for the Mitsuro desktop shell.
 
 All implement [`AgentBackend`](src/backend.rs). [`DesktopBackend`](src/desktop.rs)
 is the desktop selection/capability boundary and implements the transport-neutral
-[`ProductBackend`](src/product.rs) session/model/turn contract used by GPUI.
+[`ProductBackend`](src/product.rs) session/model/turn, file/catalog, process, Hive,
+and schedule contracts used by GPUI.
 `AgentBackend` still contains legacy Codex-shaped methods for backend-specific
 surfaces; unsupported methods must return `NotImplemented` and must not be
 represented as working product features.
@@ -28,7 +29,8 @@ to `http://127.0.0.1:3000` and can be changed with `MITSURO_SERVER_URL`. Remote 
 The Mitsuro process API can inspect and control processes already tracked by the server,
 but it cannot spawn an interactive PTY. The GPUI terminal therefore disables live spawn
 for Mitsuro instead of substituting fixture output. Codex stdio retains its interactive
-process contract.
+process contract. Hive current state, global schedules, and background processes are
+read-only product surfaces in GPUI; their mutation routes are intentionally not exposed.
 
 ## Transport assumptions (Codex app-server)
 

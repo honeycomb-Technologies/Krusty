@@ -18,6 +18,7 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
     let selected = app.selected_goal_id().map(str::to_string);
     let selected_goal = app.selected_goal().cloned();
     let empty = goals.is_empty();
+    let live_hive = app.work_is_live_hive();
     let active = goals
         .iter()
         .filter(|g| g.status == DemoGoalStatus::Active)
@@ -34,11 +35,12 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
         .child(work_title_bar(
             goals.len(),
             active,
+            live_hive,
             app.status_line().as_ref(),
             cx,
         ))
         .child(if empty {
-            work_empty_state(cx).into_any_element()
+            work_empty_state(live_hive, cx).into_any_element()
         } else {
             div()
                 .flex()
@@ -54,6 +56,7 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
 fn work_title_bar(
     count: usize,
     active: usize,
+    live_hive: bool,
     status: &str,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
@@ -92,14 +95,13 @@ fn work_title_bar(
                                 .text_color(colors.text)
                                 .child("Work"),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_tertiary)
-                                .child(format!(
-                                    "{count} goal(s) · {active} active · long-running plans"
-                                )),
-                        ),
+                        .child(div().text_xs().text_color(colors.text_tertiary).child(
+                            if live_hive {
+                                format!("{count} Hive run(s) · {active} active · read-only")
+                            } else {
+                                format!("{count} goal(s) · {active} active · long-running plans")
+                            },
+                        )),
                 ),
         )
         .child(
@@ -120,7 +122,7 @@ fn work_title_bar(
                 .child(
                     codex_button::primary_with_icon(
                         "work-header-create",
-                        "New goal",
+                        if live_hive { "Read-only" } else { "New goal" },
                         Icon::new(IconName::Plus).with_size(px(12.0)),
                         cx,
                     )
@@ -130,7 +132,7 @@ fn work_title_bar(
         )
 }
 
-fn work_empty_state(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn work_empty_state(live_hive: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .flex()
@@ -156,23 +158,27 @@ fn work_empty_state(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
                         .text_xl()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(colors.text)
-                        .child("No goals yet"),
+                        .child(if live_hive {
+                            "No Hive runs"
+                        } else {
+                            "No goals yet"
+                        }),
                 )
                 .child(
                     div()
                         .text_sm()
                         .text_color(colors.text_tertiary)
                         .text_center()
-                        .child(
-                            "Work mode tracks long-running goals with a plan tracker. \
-                             Create a goal to get a checklist of steps; selecting a goal \
-                             loads plan items and wires thread/goal/* offline.",
-                        ),
+                        .child(if live_hive {
+                            "No Mitsuro Hive runs are currently available in this view. Dispatch remains intentionally unavailable from this client."
+                        } else {
+                            "Work mode tracks long-running goals with a plan tracker. Create a goal to get a checklist of steps; selecting a goal loads plan items and wires thread/goal/* offline."
+                        }),
                 )
                 .child(
                     codex_button::primary_with_icon(
                         "start-goal",
-                        "Create goal",
+                        if live_hive { "Read-only" } else { "Create goal" },
                         Icon::new(IconName::Plus).with_size(px(14.0)),
                         cx,
                     )

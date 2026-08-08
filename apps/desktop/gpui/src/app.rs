@@ -16,20 +16,22 @@ use mitsuro_desktop_backend::{
     fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
     fixture_demo_skills, fixture_demo_usage, fixture_login_device_code_response, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, AgentBackend,
-    ApprovalChoice, BackendSelection, BackendSessionId, CollaborationModeListParams,
+    ApprovalChoice, BackendKind, BackendSelection, BackendSessionId, CollaborationModeListParams,
     CollaborationModeMask, ConfigReadParams, CreateSession, DesktopBackend, EnvironmentInfoParams,
     EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
     EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
     FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
     GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, ListMcpServerStatusParams,
-    LiveApprovalBridge, LoginAccountParams, McpServerStatus, MessageRole, ModelInfo,
-    ModelListParams, PendingApproval, PlanType, PluginListParams, PluginSummary, ProcessKillParams,
-    ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend, ProductModel, ProductTurn,
-    ReasoningEffortOption, SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams,
-    ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams,
-    ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT,
+    LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpServerInfo, McpServerStatus,
+    MessageRole, ModelInfo, ModelListParams, PendingApproval, PlanType, PluginAuthPolicy,
+    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
+    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
+    SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
+    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
+    ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -42,8 +44,10 @@ use crate::browser::{
 };
 use crate::components;
 use crate::demo::{
-    self, DemoGoal, DemoGoalStatus, DemoMessage, DemoMessageKind, DemoThread, ThreadSurface,
+    self, DemoGoal, DemoGoalStatus, DemoMessage, DemoMessageKind, DemoPlanItem, DemoThread,
+    ThreadSurface,
 };
+use crate::preferences::DesktopPreferences;
 use crate::theme;
 
 /// Top-level product shell mode (ChatGPT + Codex desktop unified chrome).
@@ -818,6 +822,10 @@ pub struct MitsuroApp {
     /// Work-mode goals (local list + optional `thread/goal/*` for linked threads).
     goals: Vec<DemoGoal>,
     selected_goal: Option<String>,
+    /// True when Work rows are a read-only projection of Mitsuro Hive runs.
+    goals_are_live_hive: bool,
+    /// Native Hive status retained separately from its Work-row projection.
+    hive_snapshot: Option<ProductHiveSnapshot>,
     /// Models from `model/list` (or fixture demo catalog).
     models: Vec<ModelInfo>,
     /// Selected model id (matches [`ModelInfo::id`]).
@@ -846,6 +854,7 @@ pub struct MitsuroApp {
     search_input: Entity<InputState>,
     search_query: String,
     backend: Option<Arc<DesktopBackend>>,
+    preferences: DesktopPreferences,
     fixture: Option<Arc<FixtureBackend>>,
     turn_in_progress: bool,
     /// Active turn id for `turn/interrupt` (from TurnStarted).
@@ -889,6 +898,8 @@ pub struct MitsuroApp {
     terminal_stdin_input: Entity<InputState>,
     /// Monotonic handle counter for client-supplied processHandle.
     terminal_handle_seq: u64,
+    /// Mitsuro background-process catalog. Interactive process semantics remain disabled.
+    background_processes: Vec<ProductProcess>,
     /// Files panel session (fs + fuzzy).
     files: FilesSession,
     /// Path bar input for `fs/readDirectory`.
@@ -908,6 +919,8 @@ pub struct MitsuroApp {
     scheduled_show_tasks: bool,
     /// Scheduled fixture row enabled toggles.
     scheduled_enabled: Vec<bool>,
+    /// Some, including an empty vec, means the Mitsuro Hive schedule API is live.
+    scheduled_tasks: Option<Vec<ProductSchedule>>,
     /// Plugins marketplace category filter (Public / Personal / MCP).
     plugins_filter: PluginsFilter,
     /// Plugins surface top tab (Plugins | Skills).
@@ -919,6 +932,10 @@ pub struct MitsuroApp {
 
 impl MitsuroApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let preferences = DesktopPreferences::load_default().unwrap_or_else(|error| {
+            eprintln!("[mitsuro] desktop preference load failed: {error}");
+            DesktopPreferences::default()
+        });
         let composer_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Do anything")
@@ -1088,6 +1105,8 @@ impl MitsuroApp {
             settings_choices: default_settings_choices(),
             goals,
             selected_goal,
+            goals_are_live_hive: false,
+            hive_snapshot: None,
             models: demo_models,
             selected_model_id: default_model_id,
             config_snippet: demo_config_snippet.into(),
@@ -1104,6 +1123,7 @@ impl MitsuroApp {
             search_input,
             search_query: String::new(),
             backend: None,
+            preferences: preferences.clone(),
             fixture: Some(Arc::clone(&fixture)),
             turn_in_progress: false,
             active_turn_id: None,
@@ -1122,6 +1142,7 @@ impl MitsuroApp {
             terminal_cmd_input,
             terminal_stdin_input,
             terminal_handle_seq: 1,
+            background_processes: Vec::new(),
             files: FilesSession::new("fixture"),
             files_path_input,
             files_search_input,
@@ -1133,11 +1154,17 @@ impl MitsuroApp {
             // Suggestions-first like bar; Create / suggestion pick reveals Your tasks.
             scheduled_show_tasks: false,
             scheduled_enabled: vec![true, true],
+            scheduled_tasks: None,
             plugins_filter: PluginsFilter::Public,
             plugins_surface_tab: PluginsSurfaceTab::Plugins,
             pending_start_thread: {
                 let mode_raw = std::env::var("MITSURO_START_MODE").ok();
-                parse_start_thread(mode_raw.as_deref())
+                parse_start_thread(mode_raw.as_deref()).or_else(|| {
+                    preferences
+                        .selected_session
+                        .as_ref()
+                        .map(BackendSessionId::qualified)
+                })
             },
         };
 
@@ -1231,7 +1258,16 @@ impl MitsuroApp {
             }
             ProductMode::Work => {
                 let n = self.goals.len();
-                format!("Work · {n} goal(s)").into()
+                if self.goals_are_live_hive {
+                    let running = self
+                        .hive_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.status.running_count)
+                        .unwrap_or(0);
+                    format!("Hive · {n} run(s) · {running} running · read-only").into()
+                } else {
+                    format!("Work · {n} goal(s)").into()
+                }
             }
             ProductMode::Codex => {
                 let n = self
@@ -1249,12 +1285,24 @@ impl MitsuroApp {
                 format!("Atlas / browser · {kind}").into()
             }
             ProductMode::Terminal => {
-                let h = self
-                    .terminal
-                    .process_handle
-                    .as_deref()
-                    .unwrap_or("no process");
-                format!("Terminal · {} · {h}", self.terminal.status_label()).into()
+                if self
+                    .backend
+                    .as_ref()
+                    .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp)
+                {
+                    format!(
+                        "Processes · {} background process(es) · read-only",
+                        self.background_processes.len()
+                    )
+                    .into()
+                } else {
+                    let h = self
+                        .terminal
+                        .process_handle
+                        .as_deref()
+                        .unwrap_or("no process");
+                    format!("Terminal · {} · {h}", self.terminal.status_label()).into()
+                }
             }
             ProductMode::Files => {
                 let n = if self.files.search_query.is_empty() {
@@ -1301,7 +1349,9 @@ impl MitsuroApp {
                 }
             }
             ProductMode::Scheduled => {
-                if self.scheduled_show_tasks {
+                if let Some(tasks) = self.scheduled_tasks.as_ref() {
+                    format!("Hive schedules · {} task(s) · read-only", tasks.len()).into()
+                } else if self.scheduled_show_tasks {
                     "Scheduled · fixture demo tasks".into()
                 } else {
                     "Scheduled · suggestions (no schedule protocol)".into()
@@ -1443,6 +1493,10 @@ impl MitsuroApp {
         self.goals.iter().find(|g| &g.id == id)
     }
 
+    pub fn work_is_live_hive(&self) -> bool {
+        self.goals_are_live_hive
+    }
+
     pub fn select_goal(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_goal = Some(id.clone());
         let thread_id = self
@@ -1454,7 +1508,7 @@ impl MitsuroApp {
             self.status_line = format!("Work · {}", g.objective).into();
         }
         // Best-effort `thread/goal/get` for linked threads (fixture or live).
-        if let Some(tid) = thread_id {
+        if let Some(tid) = thread_id.filter(|_| !self.goals_are_live_hive) {
             self.dispatch_goal_get(tid, cx);
         }
         cx.notify();
@@ -1462,6 +1516,13 @@ impl MitsuroApp {
 
     /// CTA: create a fixture goal with plan steps; also `thread/goal/set` when linked.
     pub fn start_new_goal(&mut self, cx: &mut Context<Self>) {
+        if self.goals_are_live_hive {
+            self.status_line =
+                "Hive dispatch is not wired from the GPUI client yet; this view is read-only."
+                    .into();
+            cx.notify();
+            return;
+        }
         let id = format!("goal-local-{}", self.goals.len() + 1);
         // Link to a new synthetic thread id so protocol goal/* has a stable key.
         let thread_id = format!("work-thread-{id}");
@@ -1484,6 +1545,12 @@ impl MitsuroApp {
 
     /// Clear selected goal via `thread/goal/clear` (and drop from local list).
     pub fn clear_selected_goal(&mut self, cx: &mut Context<Self>) {
+        if self.goals_are_live_hive {
+            self.status_line =
+                "Hive run deletion is intentionally unavailable in this read-only client.".into();
+            cx.notify();
+            return;
+        }
         let Some(id) = self.selected_goal.clone() else {
             self.status_line = "Work · no goal selected to clear".into();
             cx.notify();
@@ -1507,6 +1574,11 @@ impl MitsuroApp {
 
     /// Toggle a plan item done flag on the selected goal (local/fixture).
     pub fn toggle_goal_plan_item(&mut self, goal_id: &str, item_id: &str, cx: &mut Context<Self>) {
+        if self.goals_are_live_hive {
+            self.status_line = "Hive task mutation is not wired from the GPUI client yet.".into();
+            cx.notify();
+            return;
+        }
         if let Some(goal) = self.goals.iter_mut().find(|g| g.id == goal_id) {
             if let Some(item) = goal.plan_items.iter_mut().find(|i| i.id == item_id) {
                 item.done = !item.done;
@@ -1669,6 +1741,13 @@ impl MitsuroApp {
 
     pub fn terminal_session(&self) -> &TerminalSession {
         &self.terminal
+    }
+
+    pub fn terminal_interactive_available(&self) -> bool {
+        self.backend
+            .as_ref()
+            .map(|backend| backend.capabilities().processes)
+            .unwrap_or(true)
     }
 
     pub fn terminal_cmd_input(&self) -> &Entity<InputState> {
@@ -1898,9 +1977,18 @@ impl MitsuroApp {
         if let Some(backend) = self.live_backend() {
             return cx.background_executor().block(async {
                 backend
-                    .fs_read_directory(params)
+                    .browse_directory(params.path)
                     .await
-                    .map(|r| r.entries)
+                    .map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|entry| FsReadDirectoryEntry {
+                                file_name: entry.name,
+                                is_directory: entry.is_directory,
+                                is_file: entry.is_file,
+                            })
+                            .collect()
+                    })
                     .map_err(|e| e.to_string())
             });
         }
@@ -1927,9 +2015,9 @@ impl MitsuroApp {
         if let Some(backend) = self.live_backend() {
             return cx.background_executor().block(async {
                 backend
-                    .fs_read_file(params)
+                    .read_text_file(params.path)
                     .await
-                    .map(|r| r.text_lossy())
+                    .map(|file| file.text)
                     .map_err(|e| e.to_string())
             });
         }
@@ -1956,9 +2044,9 @@ impl MitsuroApp {
         if let Some(backend) = self.live_backend() {
             return cx.background_executor().block(async {
                 backend
-                    .fuzzy_file_search(params)
+                    .search_files(params.query, params.roots)
                     .await
-                    .map(|r| r.files)
+                    .map(|files| files.into_iter().map(file_match_from_product).collect())
                     .map_err(|e| e.to_string())
             });
         }
@@ -2402,10 +2490,24 @@ impl MitsuroApp {
     }
 
     pub fn scheduled_show_tasks(&self) -> bool {
-        self.scheduled_show_tasks
+        self.scheduled_tasks
+            .as_ref()
+            .is_some_and(|tasks| !tasks.is_empty())
+            || self.scheduled_show_tasks
+    }
+
+    pub fn scheduled_tasks(&self) -> Option<&[ProductSchedule]> {
+        self.scheduled_tasks.as_deref()
     }
 
     pub fn set_scheduled_show_tasks(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.scheduled_tasks.is_some() {
+            self.status_line =
+                "Hive schedule creation is not wired from the GPUI client yet; catalog is read-only."
+                    .into();
+            cx.notify();
+            return;
+        }
         self.scheduled_show_tasks = show;
         self.status_line = if show {
             "Scheduled · fixture demo tasks".into()
@@ -2415,11 +2517,33 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    pub fn request_schedule_creation(&mut self, suggestion: Option<&str>, cx: &mut Context<Self>) {
+        if self.scheduled_tasks.is_some() {
+            self.status_line =
+                "Hive schedule creation is not wired from the GPUI client yet; catalog is read-only."
+                    .into();
+        } else {
+            self.scheduled_show_tasks = true;
+            self.status_line = suggestion.map_or_else(
+                || "Scheduled · fixture demo tasks".into(),
+                |name| format!("Scheduled · added fixture suggestion “{name}”").into(),
+            );
+        }
+        cx.notify();
+    }
+
     pub fn scheduled_enabled(&self) -> &[bool] {
         &self.scheduled_enabled
     }
 
     pub fn toggle_scheduled_enabled(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.scheduled_tasks.is_some() {
+            self.status_line =
+                "Hive schedule mutations are intentionally unavailable in this read-only client."
+                    .into();
+            cx.notify();
+            return;
+        }
         if let Some(slot) = self.scheduled_enabled.get_mut(index) {
             *slot = !*slot;
             let on = *slot;
@@ -2815,30 +2939,26 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            let mcp = match backend
-                                .mcp_server_status_list(ListMcpServerStatusParams::default())
-                                .await
-                            {
-                                Ok(r) => r.data,
+                            let mcp = match backend.list_product_mcp_servers().await {
+                                Ok(servers) => {
+                                    servers.into_iter().map(mcp_status_from_product).collect()
+                                }
                                 Err(_) => Vec::new(),
                             };
-                            let plugins =
-                                match backend.plugin_list(PluginListParams::default()).await {
-                                    Ok(r) => {
-                                        r.marketplaces.into_iter().flat_map(|m| m.plugins).collect()
-                                    }
-                                    Err(_) => Vec::new(),
-                                };
-                            // Skills tab: skills/list (already bootstrapped; refresh keeps parity).
-                            let skills =
-                                match backend.skills_list(SkillsListParams::default()).await {
-                                    Ok(r) => r
-                                        .data
-                                        .into_iter()
-                                        .flat_map(|e| e.skills)
-                                        .collect::<Vec<_>>(),
-                                    Err(_) => Vec::new(),
-                                };
+                            let plugins = match backend.list_product_extensions().await {
+                                Ok(extensions) => extensions
+                                    .into_iter()
+                                    .map(plugin_summary_from_product)
+                                    .collect(),
+                                Err(_) => Vec::new(),
+                            };
+                            let skills = match backend.list_product_skills().await {
+                                Ok(skills) => skills
+                                    .into_iter()
+                                    .map(skill_metadata_from_product)
+                                    .collect(),
+                                Err(_) => Vec::new(),
+                            };
                             return Ok::<_, String>((mcp, plugins, skills, "app-server"));
                         }
                     }
@@ -3638,6 +3758,15 @@ impl MitsuroApp {
     pub fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_thread = Some(id.clone());
         self.thread_menu_open = false;
+        let backend_session_id = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == id)
+            .and_then(|thread| thread.backend_session_id.clone());
+        if let Some(session_id) = backend_session_id {
+            self.preferences.remember_session(session_id);
+            self.save_preferences_best_effort();
+        }
         // Keep Chat vs Codex mode aligned with the thread surface when possible.
         let msg_count = self
             .threads
@@ -4717,6 +4846,28 @@ impl MitsuroApp {
         }
     }
 
+    fn preferred_backend_selection(&self) -> mitsuro_desktop_backend::Result<BackendSelection> {
+        if std::env::var_os("MITSURO_BACKEND").is_some() {
+            return BackendSelection::from_env();
+        }
+        Ok(match self.preferences.selected_backend {
+            Some(mitsuro_desktop_backend::BackendKind::CodexStdio) => BackendSelection::CodexStdio,
+            Some(mitsuro_desktop_backend::BackendKind::CodexWebSocket) => {
+                BackendSelection::CodexWebSocket
+            }
+            Some(mitsuro_desktop_backend::BackendKind::Fixture) => BackendSelection::Fixture,
+            Some(mitsuro_desktop_backend::BackendKind::MitsuroHttp) | None => {
+                BackendSelection::MitsuroHttp
+            }
+        })
+    }
+
+    fn save_preferences_best_effort(&self) {
+        if let Err(error) = self.preferences.save_default() {
+            eprintln!("[mitsuro] desktop preference save failed: {error}");
+        }
+    }
+
     fn live_session_id(&self, ui_id: &str) -> Option<BackendSessionId> {
         self.threads
             .iter()
@@ -5521,7 +5672,7 @@ impl MitsuroApp {
     }
 
     fn bootstrap_backend(&mut self, cx: &mut Context<Self>) {
-        let selection = match BackendSelection::from_env() {
+        let selection = match self.preferred_backend_selection() {
             Ok(selection) => selection,
             Err(error) => {
                 self.connection = UiConnection::Fixture;
@@ -5568,7 +5719,20 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((init, remote, has_auth, models, config_snip, skills, mcp, plugins)) => {
+                    Ok(bootstrap) => {
+                        let BackendBootstrap {
+                            init,
+                            sessions: remote,
+                            has_auth,
+                            models,
+                            config_snip,
+                            skills,
+                            mcp,
+                            plugins,
+                            processes,
+                            hive,
+                            schedules,
+                        } = bootstrap;
                         eprintln!(
                             "[mitsuro] Connected backend={} os={} threads={} auth={} models={}",
                             app.backend
@@ -5584,6 +5748,12 @@ impl MitsuroApp {
                             detail: format!("{} · {}", init.platform_os, init.user_agent),
                             has_auth,
                         };
+                        if let Some(backend_kind) =
+                            app.backend.as_ref().map(|backend| backend.kind())
+                        {
+                            app.preferences.remember_backend(backend_kind);
+                            app.save_preferences_best_effort();
+                        }
                         if !remote.is_empty() {
                             app.threads = remote
                                 .into_iter()
@@ -5648,6 +5818,45 @@ impl MitsuroApp {
                             }
                         } else {
                             app.apply_plugins(plugins);
+                        }
+                        let is_mitsuro = app
+                            .backend
+                            .as_ref()
+                            .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp);
+                        if is_mitsuro {
+                            app.terminal.backend_label = "mitsuro-http · read-only catalog".into();
+                            match processes {
+                                Some(processes) => {
+                                    app.terminal.output = process_catalog_text(&processes).into();
+                                    app.background_processes = processes;
+                                }
+                                None => {
+                                    app.terminal.output = "Mitsuro background-process catalog is unavailable.\nInteractive terminal spawning is not exposed by this backend.".into();
+                                    app.background_processes.clear();
+                                }
+                            }
+                            app.goals_are_live_hive = true;
+                            match hive {
+                                Some(hive) => {
+                                    app.goals = hive_goals_from_snapshot(&hive);
+                                    app.selected_goal =
+                                        app.goals.first().map(|goal| goal.id.clone());
+                                    app.hive_snapshot = Some(hive);
+                                }
+                                None => {
+                                    app.goals.clear();
+                                    app.selected_goal = None;
+                                    app.hive_snapshot = None;
+                                }
+                            }
+                            // Some(empty) intentionally keeps the live, mutation-disabled schedule
+                            // surface instead of silently falling back to fixture suggestions.
+                            app.scheduled_tasks = Some(schedules.unwrap_or_default());
+                        } else {
+                            app.background_processes.clear();
+                            app.goals_are_live_hive = false;
+                            app.hive_snapshot = None;
+                            app.scheduled_tasks = None;
                         }
                         let auth_note = if has_auth { "auth" } else { "no auth" };
                         // Short chrome: Connected · N threads · auth (counts for models/skills live in Settings).
@@ -5723,12 +5932,19 @@ impl MitsuroApp {
         }
 
         let want_trim = want.trim();
+        let qualified = BackendSessionId::parse_qualified(want_trim).ok();
         let resolved = if want_trim == "@first" || want_trim.is_empty() {
             self.threads
                 .iter()
                 .find(|t| t.summary.archived != Some(true))
                 .or_else(|| self.threads.first())
                 .map(|t| t.summary.id.clone())
+        } else if let Some(t) = qualified.as_ref().and_then(|session| {
+            self.threads
+                .iter()
+                .find(|thread| thread.backend_session_id.as_ref() == Some(session))
+        }) {
+            Some(t.summary.id.clone())
         } else if let Some(t) = self.threads.iter().find(|t| t.summary.id == want_trim) {
             Some(t.summary.id.clone())
         } else {
@@ -5931,6 +6147,161 @@ fn model_info_from_product(model: ProductModel) -> ModelInfo {
             .collect(),
         upgrade: model.upgrade,
     }
+}
+
+fn file_match_from_product(file: ProductFileMatch) -> FuzzyFileSearchResult {
+    FuzzyFileSearchResult {
+        root: file.root,
+        path: file.path,
+        match_type: if file.is_directory {
+            mitsuro_desktop_backend::FuzzyFileSearchMatchType::Directory
+        } else {
+            mitsuro_desktop_backend::FuzzyFileSearchMatchType::File
+        },
+        file_name: file.file_name,
+        score: file.score,
+        indices: (!file.indices.is_empty()).then_some(file.indices),
+    }
+}
+
+fn skill_metadata_from_product(skill: ProductSkill) -> SkillMetadata {
+    SkillMetadata {
+        name: skill.name,
+        description: skill.description,
+        enabled: skill.enabled,
+        path: skill.path,
+        scope: skill.scope,
+        short_description: skill.short_description,
+    }
+}
+
+fn mcp_status_from_product(server: ProductMcpServer) -> McpServerStatus {
+    let auth_status = if server.status.contains("auth required") {
+        McpAuthStatus::NotLoggedIn
+    } else {
+        McpAuthStatus::Unsupported
+    };
+    McpServerStatus {
+        name: server.name.clone(),
+        server_info: Some(McpServerInfo {
+            name: server.name,
+            version: String::new(),
+            title: server.title,
+            description: None,
+            website_url: None,
+        }),
+        tools: server
+            .tool_names
+            .into_iter()
+            .map(|name| (name, serde_json::Value::Null))
+            .collect(),
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        auth_status,
+    }
+}
+
+fn plugin_summary_from_product(extension: ProductExtension) -> PluginSummary {
+    PluginSummary {
+        id: extension.id,
+        name: extension.name,
+        source: PluginSource::Remote,
+        installed: extension.installed,
+        enabled: extension.enabled,
+        install_policy: PluginInstallPolicy::Available,
+        auth_policy: PluginAuthPolicy::OnUse,
+        availability: PluginAvailability::Available,
+        version: extension.version,
+        local_version: None,
+        remote_plugin_id: None,
+        interface: Some(PluginInterface {
+            display_name: Some(extension.display_name),
+            short_description: extension.description,
+            long_description: None,
+            developer_name: Some(extension.source),
+            category: extension.category,
+            capabilities: extension.capabilities,
+        }),
+        keywords: Vec::new(),
+        extra: Default::default(),
+    }
+}
+
+fn process_catalog_text(processes: &[ProductProcess]) -> String {
+    if processes.is_empty() {
+        return "Mitsuro background-process catalog is empty.\nInteractive terminal spawning is not exposed by this backend."
+            .to_owned();
+    }
+    let mut output = String::from(
+        "Mitsuro background processes (read-only)\nInteractive terminal spawning is not exposed by this backend.\n\n",
+    );
+    for process in processes {
+        output.push_str(&format!(
+            "{}  pid={}  {}  {}\n    {}\n",
+            process.status,
+            process
+                .pid
+                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
+            process.id,
+            process.command,
+            process.working_dir
+        ));
+    }
+    output
+}
+
+fn hive_goals_from_snapshot(snapshot: &ProductHiveSnapshot) -> Vec<DemoGoal> {
+    snapshot
+        .runs
+        .iter()
+        .map(|run| {
+            let status = match run.agent_state.as_str() {
+                "paused" | "sleeping" | "scheduled" | "waiting" => DemoGoalStatus::Paused,
+                "failed" | "blocked" => DemoGoalStatus::Blocked,
+                "complete" | "completed" | "succeeded" => DemoGoalStatus::Complete,
+                _ => DemoGoalStatus::Active,
+            };
+            let mut plan_items = Vec::new();
+            for (label, count, done) in [
+                ("Completed tasks", run.completed_tasks, true),
+                ("In-progress tasks", run.in_progress_tasks, false),
+                ("Pending tasks", run.pending_tasks, false),
+                ("Blocked tasks", run.blocked_tasks, false),
+                ("Failed tasks", run.failed_tasks, false),
+            ] {
+                if count > 0 {
+                    plan_items.push(DemoPlanItem {
+                        id: format!(
+                            "{}-{}",
+                            run.session_id,
+                            label.to_lowercase().replace(' ', "-")
+                        ),
+                        title: format!("{label}: {count}"),
+                        done,
+                    });
+                }
+            }
+            if plan_items.is_empty() {
+                plan_items.push(DemoPlanItem {
+                    id: format!("{}-idle", run.session_id),
+                    title: "No queued tasks".to_owned(),
+                    done: true,
+                });
+            }
+            DemoGoal {
+                id: run.session_id.clone(),
+                objective: run
+                    .diagnostic_summary
+                    .clone()
+                    .filter(|summary| !summary.is_empty())
+                    .unwrap_or_else(|| run.title.clone()),
+                status,
+                plan_items,
+                thread_id: Some(run.session_id.clone()),
+                updated_at: None,
+            }
+        })
+        .collect()
 }
 
 /// When set, empty live plugin/MCP/skills catalogs densify with offline demo data.
@@ -6174,21 +6545,21 @@ async fn replay_fixture_events(
     });
 }
 
-fn connect_list_auth_and_models(
-    backend: Arc<DesktopBackend>,
-) -> Result<
-    (
-        mitsuro_desktop_backend::InitializeResponse,
-        Vec<SessionSummary>,
-        bool,
-        Vec<ProductModel>,
-        Option<String>,
-        Vec<SkillMetadata>,
-        Vec<McpServerStatus>,
-        Vec<PluginSummary>,
-    ),
-    String,
-> {
+struct BackendBootstrap {
+    init: mitsuro_desktop_backend::InitializeResponse,
+    sessions: Vec<SessionSummary>,
+    has_auth: bool,
+    models: Vec<ProductModel>,
+    config_snip: Option<String>,
+    skills: Vec<SkillMetadata>,
+    mcp: Vec<McpServerStatus>,
+    plugins: Vec<PluginSummary>,
+    processes: Option<Vec<ProductProcess>>,
+    hive: Option<ProductHiveSnapshot>,
+    schedules: Option<Vec<ProductSchedule>>,
+}
+
+fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendBootstrap, String> {
     // MUST use the backend pump runtime so child I/O stays alive after return.
     let b = Arc::clone(&backend);
     backend.block_on(async move {
@@ -6216,27 +6587,29 @@ fn connect_list_auth_and_models(
             Err(_) => None,
         };
         // skills/list best-effort.
-        let skills = match b.skills_list(SkillsListParams::default()).await {
-            Ok(resp) => resp.data.into_iter().flat_map(|e| e.skills).collect(),
-            Err(_) => Vec::new(),
-        };
-        // mcpServerStatus/list + plugin/list best-effort for Extensions panel.
-        let mcp = match b
-            .mcp_server_status_list(ListMcpServerStatusParams::default())
-            .await
-        {
-            Ok(resp) => resp.data,
-            Err(_) => Vec::new(),
-        };
-        let plugins = match b.plugin_list(PluginListParams::default()).await {
-            Ok(resp) => resp
-                .marketplaces
+        let skills = match b.list_product_skills().await {
+            Ok(skills) => skills
                 .into_iter()
-                .flat_map(|m| m.plugins)
+                .map(skill_metadata_from_product)
                 .collect(),
             Err(_) => Vec::new(),
         };
-        Ok((
+        // Product catalogs are best-effort for the Extensions panel.
+        let mcp = match b.list_product_mcp_servers().await {
+            Ok(servers) => servers.into_iter().map(mcp_status_from_product).collect(),
+            Err(_) => Vec::new(),
+        };
+        let plugins = match b.list_product_extensions().await {
+            Ok(extensions) => extensions
+                .into_iter()
+                .map(plugin_summary_from_product)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let processes = b.list_background_processes().await.ok();
+        let hive = b.hive_snapshot().await.ok();
+        let schedules = b.list_schedules().await.ok();
+        Ok(BackendBootstrap {
             init,
             sessions,
             has_auth,
@@ -6245,7 +6618,10 @@ fn connect_list_auth_and_models(
             skills,
             mcp,
             plugins,
-        ))
+            processes,
+            hive,
+            schedules,
+        })
     })
 }
 

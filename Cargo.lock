@@ -5937,6 +5937,7 @@ dependencies = [
  "mitsuro-desktop-backend",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wry",
 ]

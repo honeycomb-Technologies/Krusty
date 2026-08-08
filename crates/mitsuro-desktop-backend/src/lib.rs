@@ -92,8 +92,10 @@ pub use process::{
     ProcessTerminalSize, ProcessWriteStdinParams, ProcessWriteStdinResponse,
 };
 pub use product::{
-    ConversationMessage, CreateSession, MessageRole, ProductBackend, ProductModel,
-    ProductReasoningEffort, ProductTurn, SessionConversation, SessionSummary,
+    ConversationMessage, CreateSession, MessageRole, ProductBackend, ProductDirectoryEntry,
+    ProductExtension, ProductFile, ProductFileMatch, ProductHiveRun, ProductHiveSnapshot,
+    ProductHiveStatus, ProductMcpServer, ProductModel, ProductProcess, ProductReasoningEffort,
+    ProductSchedule, ProductSkill, ProductTurn, SessionConversation, SessionSummary,
 };
 pub use protocol::{
     command_execution_fields, extract_chat_tail_from_thread, extract_transcript_from_thread,

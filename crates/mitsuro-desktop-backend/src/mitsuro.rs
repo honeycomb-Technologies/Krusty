@@ -1034,6 +1034,17 @@ mod tests {
             .plugin_list(PluginListParams::default())
             .await
             .expect("extension list");
+        backend
+            .client()
+            .list_processes()
+            .await
+            .expect("process list");
+        backend.client().hive_current().await.expect("Hive current");
+        backend
+            .client()
+            .list_hive_schedules()
+            .await
+            .expect("Hive schedules");
         backend.disconnect().await.expect("disconnect");
     }
 }
