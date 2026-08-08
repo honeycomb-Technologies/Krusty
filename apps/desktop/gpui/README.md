@@ -42,9 +42,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 The home shell and Connections settings have been compared in a live 940×1054 GPUI
 window against the reversed ChatGPT desktop reference. This is not yet feature-complete
-UI parity: Pull requests, Sites, parts of Atlas/browser, and several secondary Settings
-actions remain explicitly fixture-only or unavailable. Those surfaces must be wired or
-removed before the native client can be called finalized.
+UI parity. Pull requests and Sites retain their navigation destinations but now render
+explicit capability states: neither backend exposes a typed API for those products, so
+the native client does not show sample repositories, sample deployments, or inactive
+create/review controls. Parts of Atlas/browser and several secondary Settings actions
+remain fixture-only or unavailable. Those surfaces must be wired or retired before the
+native client can be called finalized.
 
 ## Build
 

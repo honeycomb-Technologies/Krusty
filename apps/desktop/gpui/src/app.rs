@@ -83,25 +83,6 @@ pub enum ProductMode {
     Scheduled,
 }
 
-/// Pull-requests list filter chips (bar: All / Reviewing / Authored).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PrFilter {
-    #[default]
-    All,
-    Reviewing,
-    Authored,
-}
-
-impl PrFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Reviewing => "Reviewing",
-            Self::Authored => "Authored",
-        }
-    }
-}
-
 /// Plugins marketplace category chips (Public catalog vs Personal / MCP).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PluginsFilter {
@@ -925,15 +906,6 @@ pub struct MitsuroApp {
     files_path_input: Entity<InputState>,
     /// Fuzzy search query input.
     files_search_input: Entity<InputState>,
-    /// Pull requests filter chip (All / Reviewing / Authored).
-    pr_filter: PrFilter,
-    /// Selected PR number in the two-pane list (None = empty detail).
-    selected_pr: Option<u32>,
-    /// When false (default), All view stays sparse like bar (1–2 Authored rows).
-    /// Set true via `MITSURO_PR_DENSE=1` (full PR catalog). Sparse default hides overflow chrome.
-    pr_list_dense: bool,
-    /// Sites: show fixture demo cards vs empty state.
-    sites_show_fixtures: bool,
     /// Scheduled: show fixture task rows (vs empty + suggestions only).
     scheduled_show_tasks: bool,
     /// Scheduled fixture row enabled toggles.
@@ -1166,11 +1138,6 @@ impl MitsuroApp {
             files: FilesSession::new("fixture"),
             files_path_input,
             files_search_input,
-            pr_filter: PrFilter::All,
-            selected_pr: None,
-            // Sparse All view by default (bar-pr-real has 1 Authored row). Dense via env.
-            pr_list_dense: std::env::var_os("MITSURO_PR_DENSE").is_some(),
-            sites_show_fixtures: false,
             // Suggestions-first like bar; Create / suggestion pick reveals Your tasks.
             scheduled_show_tasks: false,
             scheduled_enabled: vec![true, true],
@@ -1406,25 +1373,13 @@ impl MitsuroApp {
             }
             ProductMode::Settings => format!("Settings · {}", self.settings_section.label()).into(),
             ProductMode::PullRequests => {
-                let gh = self
-                    .mcp_github_server()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("none");
-                format!(
-                    "Pull requests · {} · fixture demo · GitHub MCP: {gh}",
-                    self.pr_filter.label()
-                )
-                .into()
+                let backend = self
+                    .active_backend_kind()
+                    .map(Self::backend_display_name)
+                    .unwrap_or("no backend");
+                format!("Pull requests · unavailable · {backend}").into()
             }
-            ProductMode::Sites => {
-                if self.sites_show_fixtures {
-                    "Sites · fixture demo cards".into()
-                } else if matches!(self.connection, UiConnection::Ready { .. }) {
-                    "Sites · no sites yet (live · no sites protocol)".into()
-                } else {
-                    "Sites · no sites yet".into()
-                }
-            }
+            ProductMode::Sites => "Sites · unavailable on selected backend".into(),
             ProductMode::Scheduled => {
                 if let Some(tasks) = self.scheduled_tasks.as_ref() {
                     format!("Hive schedules · {} task(s) · read-only", tasks.len()).into()
@@ -2507,62 +2462,6 @@ impl MitsuroApp {
     pub fn set_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         self.settings_section = section;
         self.status_line = format!("Settings · {}", section.label()).into();
-        cx.notify();
-    }
-
-    pub fn pr_filter(&self) -> PrFilter {
-        self.pr_filter
-    }
-
-    pub fn set_pr_filter(&mut self, filter: PrFilter, cx: &mut Context<Self>) {
-        self.pr_filter = filter;
-        // Clear selection when filter changes so detail stays consistent with list.
-        self.selected_pr = None;
-        self.status_line = format!("Pull requests · {}", filter.label()).into();
-        cx.notify();
-    }
-
-    pub fn selected_pr(&self) -> Option<u32> {
-        self.selected_pr
-    }
-
-    pub fn set_selected_pr(&mut self, number: Option<u32>, cx: &mut Context<Self>) {
-        self.selected_pr = number;
-        self.status_line = match number {
-            Some(n) => format!("Pull requests · #{n}").into(),
-            None => format!("Pull requests · {}", self.pr_filter.label()).into(),
-        };
-        cx.notify();
-    }
-
-    /// Full fixture PR catalog (vs sparse bar-like All view).
-    pub fn pr_list_dense(&self) -> bool {
-        self.pr_list_dense
-    }
-
-    pub fn set_pr_list_dense(&mut self, dense: bool, cx: &mut Context<Self>) {
-        self.pr_list_dense = dense;
-        self.status_line = if dense {
-            "Pull requests · full list".into()
-        } else {
-            "Pull requests · sparse".into()
-        };
-        cx.notify();
-    }
-
-    pub fn sites_show_fixtures(&self) -> bool {
-        self.sites_show_fixtures
-    }
-
-    pub fn set_sites_show_fixtures(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.sites_show_fixtures = show;
-        self.status_line = if show {
-            "Sites · fixture demo cards".into()
-        } else if matches!(self.connection, UiConnection::Ready { .. }) {
-            "Sites · no sites yet (live · no sites protocol)".into()
-        } else {
-            "Sites · no sites yet".into()
-        };
         cx.notify();
     }
 
