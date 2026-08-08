@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "apps/desktop/gpui"]
 
 # Default to running mitsuro-cli
 default-members = ["crates/mitsuro-cli"]

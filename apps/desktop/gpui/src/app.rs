@@ -1,0 +1,6233 @@
+//! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    div, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window,
+};
+use gpui_component::input::{InputEvent, InputState};
+use mitsuro_desktop_backend::{
+    command_execution_fields, file_change_fields, fixture_demo_account_response,
+    fixture_demo_collaboration_modes, fixture_demo_config, fixture_demo_environments,
+    fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
+    fixture_demo_skills, fixture_demo_usage, fixture_login_device_code_response, join_abs,
+    load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, AgentBackend,
+    ApprovalChoice, BackendSelection, CollaborationModeListParams, CollaborationModeMask,
+    ConfigReadParams, DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse,
+    EnvironmentStatusParams, EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend,
+    FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
+    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountTokenUsageResponse, ListMcpServerStatusParams, LiveApprovalBridge,
+    LoginAccountParams, McpServerStatus, ModelInfo, ModelListParams, PendingApproval, PlanType,
+    PluginListParams, PluginSummary, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, SkillMetadata, SkillsListParams, ThreadArchiveParams,
+    ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams,
+    ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadReadParams, ThreadSetNameParams,
+    ThreadStartParams, ThreadSummary, ThreadUnarchiveParams, TranscriptRole, TurnInterruptParams,
+    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+};
+
+#[cfg(not(feature = "browser-native"))]
+use crate::browser::open_system_browser;
+#[cfg(feature = "browser-native")]
+use crate::browser::NativeWebViewHost;
+use crate::browser::{
+    create_default_host, discover_browser_profiles, BrowserHost, DesktopBrowserHost,
+    ProfileDiscovery,
+};
+use crate::components;
+use crate::demo::{
+    self, DemoGoal, DemoGoalStatus, DemoMessage, DemoMessageKind, DemoThread, ThreadSurface,
+};
+use crate::theme;
+
+/// Top-level product shell mode (ChatGPT + Codex desktop unified chrome).
+///
+/// Bar home sidebar drives Chat/Codex + stub routes (PRs / Sites / Scheduled /
+/// Plugins). Activity rail remains for advanced surfaces (Work / Atlas / …).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProductMode {
+    /// Simplified conversational chat surface (`mode=chat` threads).
+    Chat,
+    /// Long-running goals / plans.
+    Work,
+    /// Agent threads — current main product surface.
+    #[default]
+    Codex,
+    /// Atlas / browser-use panel.
+    Atlas,
+    /// Terminal / process panel.
+    Terminal,
+    /// Files panel (`fs/*` + `fuzzyFileSearch`).
+    Files,
+    /// Computer-use / environment status panel.
+    Computer,
+    /// Extensions: MCP servers + plugins (sidebar "Plugins").
+    Extensions,
+    /// Settings (two-column tree matching ChatGPT/Codex desktop).
+    Settings,
+    /// Pull requests destination (sidebar).
+    PullRequests,
+    /// Sites destination (sidebar).
+    Sites,
+    /// Scheduled tasks destination (sidebar).
+    Scheduled,
+}
+
+/// Pull-requests list filter chips (bar: All / Reviewing / Authored).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PrFilter {
+    #[default]
+    All,
+    Reviewing,
+    Authored,
+}
+
+impl PrFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Reviewing => "Reviewing",
+            Self::Authored => "Authored",
+        }
+    }
+}
+
+/// Plugins marketplace category chips (Public catalog vs Personal / MCP).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PluginsFilter {
+    #[default]
+    Public,
+    Personal,
+    Mcp,
+}
+
+/// Top-level Plugins surface tab (Plugins marketplace vs Skills).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PluginsSurfaceTab {
+    #[default]
+    Plugins,
+    Skills,
+}
+
+/// Settings left-nav sections (bar 1:1 Personal / Integrations / Coding / Archived).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum SettingsSection {
+    #[default]
+    General,
+    LinuxDesktop,
+    Import,
+    Profile,
+    Appearance,
+    Voice,
+    Configuration,
+    Personalization,
+    Pets,
+    KeyboardShortcuts,
+    UsageBilling,
+    Account,
+    Plugins,
+    Browser,
+    ComputerUse,
+    Hooks,
+    Connections,
+    Git,
+    Environments,
+    Worktrees,
+    ArchivedChats,
+}
+
+impl SettingsSection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::LinuxDesktop => "Linux desktop",
+            Self::Import => "Import",
+            Self::Profile => "Profile",
+            Self::Appearance => "Appearance",
+            Self::Voice => "Voice",
+            Self::Configuration => "Configuration",
+            Self::Personalization => "Personalization",
+            Self::Pets => "Pets",
+            Self::KeyboardShortcuts => "Keyboard shortcuts",
+            Self::UsageBilling => "Usage & billing",
+            Self::Account => "Account",
+            Self::Plugins => "Plugins",
+            Self::Browser => "Browser",
+            Self::ComputerUse => "Computer use",
+            Self::Hooks => "Hooks",
+            Self::Connections => "Connections",
+            Self::Git => "Git",
+            Self::Environments => "Environments",
+            Self::Worktrees => "Worktrees",
+            Self::ArchivedChats => "Archived chats",
+        }
+    }
+
+    pub fn group(self) -> SettingsNavGroup {
+        match self {
+            Self::General
+            | Self::LinuxDesktop
+            | Self::Import
+            | Self::Profile
+            | Self::Appearance
+            | Self::Voice
+            | Self::Configuration
+            | Self::Personalization
+            | Self::Pets
+            | Self::KeyboardShortcuts
+            | Self::UsageBilling
+            | Self::Account => SettingsNavGroup::Personal,
+            Self::Plugins | Self::Browser | Self::ComputerUse => SettingsNavGroup::Integrations,
+            Self::Hooks | Self::Connections | Self::Git | Self::Environments | Self::Worktrees => {
+                SettingsNavGroup::Coding
+            }
+            Self::ArchivedChats => SettingsNavGroup::Archived,
+        }
+    }
+
+    pub fn all() -> &'static [SettingsSection] {
+        &SETTINGS_SECTIONS
+    }
+
+    pub fn matches_query(self, q: &str) -> bool {
+        if q.is_empty() {
+            return true;
+        }
+        let q = q.to_ascii_lowercase();
+        self.label().to_ascii_lowercase().contains(&q)
+            || self.group().label().to_ascii_lowercase().contains(&q)
+    }
+}
+
+/// Settings nav group headers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsNavGroup {
+    Personal,
+    Integrations,
+    Coding,
+    Archived,
+}
+
+impl SettingsNavGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Personal => "Personal",
+            Self::Integrations => "Integrations",
+            Self::Coding => "Coding",
+            Self::Archived => "Archived",
+        }
+    }
+
+    pub fn all() -> &'static [SettingsNavGroup] {
+        &[
+            Self::Personal,
+            Self::Integrations,
+            Self::Coding,
+            Self::Archived,
+        ]
+    }
+}
+
+/// Optional start mode for surface capture / demos (`MITSURO_START_MODE`).
+///
+/// Accepts: chat, codex, work, atlas, terminal, files, computer, plugins|extensions,
+/// settings, pull-requests|prs|pr, sites, scheduled, thread-open|thread (Codex + first
+/// non-empty demo thread).
+fn parse_start_mode() -> Option<ProductMode> {
+    let raw = std::env::var("MITSURO_START_MODE").ok()?;
+    let key = raw.trim().to_ascii_lowercase().replace('_', "-");
+    Some(match key.as_str() {
+        "chat" | "chatgpt" => ProductMode::Chat,
+        "codex" => ProductMode::Codex,
+        "work" => ProductMode::Work,
+        "atlas" | "browser" => ProductMode::Atlas,
+        "terminal" => ProductMode::Terminal,
+        "files" => ProductMode::Files,
+        "computer" => ProductMode::Computer,
+        "plugins" | "extensions" => ProductMode::Extensions,
+        "settings" => ProductMode::Settings,
+        "pull-requests" | "prs" | "pr" | "pullrequests" => ProductMode::PullRequests,
+        "sites" => ProductMode::Sites,
+        "scheduled" | "schedule" => ProductMode::Scheduled,
+        // Open-thread capture: land on Codex surface; thread id applied after seed.
+        "thread-open" | "thread" | "open-thread" => ProductMode::Codex,
+        _ => return None,
+    })
+}
+
+/// Optional thread id/title to select after bootstrap (`MITSURO_START_THREAD`).
+///
+/// Accepts:
+/// - exact server thread id
+/// - case-insensitive title substring (e.g. `Core Fix`)
+/// - `@first` — first non-archived server thread after list load
+///
+/// When `MITSURO_START_MODE` is `thread-open` and no thread env is set, defaults
+/// to `@first` (live) rather than a fixture demo id — selection is applied
+/// **after** `thread/list` fills Recents (see [`MitsuroApp::apply_pending_start_thread`]).
+fn parse_start_thread(mode_raw: Option<&str>) -> Option<String> {
+    if let Ok(id) = std::env::var("MITSURO_START_THREAD") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+    }
+    let key = mode_raw
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if matches!(key.as_str(), "thread-open" | "thread" | "open-thread") {
+        return Some("@first".into());
+    }
+    None
+}
+
+const SETTINGS_SECTIONS: [SettingsSection; 21] = [
+    SettingsSection::General,
+    SettingsSection::LinuxDesktop,
+    SettingsSection::Import,
+    SettingsSection::Profile,
+    SettingsSection::Appearance,
+    SettingsSection::Voice,
+    SettingsSection::Configuration,
+    SettingsSection::Personalization,
+    SettingsSection::Pets,
+    SettingsSection::KeyboardShortcuts,
+    SettingsSection::UsageBilling,
+    SettingsSection::Account,
+    SettingsSection::Plugins,
+    SettingsSection::Browser,
+    SettingsSection::ComputerUse,
+    SettingsSection::Hooks,
+    SettingsSection::Connections,
+    SettingsSection::Git,
+    SettingsSection::Environments,
+    SettingsSection::Worktrees,
+    SettingsSection::ArchivedChats,
+];
+
+fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
+    let mut m = std::collections::HashMap::new();
+    // General
+    m.insert("default_permissions".into(), true);
+    m.insert("full_access".into(), true);
+    m.insert("bottom_panel".into(), true);
+    m.insert("prevent_sleep".into(), false);
+    m.insert("suggested_prompts".into(), true);
+    m.insert("show_context_usage".into(), false);
+    m.insert("popout_standalone".into(), false);
+    // Linux desktop
+    m.insert("compact_prompt".into(), true);
+    m.insert("system_tray".into(), true);
+    m.insert("warm_start".into(), true);
+    m.insert("install_updates_on_close".into(), false);
+    // Appearance
+    m.insert("use_system_theme".into(), false);
+    m.insert("reduce_motion".into(), false);
+    m.insert("high_contrast".into(), false);
+    m.insert("translucent_sidebar".into(), true);
+    // Voice
+    m.insert("voice_auto_send".into(), true);
+    m.insert("voice_noise_suppression".into(), true);
+    m.insert("voice_push_to_talk".into(), true);
+    m.insert("voice_auto_start".into(), false);
+    // Pets / personalization / import
+    m.insert("pets_enabled".into(), false);
+    m.insert("pets_react".into(), true);
+    m.insert("remember_project_prefs".into(), true);
+    m.insert("enable_local_memories".into(), true);
+    m.insert("memory_from_tools".into(), false);
+    m.insert("import_archived".into(), false);
+    // Plugins / browser / computer / hooks / git / worktrees
+    m.insert("plugins_auto_update".into(), true);
+    m.insert("browser_persist_cookies".into(), true);
+    m.insert("computer_use_enabled".into(), true);
+    m.insert("computer_confirm_actions".into(), true);
+    m.insert("computer_network".into(), false);
+    m.insert("hooks_enabled".into(), false);
+    m.insert("auto_reconnect".into(), true);
+    m.insert("git_auto_stage".into(), false);
+    m.insert("git_sign_commits".into(), false);
+    m.insert("git_pr_helper".into(), true);
+    m.insert("git_force_push".into(), false);
+    m.insert("worktrees_enabled".into(), true);
+    m.insert("worktrees_auto_prune".into(), true);
+    m.insert("archived_show_in_recents".into(), false);
+    m.insert("prefer_agents_md".into(), true);
+    m.insert("env_prefer_local".into(), true);
+    m.insert("emacs_bindings".into(), false);
+    m.insert("profile_show_name".into(), true);
+    m
+}
+
+fn default_settings_choices() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("file_open_dest".into(), "Zed".into());
+    m.insert("language".into(), "Auto detect".into());
+    m.insert("terminal_location".into(), "Bottom".into());
+    m.insert("speed".into(), "Fast".into());
+    m.insert("send_shortcut".into(), "Enter".into());
+    m.insert("follow_up".into(), "Queue".into());
+    m.insert("theme".into(), "Dark".into());
+    m.insert("density".into(), "Comfortable".into());
+    m.insert("font_size".into(), "Default".into());
+    m.insert("font_scale".into(), "100%".into());
+    m.insert("code_font".into(), "JetBrains Mono".into());
+    m.insert("code_font_size".into(), "13px".into());
+    m.insert("accent_color".into(), "Blue".into());
+    m.insert("voice_input".into(), "System default".into());
+    // Reverse voice names (settings.general.realtimeVoice.voice.*) — Sol default.
+    m.insert("voice_output".into(), "Sol".into());
+    // Reverse personality: Friendly | Pragmatic.
+    m.insert("personality".into(), "Friendly".into());
+    m.insert("reduce_motion".into(), "Off".into());
+    m.insert("diff_markers".into(), "Color".into());
+    m.insert("contrast".into(), "Default".into());
+    m.insert("ui_font".into(), "Inter".into());
+    m.insert("ui_font_size".into(), "14px".into());
+    m.insert("review_delivery".into(), "Inline".into());
+    m.insert("pet_kind".into(), "Fox".into());
+    m.insert("pet_size".into(), "Medium".into());
+    m.insert("pet_position".into(), "Bottom-right".into());
+    m.insert("browser_engine".into(), "System".into());
+    m.insert("default_browser".into(), "System default".into());
+    m.insert("browser_approval".into(), "Always ask".into());
+    m.insert("computer_env".into(), "Local".into());
+    m.insert("git_default_branch".into(), "main".into());
+    m.insert("git_pr_merge".into(), "Squash".into());
+    m.insert("worktree_strategy".into(), "Git worktree".into());
+    m.insert("worktree_keep_count".into(), "5".into());
+    m
+}
+
+/// Initials from a display name (`"Jacob Burgess"` → `"JB"`).
+pub fn profile_initials_from_name(name: &str) -> String {
+    let parts: Vec<&str> = name.split_whitespace().filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => "?".into(),
+        [one] => one
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into()),
+        [a, b, ..] => {
+            let mut s = String::new();
+            if let Some(c) = a.chars().next() {
+                s.extend(c.to_uppercase());
+            }
+            if let Some(c) = b.chars().next() {
+                s.extend(c.to_uppercase());
+            }
+            s
+        }
+    }
+}
+
+/// Optional settings left-nav section for capture (`MITSURO_SETTINGS_SECTION`).
+///
+/// Accepts labels like `appearance`, `voice`, `pets`, `keyboard`, `usage`, etc.
+fn parse_settings_section() -> Option<SettingsSection> {
+    let raw = std::env::var("MITSURO_SETTINGS_SECTION").ok()?;
+    let key = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .replace(' ', "-");
+    Some(match key.as_str() {
+        "general" => SettingsSection::General,
+        "linux" | "linux-desktop" => SettingsSection::LinuxDesktop,
+        "import" => SettingsSection::Import,
+        "profile" => SettingsSection::Profile,
+        "appearance" => SettingsSection::Appearance,
+        "voice" => SettingsSection::Voice,
+        "configuration" | "config" => SettingsSection::Configuration,
+        "personalization" => SettingsSection::Personalization,
+        "pets" | "pet" => SettingsSection::Pets,
+        "keyboard" | "keyboard-shortcuts" | "shortcuts" => SettingsSection::KeyboardShortcuts,
+        "usage" | "usage-billing" | "billing" => SettingsSection::UsageBilling,
+        "account" => SettingsSection::Account,
+        "plugins" => SettingsSection::Plugins,
+        "browser" => SettingsSection::Browser,
+        "computer" | "computer-use" => SettingsSection::ComputerUse,
+        "hooks" => SettingsSection::Hooks,
+        "connections" | "mcp" => SettingsSection::Connections,
+        "git" => SettingsSection::Git,
+        "environments" | "envs" => SettingsSection::Environments,
+        "worktrees" | "worktree" => SettingsSection::Worktrees,
+        "archived" | "archived-chats" => SettingsSection::ArchivedChats,
+        _ => return None,
+    })
+}
+
+impl ProductMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Work => "Work",
+            Self::Codex => "Codex",
+            Self::Atlas => "Atlas",
+            Self::Terminal => "Terminal",
+            Self::Files => "Files",
+            Self::Computer => "Computer",
+            Self::Extensions => "Plugins",
+            Self::Settings => "Settings",
+            Self::PullRequests => "Pull requests",
+            Self::Sites => "Sites",
+            Self::Scheduled => "Scheduled",
+        }
+    }
+
+    /// Window title bar text, e.g. `"Mitsuro — Codex"`.
+    pub fn window_title(self) -> String {
+        format!("Mitsuro — {}", self.label())
+    }
+
+    /// Whether this mode shows the home thread sidebar (bar left nav).
+    pub fn shows_thread_sidebar(self) -> bool {
+        matches!(
+            self,
+            Self::Chat
+                | Self::Codex
+                | Self::PullRequests
+                | Self::Sites
+                | Self::Scheduled
+                | Self::Extensions
+        )
+    }
+
+    /// Thin icon activity rail — only for advanced modes not in bar home nav.
+    /// Settings uses its own two-column tree (no rail chrome).
+    pub fn shows_activity_rail(self) -> bool {
+        matches!(
+            self,
+            Self::Work | Self::Atlas | Self::Terminal | Self::Files | Self::Computer
+        )
+    }
+
+    /// Mode switcher pill label (Chat vs Codex surfaces).
+    pub fn mode_switcher_label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            _ => "Codex",
+        }
+    }
+}
+
+/// Terminal / process panel session status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TerminalSessionStatus {
+    #[default]
+    Idle,
+    Running,
+    Exited,
+    Error,
+}
+
+/// Snapshot for the Files panel (`fs/*` + fuzzy search).
+#[derive(Clone, Debug)]
+pub struct FilesSession {
+    pub cwd: SharedString,
+    pub entries: Vec<FsReadDirectoryEntry>,
+    pub selected_path: Option<String>,
+    pub preview: SharedString,
+    pub preview_error: Option<String>,
+    pub search_query: String,
+    pub fuzzy_results: Vec<FuzzyFileSearchResult>,
+    pub backend_label: SharedString,
+}
+
+impl FilesSession {
+    fn new(backend_label: impl Into<SharedString>) -> Self {
+        Self {
+            cwd: FIXTURE_PROJECT_ROOT.into(),
+            entries: Vec::new(),
+            selected_path: None,
+            preview: SharedString::from(""),
+            preview_error: None,
+            search_query: String::new(),
+            fuzzy_results: Vec::new(),
+            backend_label: backend_label.into(),
+        }
+    }
+}
+
+/// Snapshot for the Terminal panel (process/spawn UI).
+#[derive(Clone, Debug)]
+pub struct TerminalSession {
+    pub process_handle: Option<String>,
+    pub output: SharedString,
+    pub running: bool,
+    pub status: TerminalSessionStatus,
+    pub exit_code: Option<i32>,
+    pub backend_label: SharedString,
+}
+
+impl TerminalSession {
+    fn idle(backend_label: impl Into<SharedString>) -> Self {
+        Self {
+            process_handle: None,
+            output: SharedString::from(""),
+            running: false,
+            status: TerminalSessionStatus::Idle,
+            exit_code: None,
+            backend_label: backend_label.into(),
+        }
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            TerminalSessionStatus::Idle => "Idle",
+            TerminalSessionStatus::Running => "Running",
+            TerminalSessionStatus::Exited => "Exited",
+            TerminalSessionStatus::Error => "Error",
+        }
+    }
+}
+
+/// Atlas / agent browser-use session state (fixture until wry host lands).
+///
+/// Variants beyond `NoNativeHost` / `Idle` are reserved for the native host
+/// and agent-driving paths; matched in `browser_panel` status chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[allow(dead_code)] // Connecting/Ready/AgentDriving/Error set by future host hooks
+pub enum BrowserSessionStatus {
+    /// Panel open, no active agent drive.
+    #[default]
+    Idle,
+    Connecting,
+    Ready,
+    /// Agent tools are navigating / interacting.
+    AgentDriving,
+    Error,
+    /// Explicit: no native WebView linked (default for P4).
+    NoNativeHost,
+}
+
+/// Snapshot of Atlas browser session for the panel (derived from [`DesktopBrowserHost`]).
+#[derive(Clone, Debug)]
+pub struct BrowserSession {
+    pub url: SharedString,
+    pub title: SharedString,
+    pub status: BrowserSessionStatus,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    /// Profile import label (discovery summary or stub).
+    pub profile_label: SharedString,
+    /// Mock page body text for the content card.
+    pub page_body: SharedString,
+    /// Host backend chip label.
+    pub host_kind: SharedString,
+    /// Optional WebKit version when wry is linked.
+    pub engine_version: Option<SharedString>,
+    /// Bridge / attach detail (external, sibling, embed probe).
+    pub bridge_detail: SharedString,
+    /// Short bridge mode label for chips.
+    pub bridge_mode: SharedString,
+}
+
+impl BrowserSession {
+    fn from_host(
+        host: &DesktopBrowserHost,
+        profile_label: SharedString,
+        bridge_detail: SharedString,
+        bridge_mode: SharedString,
+        host_kind_override: Option<SharedString>,
+    ) -> Self {
+        Self {
+            url: host.url().to_string().into(),
+            title: host.title().to_string().into(),
+            status: host.status(),
+            can_go_back: host.can_go_back(),
+            can_go_forward: host.can_go_forward(),
+            profile_label,
+            page_body: host.page_body().to_string().into(),
+            host_kind: host_kind_override.unwrap_or_else(|| SharedString::from(host.host_kind())),
+            engine_version: host
+                .engine_version()
+                .map(|v| SharedString::from(v.to_string())),
+            bridge_detail,
+            bridge_mode,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum UiConnection {
+    /// Offline chrome with static demo data (reserved / legacy chip).
+    #[allow(dead_code)]
+    Demo,
+    /// Explicit fixture backend (sample-turn.jsonl).
+    Fixture,
+    Connecting,
+    Ready {
+        detail: String,
+        /// True when account/read reports a non-null account.
+        has_auth: bool,
+    },
+    #[allow(dead_code)]
+    Error {
+        message: String,
+    },
+}
+
+impl UiConnection {
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Ready { detail, .. } => Some(detail.as_str()),
+            Self::Error { message } => Some(message.as_str()),
+            Self::Demo | Self::Fixture | Self::Connecting => None,
+        }
+    }
+
+    pub fn chip_label(&self) -> &'static str {
+        match self {
+            // Keep offline backends out of "fixture"/"demo" primary chrome.
+            Self::Demo => "Offline",
+            Self::Fixture => "Offline",
+            Self::Connecting => "Connecting",
+            Self::Ready { .. } => "Ready",
+            Self::Error { .. } => "Error",
+        }
+    }
+}
+
+/// How Send should produce an assistant reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendMode {
+    /// Replay `fixtures/sample-turn.jsonl` (default; no paid API).
+    Fixture,
+    /// Live `turn/start` via app-server (requires Ready + auth + opt-in env).
+    Live,
+}
+
+/// Account / usage surface for Settings (offline fixture demo + live probe).
+#[derive(Clone, Debug)]
+pub struct AccountSession {
+    /// Whether `account/read` reports a usable account.
+    pub signed_in: bool,
+    /// Masked email or account type label.
+    pub email_display: Option<String>,
+    /// Plan tier label (e.g. Plus).
+    pub plan_label: Option<String>,
+    /// Token usage snapshot (fixture demo numbers offline).
+    pub usage: GetAccountTokenUsageResponse,
+    /// Rate-limit windows for usage bars.
+    pub rate_limits: GetAccountRateLimitsResponse,
+    /// Last device-code / OAuth stub line (URL + code).
+    pub login_stub_detail: Option<String>,
+    /// Backend source label for status chips.
+    pub source: &'static str,
+}
+
+impl AccountSession {
+    /// Seeded fixture demo profile (signed-in Pro + usage bars + Jacob Burgess).
+    pub fn fixture_demo() -> Self {
+        let account_resp = fixture_demo_account_response();
+        let (email, plan) = match account_resp.account.as_ref() {
+            Some(Account::Chatgpt { email, plan_type }) => (
+                email
+                    .as_ref()
+                    .map(|e| mitsuro_desktop_backend::mask_email(e))
+                    .or_else(|| Some(mitsuro_desktop_backend::FIXTURE_DEMO_EMAIL_MASKED.into())),
+                Some(plan_type.label().to_string()),
+            ),
+            Some(a) => (
+                a.email_display(),
+                a.plan_type().map(|p| p.label().to_string()),
+            ),
+            None => (None, None),
+        };
+        Self {
+            signed_in: account_resp.has_account(),
+            email_display: email,
+            plan_label: plan,
+            usage: fixture_demo_usage(),
+            rate_limits: fixture_demo_rate_limits(),
+            login_stub_detail: None,
+            source: "fixture",
+        }
+    }
+
+    pub fn primary_used_percent(&self) -> i32 {
+        self.rate_limits
+            .rate_limits
+            .primary
+            .as_ref()
+            .map(|w| w.used_percent)
+            .unwrap_or(0)
+    }
+
+    pub fn secondary_used_percent(&self) -> i32 {
+        self.rate_limits
+            .rate_limits
+            .secondary
+            .as_ref()
+            .map(|w| w.used_percent)
+            .unwrap_or(0)
+    }
+
+    /// True when primary window is exhausted and no credit balance remains.
+    pub fn is_rate_limited_out(&self) -> bool {
+        let primary_full = self.primary_used_percent() >= 100;
+        let credits = self
+            .rate_limits
+            .rate_limits
+            .credits
+            .as_ref()
+            .map(|c| c.has_credits || c.unlimited)
+            .unwrap_or(false);
+        primary_full && !credits
+    }
+
+    pub fn lifetime_tokens(&self) -> i64 {
+        self.usage.summary.lifetime_tokens.unwrap_or(0)
+    }
+}
+
+pub struct MitsuroApp {
+    focus_handle: FocusHandle,
+    connection: UiConnection,
+    threads: Vec<DemoThread>,
+    selected_thread: Option<String>,
+    status_line: SharedString,
+    /// Active product shell mode (rail selection).
+    active_mode: ProductMode,
+    /// Selected Settings left-nav section (only meaningful in Settings mode).
+    settings_section: SettingsSection,
+    /// Mode to restore when leaving Settings via "Back to app".
+    settings_return_mode: ProductMode,
+    /// Client-side filter for Settings left-nav labels.
+    settings_search_query: String,
+    /// Settings search input entity.
+    settings_search_input: Entity<InputState>,
+    /// Local fixture toggles / segment choices (density UI; no paid backends).
+    settings_toggles: std::collections::HashMap<String, bool>,
+    /// Local fixture string choices (e.g. "Bottom"/"Right", "Fast").
+    settings_choices: std::collections::HashMap<String, String>,
+    /// Last selected Chat-surface thread (restored when re-entering Chat).
+    selected_chat_thread: Option<String>,
+    /// Last selected Codex-surface thread (restored when re-entering Codex).
+    selected_codex_thread: Option<String>,
+    /// Work-mode goals (local list + optional `thread/goal/*` for linked threads).
+    goals: Vec<DemoGoal>,
+    selected_goal: Option<String>,
+    /// Models from `model/list` (or fixture demo catalog).
+    models: Vec<ModelInfo>,
+    /// Selected model id (matches [`ModelInfo::id`]).
+    selected_model_id: Option<String>,
+    /// Short config snippet from `config/read` (Settings).
+    config_snippet: SharedString,
+    /// Skills from `skills/list` (or fixture demo).
+    skills: Vec<SkillMetadata>,
+    /// MCP servers from `mcpServerStatus/list` (or fixture demo).
+    mcp_servers: Vec<McpServerStatus>,
+    /// Plugins from `plugin/list` (flattened marketplace entries).
+    plugins: Vec<PluginSummary>,
+    /// Environments catalog (fixture demo; no protocol list method).
+    environments: Vec<EnvironmentSummary>,
+    /// Selected environment id for status/info detail.
+    selected_environment_id: Option<String>,
+    /// Last `environment/status` response for the selection.
+    environment_status_detail: Option<EnvironmentStatusResponse>,
+    /// Last `environment/info` response for the selection.
+    environment_info_detail: Option<EnvironmentInfoResponse>,
+    /// Collaboration mode presets (`collaborationMode/list`).
+    collaboration_modes: Vec<CollaborationModeMask>,
+    /// Account / usage session for Settings Account section.
+    account: AccountSession,
+    composer_input: Entity<InputState>,
+    search_input: Entity<InputState>,
+    search_query: String,
+    backend: Option<Arc<DesktopBackend>>,
+    fixture: Option<Arc<FixtureBackend>>,
+    turn_in_progress: bool,
+    /// Active turn id for `turn/interrupt` (from TurnStarted).
+    active_turn_id: Option<String>,
+    /// Cancel flag for fixture stream replay (Stop → set true).
+    turn_cancel: Option<Arc<AtomicBool>>,
+    /// When true, sidebar includes archived threads; default hides them.
+    show_archived: bool,
+    samples_loaded: bool,
+    /// Demo/sample threads loaded into sidebar Recents.
+    /// Mode switcher dropdown (Chat / Codex) open state.
+    mode_menu_open: bool,
+    /// Thread title overflow menu (Archive / Fork / Delete) open state.
+    thread_menu_open: bool,
+    /// Dismissible home promo card: voice.
+    dismiss_voice_promo: bool,
+    /// Dismissible home promo card: usage.
+    dismiss_usage_card: bool,
+    /// Active server approval request (exec / patch) awaiting user decision.
+    pending_approval: Option<PendingApproval>,
+    /// Remaining fixture events after stream paused on an approval.
+    fixture_resume: Option<(String, Vec<TurnStreamEvent>)>,
+    /// Live progressive turn: UI submits choice here; runner writes respond_approval.
+    live_approval_bridge: Option<Arc<LiveApprovalBridge>>,
+    /// Atlas browser host (history + mock pages; wry-linked when feature on).
+    browser_host: DesktopBrowserHost,
+    /// Snapshot synced from `browser_host` for the panel.
+    browser: BrowserSession,
+    /// Editable Atlas URL bar.
+    browser_url_input: Entity<InputState>,
+    /// Last profile discovery (paths only; no secrets).
+    browser_profiles: ProfileDiscovery,
+    /// Best-effort native / external bridge (wry child or xdg-open). UI-thread only.
+    #[cfg(feature = "browser-native")]
+    native_host: NativeWebViewHost,
+    /// Terminal panel session (process/spawn).
+    terminal: TerminalSession,
+    /// Command line for process/spawn.
+    terminal_cmd_input: Entity<InputState>,
+    /// Stdin line for process/writeStdin.
+    terminal_stdin_input: Entity<InputState>,
+    /// Monotonic handle counter for client-supplied processHandle.
+    terminal_handle_seq: u64,
+    /// Files panel session (fs + fuzzy).
+    files: FilesSession,
+    /// Path bar input for `fs/readDirectory`.
+    files_path_input: Entity<InputState>,
+    /// Fuzzy search query input.
+    files_search_input: Entity<InputState>,
+    /// Pull requests filter chip (All / Reviewing / Authored).
+    pr_filter: PrFilter,
+    /// Selected PR number in the two-pane list (None = empty detail).
+    selected_pr: Option<u32>,
+    /// When false (default), All view stays sparse like bar (1–2 Authored rows).
+    /// Set true via `MITSURO_PR_DENSE=1` (full PR catalog). Sparse default hides overflow chrome.
+    pr_list_dense: bool,
+    /// Sites: show fixture demo cards vs empty state.
+    sites_show_fixtures: bool,
+    /// Scheduled: show fixture task rows (vs empty + suggestions only).
+    scheduled_show_tasks: bool,
+    /// Scheduled fixture row enabled toggles.
+    scheduled_enabled: Vec<bool>,
+    /// Plugins marketplace category filter (Public / Personal / MCP).
+    plugins_filter: PluginsFilter,
+    /// Plugins surface top tab (Plugins | Skills).
+    plugins_surface_tab: PluginsSurfaceTab,
+    /// Deferred open-thread after async bootstrap (`MITSURO_START_THREAD` / thread-open).
+    /// Applied once Recents are filled from app-server (or fixture).
+    pending_start_thread: Option<String>,
+}
+
+impl MitsuroApp {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let composer_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Do anything")
+                .multi_line(true)
+        });
+        // Re-render composer trailing control (voice disc ↔ send) as draft changes.
+        cx.subscribe_in(
+            &composer_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let _ = app;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let browser_host = create_default_host();
+        let initial_url = browser_host.url().to_string();
+        let browser_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Enter URL")
+                .default_value(initial_url)
+        });
+        // Enter in the URL bar navigates (same as Go).
+        cx.subscribe_in(
+            &browser_url_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.browser_navigate(window, cx);
+                }
+            },
+        )
+        .detach();
+
+        let terminal_cmd_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("bash -lc 'echo hello from mitsuro'")
+                .default_value("echo hello from mitsuro")
+        });
+        let terminal_stdin_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("stdin (writeStdin)…"));
+        cx.subscribe_in(
+            &terminal_cmd_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.terminal_spawn(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &terminal_stdin_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.terminal_write_stdin(window, cx);
+                }
+            },
+        )
+        .detach();
+
+        let files_path_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("/fixture-project")
+                .default_value(FIXTURE_PROJECT_ROOT)
+        });
+        let files_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Fuzzy search file names…"));
+        let settings_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        cx.subscribe_in(
+            &files_path_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.files_navigate_path_bar(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &files_search_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.files_run_fuzzy(window, cx);
+                }
+            },
+        )
+        .detach();
+
+        let fixture = Arc::new(FixtureBackend::new().with_stream_delay(Duration::from_millis(35)));
+
+        let demo_models = fixture_demo_models();
+        let default_model_id = demo_models
+            .iter()
+            .find(|m| m.is_default)
+            .or_else(|| demo_models.first())
+            .map(|m| m.id.clone());
+        let demo_skills = fixture_demo_skills()
+            .data
+            .into_iter()
+            .flat_map(|e| e.skills)
+            .collect::<Vec<_>>();
+        let demo_mcp = fixture_demo_mcp_servers().data;
+        let demo_plugins = fixture_demo_plugins()
+            .marketplaces
+            .into_iter()
+            .flat_map(|m| m.plugins)
+            .collect::<Vec<_>>();
+        let demo_envs = fixture_demo_environments();
+        let selected_env = demo_envs.first().map(|e| e.id.clone());
+        let demo_collab = fixture_demo_collaboration_modes().data;
+        let demo_config_snippet = fixture_demo_config().settings_snippet();
+
+        #[cfg(feature = "browser-native")]
+        let native_host = NativeWebViewHost::new();
+        #[cfg(feature = "browser-native")]
+        let (bridge_mode, bridge_detail, host_kind_override) = {
+            let mode = SharedString::from(native_host.bridge_mode().label());
+            let detail = SharedString::from(native_host.report().detail.clone());
+            let kind = SharedString::from(native_host.host_kind_label());
+            (mode, detail, Some(kind))
+        };
+        #[cfg(not(feature = "browser-native"))]
+        let (bridge_mode, bridge_detail, host_kind_override) = (
+            SharedString::from("mock only"),
+            SharedString::from("browser-native off · external open still available"),
+            None,
+        );
+
+        let browser = BrowserSession::from_host(
+            &browser_host,
+            "None".into(),
+            bridge_detail,
+            bridge_mode,
+            host_kind_override,
+        );
+
+        let goals = demo::demo_goals();
+        let selected_goal = goals.first().map(|g| g.id.clone());
+        // Bar home first paint: Recents populated, no selection → hero "What should we build?"
+        let demo_seed = demo::demo_threads();
+        let mut app = Self {
+            focus_handle: cx.focus_handle(),
+            connection: UiConnection::Connecting,
+            threads: demo_seed,
+            selected_thread: None,
+            selected_chat_thread: None,
+            selected_codex_thread: None,
+            status_line: SharedString::from(""),
+            samples_loaded: true,
+            mode_menu_open: false,
+            thread_menu_open: false,
+            dismiss_voice_promo: false,
+            dismiss_usage_card: false,
+            active_mode: parse_start_mode().unwrap_or(ProductMode::Codex),
+            settings_section: SettingsSection::General,
+            settings_return_mode: ProductMode::Codex,
+            settings_search_query: String::new(),
+            settings_search_input,
+            settings_toggles: default_settings_toggles(),
+            settings_choices: default_settings_choices(),
+            goals,
+            selected_goal,
+            models: demo_models,
+            selected_model_id: default_model_id,
+            config_snippet: demo_config_snippet.into(),
+            skills: demo_skills,
+            mcp_servers: demo_mcp,
+            plugins: demo_plugins,
+            environments: demo_envs,
+            selected_environment_id: selected_env,
+            environment_status_detail: None,
+            environment_info_detail: None,
+            collaboration_modes: demo_collab,
+            account: AccountSession::fixture_demo(),
+            composer_input,
+            search_input,
+            search_query: String::new(),
+            backend: None,
+            fixture: Some(Arc::clone(&fixture)),
+            turn_in_progress: false,
+            active_turn_id: None,
+            turn_cancel: None,
+            show_archived: false,
+            pending_approval: None,
+            fixture_resume: None,
+            live_approval_bridge: None,
+            browser_host,
+            browser,
+            browser_url_input,
+            browser_profiles: ProfileDiscovery::default(),
+            #[cfg(feature = "browser-native")]
+            native_host,
+            terminal: TerminalSession::idle("fixture"),
+            terminal_cmd_input,
+            terminal_stdin_input,
+            terminal_handle_seq: 1,
+            files: FilesSession::new("fixture"),
+            files_path_input,
+            files_search_input,
+            pr_filter: PrFilter::All,
+            selected_pr: None,
+            // Sparse All view by default (bar-pr-real has 1 Authored row). Dense via env.
+            pr_list_dense: std::env::var_os("MITSURO_PR_DENSE").is_some(),
+            sites_show_fixtures: false,
+            // Suggestions-first like bar; Create / suggestion pick reveals Your tasks.
+            scheduled_show_tasks: false,
+            scheduled_enabled: vec![true, true],
+            plugins_filter: PluginsFilter::Public,
+            plugins_surface_tab: PluginsSurfaceTab::Plugins,
+            pending_start_thread: {
+                let mode_raw = std::env::var("MITSURO_START_MODE").ok();
+                parse_start_thread(mode_raw.as_deref())
+            },
+        };
+
+        // Soft probe of local codex app-server; never blocks first paint.
+        // Default offline path uses fixtures for turns (no paid models).
+        // Set MITSURO_SKIP_APPSERVER=1 to stay fully offline.
+        // Set MITSURO_FORCE_FIXTURE=1 to skip app-server and mark Fixture mode.
+        if std::env::var_os("MITSURO_FORCE_FIXTURE").is_some()
+            || std::env::var_os("MITSURO_SKIP_APPSERVER").is_some()
+        {
+            app.bootstrap_fixture(cx);
+        } else {
+            app.bootstrap_backend(cx);
+        }
+
+        // Honor MITSURO_START_MODE for capture / demos (title + status line).
+        let start = app.active_mode;
+        app.set_mode(start, window, cx);
+
+        // Optional settings section deep-link for surface capture.
+        // MITSURO_SETTINGS_SECTION=appearance|voice|pets|… (also forces Settings mode).
+        if let Some(section) = parse_settings_section() {
+            if !matches!(app.active_mode, ProductMode::Settings) {
+                app.set_mode(ProductMode::Settings, window, cx);
+            }
+            app.settings_section = section;
+            app.status_line = format!("Settings · {}", section.label()).into();
+            window.set_window_title(&ProductMode::Settings.window_title());
+            cx.notify();
+        }
+
+        // Eager select only if seed already has the id (fixture demo path).
+        // Live server threads arrive async — see apply_pending_start_thread.
+        if let Some(thread_id) = app.pending_start_thread.clone() {
+            if thread_id != "@first" && app.threads.iter().any(|t| t.summary.id == thread_id) {
+                app.pending_start_thread = None;
+                app.select_thread(thread_id, cx);
+                app.update_composer_placeholder(window, cx);
+            }
+        }
+
+        app
+    }
+
+    pub fn connection(&self) -> &UiConnection {
+        &self.connection
+    }
+
+    pub fn status_line(&self) -> &SharedString {
+        &self.status_line
+    }
+
+    pub fn set_status_line(&mut self, line: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status_line = line.into();
+        cx.notify();
+    }
+
+    pub fn active_mode(&self) -> ProductMode {
+        self.active_mode
+    }
+
+    /// Switch product mode (activity rail) and refresh status chrome.
+    ///
+    /// Selection is preserved: Chat/Codex each remember their last thread; Work
+    /// keeps `selected_goal` across hops (goals list is never cleared here).
+    pub fn set_mode(&mut self, mode: ProductMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_thread_selection_for_mode(self.active_mode);
+
+        // Entering Settings from any other mode: land on General + remember return.
+        if matches!(mode, ProductMode::Settings)
+            && !matches!(self.active_mode, ProductMode::Settings)
+        {
+            self.settings_return_mode = self.active_mode;
+            self.settings_section = SettingsSection::General;
+            self.settings_search_query.clear();
+            self.settings_search_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+
+        self.active_mode = mode;
+        window.set_window_title(&mode.window_title());
+        self.status_line = match mode {
+            ProductMode::Chat => {
+                let n = self
+                    .threads
+                    .iter()
+                    .filter(|t| t.surface == ThreadSurface::Chat)
+                    .count();
+                format!("Chat · {n} conversation(s)").into()
+            }
+            ProductMode::Work => {
+                let n = self.goals.len();
+                format!("Work · {n} goal(s)").into()
+            }
+            ProductMode::Codex => {
+                let n = self
+                    .threads
+                    .iter()
+                    .filter(|t| t.surface == ThreadSurface::Codex)
+                    .count();
+                format!("Codex · {n} agent thread(s)").into()
+            }
+            ProductMode::Atlas => {
+                // Attach probe runs when the user first opens Atlas (window already live).
+                // Full call with Window happens from browser_panel / navigate; here we only
+                // refresh status from whatever attach state we already have.
+                let kind = self.browser_host_kind_label();
+                format!("Atlas / browser · {kind}").into()
+            }
+            ProductMode::Terminal => {
+                let h = self
+                    .terminal
+                    .process_handle
+                    .as_deref()
+                    .unwrap_or("no process");
+                format!("Terminal · {} · {h}", self.terminal.status_label()).into()
+            }
+            ProductMode::Files => {
+                let n = if self.files.search_query.is_empty() {
+                    self.files.entries.len()
+                } else {
+                    self.files.fuzzy_results.len()
+                };
+                format!("Files · {} · {n} item(s)", self.files.cwd).into()
+            }
+            ProductMode::Computer => {
+                let n = self.environments.len();
+                let connected = self
+                    .environments
+                    .iter()
+                    .filter(|e| e.is_connected())
+                    .count();
+                format!("Computer · {n} environment(s) · {connected} connected").into()
+            }
+            ProductMode::Extensions => {
+                let m = self.mcp_servers.len();
+                let p = self.plugins.len();
+                let installed = self.plugins.iter().filter(|x| x.installed).count();
+                format!("Plugins · {m} MCP · {p} plugin(s) ({installed} installed)").into()
+            }
+            ProductMode::Settings => format!("Settings · {}", self.settings_section.label()).into(),
+            ProductMode::PullRequests => {
+                let gh = self
+                    .mcp_github_server()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("none");
+                format!(
+                    "Pull requests · {} · fixture demo · GitHub MCP: {gh}",
+                    self.pr_filter.label()
+                )
+                .into()
+            }
+            ProductMode::Sites => {
+                if self.sites_show_fixtures {
+                    "Sites · fixture demo cards".into()
+                } else if matches!(self.connection, UiConnection::Ready { .. }) {
+                    "Sites · no sites yet (live · no sites protocol)".into()
+                } else {
+                    "Sites · no sites yet".into()
+                }
+            }
+            ProductMode::Scheduled => {
+                if self.scheduled_show_tasks {
+                    "Scheduled · fixture demo tasks".into()
+                } else {
+                    "Scheduled · suggestions (no schedule protocol)".into()
+                }
+            }
+        };
+
+        if matches!(mode, ProductMode::Files) {
+            // Live Ready: prefer real workspace cwd (thread or $HOME), not /fixture-project.
+            if self.live_backend().is_some() {
+                let cwd = self.files.cwd.as_ref();
+                if cwd == FIXTURE_PROJECT_ROOT || cwd.is_empty() {
+                    self.files.cwd = self.preferred_workspace_cwd().into();
+                    self.files.backend_label = self.files_backend_label();
+                    self.files_refresh_directory(window, cx);
+                } else if self.files.entries.is_empty() {
+                    self.files_refresh_directory(window, cx);
+                }
+            } else if self.files.entries.is_empty() {
+                self.files_refresh_directory(window, cx);
+            }
+        }
+        if matches!(mode, ProductMode::Computer) {
+            if self.environments.is_empty() {
+                self.refresh_environments(window, cx);
+            } else if self.environment_status_detail.is_none() {
+                self.refresh_selected_environment_detail(cx);
+            }
+        }
+        // Always re-hit plugin/list + mcpServerStatus/list + skills/list when Ready so
+        // first-paint demo seed is replaced by live (or honest empty) catalog.
+        if matches!(mode, ProductMode::Extensions)
+            && (matches!(self.connection, UiConnection::Ready { .. })
+                || self.mcp_servers.is_empty()
+                || self.plugins.is_empty())
+        {
+            self.refresh_extensions(window, cx);
+        }
+
+        // Restore per-surface thread selection when entering Chat/Codex.
+        // Prefer remembered selection; otherwise keep empty (calm greeting) rather
+        // than auto-picking the first demo thread.
+        if matches!(mode, ProductMode::Chat | ProductMode::Codex) {
+            let surface = match mode {
+                ProductMode::Chat => ThreadSurface::Chat,
+                _ => ThreadSurface::Codex,
+            };
+            let remembered = match surface {
+                ThreadSurface::Chat => self.selected_chat_thread.clone(),
+                ThreadSurface::Codex => self.selected_codex_thread.clone(),
+            };
+            let remembered_ok = remembered
+                .as_ref()
+                .and_then(|id| self.threads.iter().find(|t| &t.summary.id == id))
+                .map(|t| t.surface == surface)
+                .unwrap_or(false);
+            if remembered_ok {
+                self.selected_thread = remembered;
+            } else {
+                let selected_ok = self
+                    .selected_thread
+                    .as_ref()
+                    .and_then(|id| self.threads.iter().find(|t| &t.summary.id == id))
+                    .map(|t| t.surface == surface)
+                    .unwrap_or(false);
+                if !selected_ok {
+                    // Empty selection → centered greeting (product density, not demo wall).
+                    self.selected_thread = None;
+                }
+            }
+            self.remember_thread_selection_for_mode(mode);
+            self.update_composer_placeholder(window, cx);
+        }
+
+        cx.notify();
+    }
+
+    /// Persist current `selected_thread` into the Chat or Codex slot.
+    fn remember_thread_selection_for_mode(&mut self, mode: ProductMode) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        let surface = self
+            .threads
+            .iter()
+            .find(|t| t.summary.id == id)
+            .map(|t| t.surface);
+        match surface {
+            Some(ThreadSurface::Chat) if matches!(mode, ProductMode::Chat) => {
+                self.selected_chat_thread = Some(id);
+            }
+            Some(ThreadSurface::Codex) if matches!(mode, ProductMode::Codex) => {
+                self.selected_codex_thread = Some(id);
+            }
+            Some(ThreadSurface::Chat) => {
+                self.selected_chat_thread = Some(id);
+            }
+            Some(ThreadSurface::Codex) => {
+                self.selected_codex_thread = Some(id);
+            }
+            None => {}
+        }
+    }
+
+    /// Composer placeholder: Chat home uses "Message…"; Codex home "Do anything".
+    fn update_composer_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = match self.active_mode {
+            ProductMode::Chat => {
+                if self.is_calm_stage() || self.is_empty_conversation() {
+                    "Message…"
+                } else {
+                    "Message…"
+                }
+            }
+            ProductMode::Codex => {
+                if self.is_calm_stage() || self.is_empty_conversation() {
+                    "Do anything"
+                } else {
+                    "Ask Mitsuro…"
+                }
+            }
+            _ => "Ask Mitsuro…",
+        };
+        self.composer_input.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx);
+        });
+    }
+
+    pub fn goals(&self) -> &[DemoGoal] {
+        &self.goals
+    }
+
+    pub fn selected_goal_id(&self) -> Option<&str> {
+        self.selected_goal.as_deref()
+    }
+
+    pub fn selected_goal(&self) -> Option<&DemoGoal> {
+        let id = self.selected_goal.as_ref()?;
+        self.goals.iter().find(|g| &g.id == id)
+    }
+
+    pub fn select_goal(&mut self, id: String, cx: &mut Context<Self>) {
+        self.selected_goal = Some(id.clone());
+        let thread_id = self
+            .goals
+            .iter()
+            .find(|g| g.id == id)
+            .and_then(|g| g.thread_id.clone());
+        if let Some(g) = self.goals.iter().find(|g| g.id == id) {
+            self.status_line = format!("Work · {}", g.objective).into();
+        }
+        // Best-effort `thread/goal/get` for linked threads (fixture or live).
+        if let Some(tid) = thread_id {
+            self.dispatch_goal_get(tid, cx);
+        }
+        cx.notify();
+    }
+
+    /// CTA: create a fixture goal with plan steps; also `thread/goal/set` when linked.
+    pub fn start_new_goal(&mut self, cx: &mut Context<Self>) {
+        let id = format!("goal-local-{}", self.goals.len() + 1);
+        // Link to a new synthetic thread id so protocol goal/* has a stable key.
+        let thread_id = format!("work-thread-{id}");
+        let objective = "New goal — describe the long-running outcome".to_string();
+        let goal = DemoGoal {
+            id: id.clone(),
+            objective: objective.clone(),
+            status: DemoGoalStatus::Active,
+            thread_id: Some(thread_id.clone()),
+            updated_at: None,
+            plan_items: demo::new_goal_plan_items(&id),
+        };
+        self.goals.insert(0, goal);
+        self.selected_goal = Some(id);
+        self.active_mode = ProductMode::Work;
+        self.status_line = "Started a new Work goal (fixture + thread/goal/set).".into();
+        self.dispatch_goal_set(thread_id, objective, cx);
+        cx.notify();
+    }
+
+    /// Clear selected goal via `thread/goal/clear` (and drop from local list).
+    pub fn clear_selected_goal(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_goal.clone() else {
+            self.status_line = "Work · no goal selected to clear".into();
+            cx.notify();
+            return;
+        };
+        let thread_id = self
+            .goals
+            .iter()
+            .find(|g| g.id == id)
+            .and_then(|g| g.thread_id.clone());
+        self.goals.retain(|g| g.id != id);
+        self.selected_goal = self.goals.first().map(|g| g.id.clone());
+        if let Some(tid) = thread_id {
+            self.dispatch_goal_clear(tid, cx);
+            self.status_line = "Work · goal cleared (thread/goal/clear)".into();
+        } else {
+            self.status_line = "Work · goal removed (local)".into();
+        }
+        cx.notify();
+    }
+
+    /// Toggle a plan item done flag on the selected goal (local/fixture).
+    pub fn toggle_goal_plan_item(&mut self, goal_id: &str, item_id: &str, cx: &mut Context<Self>) {
+        if let Some(goal) = self.goals.iter_mut().find(|g| g.id == goal_id) {
+            if let Some(item) = goal.plan_items.iter_mut().find(|i| i.id == item_id) {
+                item.done = !item.done;
+                self.status_line = format!(
+                    "Work · plan item {} · {}",
+                    if item.done { "done" } else { "open" },
+                    item.title
+                )
+                .into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn dispatch_goal_set(&self, thread_id: String, objective: String, cx: &mut Context<Self>) {
+        let params = ThreadGoalSetParams::new(thread_id)
+            .with_objective(objective)
+            .with_status(ThreadGoalStatus::Active);
+        if let Some(backend) = self.backend.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        rt.block_on(async {
+                            backend
+                                .thread_goal_set(params)
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        } else if let Some(fixture) = self.fixture.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        // Ensure fixture is connected for typed goal methods.
+                        if !fixture.status().is_usable() {
+                            let _ = fixture.connect().await;
+                        }
+                        fixture
+                            .thread_goal_set(params)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+    }
+
+    fn dispatch_goal_get(&self, thread_id: String, cx: &mut Context<Self>) {
+        let params = ThreadGoalGetParams::new(thread_id);
+        if let Some(backend) = self.backend.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        rt.block_on(async {
+                            backend
+                                .thread_goal_get(params)
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        } else if let Some(fixture) = self.fixture.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        if !fixture.status().is_usable() {
+                            let _ = fixture.connect().await;
+                        }
+                        fixture
+                            .thread_goal_get(params)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+    }
+
+    fn dispatch_goal_clear(&self, thread_id: String, cx: &mut Context<Self>) {
+        let params = ThreadGoalClearParams::new(thread_id);
+        if let Some(backend) = self.backend.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        rt.block_on(async {
+                            backend
+                                .thread_goal_clear(params)
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        } else if let Some(fixture) = self.fixture.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        if !fixture.status().is_usable() {
+                            let _ = fixture.connect().await;
+                        }
+                        fixture
+                            .thread_goal_clear(params)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+    }
+
+    /// Thread surface for the current Chat/Codex mode (default Codex).
+    pub fn active_thread_surface(&self) -> ThreadSurface {
+        match self.active_mode {
+            ProductMode::Chat => ThreadSurface::Chat,
+            ProductMode::Codex
+            | ProductMode::PullRequests
+            | ProductMode::Sites
+            | ProductMode::Scheduled
+            | ProductMode::Extensions => ThreadSurface::Codex,
+            _ => ThreadSurface::Codex,
+        }
+    }
+
+    /// Home hero stage: Chat/Codex with no selected thread.
+    /// Sidebar stays visible (bar density); main column shows centered hero + composer.
+    pub fn is_calm_stage(&self) -> bool {
+        matches!(self.active_mode, ProductMode::Chat | ProductMode::Codex)
+            && self.selected_thread.is_none()
+    }
+
+    /// Whether the main transcript column is empty (no selection or no messages).
+    /// Used to quiet composer chrome (hide model chip) until a turn starts.
+    pub fn is_empty_conversation(&self) -> bool {
+        match self.selected_thread() {
+            None => true,
+            Some(t) => t.messages.is_empty(),
+        }
+    }
+
+    pub fn terminal_session(&self) -> &TerminalSession {
+        &self.terminal
+    }
+
+    pub fn terminal_cmd_input(&self) -> &Entity<InputState> {
+        &self.terminal_cmd_input
+    }
+
+    pub fn terminal_stdin_input(&self) -> &Entity<InputState> {
+        &self.terminal_stdin_input
+    }
+
+    pub fn files_session(&self) -> &FilesSession {
+        &self.files
+    }
+
+    pub fn files_path_input(&self) -> &Entity<InputState> {
+        &self.files_path_input
+    }
+
+    pub fn files_search_input(&self) -> &Entity<InputState> {
+        &self.files_search_input
+    }
+
+    fn files_backend_label(&self) -> SharedString {
+        if self.live_backend().is_some() {
+            "app-server".into()
+        } else {
+            "fixture".into()
+        }
+    }
+
+    fn terminal_backend_label(&self) -> SharedString {
+        if self.live_backend().is_some() {
+            "app-server".into()
+        } else {
+            "fixture".into()
+        }
+    }
+
+    /// Preferred workspace root for Files/Terminal when live: selected thread cwd → any thread cwd → $HOME.
+    fn preferred_workspace_cwd(&self) -> String {
+        let pick = |cwd: &str| -> Option<String> {
+            let p = path_from_cwd_field(cwd);
+            if p.is_empty() || p == FIXTURE_PROJECT_ROOT {
+                return None;
+            }
+            if p.starts_with('/') {
+                Some(normalize_abs_path(&p))
+            } else {
+                None
+            }
+        };
+        if let Some(id) = &self.selected_thread {
+            if let Some(t) = self.threads.iter().find(|t| &t.summary.id == id) {
+                if let Some(c) = t.summary.cwd.as_deref().and_then(pick) {
+                    return c;
+                }
+            }
+        }
+        for t in &self.threads {
+            if let Some(c) = t.summary.cwd.as_deref().and_then(pick) {
+                return c;
+            }
+        }
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
+    }
+
+    /// MCP server that looks like GitHub (for PR honesty chrome).
+    pub fn mcp_github_server(&self) -> Option<&McpServerStatus> {
+        self.mcp_servers.iter().find(|s| {
+            let name = s.name.to_lowercase();
+            let title = s.display_title().to_lowercase();
+            name.contains("github") || title.contains("github")
+        })
+    }
+
+    /// Refresh directory listing for current Files cwd (`fs/readDirectory`).
+    pub fn files_refresh_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = normalize_abs_path(self.files.cwd.as_ref());
+        self.files.cwd = path.clone().into();
+        self.files.search_query.clear();
+        self.files.fuzzy_results.clear();
+        let path_for_input = path.clone();
+        self.files_path_input.update(cx, |state, cx| {
+            state.set_value(path_for_input, window, cx);
+        });
+        self.files_search_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+
+        let params = FsReadDirectoryParams::new(path);
+        let result = self.files_call_read_directory(params, cx);
+        match result {
+            Ok(entries) => {
+                self.files.entries = entries;
+                self.files.backend_label = self.files_backend_label();
+                self.files.preview = SharedString::from("");
+                self.files.preview_error = None;
+                self.files.selected_path = None;
+                self.status_line = format!(
+                    "Files · {} · {} · {} item(s)",
+                    self.files.backend_label,
+                    self.files.cwd,
+                    self.files.entries.len()
+                )
+                .into();
+            }
+            Err(e) => {
+                self.files.entries.clear();
+                self.files.preview_error = Some(e.clone());
+                self.status_line = format!("Files · list failed: {e}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Navigate path bar value as cwd.
+    pub fn files_navigate_path_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.files_path_input.read(cx).value().to_string();
+        let path = normalize_abs_path(raw.trim());
+        if path.is_empty() {
+            self.status_line = "Files · empty path".into();
+            cx.notify();
+            return;
+        }
+        self.files.cwd = path.into();
+        self.files_refresh_directory(window, cx);
+    }
+
+    /// Parent directory of current cwd.
+    pub fn files_go_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = normalize_abs_path(self.files.cwd.as_ref());
+        let root_fallback = if self.live_backend().is_some() {
+            self.preferred_workspace_cwd()
+        } else {
+            FIXTURE_PROJECT_ROOT.to_string()
+        };
+        let parent = if cwd == "/" {
+            "/".to_string()
+        } else {
+            let trimmed = cwd.trim_end_matches('/');
+            match trimmed.rsplit_once('/') {
+                Some(("", _)) => "/".to_string(),
+                Some((p, _)) => normalize_abs_path(p),
+                None => root_fallback,
+            }
+        };
+        self.files.cwd = parent.into();
+        self.files_refresh_directory(window, cx);
+    }
+
+    /// Activate a directory entry (enter dir) or open a file preview.
+    pub fn files_activate_entry(
+        &mut self,
+        name: String,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = join_abs(self.files.cwd.as_ref(), &name);
+        if is_dir {
+            self.files.cwd = full.into();
+            self.files_refresh_directory(window, cx);
+        } else {
+            self.files_open_path(full, window, cx);
+        }
+    }
+
+    /// Open/preview a file via `fs/readFile`.
+    pub fn files_open_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let path = normalize_abs_path(&path);
+        self.files.selected_path = Some(path.clone());
+        let params = FsReadFileParams::new(path.clone());
+        match self.files_call_read_file(params, cx) {
+            Ok(text) => {
+                self.files.preview = text.into();
+                self.files.preview_error = None;
+                self.status_line = format!("Files · preview · {path}").into();
+            }
+            Err(e) => {
+                self.files.preview = SharedString::from("");
+                self.files.preview_error = Some(e.clone());
+                self.status_line = format!("Files · read failed: {e}").into();
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Run `fuzzyFileSearch` against fixture/project roots.
+    pub fn files_run_fuzzy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.files_search_input.read(cx).value().to_string();
+        let query = query.trim().to_string();
+        self.files.search_query = query.clone();
+        if query.is_empty() {
+            self.files.fuzzy_results.clear();
+            self.files_refresh_directory(window, cx);
+            return;
+        }
+        let roots = vec![normalize_abs_path(self.files.cwd.as_ref())];
+        let params = FuzzyFileSearchParams::new(query.clone(), roots);
+        match self.files_call_fuzzy(params, cx) {
+            Ok(files) => {
+                self.files.fuzzy_results = files;
+                self.files.backend_label = self.files_backend_label();
+                self.status_line = format!(
+                    "Files · {} · fuzzy “{query}” · {} hit(s)",
+                    self.files.backend_label,
+                    self.files.fuzzy_results.len()
+                )
+                .into();
+            }
+            Err(e) => {
+                self.files.fuzzy_results.clear();
+                self.status_line = format!("Files · fuzzy failed: {e}").into();
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn files_call_read_directory(
+        &self,
+        params: FsReadDirectoryParams,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<FsReadDirectoryEntry>, String> {
+        // Prefer live app-server when Ready — fixture is always present for turns offline.
+        if let Some(backend) = self.live_backend() {
+            return cx.background_executor().block(async {
+                backend
+                    .fs_read_directory(params)
+                    .await
+                    .map(|r| r.entries)
+                    .map_err(|e| e.to_string())
+            });
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            return cx.background_executor().block(async {
+                if !fixture.status().is_usable() {
+                    let _ = fixture.connect().await;
+                }
+                fixture
+                    .fs_read_directory(params)
+                    .await
+                    .map(|r| r.entries)
+                    .map_err(|e| e.to_string())
+            });
+        }
+        Err("no backend".into())
+    }
+
+    fn files_call_read_file(
+        &self,
+        params: FsReadFileParams,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if let Some(backend) = self.live_backend() {
+            return cx.background_executor().block(async {
+                backend
+                    .fs_read_file(params)
+                    .await
+                    .map(|r| r.text_lossy())
+                    .map_err(|e| e.to_string())
+            });
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            return cx.background_executor().block(async {
+                if !fixture.status().is_usable() {
+                    let _ = fixture.connect().await;
+                }
+                fixture
+                    .fs_read_file(params)
+                    .await
+                    .map(|r| r.text_lossy())
+                    .map_err(|e| e.to_string())
+            });
+        }
+        Err("no backend".into())
+    }
+
+    fn files_call_fuzzy(
+        &self,
+        params: FuzzyFileSearchParams,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<FuzzyFileSearchResult>, String> {
+        if let Some(backend) = self.live_backend() {
+            return cx.background_executor().block(async {
+                backend
+                    .fuzzy_file_search(params)
+                    .await
+                    .map(|r| r.files)
+                    .map_err(|e| e.to_string())
+            });
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            return cx.background_executor().block(async {
+                if !fixture.status().is_usable() {
+                    let _ = fixture.connect().await;
+                }
+                fixture
+                    .fuzzy_file_search(params)
+                    .await
+                    .map(|r| r.files)
+                    .map_err(|e| e.to_string())
+            });
+        }
+        Err("no backend".into())
+    }
+
+    /// Apply process stream events to the terminal output buffer.
+    fn apply_process_events(&mut self, events: &[TurnStreamEvent]) {
+        for ev in events {
+            match ev {
+                TurnStreamEvent::ProcessOutputDelta { delta, .. } => {
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(delta);
+                    self.terminal.output = out.into();
+                }
+                TurnStreamEvent::ProcessExited {
+                    exit_code,
+                    process_handle,
+                    stdout,
+                    stderr,
+                    ..
+                } => {
+                    if !stdout.is_empty() {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(stdout);
+                        self.terminal.output = out.into();
+                    }
+                    if !stderr.is_empty() {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(stderr);
+                        self.terminal.output = out.into();
+                    }
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(&format!(
+                        "\n[exited {exit_code}] processHandle={process_handle}\n"
+                    ));
+                    self.terminal.output = out.into();
+                    self.terminal.running = false;
+                    self.terminal.status = TerminalSessionStatus::Exited;
+                    self.terminal.exit_code = Some(*exit_code);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Start a process via live `process/spawn` when Ready, else fixture mock.
+    pub fn terminal_spawn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal.running {
+            self.status_line = "Terminal · already running".into();
+            cx.notify();
+            return;
+        }
+        let raw = self.terminal_cmd_input.read(cx).value().to_string();
+        let cmd = raw.trim().to_string();
+        if cmd.is_empty() {
+            self.status_line = "Terminal · empty command".into();
+            cx.notify();
+            return;
+        }
+        self.terminal_handle_seq = self.terminal_handle_seq.saturating_add(1);
+        let handle = format!("mitsuro-term-{}", self.terminal_handle_seq);
+        let cwd = if self.live_backend().is_some() {
+            self.preferred_workspace_cwd()
+        } else {
+            "/tmp/mitsuro-fixture".into()
+        };
+        let params = if cmd.starts_with("echo ") || !cmd.contains(' ') {
+            // Simple argv: `echo hello…` or single token.
+            let parts: Vec<String> = shell_split_simple(&cmd);
+            ProcessSpawnParams::streaming(parts, handle.clone(), cwd)
+        } else {
+            ProcessSpawnParams::bash_lc(cmd.clone(), handle.clone(), cwd)
+        };
+
+        self.terminal.backend_label = self.terminal_backend_label();
+        self.terminal.process_handle = Some(handle.clone());
+        self.terminal.output = format!("$ {cmd}\n").into();
+        self.terminal.running = true;
+        self.terminal.status = TerminalSessionStatus::Running;
+        self.terminal.exit_code = None;
+        self.status_line = format!("Terminal · spawning {handle}").into();
+        cx.notify();
+
+        // Prefer live app-server when Ready (no env gate). Fixture remains offline fallback.
+        if let Some(backend) = self.live_backend() {
+            let live_params = params.clone();
+            let result = cx
+                .background_executor()
+                .block(async move { backend.process_spawn(live_params).await });
+            match result {
+                Ok(resp) => {
+                    if let Some(h) = resp.process_handle {
+                        self.terminal.process_handle = Some(h);
+                    }
+                    self.terminal.backend_label = "app-server".into();
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(
+                        "[process/spawn · app-server]\n\
+                         (stdout/stderr via process/outputDelta when notification bridge is active)\n",
+                    );
+                    self.terminal.output = out.into();
+                    self.status_line = "Terminal · process/spawn (app-server)".into();
+                }
+                Err(e) => {
+                    // Soft-fallback to fixture mock so the panel stays usable offline-ish.
+                    if let Some(fixture) = self.fixture.clone() {
+                        let fix_for_connect = Arc::clone(&fixture);
+                        let _ = cx.background_executor().block(async move {
+                            if !fix_for_connect.status().is_usable() {
+                                let _ = fix_for_connect.connect().await;
+                            }
+                        });
+                        let fix_params = params.clone();
+                        let fix_for_spawn = Arc::clone(&fixture);
+                        let result = cx
+                            .background_executor()
+                            .block(async move { fix_for_spawn.process_spawn(fix_params).await });
+                        match result {
+                            Ok(resp) => {
+                                if let Some(h) = resp.process_handle {
+                                    self.terminal.process_handle = Some(h);
+                                }
+                                let events = fixture.take_process_events();
+                                self.apply_process_events(&events);
+                                self.terminal.backend_label = "fixture".into();
+                                let mut out = self.terminal.output.to_string();
+                                out.push_str(&format!("[live spawn failed: {e}; fixture mock]\n"));
+                                self.terminal.output = out.into();
+                                self.status_line =
+                                    format!("Terminal · live spawn failed ({e}); fixture mock")
+                                        .into();
+                            }
+                            Err(fe) => {
+                                self.terminal.running = false;
+                                self.terminal.status = TerminalSessionStatus::Error;
+                                let mut out = self.terminal.output.to_string();
+                                out.push_str(&format!("[error] live: {e}; fixture: {fe}\n"));
+                                self.terminal.output = out.into();
+                                self.status_line = format!("Terminal · spawn failed: {e}").into();
+                            }
+                        }
+                    } else {
+                        self.terminal.running = false;
+                        self.terminal.status = TerminalSessionStatus::Error;
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("[error] {e}\n"));
+                        self.terminal.output = out.into();
+                        self.status_line = format!("Terminal · spawn failed: {e}").into();
+                    }
+                }
+            }
+            let _ = window;
+            cx.notify();
+            return;
+        }
+
+        if let Some(fixture) = self.fixture.clone() {
+            // Ensure fixture is connected.
+            let _ = cx.background_executor().block(async {
+                if !fixture.status().is_usable() {
+                    let _ = fixture.connect().await;
+                }
+            });
+            let result = cx
+                .background_executor()
+                .block(async { fixture.process_spawn(params).await });
+            match result {
+                Ok(resp) => {
+                    if let Some(h) = resp.process_handle {
+                        self.terminal.process_handle = Some(h);
+                    }
+                    let events = fixture.take_process_events();
+                    self.apply_process_events(&events);
+                    self.terminal.backend_label = "fixture".into();
+                    self.status_line = if self.terminal.running {
+                        "Terminal · running (fixture)".into()
+                    } else {
+                        "Terminal · exited (fixture)".into()
+                    };
+                }
+                Err(e) => {
+                    self.terminal.running = false;
+                    self.terminal.status = TerminalSessionStatus::Error;
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(&format!("[error] {e}\n"));
+                    self.terminal.output = out.into();
+                    self.status_line = format!("Terminal · spawn failed: {e}").into();
+                }
+            }
+        } else {
+            self.terminal.running = false;
+            self.terminal.status = TerminalSessionStatus::Error;
+            self.status_line = "Terminal · no backend".into();
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Write stdin via live `process/writeStdin` when the session is app-server, else fixture.
+    pub fn terminal_write_stdin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = match self.terminal.process_handle.clone() {
+            Some(h) if self.terminal.running => h,
+            _ => {
+                self.status_line = "Terminal · no running process".into();
+                cx.notify();
+                return;
+            }
+        };
+        let text = self.terminal_stdin_input.read(cx).value().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let payload = if text.ends_with('\n') {
+            text.clone()
+        } else {
+            format!("{text}\n")
+        };
+        let params = ProcessWriteStdinParams::text(&handle, &payload);
+        let use_live =
+            self.terminal.backend_label.as_ref() == "app-server" && self.live_backend().is_some();
+
+        if use_live {
+            if let Some(backend) = self.live_backend() {
+                let result = cx
+                    .background_executor()
+                    .block(async move { backend.process_write_stdin(params).await });
+                match result {
+                    Ok(_) => {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("→ {payload}"));
+                        self.terminal.output = out.into();
+                        self.terminal_stdin_input.update(cx, |state, cx| {
+                            state.set_value("", window, cx);
+                        });
+                        self.status_line = "Terminal · writeStdin (app-server)".into();
+                    }
+                    Err(e) => {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("[stdin error] {e}\n"));
+                        self.terminal.output = out.into();
+                        self.status_line = format!("Terminal · writeStdin failed: {e}").into();
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+
+        if let Some(fixture) = self.fixture.clone() {
+            let result = cx
+                .background_executor()
+                .block(async { fixture.process_write_stdin(params).await });
+            match result {
+                Ok(_) => {
+                    let events = fixture.take_process_events();
+                    self.apply_process_events(&events);
+                    self.terminal_stdin_input.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                    });
+                    self.status_line = "Terminal · writeStdin (fixture)".into();
+                }
+                Err(e) => {
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(&format!("[stdin error] {e}\n"));
+                    self.terminal.output = out.into();
+                    self.status_line = format!("Terminal · writeStdin failed: {e}").into();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Kill the running process via live `process/kill` when session is app-server, else fixture.
+    pub fn terminal_kill(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let handle = match self.terminal.process_handle.clone() {
+            Some(h) if self.terminal.running => h,
+            _ => {
+                self.status_line = "Terminal · nothing to kill".into();
+                cx.notify();
+                return;
+            }
+        };
+        let use_live =
+            self.terminal.backend_label.as_ref() == "app-server" && self.live_backend().is_some();
+
+        if use_live {
+            if let Some(backend) = self.live_backend() {
+                let result = cx.background_executor().block(async move {
+                    backend.process_kill(ProcessKillParams::new(handle)).await
+                });
+                match result {
+                    Ok(_) => {
+                        self.terminal.running = false;
+                        self.terminal.status = TerminalSessionStatus::Exited;
+                        self.terminal.exit_code = Some(137);
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str("\n[killed · process/kill · app-server · exit 137]\n");
+                        self.terminal.output = out.into();
+                        self.status_line = "Terminal · killed (app-server)".into();
+                    }
+                    Err(e) => {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("[kill error] {e}\n"));
+                        self.terminal.output = out.into();
+                        self.status_line = format!("Terminal · kill failed: {e}").into();
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+
+        if let Some(fixture) = self.fixture.clone() {
+            let result = cx
+                .background_executor()
+                .block(async { fixture.process_kill(ProcessKillParams::new(handle)).await });
+            match result {
+                Ok(_) => {
+                    let events = fixture.take_process_events();
+                    self.apply_process_events(&events);
+                    self.status_line = "Terminal · killed (fixture)".into();
+                }
+                Err(e) => {
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(&format!("[kill error] {e}\n"));
+                    self.terminal.output = out.into();
+                    self.status_line = format!("Terminal · kill failed: {e}").into();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open Atlas mode and request native host attach (handle probe / optional embed).
+    pub fn open_atlas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser_request_attach(window, cx);
+        self.set_mode(ProductMode::Atlas, window, cx);
+    }
+
+    /// Open Settings mode (e.g. from composer model chip / profile gear / Ctrl+,).
+    /// Always lands on General when entering from another mode.
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Settings, window, cx);
+    }
+
+    /// Leave Settings via "Back to app" (restore Chat/Codex or prior mode).
+    pub fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dest = match self.settings_return_mode {
+            ProductMode::Settings => ProductMode::Codex,
+            other => other,
+        };
+        self.set_mode(dest, window, cx);
+    }
+
+    pub fn settings_section(&self) -> SettingsSection {
+        self.settings_section
+    }
+
+    pub fn set_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.settings_section = section;
+        self.status_line = format!("Settings · {}", section.label()).into();
+        cx.notify();
+    }
+
+    pub fn pr_filter(&self) -> PrFilter {
+        self.pr_filter
+    }
+
+    pub fn set_pr_filter(&mut self, filter: PrFilter, cx: &mut Context<Self>) {
+        self.pr_filter = filter;
+        // Clear selection when filter changes so detail stays consistent with list.
+        self.selected_pr = None;
+        self.status_line = format!("Pull requests · {}", filter.label()).into();
+        cx.notify();
+    }
+
+    pub fn selected_pr(&self) -> Option<u32> {
+        self.selected_pr
+    }
+
+    pub fn set_selected_pr(&mut self, number: Option<u32>, cx: &mut Context<Self>) {
+        self.selected_pr = number;
+        self.status_line = match number {
+            Some(n) => format!("Pull requests · #{n}").into(),
+            None => format!("Pull requests · {}", self.pr_filter.label()).into(),
+        };
+        cx.notify();
+    }
+
+    /// Full fixture PR catalog (vs sparse bar-like All view).
+    pub fn pr_list_dense(&self) -> bool {
+        self.pr_list_dense
+    }
+
+    pub fn set_pr_list_dense(&mut self, dense: bool, cx: &mut Context<Self>) {
+        self.pr_list_dense = dense;
+        self.status_line = if dense {
+            "Pull requests · full list".into()
+        } else {
+            "Pull requests · sparse".into()
+        };
+        cx.notify();
+    }
+
+    pub fn sites_show_fixtures(&self) -> bool {
+        self.sites_show_fixtures
+    }
+
+    pub fn set_sites_show_fixtures(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.sites_show_fixtures = show;
+        self.status_line = if show {
+            "Sites · fixture demo cards".into()
+        } else if matches!(self.connection, UiConnection::Ready { .. }) {
+            "Sites · no sites yet (live · no sites protocol)".into()
+        } else {
+            "Sites · no sites yet".into()
+        };
+        cx.notify();
+    }
+
+    pub fn scheduled_show_tasks(&self) -> bool {
+        self.scheduled_show_tasks
+    }
+
+    pub fn set_scheduled_show_tasks(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.scheduled_show_tasks = show;
+        self.status_line = if show {
+            "Scheduled · fixture demo tasks".into()
+        } else {
+            "Scheduled · suggestions (no schedule protocol)".into()
+        };
+        cx.notify();
+    }
+
+    pub fn scheduled_enabled(&self) -> &[bool] {
+        &self.scheduled_enabled
+    }
+
+    pub fn toggle_scheduled_enabled(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(slot) = self.scheduled_enabled.get_mut(index) {
+            *slot = !*slot;
+            let on = *slot;
+            self.status_line = format!(
+                "Scheduled · task {} {}",
+                index + 1,
+                if on { "enabled" } else { "disabled" }
+            )
+            .into();
+            cx.notify();
+        }
+    }
+
+    pub fn plugins_filter(&self) -> PluginsFilter {
+        self.plugins_filter
+    }
+
+    pub fn set_plugins_filter(&mut self, filter: PluginsFilter, cx: &mut Context<Self>) {
+        self.plugins_filter = filter;
+        let label = match filter {
+            PluginsFilter::Public => "Public",
+            PluginsFilter::Personal => "Personal",
+            PluginsFilter::Mcp => "MCP",
+        };
+        self.status_line = format!("Plugins · {label}").into();
+        cx.notify();
+    }
+
+    pub fn plugins_surface_tab(&self) -> PluginsSurfaceTab {
+        self.plugins_surface_tab
+    }
+
+    pub fn set_plugins_surface_tab(&mut self, tab: PluginsSurfaceTab, cx: &mut Context<Self>) {
+        self.plugins_surface_tab = tab;
+        self.status_line = match tab {
+            PluginsSurfaceTab::Plugins => "Plugins".into(),
+            PluginsSurfaceTab::Skills => "Skills".into(),
+        };
+        cx.notify();
+    }
+
+    pub fn settings_search_input(&self) -> &Entity<InputState> {
+        &self.settings_search_input
+    }
+
+    pub fn settings_search_query(&self) -> &str {
+        &self.settings_search_query
+    }
+
+    /// Sync settings search box → filter string (call from render).
+    pub fn sync_settings_search(&mut self, cx: &mut Context<Self>) {
+        let value = self.settings_search_input.read(cx).value().to_string();
+        if value != self.settings_search_query {
+            self.settings_search_query = value;
+        }
+    }
+
+    pub fn settings_toggle(&self, key: &str, default: bool) -> bool {
+        self.settings_toggles.get(key).copied().unwrap_or(default)
+    }
+
+    pub fn flip_settings_toggle(&mut self, key: &str, default: bool, cx: &mut Context<Self>) {
+        let next = !self.settings_toggle(key, default);
+        self.settings_toggles.insert(key.to_string(), next);
+        self.status_line = format!(
+            "Settings · {} · {}",
+            self.settings_section.label(),
+            if next { "on" } else { "off" }
+        )
+        .into();
+        cx.notify();
+    }
+
+    pub fn settings_choice(&self, key: &str, default: &str) -> String {
+        self.settings_choices
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    pub fn set_settings_choice(
+        &mut self,
+        key: &str,
+        value: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let value = value.into();
+        self.settings_choices.insert(key.to_string(), value.clone());
+        self.status_line = format!("Settings · {} · {value}", self.settings_section.label()).into();
+        cx.notify();
+    }
+
+    /// Stub action button feedback in Settings rows.
+    pub fn note_settings_action(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.status_line = format!("Settings · {} · {id}", self.settings_section.label()).into();
+        cx.notify();
+    }
+
+    /// Catalog models currently shown in Settings / composer chip.
+    pub fn models(&self) -> &[ModelInfo] {
+        &self.models
+    }
+
+    pub fn selected_model(&self) -> Option<&ModelInfo> {
+        let id = self.selected_model_id.as_deref()?;
+        self.models.iter().find(|m| m.id == id)
+    }
+
+    pub fn selected_model_id(&self) -> Option<&str> {
+        self.selected_model_id.as_deref()
+    }
+
+    /// Model slug for `TurnStartParams.model` (prefer `ModelInfo.model`, else id).
+    pub fn selected_model_slug(&self) -> Option<String> {
+        self.selected_model().map(|m| {
+            if !m.model.trim().is_empty() {
+                m.model.clone()
+            } else {
+                m.id.clone()
+            }
+        })
+    }
+
+    /// Config snippet from `config/read` for Settings.
+    pub fn config_snippet(&self) -> &SharedString {
+        &self.config_snippet
+    }
+
+    /// Skills loaded via `skills/list` (or fixture demo).
+    pub fn skills(&self) -> &[SkillMetadata] {
+        &self.skills
+    }
+
+    pub fn skills_enabled_count(&self) -> usize {
+        self.skills.iter().filter(|s| s.enabled).count()
+    }
+
+    /// Apply a `model/list` result and pick default when selection is missing.
+    fn apply_models(&mut self, models: Vec<ModelInfo>) {
+        if models.is_empty() {
+            return;
+        }
+        let keep = self
+            .selected_model_id
+            .as_ref()
+            .and_then(|id| models.iter().find(|m| &m.id == id).map(|m| m.id.clone()));
+        let default_id = models
+            .iter()
+            .find(|m| m.is_default && !m.hidden)
+            .or_else(|| models.iter().find(|m| !m.hidden))
+            .or_else(|| models.first())
+            .map(|m| m.id.clone());
+        self.selected_model_id = keep.or(default_id);
+        self.models = models;
+    }
+
+    fn apply_skills(&mut self, skills: Vec<SkillMetadata>) {
+        if !skills.is_empty() {
+            self.skills = skills;
+        }
+    }
+
+    fn apply_mcp_servers(&mut self, servers: Vec<McpServerStatus>) {
+        if !servers.is_empty() {
+            self.mcp_servers = servers;
+        }
+    }
+
+    fn apply_plugins(&mut self, plugins: Vec<PluginSummary>) {
+        if !plugins.is_empty() {
+            self.plugins = plugins;
+        }
+    }
+
+    /// MCP servers for the Extensions panel.
+    pub fn mcp_servers(&self) -> &[McpServerStatus] {
+        &self.mcp_servers
+    }
+
+    /// Flattened plugins for the Extensions panel.
+    pub fn plugins(&self) -> &[PluginSummary] {
+        &self.plugins
+    }
+
+    /// Environments for the Computer panel.
+    pub fn environments(&self) -> &[EnvironmentSummary] {
+        &self.environments
+    }
+
+    pub fn selected_environment_id(&self) -> Option<&str> {
+        self.selected_environment_id.as_deref()
+    }
+
+    pub fn environment_status_detail(&self) -> Option<&EnvironmentStatusResponse> {
+        self.environment_status_detail.as_ref()
+    }
+
+    pub fn environment_info_detail(&self) -> Option<&EnvironmentInfoResponse> {
+        self.environment_info_detail.as_ref()
+    }
+
+    pub fn collaboration_modes(&self) -> &[CollaborationModeMask] {
+        &self.collaboration_modes
+    }
+
+    pub fn select_environment(&mut self, id: String, cx: &mut Context<Self>) {
+        self.selected_environment_id = Some(id);
+        self.environment_status_detail = None;
+        self.environment_info_detail = None;
+        self.refresh_selected_environment_detail(cx);
+        cx.notify();
+    }
+
+    /// Reload environment catalog + collaboration modes (fixture offline).
+    pub fn refresh_environments(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        self.status_line = "Computer · refreshing environments…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            // No environment/list on live protocol — keep fixture catalog
+                            // and best-effort collaboration modes + selected status/info.
+                            let modes = match backend
+                                .collaboration_mode_list(CollaborationModeListParams::default())
+                                .await
+                            {
+                                Ok(r) => r.data,
+                                Err(_) => Vec::new(),
+                            };
+                            let catalog = backend.environment_catalog();
+                            let catalog = if catalog.is_empty() {
+                                fixture_demo_environments()
+                            } else {
+                                catalog
+                            };
+                            return Ok::<_, String>((catalog, modes, "app-server"));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let catalog = fixture.environment_catalog();
+                    let modes = fixture
+                        .collaboration_mode_list(CollaborationModeListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .data;
+                    Ok((catalog, modes, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((envs, modes, label)) => {
+                        if envs.is_empty() {
+                            app.environments = fixture_demo_environments();
+                        } else {
+                            app.environments = envs;
+                        }
+                        if modes.is_empty() {
+                            app.collaboration_modes = fixture_demo_collaboration_modes().data;
+                        } else {
+                            app.collaboration_modes = modes;
+                        }
+                        if app
+                            .selected_environment_id
+                            .as_ref()
+                            .map(|id| !app.environments.iter().any(|e| &e.id == id))
+                            .unwrap_or(true)
+                        {
+                            app.selected_environment_id =
+                                app.environments.first().map(|e| e.id.clone());
+                        }
+                        let n = app.environments.len();
+                        let connected =
+                            app.environments.iter().filter(|e| e.is_connected()).count();
+                        app.status_line =
+                            format!("Computer · {label} · {n} env(s) · {connected} connected")
+                                .into();
+                    }
+                    Err(message) => {
+                        app.environments = fixture_demo_environments();
+                        app.collaboration_modes = fixture_demo_collaboration_modes().data;
+                        if app.selected_environment_id.is_none() {
+                            app.selected_environment_id =
+                                app.environments.first().map(|e| e.id.clone());
+                        }
+                        app.status_line =
+                            format!("Computer refresh failed ({message}); fixture catalog loaded.")
+                                .into();
+                    }
+                }
+                app.environment_status_detail = None;
+                app.environment_info_detail = None;
+                app.refresh_selected_environment_detail(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch `environment/status` + `environment/info` for the selected id.
+    pub fn refresh_selected_environment_detail(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_environment_id.clone() else {
+            return;
+        };
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            let status = backend
+                                .environment_status(EnvironmentStatusParams::new(id.clone()))
+                                .await
+                                .ok();
+                            let info = backend
+                                .environment_info(EnvironmentInfoParams::new(id.clone()))
+                                .await
+                                .ok();
+                            return Ok::<_, String>((status, info, "app-server"));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let status = fixture
+                        .environment_status(EnvironmentStatusParams::new(id.clone()))
+                        .await
+                        .ok();
+                    let info = fixture
+                        .environment_info(EnvironmentInfoParams::new(id))
+                        .await
+                        .ok();
+                    Ok((status, info, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((status, info, _)) => {
+                        app.environment_status_detail = status;
+                        app.environment_info_detail = info;
+                    }
+                    Err(_) => {
+                        // Fall back to catalog row fields.
+                        if let Some(entry) = app
+                            .selected_environment_id
+                            .as_ref()
+                            .and_then(|sid| app.environments.iter().find(|e| &e.id == sid))
+                        {
+                            app.environment_status_detail = Some(EnvironmentStatusResponse {
+                                status: entry.status,
+                                error: entry.error.clone(),
+                            });
+                            if let Some(shell) = entry.shell.clone() {
+                                app.environment_info_detail = Some(EnvironmentInfoResponse {
+                                    shell,
+                                    cwd: entry.cwd.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh MCP + plugin + skills lists (live app-server when Ready, else fixture).
+    pub fn refresh_extensions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let fixture = self.fixture.clone();
+        let backend = self.live_backend();
+        let use_live = backend.is_some();
+        let densify = densify_extensions();
+        self.status_line = "Extensions · refreshing…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            let mcp = match backend
+                                .mcp_server_status_list(ListMcpServerStatusParams::default())
+                                .await
+                            {
+                                Ok(r) => r.data,
+                                Err(_) => Vec::new(),
+                            };
+                            let plugins =
+                                match backend.plugin_list(PluginListParams::default()).await {
+                                    Ok(r) => {
+                                        r.marketplaces.into_iter().flat_map(|m| m.plugins).collect()
+                                    }
+                                    Err(_) => Vec::new(),
+                                };
+                            // Skills tab: skills/list (already bootstrapped; refresh keeps parity).
+                            let skills =
+                                match backend.skills_list(SkillsListParams::default()).await {
+                                    Ok(r) => r
+                                        .data
+                                        .into_iter()
+                                        .flat_map(|e| e.skills)
+                                        .collect::<Vec<_>>(),
+                                    Err(_) => Vec::new(),
+                                };
+                            return Ok::<_, String>((mcp, plugins, skills, "app-server"));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let mcp = fixture
+                        .mcp_server_status_list(ListMcpServerStatusParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .data;
+                    let plugins = fixture
+                        .plugin_list(PluginListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .marketplaces
+                        .into_iter()
+                        .flat_map(|m| m.plugins)
+                        .collect::<Vec<_>>();
+                    let skills = fixture
+                        .skills_list(SkillsListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .data
+                        .into_iter()
+                        .flat_map(|e| e.skills)
+                        .collect::<Vec<_>>();
+                    Ok((mcp, plugins, skills, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((mcp, plugins, skills, label)) => {
+                        let mcp_empty = mcp.is_empty();
+                        let plugins_empty = plugins.is_empty();
+                        let skills_empty = skills.is_empty();
+                        // Live empty: keep product empty unless MITSURO_EXTENSIONS_DENSE densifies.
+                        // Always keep status source as the real path ("app-server"), never silent fixture.
+                        let use_demo = densify || label == "fixture";
+                        if mcp_empty && use_demo {
+                            app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                        } else {
+                            app.apply_mcp_servers(mcp);
+                        }
+                        if plugins_empty && use_demo {
+                            app.apply_plugins(
+                                fixture_demo_plugins()
+                                    .marketplaces
+                                    .into_iter()
+                                    .flat_map(|m| m.plugins)
+                                    .collect(),
+                            );
+                        } else {
+                            app.apply_plugins(plugins);
+                        }
+                        if skills_empty && use_demo {
+                            app.apply_skills(
+                                fixture_demo_skills()
+                                    .data
+                                    .into_iter()
+                                    .flat_map(|e| e.skills)
+                                    .collect(),
+                            );
+                        } else {
+                            app.apply_skills(skills);
+                        }
+                        let empty_note =
+                            if label == "app-server" && mcp_empty && plugins_empty && densify {
+                                "app-server empty · densified"
+                            } else if label == "app-server" && mcp_empty && plugins_empty {
+                                "app-server · empty catalog"
+                            } else {
+                                label
+                            };
+                        app.status_line = format!(
+                            "Extensions · {empty_note} · {} MCP · {} plugin(s) · {} skill(s)",
+                            app.mcp_servers.len(),
+                            app.plugins.len(),
+                            app.skills.len()
+                        )
+                        .into();
+                    }
+                    Err(message) => {
+                        app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                        app.apply_plugins(
+                            fixture_demo_plugins()
+                                .marketplaces
+                                .into_iter()
+                                .flat_map(|m| m.plugins)
+                                .collect(),
+                        );
+                        app.apply_skills(
+                            fixture_demo_skills()
+                                .data
+                                .into_iter()
+                                .flat_map(|e| e.skills)
+                                .collect(),
+                        );
+                        app.status_line = format!(
+                            "Extensions refresh failed ({message}); fixture catalog loaded."
+                        )
+                        .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_config_snippet(&mut self, snippet: String) {
+        if !snippet.trim().is_empty() {
+            self.config_snippet = snippet.into();
+        }
+    }
+
+    pub fn browser_session(&self) -> &BrowserSession {
+        &self.browser
+    }
+
+    pub fn browser_url_input(&self) -> &Entity<InputState> {
+        &self.browser_url_input
+    }
+
+    #[allow(dead_code)] // Settings / profile list UI can bind later
+    pub fn browser_profiles(&self) -> &ProfileDiscovery {
+        &self.browser_profiles
+    }
+
+    fn browser_host_kind_label(&self) -> String {
+        #[cfg(feature = "browser-native")]
+        {
+            return self.native_host.host_kind_label();
+        }
+        #[cfg(not(feature = "browser-native"))]
+        {
+            self.browser_host.host_kind().to_string()
+        }
+    }
+
+    fn bridge_fields(&self) -> (SharedString, SharedString, Option<SharedString>) {
+        #[cfg(feature = "browser-native")]
+        {
+            let mode = SharedString::from(self.native_host.bridge_mode().label());
+            let detail = SharedString::from(self.native_host.report().detail.clone());
+            let kind = SharedString::from(self.native_host.host_kind_label());
+            (mode, detail, Some(kind))
+        }
+        #[cfg(not(feature = "browser-native"))]
+        {
+            (
+                SharedString::from("mock only"),
+                SharedString::from("browser-native off · use Open external for real URLs"),
+                None,
+            )
+        }
+    }
+
+    fn sync_browser_session(&mut self) {
+        let profile = self.browser.profile_label.clone();
+        let (bridge_mode, bridge_detail, host_kind_override) = self.bridge_fields();
+        self.browser = BrowserSession::from_host(
+            &self.browser_host,
+            profile,
+            bridge_detail,
+            bridge_mode,
+            host_kind_override,
+        );
+    }
+
+    fn sync_url_bar_from_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.browser_host.url().to_string();
+        self.browser_url_input.update(cx, |state, cx| {
+            state.set_value(url, window, cx);
+        });
+    }
+
+    /// Probe GPUI raw window handle and optionally try wry child embed.
+    pub fn browser_request_attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "browser-native")]
+        {
+            self.native_host.attach_after_window_open(window);
+            self.sync_browser_session();
+            let detail = self.native_host.report().detail.clone();
+            self.status_line = format!("Atlas attach · {detail}").into();
+            cx.notify();
+        }
+        #[cfg(not(feature = "browser-native"))]
+        {
+            let _ = window;
+            self.status_line = "Atlas · mock host (browser-native off)".into();
+            cx.notify();
+        }
+    }
+
+    /// Navigate from the URL bar (Go / Enter). Updates mock history + optional bridge/WebView.
+    pub fn browser_navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.browser_url_input.read(cx).value().to_string();
+        if raw.trim().is_empty() {
+            self.status_line = "Browser · empty URL".into();
+            cx.notify();
+            return;
+        }
+        // Ensure handle probe has run before first navigate on Atlas.
+        #[cfg(feature = "browser-native")]
+        {
+            if !self.native_host.is_attached() {
+                self.native_host.attach_after_window_open(window);
+            }
+        }
+        self.browser_host.navigate(&raw);
+        let url = self.browser_host.url().to_string();
+
+        #[cfg(feature = "browser-native")]
+        let nav_note = {
+            let out = self.native_host.navigate(&url);
+            out.summary
+        };
+        #[cfg(not(feature = "browser-native"))]
+        let nav_note = "mock history".to_string();
+
+        self.sync_browser_session();
+        self.sync_url_bar_from_host(window, cx);
+        self.status_line = format!("Navigated · {url} · {nav_note}").into();
+        cx.notify();
+    }
+
+    /// Open current Atlas URL in the system browser (or Chromium --app sibling).
+    pub fn browser_open_external(&mut self, cx: &mut Context<Self>) {
+        let url = self.browser_host.url().to_string();
+        #[cfg(feature = "browser-native")]
+        let result = self.native_host.open_bridge(&url);
+        #[cfg(not(feature = "browser-native"))]
+        let result = open_system_browser(&url);
+
+        self.sync_browser_session();
+        self.status_line = format!("Open external · {} · {}", url, result.summary()).into();
+        cx.notify();
+    }
+
+    /// Back navigation via host history.
+    pub fn browser_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.browser_host.go_back() {
+            self.status_line = "Browser back · no history".into();
+            cx.notify();
+            return;
+        }
+        let url = self.browser_host.url().to_string();
+        #[cfg(feature = "browser-native")]
+        {
+            let _ = self.native_host.navigate(&url);
+        }
+        self.sync_browser_session();
+        self.sync_url_bar_from_host(window, cx);
+        self.status_line = format!("Back · {url}").into();
+        cx.notify();
+    }
+
+    /// Forward navigation via host history.
+    pub fn browser_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.browser_host.go_forward() {
+            self.status_line = "Browser forward · no history".into();
+            cx.notify();
+            return;
+        }
+        let url = self.browser_host.url().to_string();
+        #[cfg(feature = "browser-native")]
+        {
+            let _ = self.native_host.navigate(&url);
+        }
+        self.sync_browser_session();
+        self.sync_url_bar_from_host(window, cx);
+        self.status_line = format!("Forward · {url}").into();
+        cx.notify();
+    }
+
+    /// Discover Chrome/Chromium profiles under `~/.config` (paths only; no secrets).
+    pub fn browser_import_profile_stub(&mut self, cx: &mut Context<Self>) {
+        let discovery = discover_browser_profiles();
+        let label = discovery.summary_label();
+        let n = discovery.count();
+        self.browser_profiles = discovery;
+        self.browser.profile_label = label.clone().into();
+        // Keep host status; discovery does not copy files.
+        self.sync_browser_session();
+        self.browser.profile_label = label.clone().into();
+        self.status_line =
+            format!("Import profile · found {n} · no files copied (paths only)").into();
+        cx.notify();
+    }
+
+    pub fn threads(&self) -> &[DemoThread] {
+        &self.threads
+    }
+
+    pub fn selected_thread_id(&self) -> Option<&str> {
+        self.selected_thread.as_deref()
+    }
+
+    pub fn selected_thread(&self) -> Option<&DemoThread> {
+        let id = self.selected_thread.as_ref()?;
+        self.threads.iter().find(|t| &t.summary.id == id)
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Local sidebar filter: title, preview, cwd (case-insensitive substring).
+    pub fn thread_matches_search(&self, summary: &ThreadSummary) -> bool {
+        let filter = self.search_query.trim().to_lowercase();
+        if filter.is_empty() {
+            return true;
+        }
+        let title = summary.display_title().to_lowercase();
+        let preview = summary.preview.as_deref().unwrap_or("").to_lowercase();
+        let cwd = summary.cwd.as_deref().unwrap_or("").to_lowercase();
+        let meta = demo::meta_line(summary).to_lowercase();
+        title.contains(&filter)
+            || preview.contains(&filter)
+            || cwd.contains(&filter)
+            || meta.contains(&filter)
+    }
+
+    pub fn model_label(&self) -> SharedString {
+        self.selected_model()
+            .map(|m| SharedString::from(m.label().to_string()))
+            .unwrap_or_else(|| SharedString::from("No model"))
+    }
+
+    /// Account session for Settings Account section.
+    pub fn account_session(&self) -> &AccountSession {
+        &self.account
+    }
+
+    /// Human-readable account status: Signed out / Fixture demo / Ready.
+    pub fn account_status_label(&self) -> SharedString {
+        match &self.connection {
+            UiConnection::Fixture | UiConnection::Demo => {
+                if self.account.signed_in {
+                    let email = self.account.email_display.as_deref().unwrap_or("demo");
+                    let plan = self.account.plan_label.as_deref().unwrap_or("Pro");
+                    format!("Fixture demo · {email} · {plan}").into()
+                } else {
+                    "Signed out · fixture".into()
+                }
+            }
+            UiConnection::Connecting => "Connecting…".into(),
+            UiConnection::Ready { has_auth: true, .. } => {
+                let email = self
+                    .account
+                    .email_display
+                    .as_deref()
+                    .unwrap_or("authenticated");
+                let plan = self.account.plan_label.as_deref().unwrap_or("plan unknown");
+                format!("Ready · {email} · {plan}").into()
+            }
+            UiConnection::Ready {
+                has_auth: false, ..
+            } => "Signed out · no account (account/read)".into(),
+            UiConnection::Error { message } => format!("Error · {message}").into(),
+        }
+    }
+
+    /// Human-readable auth line for Settings (account/read when Ready).
+    pub fn auth_status_label(&self) -> SharedString {
+        self.account_status_label()
+    }
+
+    /// Apply account snapshot from protocol responses.
+    fn apply_account_snapshot(
+        &mut self,
+        account: Option<Account>,
+        usage: GetAccountTokenUsageResponse,
+        rate_limits: GetAccountRateLimitsResponse,
+        source: &'static str,
+        login_stub: Option<String>,
+    ) {
+        let signed_in = account.as_ref().is_some_and(|a| a.is_signed_in());
+        let email_display = account.as_ref().and_then(|a| a.email_display());
+        let plan_label = account
+            .as_ref()
+            .and_then(|a| a.plan_type())
+            .map(|p: PlanType| p.label().to_string());
+        self.account = AccountSession {
+            signed_in,
+            email_display,
+            plan_label,
+            usage,
+            rate_limits,
+            login_stub_detail: login_stub.or(self.account.login_stub_detail.clone()),
+            source,
+        };
+        if let UiConnection::Ready { has_auth, .. } = &mut self.connection {
+            *has_auth = signed_in;
+        }
+    }
+
+    /// Refresh account + usage + rate limits (no Window required).
+    fn kick_account_refresh(&mut self, cx: &mut Context<Self>) {
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            let acc = backend.account_read(GetAccountParams::default()).await.ok();
+                            let usage = backend
+                                .account_usage_read()
+                                .await
+                                .unwrap_or_else(|_| fixture_demo_usage());
+                            let limits = backend
+                                .account_rate_limits_read()
+                                .await
+                                .unwrap_or_else(|_| fixture_demo_rate_limits());
+                            return Ok::<_, String>((
+                                acc.and_then(|r| r.account),
+                                usage,
+                                limits,
+                                "app-server",
+                            ));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let acc = fixture
+                        .account_read(GetAccountParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let usage = fixture
+                        .account_usage_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let limits = fixture
+                        .account_rate_limits_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok((acc.account, usage, limits, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                if let Ok((account, usage, limits, source)) = result {
+                    app.apply_account_snapshot(account, usage, limits, source, None);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh account + usage + rate limits (fixture or live; never paid models).
+    pub fn refresh_account(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.status_line = "Account · refreshing…".into();
+        cx.notify();
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            let acc = backend.account_read(GetAccountParams::default()).await.ok();
+                            let usage = backend
+                                .account_usage_read()
+                                .await
+                                .unwrap_or_else(|_| fixture_demo_usage());
+                            let limits = backend
+                                .account_rate_limits_read()
+                                .await
+                                .unwrap_or_else(|_| fixture_demo_rate_limits());
+                            return Ok::<_, String>((
+                                acc.and_then(|r| r.account),
+                                usage,
+                                limits,
+                                "app-server",
+                            ));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let acc = fixture
+                        .account_read(GetAccountParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let usage = fixture
+                        .account_usage_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let limits = fixture
+                        .account_rate_limits_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok((acc.account, usage, limits, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((account, usage, limits, source)) => {
+                        app.apply_account_snapshot(account, usage, limits, source, None);
+                        app.status_line = format!(
+                            "Account · {} · {}",
+                            source,
+                            if app.account.signed_in {
+                                "signed in"
+                            } else {
+                                "signed out"
+                            }
+                        )
+                        .into();
+                    }
+                    Err(message) => {
+                        app.apply_account_snapshot(
+                            fixture_demo_account_response().account,
+                            fixture_demo_usage(),
+                            fixture_demo_rate_limits(),
+                            "fixture",
+                            None,
+                        );
+                        app.status_line =
+                            format!("Account refresh failed ({message}); fixture demo loaded.")
+                                .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sign-in stub: `account/login/start` device code (fixture returns URL + code; no network).
+    pub fn account_sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        self.status_line = "Account · sign in (stub)…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            match backend
+                                .account_login_start(LoginAccountParams::device_code())
+                                .await
+                            {
+                                Ok(login) => {
+                                    let detail = format!(
+                                        "device login · {} · code {}",
+                                        login.device_url().unwrap_or("—"),
+                                        login.user_code().unwrap_or("—")
+                                    );
+                                    // Re-read account after start (may still be pending on live).
+                                    let acc = backend
+                                        .account_read(GetAccountParams::default())
+                                        .await
+                                        .ok()
+                                        .and_then(|r| r.account);
+                                    let usage = backend
+                                        .account_usage_read()
+                                        .await
+                                        .unwrap_or_else(|_| fixture_demo_usage());
+                                    let limits = backend
+                                        .account_rate_limits_read()
+                                        .await
+                                        .unwrap_or_else(|_| fixture_demo_rate_limits());
+                                    return Ok((acc, usage, limits, "app-server", Some(detail)));
+                                }
+                                Err(e) => {
+                                    return Err(format!("login/start: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    let login = fixture
+                        .account_login_start(LoginAccountParams::device_code())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let detail = format!(
+                        "stub · {} · code {}",
+                        login
+                            .device_url()
+                            .unwrap_or(mitsuro_desktop_backend::FIXTURE_LOGIN_VERIFICATION_URL),
+                        login
+                            .user_code()
+                            .unwrap_or(mitsuro_desktop_backend::FIXTURE_LOGIN_USER_CODE)
+                    );
+                    let acc = fixture
+                        .account_read(GetAccountParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .account;
+                    let usage = fixture
+                        .account_usage_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let limits = fixture
+                        .account_rate_limits_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok((acc, usage, limits, "fixture", Some(detail)))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((account, usage, limits, source, stub)) => {
+                        app.apply_account_snapshot(account, usage, limits, source, stub.clone());
+                        app.status_line = format!(
+                            "Account · signed in · {}",
+                            stub.as_deref().unwrap_or(source)
+                        )
+                        .into();
+                    }
+                    Err(message) => {
+                        // Offline-safe fallback: apply fixture login stub without network.
+                        let login = fixture_login_device_code_response();
+                        let detail = format!(
+                            "stub · {} · code {}",
+                            login.device_url().unwrap_or("—"),
+                            login.user_code().unwrap_or("—")
+                        );
+                        app.apply_account_snapshot(
+                            fixture_demo_account_response().account,
+                            fixture_demo_usage(),
+                            fixture_demo_rate_limits(),
+                            "fixture",
+                            Some(detail),
+                        );
+                        app.status_line =
+                            format!("Account sign-in stub ({message}); fixture demo applied.")
+                                .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        let _ = window;
+    }
+
+    /// Sign-out stub: `account/logout` (fixture clears demo profile).
+    pub fn account_sign_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let fixture = self.fixture.clone();
+        let backend = self.backend.clone();
+        let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        self.status_line = "Account · sign out…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if use_live {
+                        if let Some(backend) = backend {
+                            let _ = backend.account_logout().await;
+                            let acc = backend
+                                .account_read(GetAccountParams::default())
+                                .await
+                                .ok()
+                                .and_then(|r| r.account);
+                            return Ok::<_, String>((acc, "app-server"));
+                        }
+                    }
+                    let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+                    if !fixture.status().is_usable() {
+                        fixture.connect().await.map_err(|e| e.to_string())?;
+                    }
+                    fixture.account_logout().await.map_err(|e| e.to_string())?;
+                    let acc = fixture
+                        .account_read(GetAccountParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .account;
+                    Ok((acc, "fixture"))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((account, source)) => {
+                        app.apply_account_snapshot(
+                            account,
+                            fixture_demo_usage(),
+                            fixture_demo_rate_limits(),
+                            source,
+                            None,
+                        );
+                        app.account.login_stub_detail = None;
+                        app.status_line = format!("Account · signed out · {source}").into();
+                    }
+                    Err(message) => {
+                        app.account.signed_in = false;
+                        app.account.email_display = None;
+                        app.account.plan_label = None;
+                        app.account.login_stub_detail = None;
+                        app.status_line =
+                            format!("Account sign-out stub ({message}); local cleared.").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Connection detail line for Settings.
+    pub fn connection_status_label(&self) -> SharedString {
+        match &self.connection {
+            UiConnection::Demo => "Demo chrome".into(),
+            UiConnection::Fixture => "Fixture backend · sample-turn.jsonl · no paid API".into(),
+            UiConnection::Connecting => "Connecting to codex app-server…".into(),
+            UiConnection::Ready { detail, has_auth } => {
+                let auth = if *has_auth { "auth ok" } else { "no auth" };
+                format!("Ready · {detail} · {auth}").into()
+            }
+            UiConnection::Error { message } => format!("Error · {message}").into(),
+        }
+    }
+
+    pub fn pending_approval(&self) -> Option<&PendingApproval> {
+        self.pending_approval.as_ref()
+    }
+
+    /// Approve or reject the current pending approval (fixture resume + live respond).
+    pub fn resolve_pending_approval(&mut self, choice: ApprovalChoice, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_approval.take() else {
+            self.status_line = "No pending approval.".into();
+            cx.notify();
+            return;
+        };
+
+        let label = match choice {
+            ApprovalChoice::Approve => "approved",
+            ApprovalChoice::Reject => "rejected",
+            ApprovalChoice::Abort => "aborted",
+        };
+        self.status_line = format!(
+            "Approval {label}: {}",
+            pending.summary.chars().take(48).collect::<String>()
+        )
+        .into();
+
+        // Progressive live path: unblock the turn loop; it writes respond_approval.
+        if let Some(bridge) = self.live_approval_bridge.as_ref() {
+            if bridge.submit(choice) {
+                self.status_line = format!("Approval {label} · live turn continuing…").into();
+                cx.notify();
+                return;
+            }
+        }
+
+        // Fallback live path (no bridge waiter): write JSON-RPC result directly.
+        if let Some(backend) = self.backend.clone() {
+            let pending_live = pending.clone();
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        rt.block_on(async {
+                            backend
+                                .respond_approval(&pending_live, choice)
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        }
+
+        // Fixture path: resume remaining stream events after the approval pause.
+        if let Some((thread_id, rest)) = self.fixture_resume.take() {
+            self.continue_fixture_events(thread_id, rest, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
+        self.selected_thread = Some(id.clone());
+        self.thread_menu_open = false;
+        // Keep Chat vs Codex mode aligned with the thread surface when possible.
+        let msg_count = self
+            .threads
+            .iter()
+            .find(|t| t.summary.id == id)
+            .map(|t| t.messages.len());
+        if let Some(t) = self.threads.iter().find(|t| t.summary.id == id) {
+            match t.surface {
+                ThreadSurface::Chat => {
+                    self.selected_chat_thread = Some(id.clone());
+                    if !matches!(self.active_mode, ProductMode::Chat) {
+                        self.active_mode = ProductMode::Chat;
+                    }
+                }
+                ThreadSurface::Codex => {
+                    self.selected_codex_thread = Some(id.clone());
+                    if !matches!(self.active_mode, ProductMode::Codex | ProductMode::Chat) {
+                        self.active_mode = ProductMode::Codex;
+                    }
+                }
+            }
+            let n = msg_count.unwrap_or(0);
+            self.status_line = if n > 0 {
+                format!("thread · {n} msgs")
+            } else {
+                format!("{} · {}", t.surface.label(), t.summary.display_title())
+            }
+            .into();
+        } else {
+            self.status_line = "Thread selected.".into();
+        }
+
+        // Real server threads when Ready: always thread/read if local cache is empty
+        // (list/bootstrap leaves messages empty until open).
+        if is_app_server_thread_id(&id) {
+            if let Some(backend) = self.live_backend() {
+                let empty = self
+                    .threads
+                    .iter()
+                    .find(|t| t.summary.id == id)
+                    .map(|t| t.messages.is_empty())
+                    .unwrap_or(true);
+                if empty {
+                    self.status_line = "thread/read…".into();
+                    self.load_thread_messages(backend, id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Select thread and refresh composer placeholder (needs `Window`).
+    pub fn select_thread_with_window(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_thread(id, cx);
+        self.update_composer_placeholder(window, cx);
+    }
+
+    /// Load offline sample threads into the sidebar (dev/review). Off by default for BAR first paint.
+    pub fn toggle_samples(&mut self, cx: &mut Context<Self>) {
+        if self.samples_loaded {
+            // Keep user-created threads; drop demo ids.
+            let demo_ids: std::collections::HashSet<_> = demo::demo_threads()
+                .into_iter()
+                .map(|t| t.summary.id)
+                .collect();
+            self.threads.retain(|t| !demo_ids.contains(&t.summary.id));
+            self.samples_loaded = false;
+            if self
+                .selected_thread
+                .as_ref()
+                .is_some_and(|id| demo_ids.contains(id))
+            {
+                self.selected_thread = None;
+            }
+        } else {
+            for t in demo::demo_threads() {
+                if !self.threads.iter().any(|x| x.summary.id == t.summary.id) {
+                    self.threads.push(t);
+                }
+            }
+            self.samples_loaded = true;
+        }
+        cx.notify();
+    }
+
+    pub fn samples_loaded(&self) -> bool {
+        self.samples_loaded
+    }
+
+    pub fn mode_menu_open(&self) -> bool {
+        self.mode_menu_open
+    }
+
+    pub fn toggle_mode_menu(&mut self, cx: &mut Context<Self>) {
+        self.mode_menu_open = !self.mode_menu_open;
+        if self.mode_menu_open {
+            self.thread_menu_open = false;
+        }
+        cx.notify();
+    }
+
+    pub fn close_mode_menu(&mut self, cx: &mut Context<Self>) {
+        if self.mode_menu_open {
+            self.mode_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn thread_menu_open(&self) -> bool {
+        self.thread_menu_open
+    }
+
+    pub fn toggle_thread_menu(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = !self.thread_menu_open;
+        if self.thread_menu_open {
+            self.mode_menu_open = false;
+        }
+        cx.notify();
+    }
+
+    pub fn close_thread_menu(&mut self, cx: &mut Context<Self>) {
+        if self.thread_menu_open {
+            self.thread_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Switch Chat ↔ Codex from the sidebar mode pill (clears selection → home hero).
+    pub fn switch_thread_surface(
+        &mut self,
+        surface: demo::ThreadSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode_menu_open = false;
+        self.thread_menu_open = false;
+        let mode = match surface {
+            demo::ThreadSurface::Chat => ProductMode::Chat,
+            demo::ThreadSurface::Codex => ProductMode::Codex,
+        };
+        // Clear selection so home hero shows (bar: mode switch lands on empty home).
+        self.remember_thread_selection_for_mode(self.active_mode);
+        self.selected_thread = None;
+        self.set_mode(mode, window, cx);
+        // set_mode may restore remembered selection — force home for switcher.
+        self.selected_thread = None;
+        self.update_composer_placeholder(window, cx);
+        self.status_line = format!("Mode · {}", mode.label()).into();
+        cx.notify();
+    }
+
+    pub fn dismiss_voice_promo(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_voice_promo = true;
+        cx.notify();
+    }
+
+    pub fn dismiss_usage_card(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_usage_card = true;
+        cx.notify();
+    }
+
+    pub fn voice_promo_visible(&self) -> bool {
+        !self.dismiss_voice_promo && self.is_calm_stage()
+    }
+
+    pub fn usage_card_visible(&self) -> bool {
+        !self.dismiss_usage_card && self.is_calm_stage()
+    }
+
+    /// Profile row label for sidebar footer / Settings.
+    ///
+    /// Fixture demo uses [`mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME`] ("Jacob Burgess").
+    /// Override with `MITSURO_PROFILE_NAME` for capture / demos.
+    pub fn profile_display_name(&self) -> SharedString {
+        if let Ok(name) = std::env::var("MITSURO_PROFILE_NAME") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return SharedString::from(name.to_string());
+            }
+        }
+        if self.account.source == "fixture" || self.account.signed_in {
+            // Prefer friendly fixture identity over masked email.
+            if self.account.source == "fixture"
+                || self
+                    .account
+                    .email_display
+                    .as_deref()
+                    .is_some_and(|e| e.contains('@'))
+            {
+                return SharedString::from(mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME);
+            }
+            if let Some(email) = self.account.email_display.as_deref() {
+                return SharedString::from(email.to_string());
+            }
+        }
+        SharedString::from(mitsuro_desktop_backend::FIXTURE_DEMO_DISPLAY_NAME)
+    }
+
+    /// Plan chip for profile footer (e.g. "Pro"). Empty when unknown.
+    pub fn profile_plan_label(&self) -> Option<SharedString> {
+        self.account
+            .plan_label
+            .as_ref()
+            .map(|p| SharedString::from(p.clone()))
+    }
+
+    /// Initials for solid avatar chip (e.g. "JB" from Jacob Burgess).
+    pub fn profile_initials(&self) -> SharedString {
+        SharedString::from(profile_initials_from_name(&self.profile_display_name()))
+    }
+
+    /// Return to home (Codex/Chat) with no thread selected.
+    pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = match self.active_thread_surface() {
+            demo::ThreadSurface::Chat => ProductMode::Chat,
+            demo::ThreadSurface::Codex => ProductMode::Codex,
+        };
+        self.selected_thread = None;
+        self.mode_menu_open = false;
+        self.thread_menu_open = false;
+        self.set_mode(mode, window, cx);
+        self.selected_thread = None;
+        self.update_composer_placeholder(window, cx);
+        cx.notify();
+    }
+
+    pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        let surface = self.active_thread_surface();
+        // Live path: create a server session so Send can attach turns to a real id.
+        if matches!(self.connection, UiConnection::Ready { .. }) {
+            if let Some(backend) = self.backend.clone() {
+                self.status_line = format!("Starting {} via backend…", surface.label()).into();
+                cx.notify();
+                let cwd = match surface {
+                    ThreadSurface::Codex => std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string()),
+                    ThreadSurface::Chat => None,
+                };
+                let model = self.selected_model_slug();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_start(ThreadStartParams {
+                                        cwd,
+                                        model,
+                                        ephemeral: Some(false),
+                                        ..Default::default()
+                                    })
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| match result {
+                        Ok(started) => {
+                            let summary = started.summary();
+                            let id = summary.id.clone();
+                            app.threads.insert(
+                                0,
+                                DemoThread {
+                                    summary,
+                                    surface,
+                                    messages: vec![],
+                                },
+                            );
+                            app.selected_thread = Some(id.clone());
+                            match surface {
+                                ThreadSurface::Chat => {
+                                    app.selected_chat_thread = Some(id);
+                                    app.active_mode = ProductMode::Chat;
+                                }
+                                ThreadSurface::Codex => {
+                                    app.selected_codex_thread = Some(id);
+                                    app.active_mode = ProductMode::Codex;
+                                }
+                            }
+                            app.status_line =
+                                format!("Started {} via app-server.", surface.label()).into();
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            app.status_line =
+                                format!("thread/start failed ({e}); local shell thread.").into();
+                            app.new_thread_local(surface, cx);
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
+        }
+        self.new_thread_local(surface, cx);
+    }
+
+    /// Offline / fallback thread (local id only — not on app-server).
+    fn new_thread_local(&mut self, surface: ThreadSurface, cx: &mut Context<Self>) {
+        let id = format!("local-{}", self.threads.len() + 1);
+        let (name, preview, cwd) = match surface {
+            ThreadSurface::Chat => (
+                "New chat".into(),
+                "Empty · ready for a message".into(),
+                None,
+            ),
+            ThreadSurface::Codex => (
+                "New thread".into(),
+                "Empty · ready for a prompt".into(),
+                Some("~/Work/Mitsuro".into()),
+            ),
+        };
+        let thread = DemoThread {
+            summary: ThreadSummary {
+                id: id.clone(),
+                name: Some(name),
+                preview: Some(preview),
+                cwd,
+                created_at: None,
+                updated_at: None,
+                model_provider: Some("local".into()),
+                ephemeral: Some(true),
+                is_pinned: Some(false),
+                archived: Some(false),
+                raw: None,
+            },
+            surface,
+            messages: vec![],
+        };
+        self.threads.insert(0, thread);
+        self.selected_thread = Some(id.clone());
+        match surface {
+            ThreadSurface::Chat => {
+                self.selected_chat_thread = Some(id);
+                self.active_mode = ProductMode::Chat;
+            }
+            ThreadSurface::Codex => {
+                self.selected_codex_thread = Some(id);
+                self.active_mode = ProductMode::Codex;
+            }
+        }
+        self.status_line = format!("Started a local {} thread.", surface.label()).into();
+        cx.notify();
+    }
+
+    /// Whether the sidebar shows archived threads.
+    pub fn show_archived(&self) -> bool {
+        self.show_archived
+    }
+
+    /// Toggle show/hide archived threads in the sidebar.
+    pub fn toggle_show_archived(&mut self, cx: &mut Context<Self>) {
+        self.show_archived = !self.show_archived;
+        self.status_line = if self.show_archived {
+            "Showing archived threads.".into()
+        } else {
+            "Hiding archived threads.".into()
+        };
+        cx.notify();
+    }
+
+    /// Whether a turn is currently streaming (Send blocked / Stop visible).
+    pub fn turn_in_progress(&self) -> bool {
+        self.turn_in_progress
+    }
+
+    /// Visible threads for the sidebar (surface + search + archived filter).
+    pub fn visible_threads(&self) -> Vec<DemoThread> {
+        let surface = self.active_thread_surface();
+        self.threads
+            .iter()
+            .filter(|t| {
+                if t.surface != surface {
+                    return false;
+                }
+                let archived = t.summary.archived.unwrap_or(false);
+                if !self.show_archived && archived {
+                    return false;
+                }
+                self.thread_matches_search(&t.summary)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Archive the selected thread (or toggle unarchive when already archived).
+    pub fn archive_selected_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        if self
+            .live_backend()
+            .is_some_and(|backend| !backend.capabilities().archive)
+        {
+            self.status_line = "Archive is not supported by the selected backend.".into();
+            cx.notify();
+            return;
+        }
+        let Some(id) = self.selected_thread.clone() else {
+            self.status_line = "Archive · no thread selected".into();
+            cx.notify();
+            return;
+        };
+        let is_archived = self
+            .threads
+            .iter()
+            .find(|t| t.summary.id == id)
+            .and_then(|t| t.summary.archived)
+            .unwrap_or(false);
+
+        if is_archived {
+            self.unarchive_thread_id(id, cx);
+        } else {
+            self.archive_thread_id(id, cx);
+        }
+    }
+
+    fn archive_thread_id(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(t) = self.threads.iter_mut().find(|t| t.summary.id == id) {
+            t.summary.archived = Some(true);
+        }
+        self.status_line = "thread/archive…".into();
+        // Deselect if not showing archived
+        if !self.show_archived {
+            if self.selected_thread.as_deref() == Some(id.as_str()) {
+                self.selected_thread = self
+                    .threads
+                    .iter()
+                    .find(|t| !t.summary.archived.unwrap_or(false))
+                    .map(|t| t.summary.id.clone());
+            }
+        }
+
+        // Live app-server when Ready + real server id (mirror thread_name_set).
+        if is_app_server_thread_id(&id) {
+            if let Some(backend) = self.live_backend() {
+                let tid = id.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_archive(ThreadArchiveParams::new(tid.clone()))
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                Ok::<_, String>(tid)
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        match result {
+                            Ok(_tid) => {
+                                app.status_line = "thread/archive · done".into();
+                            }
+                            Err(e) => {
+                                app.status_line = format!("thread/archive failed · {e}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            let tid = id;
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        fixture
+                            .thread_archive(ThreadArchiveParams::new(tid))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+        self.status_line = "thread/archive · local".into();
+        cx.notify();
+    }
+
+    fn unarchive_thread_id(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(t) = self.threads.iter_mut().find(|t| t.summary.id == id) {
+            t.summary.archived = Some(false);
+        }
+        self.status_line = "thread/unarchive…".into();
+
+        if is_app_server_thread_id(&id) {
+            if let Some(backend) = self.live_backend() {
+                let tid = id.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_unarchive(ThreadUnarchiveParams::new(tid.clone()))
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                Ok::<_, String>(tid)
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        match result {
+                            Ok(_tid) => {
+                                app.status_line = "thread/unarchive · done".into();
+                            }
+                            Err(e) => {
+                                app.status_line = format!("thread/unarchive failed · {e}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            let tid = id;
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        fixture
+                            .thread_unarchive(ThreadUnarchiveParams::new(tid))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+        self.status_line = "thread/unarchive · local".into();
+        cx.notify();
+    }
+
+    /// Delete the selected thread (backend + local list).
+    pub fn delete_selected_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        let Some(id) = self.selected_thread.clone() else {
+            self.status_line = "Delete · no thread selected".into();
+            cx.notify();
+            return;
+        };
+        self.threads.retain(|t| t.summary.id != id);
+        self.selected_thread = self.threads.first().map(|t| t.summary.id.clone());
+        self.status_line = "thread/delete…".into();
+
+        if is_app_server_thread_id(&id) {
+            if let Some(backend) = self.live_backend() {
+                let tid = id.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_delete(ThreadDeleteParams::new(tid.clone()))
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                Ok::<_, String>(tid)
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        match result {
+                            Ok(_tid) => {
+                                app.status_line = "thread/delete · done".into();
+                            }
+                            Err(e) => {
+                                app.status_line = format!("thread/delete failed · {e}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            let tid = id;
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        fixture
+                            .thread_delete(ThreadDeleteParams::new(tid))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+        self.status_line = "thread/delete · local".into();
+        cx.notify();
+    }
+
+    /// Fork the selected thread into a new local (and backend) thread.
+    pub fn fork_selected_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        if self
+            .live_backend()
+            .is_some_and(|backend| !backend.capabilities().fork)
+        {
+            self.status_line = "Fork is not supported by the selected backend.".into();
+            cx.notify();
+            return;
+        }
+        let Some(id) = self.selected_thread.clone() else {
+            self.status_line = "Fork · no thread selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(source) = self.threads.iter().find(|t| t.summary.id == id).cloned() else {
+            self.status_line = "Fork · thread not found".into();
+            cx.notify();
+            return;
+        };
+
+        // Optimistic local fork; backend may replace id when Ready/Fixture.
+        let fork_id = format!("fork-{}", self.threads.len() + 1);
+        let mut forked = source;
+        forked.summary.id = fork_id.clone();
+        forked.summary.archived = Some(false);
+        let base = forked
+            .summary
+            .name
+            .clone()
+            .unwrap_or_else(|| "Thread".into());
+        forked.summary.name = Some(format!("{base} (fork)"));
+        self.threads.insert(0, forked);
+        self.selected_thread = Some(fork_id.clone());
+        self.status_line = "thread/fork…".into();
+
+        // Live thread/fork when Ready + real source id.
+        if is_app_server_thread_id(&id) {
+            if let Some(backend) = self.live_backend() {
+                let tid = id.clone();
+                let local_id = fork_id.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_fork(ThreadForkParams::new(tid))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        match result {
+                            Ok(resp) => {
+                                let summary = resp.summary();
+                                if let Some(t) =
+                                    app.threads.iter_mut().find(|t| t.summary.id == local_id)
+                                {
+                                    t.summary = summary.clone();
+                                }
+                                let forked_id = summary.id.clone();
+                                app.selected_thread = Some(summary.id.clone());
+                                app.status_line = "thread/fork · done".into();
+                                // Pull turns for the new server thread if still empty.
+                                if let Some(backend) = app.live_backend() {
+                                    let empty = app
+                                        .threads
+                                        .iter()
+                                        .find(|t| t.summary.id == forked_id)
+                                        .map(|t| t.messages.is_empty())
+                                        .unwrap_or(true);
+                                    if empty {
+                                        app.status_line = "thread/read…".into();
+                                        app.load_thread_messages(backend, forked_id, cx);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                app.status_line =
+                                    format!("thread/fork failed · {e} · local {local_id}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            let tid = id;
+            let local_id = fork_id;
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        fixture
+                            .thread_fork(ThreadForkParams::new(tid))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if let Ok(resp) = result {
+                        let summary = resp.summary();
+                        if let Some(t) = app.threads.iter_mut().find(|t| t.summary.id == local_id) {
+                            // Preserve messages; update summary/id from fixture.
+                            let messages = std::mem::take(&mut t.messages);
+                            t.summary = summary.clone();
+                            t.messages = messages;
+                        }
+                        app.selected_thread = Some(summary.id.clone());
+                        app.status_line = "thread/fork · fixture".into();
+                    } else {
+                        app.status_line = format!("thread/fork · local {local_id}").into();
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        self.status_line = format!("thread/fork · local {fork_id}").into();
+        cx.notify();
+    }
+
+    /// Stop / interrupt the in-progress turn (fixture cancel or live `turn/interrupt`).
+    pub fn interrupt_turn(&mut self, cx: &mut Context<Self>) {
+        if !self.turn_in_progress {
+            self.status_line = "No turn in progress.".into();
+            cx.notify();
+            return;
+        }
+
+        // Cancel fixture stream replay.
+        if let Some(flag) = &self.turn_cancel {
+            flag.store(true, Ordering::SeqCst);
+        }
+        // Drop pending fixture resume so approvals don't continue after stop.
+        self.fixture_resume = None;
+        // Unblock live approval waiters with Abort so the runner can wind down.
+        if let Some(bridge) = self.live_approval_bridge.as_ref() {
+            let _ = bridge.submit(ApprovalChoice::Abort);
+        }
+
+        let thread_id = self.selected_thread.clone();
+        let turn_id = self.active_turn_id.clone();
+
+        // Live path: call turn/interrupt when we know thread + turn ids.
+        if let (Some(backend), Some(tid), Some(turn)) =
+            (self.backend.clone(), thread_id, turn_id.clone())
+        {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        rt.block_on(async {
+                            backend
+                                .turn_interrupt(TurnInterruptParams::new(tid, turn))
+                                .await
+                                .map_err(|e| e.to_string())
+                        })
+                    })
+                    .await;
+            })
+            .detach();
+        } else if let (Some(fixture), Some(tid), Some(turn)) =
+            (self.fixture.clone(), self.selected_thread.clone(), turn_id)
+        {
+            // Fixture: no-op success path for parity.
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        fixture
+                            .turn_interrupt(TurnInterruptParams::new(tid, turn))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+
+        // Immediately clear streaming UI state.
+        if let Some(id) = self.selected_thread.clone() {
+            if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == id) {
+                for m in &mut thread.messages {
+                    m.streaming = false;
+                }
+            }
+        }
+        self.turn_in_progress = false;
+        self.active_turn_id = None;
+        self.turn_cancel = None;
+        self.pending_approval = None;
+        self.status_line = "Turn interrupted.".into();
+        cx.notify();
+    }
+
+    /// Select a model by id (Settings list / chip).
+    pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.models.iter().any(|m| m.id == id) {
+            self.selected_model_id = Some(id);
+            let label = self.model_label();
+            self.status_line = format!("Model: {label}").into();
+            cx.notify();
+        }
+    }
+
+    /// Cycle through catalog models (kept for keyboard / alternate pickers).
+    #[allow(dead_code)]
+    pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
+        if self.models.is_empty() {
+            self.status_line = "No models loaded.".into();
+            cx.notify();
+            return;
+        }
+        let idx = self
+            .selected_model_id
+            .as_ref()
+            .and_then(|id| self.models.iter().position(|m| &m.id == id))
+            .unwrap_or(0);
+        let next = (idx + 1) % self.models.len();
+        self.selected_model_id = Some(self.models[next].id.clone());
+        let label = self.model_label();
+        self.status_line = format!("Model: {label}").into();
+        cx.notify();
+    }
+
+    /// Composer model chip: open Settings so the full list is visible.
+    pub fn open_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
+        let label = self.model_label();
+        self.status_line = format!("Model picker · selected: {label}").into();
+        cx.notify();
+    }
+
+    /// Fill the composer with a suggestion chip prompt (empty-state affordance).
+    pub fn fill_composer(
+        &mut self,
+        input: &Entity<InputState>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let owned = text.to_string();
+        input.update(cx, |state, cx| {
+            state.set_value(owned, window, cx);
+        });
+        self.status_line = "Prompt loaded into composer.".into();
+        cx.notify();
+    }
+
+    pub fn submit_composer(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.turn_in_progress {
+            self.status_line = "Turn already in progress…".into();
+            cx.notify();
+            return;
+        }
+
+        let text = input.read(cx).value().to_string();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.status_line = "Composer is empty.".into();
+            cx.notify();
+            return;
+        }
+
+        // Ensure we have a selected thread; prefer real app-server id (not local-*).
+        if self.selected_thread.is_none() {
+            // Kick async thread/start when Ready; fall through to local then promote on send.
+            if matches!(self.connection, UiConnection::Ready { .. }) && self.backend.is_some() {
+                // Synchronous local placeholder; promote_to_server before live turn if still local-*.
+                self.new_thread_local(self.active_thread_surface(), cx);
+            } else {
+                self.new_thread(cx);
+            }
+        }
+        let thread_id = self.selected_thread.clone().unwrap_or_default();
+        if thread_id.is_empty() {
+            self.status_line = "No thread available.".into();
+            cx.notify();
+            return;
+        }
+
+        // Append user bubble immediately; auto-name from first message when still default.
+        let mut auto_name: Option<String> = None;
+        if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == thread_id) {
+            thread.messages.push(DemoMessage::user(trimmed));
+            thread.summary.preview = Some(trimmed.chars().take(64).collect());
+            let is_default_name = thread
+                .summary
+                .name
+                .as_deref()
+                .map(|n| n == "New thread" || n == "New chat" || n == "New fixture thread")
+                .unwrap_or(true);
+            if is_default_name {
+                let name: String = trimmed.chars().take(48).collect();
+                thread.summary.name = Some(name.clone());
+                auto_name = Some(name);
+            }
+        }
+
+        // Best-effort `thread/name/set` when renaming from first message (live or fixture).
+        if let Some(name) = auto_name {
+            self.set_thread_name_best_effort(&thread_id, name, cx);
+        }
+
+        input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+
+        let mode = self.resolve_send_mode();
+        let model_slug = self.selected_model_slug();
+        if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
+            // Still attempt live (server is source of truth) but surface the probe.
+            self.status_line =
+                "Live Send · rate limit 100% / no credits — server may refuse.".into();
+        }
+        self.turn_in_progress = true;
+        match mode {
+            SendMode::Live => {
+                let model_note = model_slug
+                    .as_deref()
+                    .map(|m| format!(" · model={m}"))
+                    .unwrap_or_default();
+                // If UI still holds a local-* id, promote via thread/start then turn/start.
+                if thread_id.starts_with("local-") {
+                    self.status_line =
+                        format!("Promoting local thread → app-server{model_note}…").into();
+                    self.promote_local_then_live_turn(
+                        thread_id,
+                        trimmed.to_string(),
+                        model_slug,
+                        cx,
+                    );
+                } else {
+                    self.status_line = format!("Live turn/start{model_note}…").into();
+                    self.start_live_turn(thread_id, trimmed.to_string(), model_slug, cx);
+                }
+            }
+            SendMode::Fixture => {
+                self.status_line = "Streaming fixture turn…".into();
+                self.start_fixture_turn(thread_id, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Replace a `local-*` thread with a real app-server thread, then start live turn.
+    fn promote_local_then_live_turn(
+        &mut self,
+        local_id: String,
+        text: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.backend.clone() else {
+            self.start_fixture_turn(local_id, cx);
+            return;
+        };
+        let cwd = self
+            .threads
+            .iter()
+            .find(|t| t.summary.id == local_id)
+            .and_then(|t| t.summary.cwd.clone())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.display().to_string())
+            });
+        let model_for_start = model.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    rt.block_on(async {
+                        backend
+                            .thread_start(ThreadStartParams {
+                                cwd,
+                                model: model_for_start,
+                                ephemeral: Some(false),
+                                ..Default::default()
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| match result {
+                Ok(started) => {
+                    let summary = started.summary();
+                    let new_id = summary.id.clone();
+                    // Migrate local thread → server id (preserve user bubble).
+                    if let Some(idx) = app.threads.iter().position(|t| t.summary.id == local_id) {
+                        let mut t = app.threads.remove(idx);
+                        t.summary = summary;
+                        // Keep messages (user already appended).
+                        app.threads.insert(0, t);
+                    }
+                    app.selected_thread = Some(new_id.clone());
+                    match app.active_thread_surface() {
+                        ThreadSurface::Chat => app.selected_chat_thread = Some(new_id.clone()),
+                        ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
+                    }
+                    app.status_line = format!("Live turn/start on {new_id}…").into();
+                    app.start_live_turn(new_id, text, model, cx);
+                    cx.notify();
+                }
+                Err(e) => {
+                    app.status_line =
+                        format!("thread/start failed ({e}); falling back to fixture stream.")
+                            .into();
+                    app.start_fixture_turn(local_id, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Live Codex backend only while connection is Ready.
+    fn live_backend(&self) -> Option<Arc<DesktopBackend>> {
+        if matches!(self.connection, UiConnection::Ready { .. }) {
+            self.backend.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Best-effort `thread/name/set` (live app-server or fixture). UI already updated.
+    fn set_thread_name_best_effort(
+        &mut self,
+        thread_id: &str,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let tid = thread_id.to_string();
+        if is_app_server_thread_id(&tid) {
+            if let Some(backend) = self.live_backend() {
+                cx.spawn(async move |_this, cx| {
+                    let _ = cx
+                        .background_spawn(async move {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| e.to_string())?;
+                            rt.block_on(async {
+                                backend
+                                    .thread_name_set(ThreadSetNameParams::new(tid, name))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                        })
+                        .await;
+                })
+                .detach();
+                return;
+            }
+        }
+        if let Some(fixture) = self.fixture.clone() {
+            cx.spawn(async move |_this, cx| {
+                let _ = cx
+                    .background_spawn(async move {
+                        fixture
+                            .thread_name_set(ThreadSetNameParams::new(tid, name))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+            })
+            .detach();
+        }
+    }
+
+    fn resolve_send_mode(&self) -> SendMode {
+        // A connected backend is not authorization to spend provider credits.
+        // Live turns require explicit opt-in in addition to auth and readiness.
+        let force_fixture = std::env::var_os("MITSURO_FORCE_FIXTURE").is_some()
+            || std::env::var_os("MITSURO_NO_LIVE_TURN").is_some();
+        let allow_live = std::env::var_os("MITSURO_ALLOW_LIVE_TURN").is_some();
+        if force_fixture || !allow_live {
+            return SendMode::Fixture;
+        }
+        match &self.connection {
+            UiConnection::Ready { has_auth: true, .. } if self.backend.is_some() => SendMode::Live,
+            _ => SendMode::Fixture,
+        }
+    }
+
+    fn start_fixture_turn(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let delay = self
+            .fixture
+            .as_ref()
+            .map(|f| f.stream_delay())
+            .unwrap_or(Duration::from_millis(35));
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.turn_cancel = Some(Arc::clone(&cancel));
+        // Fixture sample uses turn ids from JSONL; track a stable id for interrupt RPC.
+        self.active_turn_id = Some("turn-fixture-stream".into());
+
+        cx.spawn(async move |this, cx| {
+            let events = match load_sample_turn_events() {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.turn_in_progress = false;
+                        app.turn_cancel = None;
+                        app.active_turn_id = None;
+                        app.status_line = format!("Fixture load error: {e}").into();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            // Rewrite thread_id on events so they bind to the active UI thread.
+            let events: Vec<TurnStreamEvent> = events
+                .into_iter()
+                .map(|ev| rebind_thread_id(ev, &thread_id))
+                .collect();
+
+            replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
+        })
+        .detach();
+    }
+
+    /// Resume fixture stream after the user answers an approval prompt.
+    fn continue_fixture_events(
+        &mut self,
+        thread_id: String,
+        events: Vec<TurnStreamEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let delay = self
+            .fixture
+            .as_ref()
+            .map(|f| f.stream_delay())
+            .unwrap_or(Duration::from_millis(35));
+        self.turn_in_progress = true;
+        let cancel = self
+            .turn_cancel
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        self.turn_cancel = Some(Arc::clone(&cancel));
+        cx.spawn(async move |this, cx| {
+            replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
+        })
+        .detach();
+    }
+
+    fn start_live_turn(
+        &mut self,
+        thread_id: String,
+        text: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.backend.clone() else {
+            self.start_fixture_turn(thread_id, cx);
+            return;
+        };
+
+        // Progressive path: apply events as they arrive; mid-stream approvals
+        // surface ApprovalBar and block the turn loop until the user answers.
+        let bridge = Arc::new(LiveApprovalBridge::new());
+        self.live_approval_bridge = Some(Arc::clone(&bridge));
+
+        cx.spawn(async move |this, cx| {
+            /// Messages from the progressive live-turn producer thread.
+            enum LiveMsg {
+                Event(TurnStreamEvent),
+                Finished(Result<mitsuro_desktop_backend::LiveTurnOutcome, String>),
+            }
+
+            let (msg_tx, msg_rx) = std::sync::mpsc::channel::<LiveMsg>();
+            let msg_rx = Arc::new(std::sync::Mutex::new(msg_rx));
+
+            // Producer: progressive live turn on a dedicated multi-thread runtime.
+            // Selected model is forwarded as TurnStartParams.model (wire `model`).
+            let _producer = cx.background_spawn({
+                let backend = Arc::clone(&backend);
+                let bridge = Arc::clone(&bridge);
+                let thread_id = thread_id.clone();
+                let text = text.clone();
+                let model = model.clone();
+                let msg_tx = msg_tx;
+                async move {
+                    let (event_tx, event_rx) = std::sync::mpsc::channel::<TurnStreamEvent>();
+                    // Forward turn events onto the UI message channel.
+                    let forward_tx = msg_tx.clone();
+                    let forwarder = std::thread::spawn(move || {
+                        while let Ok(ev) = event_rx.recv() {
+                            if forward_tx.send(LiveMsg::Event(ev)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    let result = backend
+                        .run_turn_with_bridge_blocking(
+                            mitsuro_desktop_backend::TurnStartParams::text_with_model(
+                                thread_id, text, model,
+                            ),
+                            event_tx,
+                            bridge,
+                            DEFAULT_LIVE_TURN_TIMEOUT,
+                        )
+                        .map_err(|e| e.to_string());
+
+                    // Dropping event_tx (inside run_live… after return) ends forwarder once drained.
+                    let _ = forwarder.join();
+                    let _ = msg_tx.send(LiveMsg::Finished(result));
+                }
+            });
+
+            // Consumer: apply each event to the UI as soon as it is produced.
+            let mut saw_completed = false;
+            let mut outcome: Option<Result<mitsuro_desktop_backend::LiveTurnOutcome, String>> =
+                None;
+            loop {
+                let rx = Arc::clone(&msg_rx);
+                let next = cx
+                    .background_spawn(async move {
+                        let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.recv()
+                    })
+                    .await;
+
+                match next {
+                    Ok(LiveMsg::Event(ev)) => {
+                        let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
+                        let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
+                        let _ = this.update(cx, |app, cx| {
+                            app.apply_stream_event(&thread_id, ev);
+                            if is_approval {
+                                app.turn_in_progress = true;
+                                app.status_line = "Waiting for approval (live)…".into();
+                            }
+                            cx.notify();
+                        });
+                        if done {
+                            saw_completed = true;
+                        }
+                    }
+                    Ok(LiveMsg::Finished(result)) => {
+                        outcome = Some(result);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let outcome = outcome.unwrap_or_else(|| Err("live turn channel closed".into()));
+            let _ = this.update(cx, |app, cx| {
+                app.live_approval_bridge = None;
+                match &outcome {
+                    Ok(o) if o.completed || saw_completed => {
+                        if app.pending_approval.is_none() {
+                            app.turn_in_progress = false;
+                            app.active_turn_id = None;
+                            app.turn_cancel = None;
+                            app.status_line = "Live turn complete.".into();
+                        }
+                    }
+                    Ok(_) => {
+                        if app.pending_approval.is_none() {
+                            app.turn_in_progress = false;
+                            app.active_turn_id = None;
+                            app.turn_cancel = None;
+                            app.status_line = "Live turn ended (timeout or closed).".into();
+                        }
+                    }
+                    Err(e) => {
+                        app.turn_in_progress = false;
+                        app.active_turn_id = None;
+                        app.turn_cancel = None;
+                        app.status_line =
+                            format!("Live turn failed ({e}); falling back to fixture.").into();
+                    }
+                }
+                cx.notify();
+            });
+
+            if outcome.is_err() {
+                // Fixture fallback with approval pause (same path as normal fixture).
+                if let Ok(events) = load_sample_turn_events() {
+                    let events: Vec<TurnStreamEvent> = events
+                        .into_iter()
+                        .map(|ev| rebind_thread_id(ev, &thread_id))
+                        .collect();
+                    let delay = Duration::from_millis(35);
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let _ = this.update(cx, |app, cx| {
+                        app.turn_in_progress = true;
+                        app.turn_cancel = Some(Arc::clone(&cancel));
+                        app.active_turn_id = Some("turn-fixture-stream".into());
+                        cx.notify();
+                    });
+                    replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
+                } else {
+                    let _ = this.update(cx, |app, cx| {
+                        app.turn_in_progress = false;
+                        app.status_line = "Fixture fallback failed to load.".into();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply_stream_event(&mut self, thread_id: &str, event: TurnStreamEvent) {
+        let Some(idx) = self.threads.iter().position(|t| t.summary.id == thread_id) else {
+            return;
+        };
+
+        let mut status_update: Option<String> = None;
+
+        // Capture turn id before borrowing the thread mutably.
+        if let TurnStreamEvent::TurnStarted { turn_id, .. } = &event {
+            self.active_turn_id = Some(turn_id.clone());
+            status_update = Some(format!("Turn {turn_id} started…"));
+        }
+
+        {
+            let thread = &mut self.threads[idx];
+            match event {
+                TurnStreamEvent::TurnStarted { .. } => {
+                    // status_update set above
+                }
+                TurnStreamEvent::ItemStarted {
+                    item_id,
+                    kind,
+                    item,
+                    ..
+                } => match kind {
+                    mitsuro_desktop_backend::ItemKind::AgentMessage => {
+                        let exists = thread
+                            .messages
+                            .iter()
+                            .any(|m| m.item_id.as_deref() == Some(item_id.as_str()));
+                        if !exists {
+                            thread
+                                .messages
+                                .push(DemoMessage::streaming_assistant(item_id));
+                        }
+                    }
+                    mitsuro_desktop_backend::ItemKind::Reasoning => {
+                        thread
+                            .messages
+                            .push(DemoMessage::reasoning(String::new(), Some(item_id)));
+                        if let Some(m) = thread.messages.last_mut() {
+                            m.streaming = true;
+                        }
+                    }
+                    mitsuro_desktop_backend::ItemKind::Plan => {
+                        thread
+                            .messages
+                            .push(DemoMessage::plan(String::new(), Some(item_id)));
+                        if let Some(m) = thread.messages.last_mut() {
+                            m.streaming = true;
+                        }
+                    }
+                    mitsuro_desktop_backend::ItemKind::CommandExecution => {
+                        let fields = item
+                            .as_ref()
+                            .map(command_execution_fields)
+                            .unwrap_or_default();
+                        let mut m = DemoMessage::command_execution(
+                            fields.command,
+                            fields.cwd,
+                            fields.status,
+                            fields.output,
+                            Some(item_id),
+                        );
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                    mitsuro_desktop_backend::ItemKind::FileChange => {
+                        let fields = item.as_ref().map(file_change_fields).unwrap_or_default();
+                        let mut m = DemoMessage::file_change(
+                            fields.paths_summary,
+                            fields.patch_preview,
+                            fields.status,
+                            Some(item_id),
+                        );
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                    _ => {}
+                },
+                TurnStreamEvent::AgentMessageDelta { item_id, delta, .. } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        msg.text_mut().push_str(&delta);
+                        msg.streaming = true;
+                    } else {
+                        let mut m = DemoMessage::streaming_assistant(item_id);
+                        m.set_text(delta);
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::ReasoningTextDelta { item_id, delta, .. }
+                | TurnStreamEvent::ReasoningSummaryDelta { item_id, delta, .. } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        msg.text_mut().push_str(&delta);
+                        msg.streaming = true;
+                    } else {
+                        let mut m = DemoMessage::reasoning(delta, Some(item_id));
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::PlanDelta { item_id, delta, .. } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        msg.text_mut().push_str(&delta);
+                        msg.streaming = true;
+                    } else {
+                        let mut m = DemoMessage::plan(delta, Some(item_id));
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::CommandExecutionOutputDelta { item_id, delta, .. } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        if let DemoMessageKind::CommandExecution { output, .. } = &mut msg.kind {
+                            output.push_str(&delta);
+                        } else {
+                            msg.text_mut().push_str(&delta);
+                        }
+                        msg.streaming = true;
+                    } else {
+                        let mut m = DemoMessage::command_execution(
+                            "",
+                            "",
+                            "inProgress",
+                            delta,
+                            Some(item_id),
+                        );
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::FileChangeOutputDelta { item_id, delta, .. } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        if let DemoMessageKind::FileChange { patch_preview, .. } = &mut msg.kind {
+                            // Legacy textual output; append below any structured patch.
+                            if !patch_preview.is_empty() && !patch_preview.ends_with('\n') {
+                                patch_preview.push('\n');
+                            }
+                            patch_preview.push_str(&delta);
+                        } else {
+                            msg.text_mut().push_str(&delta);
+                        }
+                        msg.streaming = true;
+                    } else {
+                        let mut m =
+                            DemoMessage::file_change("", delta, "inProgress", Some(item_id));
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::FileChangePatchUpdated {
+                    item_id, changes, ..
+                } => {
+                    let (paths, patch) = summarize_file_changes(Some(&changes));
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        if let DemoMessageKind::FileChange {
+                            paths_summary,
+                            patch_preview,
+                            ..
+                        } = &mut msg.kind
+                        {
+                            if !paths.is_empty() {
+                                *paths_summary = paths;
+                            }
+                            if !patch.is_empty() {
+                                *patch_preview = patch;
+                            }
+                        }
+                        msg.streaming = true;
+                    } else {
+                        let mut m =
+                            DemoMessage::file_change(paths, patch, "inProgress", Some(item_id));
+                        m.streaming = true;
+                        thread.messages.push(m);
+                    }
+                }
+                TurnStreamEvent::ItemCompleted {
+                    item_id,
+                    text,
+                    kind,
+                    item,
+                    ..
+                } => {
+                    if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
+                        match kind {
+                            mitsuro_desktop_backend::ItemKind::CommandExecution => {
+                                if let Some(raw) = item.as_ref() {
+                                    let fields = command_execution_fields(raw);
+                                    if let DemoMessageKind::CommandExecution {
+                                        command,
+                                        cwd,
+                                        status,
+                                        output,
+                                    } = &mut msg.kind
+                                    {
+                                        if !fields.command.is_empty() {
+                                            *command = fields.command;
+                                        }
+                                        if !fields.cwd.is_empty() {
+                                            *cwd = fields.cwd;
+                                        }
+                                        *status = fields.status;
+                                        if !fields.output.is_empty() {
+                                            *output = fields.output;
+                                        } else if let Some(t) = text {
+                                            if !t.is_empty() {
+                                                *output = t;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            mitsuro_desktop_backend::ItemKind::FileChange => {
+                                if let Some(raw) = item.as_ref() {
+                                    let fields = file_change_fields(raw);
+                                    if let DemoMessageKind::FileChange {
+                                        paths_summary,
+                                        patch_preview,
+                                        status,
+                                    } = &mut msg.kind
+                                    {
+                                        if !fields.paths_summary.is_empty() {
+                                            *paths_summary = fields.paths_summary;
+                                        }
+                                        if !fields.patch_preview.is_empty() {
+                                            *patch_preview = fields.patch_preview;
+                                        } else if let Some(t) = text {
+                                            if !t.is_empty() {
+                                                *patch_preview = t;
+                                            }
+                                        }
+                                        *status = fields.status;
+                                    }
+                                }
+                            }
+                            _ => {
+                                if let Some(final_text) = text {
+                                    if !final_text.is_empty() {
+                                        msg.set_text(final_text);
+                                    }
+                                }
+                            }
+                        }
+                        msg.streaming = false;
+                    } else if let Some(final_text) = text {
+                        if !final_text.is_empty()
+                            || matches!(
+                                kind,
+                                mitsuro_desktop_backend::ItemKind::CommandExecution
+                                    | mitsuro_desktop_backend::ItemKind::FileChange
+                            )
+                        {
+                            match kind {
+                                mitsuro_desktop_backend::ItemKind::AgentMessage => {
+                                    thread.messages.push(DemoMessage::assistant(final_text));
+                                }
+                                mitsuro_desktop_backend::ItemKind::Reasoning => {
+                                    thread
+                                        .messages
+                                        .push(DemoMessage::reasoning(final_text, Some(item_id)));
+                                }
+                                mitsuro_desktop_backend::ItemKind::Plan => {
+                                    thread
+                                        .messages
+                                        .push(DemoMessage::plan(final_text, Some(item_id)));
+                                }
+                                mitsuro_desktop_backend::ItemKind::CommandExecution => {
+                                    let fields = item
+                                        .as_ref()
+                                        .map(command_execution_fields)
+                                        .unwrap_or_default();
+                                    let output = if fields.output.is_empty() {
+                                        final_text
+                                    } else {
+                                        fields.output
+                                    };
+                                    thread.messages.push(DemoMessage::command_execution(
+                                        fields.command,
+                                        fields.cwd,
+                                        fields.status,
+                                        output,
+                                        Some(item_id),
+                                    ));
+                                }
+                                mitsuro_desktop_backend::ItemKind::FileChange => {
+                                    let fields =
+                                        item.as_ref().map(file_change_fields).unwrap_or_default();
+                                    let patch = if fields.patch_preview.is_empty() {
+                                        final_text
+                                    } else {
+                                        fields.patch_preview
+                                    };
+                                    thread.messages.push(DemoMessage::file_change(
+                                        fields.paths_summary,
+                                        patch,
+                                        fields.status,
+                                        Some(item_id),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if matches!(
+                        kind,
+                        mitsuro_desktop_backend::ItemKind::CommandExecution
+                            | mitsuro_desktop_backend::ItemKind::FileChange
+                    ) {
+                        // Completed with empty text — still materialize structured block from item.
+                        match kind {
+                            mitsuro_desktop_backend::ItemKind::CommandExecution => {
+                                let fields = item
+                                    .as_ref()
+                                    .map(command_execution_fields)
+                                    .unwrap_or_default();
+                                thread.messages.push(DemoMessage::command_execution(
+                                    fields.command,
+                                    fields.cwd,
+                                    fields.status,
+                                    fields.output,
+                                    Some(item_id),
+                                ));
+                            }
+                            mitsuro_desktop_backend::ItemKind::FileChange => {
+                                let fields =
+                                    item.as_ref().map(file_change_fields).unwrap_or_default();
+                                thread.messages.push(DemoMessage::file_change(
+                                    fields.paths_summary,
+                                    fields.patch_preview,
+                                    fields.status,
+                                    Some(item_id),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                TurnStreamEvent::TurnCompleted { status, .. } => {
+                    for m in &mut thread.messages {
+                        m.streaming = false;
+                    }
+                    let label = status.unwrap_or_else(|| "completed".into());
+                    status_update = Some(format!("Turn {label}."));
+                }
+                TurnStreamEvent::ApprovalRequested(pending) => {
+                    self.pending_approval = Some(pending.clone());
+                    status_update = Some(format!(
+                        "Approval required: {}",
+                        pending.summary.chars().take(56).collect::<String>()
+                    ));
+                }
+                // Process notifications (P10): surface in status; full terminal UI later.
+                TurnStreamEvent::ProcessOutputDelta {
+                    process_handle,
+                    stream,
+                    delta,
+                    ..
+                } => {
+                    let preview: String = delta.chars().take(48).collect();
+                    status_update =
+                        Some(format!("Process {process_handle} · {stream:?}: {preview}"));
+                }
+                TurnStreamEvent::ProcessExited {
+                    process_handle,
+                    exit_code,
+                    ..
+                } => {
+                    status_update = Some(format!(
+                        "Process {process_handle} exited · code {exit_code}"
+                    ));
+                }
+                TurnStreamEvent::Other { .. } => {}
+            }
+        }
+
+        if let Some(line) = status_update {
+            self.status_line = line.into();
+        }
+    }
+
+    fn bootstrap_fixture(&mut self, cx: &mut Context<Self>) {
+        let fixture = self
+            .fixture
+            .clone()
+            .unwrap_or_else(|| Arc::new(FixtureBackend::new()));
+        self.fixture = Some(Arc::clone(&fixture));
+        self.connection = UiConnection::Fixture;
+        // Quiet status — connection chip carries "Local"; no fixture pill wall.
+        self.status_line = SharedString::from("");
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    fixture.connect().await.map_err(|e| e.to_string())?;
+                    let list = fixture
+                        .thread_list(ThreadListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let models = fixture
+                        .model_list(ModelListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let config = fixture
+                        .config_read(ConfigReadParams {
+                            include_layers: Some(true),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let skills = fixture
+                        .skills_list(SkillsListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let mcp = fixture
+                        .mcp_server_status_list(ListMcpServerStatusParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let plugins = fixture
+                        .plugin_list(PluginListParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let account = fixture
+                        .account_read(GetAccountParams::default())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let usage = fixture
+                        .account_usage_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let rate_limits = fixture
+                        .account_rate_limits_read()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok::<_, String>((
+                        list.threads(),
+                        models.data,
+                        config.settings_snippet(),
+                        skills
+                            .data
+                            .into_iter()
+                            .flat_map(|e| e.skills)
+                            .collect::<Vec<_>>(),
+                        mcp.data,
+                        plugins
+                            .marketplaces
+                            .into_iter()
+                            .flat_map(|m| m.plugins)
+                            .collect::<Vec<_>>(),
+                        account.account,
+                        usage,
+                        rate_limits,
+                    ))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                if let Ok((
+                    remote,
+                    models,
+                    config_snip,
+                    skills,
+                    mcp,
+                    plugins,
+                    account,
+                    usage,
+                    rate_limits,
+                )) = result
+                {
+                    // Keep first paint calm: do not dump fixture/remote threads into the sidebar.
+                    // Threads appear when the user creates one or loads samples.
+                    let _ = remote;
+                    app.apply_models(models);
+                    app.apply_config_snippet(config_snip);
+                    app.apply_skills(skills);
+                    app.apply_mcp_servers(mcp);
+                    app.apply_plugins(plugins);
+                    app.apply_account_snapshot(account, usage, rate_limits, "fixture", None);
+                } else {
+                    // Seed demo catalog even if connect path failed.
+                    app.apply_models(fixture_demo_models());
+                    app.apply_config_snippet(fixture_demo_config().settings_snippet());
+                    app.apply_skills(
+                        fixture_demo_skills()
+                            .data
+                            .into_iter()
+                            .flat_map(|e| e.skills)
+                            .collect(),
+                    );
+                    app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                    app.apply_plugins(
+                        fixture_demo_plugins()
+                            .marketplaces
+                            .into_iter()
+                            .flat_map(|m| m.plugins)
+                            .collect(),
+                    );
+                    app.account = AccountSession::fixture_demo();
+                }
+                app.connection = UiConnection::Fixture;
+                // Single quiet status; counts live in Settings, not title chrome.
+                app.status_line = SharedString::from("");
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn bootstrap_backend(&mut self, cx: &mut Context<Self>) {
+        let selection = match BackendSelection::from_env() {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.connection = UiConnection::Fixture;
+                self.status_line = format!("Backend configuration error: {error}").into();
+                return;
+            }
+        };
+        if matches!(selection, BackendSelection::Fixture) {
+            self.connection = UiConnection::Fixture;
+            self.status_line = "Fixture backend selected explicitly.".into();
+            return;
+        }
+        if matches!(selection, BackendSelection::CodexWebSocket) {
+            self.connection = UiConnection::Fixture;
+            self.status_line =
+                "codex-ws is not implemented yet; use codex-stdio or mitsuro-http.".into();
+            return;
+        }
+        let backend = match selection {
+            BackendSelection::CodexStdio => DesktopBackend::codex_stdio(),
+            BackendSelection::Auto | BackendSelection::MitsuroHttp => {
+                match DesktopBackend::mitsuro_from_env() {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        self.connection = UiConnection::Fixture;
+                        self.status_line =
+                            format!("Mitsuro backend configuration error: {error}").into();
+                        return;
+                    }
+                }
+            }
+            BackendSelection::CodexWebSocket | BackendSelection::Fixture => unreachable!(),
+        };
+        let backend = Arc::new(backend);
+        let backend_label = backend.kind().id();
+        self.backend = Some(Arc::clone(&backend));
+        self.connection = UiConnection::Connecting;
+        self.status_line = format!("Connecting to {backend_label}…").into();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { connect_list_auth_and_models(backend) })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((init, remote, has_auth, models, config_snip, skills, mcp, plugins)) => {
+                        eprintln!(
+                            "[mitsuro] Connected backend={} os={} threads={} auth={} models={}",
+                            app.backend
+                                .as_ref()
+                                .map(|backend| backend.kind().id())
+                                .unwrap_or("none"),
+                            init.platform_os,
+                            remote.len(),
+                            has_auth,
+                            models.len()
+                        );
+                        app.connection = UiConnection::Ready {
+                            detail: format!("{} · {}", init.platform_os, init.user_agent),
+                            has_auth,
+                        };
+                        if !remote.is_empty() {
+                            app.threads = remote
+                                .into_iter()
+                                .map(|summary| DemoThread {
+                                    summary,
+                                    surface: ThreadSurface::Codex,
+                                    messages: vec![],
+                                })
+                                .collect();
+                            // Default: leave selected_thread None → calm home hero.
+                            // Override via MITSURO_START_THREAD / START_MODE=thread-open.
+                        }
+                        if models.is_empty() {
+                            app.apply_models(fixture_demo_models());
+                        } else {
+                            app.apply_models(models);
+                        }
+                        if let Some(snip) = config_snip {
+                            app.apply_config_snippet(snip);
+                        }
+                        // Live empty catalogs: keep product empty unless MITSURO_EXTENSIONS_DENSE.
+                        // Never silent-swap fixture while status implies app-server.
+                        let densify = densify_extensions();
+                        if skills.is_empty() {
+                            if densify {
+                                app.apply_skills(
+                                    fixture_demo_skills()
+                                        .data
+                                        .into_iter()
+                                        .flat_map(|e| e.skills)
+                                        .collect(),
+                                );
+                            } else {
+                                app.apply_skills(Vec::new());
+                            }
+                        } else {
+                            app.apply_skills(skills);
+                        }
+                        if mcp.is_empty() {
+                            if densify {
+                                app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                            } else {
+                                app.apply_mcp_servers(Vec::new());
+                            }
+                        } else {
+                            app.apply_mcp_servers(mcp);
+                        }
+                        if plugins.is_empty() {
+                            if densify {
+                                app.apply_plugins(
+                                    fixture_demo_plugins()
+                                        .marketplaces
+                                        .into_iter()
+                                        .flat_map(|m| m.plugins)
+                                        .collect(),
+                                );
+                            } else {
+                                app.apply_plugins(Vec::new());
+                            }
+                        } else {
+                            app.apply_plugins(plugins);
+                        }
+                        let auth_note = if has_auth { "auth" } else { "no auth" };
+                        // Short chrome: Connected · N threads · auth (counts for models/skills live in Settings).
+                        app.status_line =
+                            format!("Connected · {} threads · {auth_note}", app.threads.len(),)
+                                .into();
+                        // Best-effort account snapshot from app-server (needs Window for public API —
+                        // use internal spawn path via refresh_account with a no-op when possible).
+                        app.kick_account_refresh(cx);
+                        // Defer open-thread so first Connected paint (recents + chrome) settles
+                        // before thread/read materializes bubbles (GNOME hang detector).
+                        if app.pending_start_thread.is_some() {
+                            cx.spawn(async move |this, cx| {
+                                let _ = cx
+                                    .background_spawn(async {
+                                        std::thread::sleep(std::time::Duration::from_millis(600));
+                                    })
+                                    .await;
+                                let _ = this.update(cx, |app, cx| {
+                                    app.apply_pending_start_thread(cx);
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                    Err(message) => {
+                        eprintln!("[mitsuro] App-server connect failed: {message}");
+                        // Fall back to fixture mode for offline chrome + streaming.
+                        app.connection = UiConnection::Fixture;
+                        app.apply_models(fixture_demo_models());
+                        app.apply_config_snippet(fixture_demo_config().settings_snippet());
+                        app.apply_skills(
+                            fixture_demo_skills()
+                                .data
+                                .into_iter()
+                                .flat_map(|e| e.skills)
+                                .collect(),
+                        );
+                        app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                        app.apply_plugins(
+                            fixture_demo_plugins()
+                                .marketplaces
+                                .into_iter()
+                                .flat_map(|m| m.plugins)
+                                .collect(),
+                        );
+                        app.status_line = format!(
+                            "App-server unavailable ({message}); fixture models + turns enabled."
+                        )
+                        .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Apply `pending_start_thread` after Recents are populated (bootstrap).
+    ///
+    /// Resolves:
+    /// - `@first` → first non-archived thread
+    /// - exact id match
+    /// - case-insensitive title / preview substring
+    fn apply_pending_start_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(want) = self.pending_start_thread.take() else {
+            return;
+        };
+        if self.threads.is_empty() {
+            // Put back so a later list refresh could retry (rare).
+            self.pending_start_thread = Some(want);
+            return;
+        }
+
+        let want_trim = want.trim();
+        let resolved = if want_trim == "@first" || want_trim.is_empty() {
+            self.threads
+                .iter()
+                .find(|t| t.summary.archived != Some(true))
+                .or_else(|| self.threads.first())
+                .map(|t| t.summary.id.clone())
+        } else if let Some(t) = self.threads.iter().find(|t| t.summary.id == want_trim) {
+            Some(t.summary.id.clone())
+        } else {
+            let needle = want_trim.to_ascii_lowercase();
+            self.threads
+                .iter()
+                .find(|t| {
+                    t.summary
+                        .display_title()
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                        || t.summary
+                            .name
+                            .as_ref()
+                            .map(|n| n.to_ascii_lowercase().contains(&needle))
+                            .unwrap_or(false)
+                        || t.summary
+                            .preview
+                            .as_ref()
+                            .map(|p| p.to_ascii_lowercase().contains(&needle))
+                            .unwrap_or(false)
+                })
+                .map(|t| t.summary.id.clone())
+        };
+
+        match resolved {
+            Some(id) => {
+                eprintln!("[mitsuro] open-thread select → {id} (from {want_trim})");
+                self.select_thread(id, cx);
+            }
+            None => {
+                self.status_line = format!(
+                    "START_THREAD {want_trim:?} not in Recents ({} threads).",
+                    self.threads.len()
+                )
+                .into();
+            }
+        }
+    }
+
+    /// Load transcript for a server thread via `thread/read` (includeTurns).
+    /// Used when selecting an empty cached server thread while Ready.
+    fn load_thread_messages(
+        &mut self,
+        backend: Arc<DesktopBackend>,
+        thread_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    // Keep transcript work off the UI thread, but preserve the
+                    // canonical history instead of silently dropping and
+                    // truncating nearly all server messages.
+                    let tid = thread_id.clone();
+                    let b = Arc::clone(&backend);
+                    let prepared = backend.block_on(async move {
+                        match b
+                            .thread_read(ThreadReadParams {
+                                thread_id: tid.clone(),
+                                include_turns: Some(true),
+                            })
+                            .await
+                        {
+                            Ok(r) => {
+                                let msgs = r.transcript_messages();
+                                let seen = msgs.len();
+                                eprintln!(
+                                    "[mitsuro] thread/read ok id={} tail={} scanned={}",
+                                    tid,
+                                    msgs.len(),
+                                    seen
+                                );
+                                let n_chat = msgs.len();
+                                let ui: Vec<DemoMessage> = msgs
+                                    .into_iter()
+                                    .map(|m| {
+                                        let mut msg = match m.role {
+                                            TranscriptRole::User => DemoMessage::user(m.body),
+                                            TranscriptRole::Assistant => {
+                                                DemoMessage::assistant(m.body)
+                                            }
+                                            _ => DemoMessage::assistant(m.body),
+                                        };
+                                        if msg.item_id.is_none() {
+                                            msg.item_id = m.item_id;
+                                        }
+                                        msg
+                                    })
+                                    .collect();
+                                eprintln!(
+                                    "[mitsuro] thread/read prepared id={} scanned={} ui={}",
+                                    tid,
+                                    seen,
+                                    ui.len()
+                                );
+                                Ok::<_, String>((tid, seen.max(n_chat), ui))
+                            }
+                            Err(e) => {
+                                eprintln!("[mitsuro] thread/read failed id={tid}: {e}");
+                                Err(e.to_string())
+                            }
+                        }
+                    });
+                    // Let "Loading thread…" paint before attaching bubbles.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    prepared
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok((tid, n_in, ui_msgs)) => {
+                        if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
+                            thread.messages = ui_msgs;
+                            app.selected_thread = Some(tid.clone());
+                            app.selected_codex_thread = Some(tid.clone());
+                            if !matches!(app.active_mode, ProductMode::Codex | ProductMode::Chat) {
+                                app.active_mode = ProductMode::Codex;
+                            }
+                            eprintln!(
+                                "[mitsuro] thread/read applied id={} server={} ui={}",
+                                tid,
+                                n_in,
+                                thread.messages.len()
+                            );
+                            app.status_line = format!(
+                                "thread/read · {} msgs (of {n_in})",
+                                thread.messages.len(),
+                            )
+                            .into();
+                        } else {
+                            eprintln!(
+                                "[mitsuro] thread/read MISSING sidebar thread id={tid} n={n_in}"
+                            );
+                            app.status_line =
+                                format!("thread/read · thread missing in sidebar").into();
+                        }
+                    }
+                    Err(e) => {
+                        app.status_line = format!("thread/read failed · {e}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn sync_search_from_input(&mut self, cx: &Context<Self>) {
+        let value = self.search_input.read(cx).value().to_string();
+        if value != self.search_query {
+            self.search_query = value;
+        }
+    }
+}
+
+/// True when `id` is expected to exist on codex app-server (not a local/demo placeholder).
+fn is_app_server_thread_id(id: &str) -> bool {
+    !(id.starts_with("local-")
+        || id.starts_with("fork-")
+        || id.starts_with("demo-")
+        || id.starts_with("chat-")
+        || id.starts_with("goal-")
+        || id.starts_with("fixture-"))
+}
+
+/// When set, empty live plugin/MCP/skills catalogs densify with offline demo data.
+fn densify_extensions() -> bool {
+    std::env::var_os("MITSURO_EXTENSIONS_DENSE").is_some()
+}
+
+/// Normalize thread `cwd` fields (`file:///path` or absolute path) for fs/* roots.
+fn path_from_cwd_field(cwd: &str) -> String {
+    let s = cwd.trim();
+    if let Some(rest) = s.strip_prefix("file://") {
+        if rest.starts_with('/') {
+            return rest.to_string();
+        }
+        // file://host/path → treat path portion as absolute when possible
+        if let Some(idx) = rest.find('/') {
+            return rest[idx..].to_string();
+        }
+        return rest.to_string();
+    }
+    s.to_string()
+}
+
+fn find_message_mut<'a>(
+    messages: &'a mut [DemoMessage],
+    item_id: &str,
+) -> Option<&'a mut DemoMessage> {
+    messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.item_id.as_deref() == Some(item_id))
+}
+
+/// Minimal whitespace split for `echo hello` style argv (no shell quoting).
+fn shell_split_simple(cmd: &str) -> Vec<String> {
+    cmd.split_whitespace().map(str::to_string).collect()
+}
+
+fn rebind_thread_id(event: TurnStreamEvent, thread_id: &str) -> TurnStreamEvent {
+    match event {
+        TurnStreamEvent::TurnStarted { turn_id, turn, .. } => TurnStreamEvent::TurnStarted {
+            thread_id: thread_id.into(),
+            turn_id,
+            turn,
+        },
+        TurnStreamEvent::TurnCompleted {
+            turn_id,
+            status,
+            turn,
+            ..
+        } => TurnStreamEvent::TurnCompleted {
+            thread_id: thread_id.into(),
+            turn_id,
+            status,
+            turn,
+        },
+        TurnStreamEvent::ItemStarted {
+            turn_id,
+            item_id,
+            kind,
+            item,
+            ..
+        } => TurnStreamEvent::ItemStarted {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            kind,
+            item,
+        },
+        TurnStreamEvent::ItemCompleted {
+            turn_id,
+            item_id,
+            kind,
+            text,
+            item,
+            ..
+        } => TurnStreamEvent::ItemCompleted {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            kind,
+            text,
+            item,
+        },
+        TurnStreamEvent::AgentMessageDelta {
+            turn_id,
+            item_id,
+            delta,
+            ..
+        } => TurnStreamEvent::AgentMessageDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            delta,
+        },
+        TurnStreamEvent::ReasoningTextDelta {
+            turn_id,
+            item_id,
+            content_index,
+            delta,
+            ..
+        } => TurnStreamEvent::ReasoningTextDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            content_index,
+            delta,
+        },
+        TurnStreamEvent::ReasoningSummaryDelta {
+            turn_id,
+            item_id,
+            summary_index,
+            delta,
+            ..
+        } => TurnStreamEvent::ReasoningSummaryDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            summary_index,
+            delta,
+        },
+        TurnStreamEvent::PlanDelta {
+            turn_id,
+            item_id,
+            delta,
+            ..
+        } => TurnStreamEvent::PlanDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            delta,
+        },
+        TurnStreamEvent::CommandExecutionOutputDelta {
+            turn_id,
+            item_id,
+            delta,
+            ..
+        } => TurnStreamEvent::CommandExecutionOutputDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            delta,
+        },
+        TurnStreamEvent::FileChangeOutputDelta {
+            turn_id,
+            item_id,
+            delta,
+            ..
+        } => TurnStreamEvent::FileChangeOutputDelta {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            delta,
+        },
+        TurnStreamEvent::FileChangePatchUpdated {
+            turn_id,
+            item_id,
+            changes,
+            ..
+        } => TurnStreamEvent::FileChangePatchUpdated {
+            thread_id: thread_id.into(),
+            turn_id,
+            item_id,
+            changes,
+        },
+        TurnStreamEvent::ApprovalRequested(mut pending) => {
+            pending.thread_id = Some(thread_id.into());
+            TurnStreamEvent::ApprovalRequested(pending)
+        }
+        other => other,
+    }
+}
+
+/// Replay fixture events with delay; pause when an approval is requested.
+/// Honors `cancel` so Stop / `turn/interrupt` ends the stream early.
+async fn replay_fixture_events(
+    this: gpui::WeakEntity<MitsuroApp>,
+    cx: &mut gpui::AsyncApp,
+    thread_id: String,
+    events: Vec<TurnStreamEvent>,
+    delay: Duration,
+    cancel: Arc<AtomicBool>,
+) {
+    let mut iter = events.into_iter();
+    while let Some(ev) = iter.next() {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = this.update(cx, |app, cx| {
+                if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == thread_id) {
+                    for m in &mut thread.messages {
+                        m.streaming = false;
+                    }
+                }
+                app.turn_in_progress = false;
+                app.fixture_resume = None;
+                app.active_turn_id = None;
+                app.turn_cancel = None;
+                if app.status_line.as_ref() != "Turn interrupted." {
+                    app.status_line = "Fixture turn stopped.".into();
+                }
+                cx.notify();
+            });
+            return;
+        }
+        let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
+        let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
+        let _ = this.update(cx, |app, cx| {
+            app.apply_stream_event(&thread_id, ev);
+            cx.notify();
+        });
+        if is_approval {
+            // Stash remaining events; user must Approve/Reject to continue.
+            let rest: Vec<TurnStreamEvent> = iter.collect();
+            let _ = this.update(cx, |app, cx| {
+                app.fixture_resume = Some((thread_id.clone(), rest));
+                // Keep turn_in_progress true while waiting so Send is blocked.
+                app.turn_in_progress = true;
+                app.status_line = "Waiting for approval…".into();
+                cx.notify();
+            });
+            return;
+        }
+        if done {
+            break;
+        }
+        let d = delay;
+        let _ = cx
+            .background_spawn(async move {
+                std::thread::sleep(d);
+            })
+            .await;
+    }
+    let _ = this.update(cx, |app, cx| {
+        app.turn_in_progress = false;
+        app.fixture_resume = None;
+        app.active_turn_id = None;
+        app.turn_cancel = None;
+        if app.pending_approval.is_none() && !cancel.load(Ordering::SeqCst) {
+            app.status_line = "Fixture turn complete.".into();
+        }
+        cx.notify();
+    });
+}
+
+fn connect_list_auth_and_models(
+    backend: Arc<DesktopBackend>,
+) -> Result<
+    (
+        mitsuro_desktop_backend::InitializeResponse,
+        Vec<ThreadSummary>,
+        bool,
+        Vec<ModelInfo>,
+        Option<String>,
+        Vec<SkillMetadata>,
+        Vec<McpServerStatus>,
+        Vec<PluginSummary>,
+    ),
+    String,
+> {
+    // MUST use the backend pump runtime so child I/O stays alive after return.
+    let b = Arc::clone(&backend);
+    backend.block_on(async move {
+        let init = b.connect().await.map_err(|e| format!("initialize: {e}"))?;
+        let list = b
+            .thread_list(ThreadListParams {
+                limit: Some(40),
+                use_state_db_only: Some(true),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("thread/list: {e}"))?;
+        let has_auth = b.has_usable_auth().await;
+        // model/list is best-effort — missing method or error falls back to empty
+        // (UI seeds fixture demo models).
+        let models = match b
+            .model_list(ModelListParams {
+                limit: Some(100),
+                include_hidden: Some(false),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => resp.data,
+            Err(_) => Vec::new(),
+        };
+        // config/read best-effort for Settings snippet.
+        let config_snip = match b
+            .config_read(ConfigReadParams {
+                include_layers: Some(false),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => Some(resp.settings_snippet()),
+            Err(_) => None,
+        };
+        // skills/list best-effort.
+        let skills = match b.skills_list(SkillsListParams::default()).await {
+            Ok(resp) => resp.data.into_iter().flat_map(|e| e.skills).collect(),
+            Err(_) => Vec::new(),
+        };
+        // mcpServerStatus/list + plugin/list best-effort for Extensions panel.
+        let mcp = match b
+            .mcp_server_status_list(ListMcpServerStatusParams::default())
+            .await
+        {
+            Ok(resp) => resp.data,
+            Err(_) => Vec::new(),
+        };
+        let plugins = match b.plugin_list(PluginListParams::default()).await {
+            Ok(resp) => resp
+                .marketplaces
+                .into_iter()
+                .flat_map(|m| m.plugins)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        Ok((
+            init,
+            list.threads(),
+            has_auth,
+            models,
+            config_snip,
+            skills,
+            mcp,
+            plugins,
+        ))
+    })
+}
+
+impl Focusable for MitsuroApp {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for MitsuroApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_search_from_input(cx);
+        if matches!(self.active_mode, ProductMode::Settings) {
+            self.sync_settings_search(cx);
+        }
+        // Keep OS titlebar in sync with product mode (Chat / Work / Codex / …).
+        window.set_window_title(&self.active_mode.window_title());
+        let colors = theme::colors();
+        // Bar home: always-on left sidebar for Chat/Codex (+ stubs/plugins).
+        // Activity rail only for advanced modes outside bar home nav.
+        let show_sidebar = self.active_mode.shows_thread_sidebar();
+        let show_rail = self.active_mode.shows_activity_rail();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.bg_under)
+            .text_color(colors.text)
+            .track_focus(&self.focus_handle)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .when(show_rail, |this| {
+                        this.child(components::activity_rail(self, cx))
+                    })
+                    .when(show_sidebar, |this| {
+                        this.child(components::sidebar(self, &self.search_input, cx))
+                    })
+                    .child(components::main_column(self, &self.composer_input, cx)),
+            )
+            .when_some(
+                gpui_component::Root::render_notification_layer(window, cx),
+                |this, layer| this.child(layer),
+            )
+    }
+}

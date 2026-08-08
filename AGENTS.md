@@ -40,6 +40,9 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
 - `apps/desktop/shell`: Tauri wrapper around the Expo web build.
+- `apps/desktop/gpui`: Experimental native GPUI client. It may implement native presentation
+  independently, but must use shared Mitsuro client/server contracts and keep backend-specific
+  behavior behind explicit capabilities.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.
@@ -186,7 +189,10 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 - Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
 - Keep knowledge surfaces server-backed and shared across modes; reports and memories should behave like one project knowledge substrate rather than separate client-local feature stacks.
-- Desktop shell is a host for the Expo web build, not a separate product surface. Keep desktop-specific code focused on windowing, permissions, startup wiring, and packaging.
+- The shipped Tauri desktop shell remains a host for the Expo web build. The experimental GPUI
+  client is an explicitly approved alternate native surface; keep business logic in shared
+  crates, make unsupported backend capabilities honest, and do not imply that it has replaced
+  the shipped shell without an explicit migration decision.
 - Treat Tauri permissions, deep links, and updater config as security-sensitive.
 
 ### Mobile and Shared Client Performance (`apps/mobile`, `packages/state`, `packages/ui`)
@@ -318,4 +324,3 @@ All new product work intended for the next coordinated release starts from
 - Treat that branch tip as the only authority for multi-machine agents/worktrees.
 - Capture unique dirty work on named branches first; integrate into staging deliberately.
 - Do not merge to `main`, tag, or restart production without explicit approval after staging validation.
-

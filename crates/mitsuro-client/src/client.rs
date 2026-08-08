@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -27,9 +27,32 @@ pub struct MitsuroClient {
 
 impl MitsuroClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
+        Self::build(base_url.into(), None)
+    }
+
+    /// Construct a client for an authenticated remote Mitsuro server.
+    ///
+    /// The token is installed as a default header and is never exposed by this
+    /// type's public API. Local loopback servers normally use [`Self::local`].
+    pub fn with_bearer_token(base_url: impl Into<String>, token: impl AsRef<str>) -> Result<Self> {
+        Self::build(base_url.into(), Some(token.as_ref()))
+    }
+
+    fn build(base_url: String, bearer_token: Option<&str>) -> Result<Self> {
         let base_url = normalize_base_url(base_url.into());
+        let mut headers = HeaderMap::new();
+        if let Some(token) = bearer_token {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(anyhow!("Mitsuro bearer token cannot be empty"));
+            }
+            let value = HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("validating Mitsuro bearer token")?;
+            headers.insert(AUTHORIZATION, value);
+        }
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            .default_headers(headers)
             .build()
             .context("building Mitsuro HTTP client")?;
         Ok(Self {
@@ -124,6 +147,18 @@ impl MitsuroClient {
     ) -> Result<SessionInfo> {
         self.patch_json(&format!("/sessions/{session_id}"), &request)
             .await
+    }
+
+    pub async fn delete_session(&self, session_id: &str) -> Result<SimpleOkResponse> {
+        self.delete_json(&format!("/sessions/{session_id}")).await
+    }
+
+    pub async fn cancel_session(&self, session_id: &str) -> Result<SimpleOkResponse> {
+        self.post_json(
+            &format!("/sessions/{session_id}/cancel"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     pub async fn server_access(&self) -> Result<ServerAccessResponse> {
@@ -351,5 +386,12 @@ mod tests {
     fn trims_trailing_slashes() {
         let client = MitsuroClient::new("http://localhost:3000///").expect("client");
         assert_eq!(client.base_url(), "http://localhost:3000");
+    }
+
+    #[test]
+    fn rejects_empty_remote_bearer_token() {
+        let error = MitsuroClient::with_bearer_token("https://mitsuro.example", "  ")
+            .expect_err("blank token must fail");
+        assert!(error.to_string().contains("cannot be empty"));
     }
 }

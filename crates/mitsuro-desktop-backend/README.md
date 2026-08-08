@@ -1,0 +1,102 @@
+# mitsuro-desktop-backend
+
+Protocol types and agent backends for the Mitsuro desktop shell.
+
+## Backends
+
+| Backend | Status | Role |
+|---------|--------|------|
+| `CodexAppServerBackend` | wired | Spawns local `codex app-server` over stdio |
+| `MitsuroServerBackend` | wired for core conversations | Uses canonical `mitsuro-client` over HTTP/SSE |
+| `FixtureBackend` | explicit typed subset | Deterministic development and tests |
+
+All implement [`AgentBackend`](src/backend.rs). [`DesktopBackend`](src/desktop.rs)
+is the desktop selection/capability boundary. `AgentBackend` still contains legacy
+Codex-shaped methods; unsupported methods must return `NotImplemented` and must
+not be represented as working product features.
+
+## Mitsuro transport
+
+`MitsuroServerBackend` supports health/connection, session list/create/read/rename/delete,
+model list, SSE turn streaming, approvals, and cancellation. Its base URL defaults to
+`http://127.0.0.1:3000` and can be changed with `MITSURO_SERVER_URL`. Remote servers use
+`MITSURO_SERVER_TOKEN`; the shared client installs it as a bearer header.
+
+## Transport assumptions (Codex app-server)
+
+Verified against `codex` 0.146.0 on Linux (`~/.local/bin/codex app-server --stdio`):
+
+1. **Spawn:** `codex app-server --stdio` (or `CODEX_BIN` env override, default `~/.local/bin/codex` then `codex` on `PATH`).
+2. **Framing:** newline-delimited JSON (JSONL). One JSON object per line on stdin/stdout. **Not** LSP `Content-Length` framing.
+3. **Request shape:**
+   ```json
+   {"id":1,"method":"initialize","params":{...}}
+   ```
+   The JSON-RPC `"jsonrpc":"2.0"` field is optional on this wire; this client includes it for clarity.
+4. **Response shape:** `{"id":1,"result":{...}}` or `{"id":1,"error":{"code":...,"message":"..."}}`.
+5. **Notifications:** server→client messages with `method` + `params` and **no** `id` (often include `emittedAtMs`).
+6. **Server requests:** client must answer approvals (`execCommandApproval`, `applyPatchApproval`, `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`). Incoming requests are classified, mapped to `TurnStreamEvent::ApprovalRequested`, and answered via `CodexAppServerBackend::respond_approval` / `approve` / `deny`.
+7. **Handshake:** first client call must be `initialize` with `clientInfo` (`name`, `version`; optional `title`) and optional `capabilities`.
+8. **Offline-safe methods:** `initialize`, `thread/list`, and `thread/start` (use `ephemeral: true` when probing) do not require paid model calls.
+9. **Correlation:** request `id` may be `u64` or `string`; this client uses monotonic integer ids.
+
+## Wired methods
+
+- `initialize`
+- `thread/list`
+- `thread/start`
+- `thread/read`
+- `turn/start` (live; UI defaults to fixtures)
+- `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
+- `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
+
+The maintained Codex method inventory is in `fixtures/client-methods.txt`. Inventory and
+generic Codex forwarding are not evidence that a fixture or UI feature is implemented.
+
+## Turn streaming
+
+Server notifications are mapped to [`TurnStreamEvent`](src/types.rs):
+
+| Notification | Event |
+|--------------|--------|
+| `turn/started` | `TurnStarted` |
+| `turn/completed` | `TurnCompleted` |
+| `item/started` | `ItemStarted` |
+| `item/completed` | `ItemCompleted` |
+| `item/agentMessage/delta` | `AgentMessageDelta` |
+| `item/reasoning/textDelta` | `ReasoningTextDelta` |
+| `item/reasoning/summaryTextDelta` | `ReasoningSummaryDelta` |
+| `item/plan/delta` | `PlanDelta` |
+| `execCommandApproval` / `applyPatchApproval` / `item/*/requestApproval` | `ApprovalRequested` |
+
+Offline path: [`FixtureBackend`](src/fixture.rs) + `fixtures/sample-turn.jsonl` (embedded as `SAMPLE_TURN_JSONL`). The sample stream injects a mid-turn `item/commandExecution/requestApproval` server request.
+
+Approvals: [`approvals`](src/approvals.rs) — params/response types, `build_approval_result`, `parse_approval_request`.
+
+### Progressive live turns (mid-stream approvals)
+
+Collect-all-then-apply hangs when the server waits on an approval RPC. Use [`live_turn`](src/live_turn.rs):
+
+| API | Role |
+|-----|------|
+| `run_live_turn_progressive` | Deliver each `TurnStreamEvent` as it arrives; `on_approval` → `respond_approval` before further recv |
+| `run_live_turn_with_policy` | Non-interactive `AutoApprove` / `AutoReject` (tests) |
+| `run_live_turn_with_bridge` / `_blocking` | UI: block on `LiveApprovalBridge` until Approve/Reject |
+| `LiveApprovalBridge` | `wait` / `submit` handoff between turn loop and ApprovalBar |
+
+Real network turns remain gated by `MITSURO_ALLOW_LIVE_TURN=1` in the desktop shell.
+
+## Tests
+
+```bash
+# Unit tests always (mock stdio + fixture parse + progressive mid-stream approval)
+cargo test -p mitsuro-desktop-backend
+
+# Live turn/start only with explicit opt-in (may use paid models):
+MITSURO_ALLOW_LIVE_TURN=1 cargo test -p mitsuro-desktop-backend real_app_server_turn_start
+```
+
+## Contract sources
+
+- Mitsuro: `../mitsuro-client` plus the server route and type contracts.
+- Codex: typed protocol models in this crate plus the maintained method inventory.
