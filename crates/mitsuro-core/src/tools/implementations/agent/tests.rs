@@ -943,11 +943,14 @@ fn single_agent_completion_uses_authoritative_terminal_stage() {
 
     assert_eq!(
         agent_progress_for_terminal_stage(DelegatedRunStage::Degraded),
-        (AgentProgressStatus::Failed, Some("degraded".to_string()))
+        (AgentProgressStatus::Degraded, Some("degraded".to_string()))
     );
     assert_eq!(
         agent_progress_for_terminal_stage(DelegatedRunStage::Cancelled),
-        (AgentProgressStatus::Failed, Some("cancelled".to_string()))
+        (
+            AgentProgressStatus::Cancelled,
+            Some("cancelled".to_string())
+        )
     );
 }
 

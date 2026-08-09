@@ -22,6 +22,18 @@ export function isTerminalSessionAgentState(agentState: string | null | undefine
   return agentState === 'idle' || agentState === 'failed' || agentState === 'error';
 }
 
+export function hasActiveDelegationGroups(
+  groups: ApiSessionStateResponse['delegation_groups'] | null | undefined,
+) {
+  return Boolean(groups?.some((group) =>
+    group.state === 'created'
+    || group.state === 'queued'
+    || group.state === 'running'
+    || group.state === 'ready_for_parent'
+    || group.state === 'synthesizing'
+  ));
+}
+
 export function sessionAgentErrorMessage(
   serverState: ApiSessionStateResponse | null | undefined,
 ): string | null {
@@ -40,7 +52,9 @@ export function sessionAgentErrorMessage(
 
 export function shouldStopSessionStatePolling(
   agentState: string | null | undefined,
+  delegationGroups?: ApiSessionStateResponse['delegation_groups'] | null,
 ) {
+  if (hasActiveDelegationGroups(delegationGroups)) return false;
   return isTerminalSessionAgentState(agentState) || isActionableSessionAgentState(agentState);
 }
 
@@ -59,6 +73,15 @@ export interface ApplySessionSnapshotOptions {
   metadataOnly?: boolean;
 }
 
+export function mergeDelegationEventCursor(
+  current: number | null,
+  incoming: number | null | undefined,
+): number | null {
+  if (incoming === null || incoming === undefined) return current;
+  if (current === null) return incoming;
+  return Math.max(current, incoming);
+}
+
 export function applySessionSnapshot(
   sessionId: string,
   serverState: ApiSessionStateResponse | null,
@@ -75,6 +98,11 @@ export function applySessionSnapshot(
   const pendingInteractions = pendingInteractionsFromSnapshot(serverState);
   const metadataOnly = options.metadataOnly === true;
   set((state) => {
+    const delegationCursor = mergeDelegationEventCursor(
+      state.delegationEventCursor,
+      serverState.delegation_event_cursor,
+    );
+    const delegationChanged = delegationCursor !== state.delegationEventCursor;
     const base = {
       mode: nextMode,
       permissionMode: nextPermissionMode,
@@ -86,9 +114,10 @@ export function applySessionSnapshot(
           : false,
       thinkingContent: serverState.live_partial_assistant?.thinking || '',
       lastEventSequence: serverState.last_event_sequence ?? null,
+      delegationEventCursor: delegationCursor,
     };
 
-    if (metadataOnly) {
+    if (metadataOnly && !delegationChanged) {
       // SSE owns the live timeline. Avoid remapping message identities every poll.
       return base;
     }
@@ -109,6 +138,7 @@ export function applySessionSnapshot(
         serverState.delegated_tools,
         serverState.recent_delegated_runs,
         serverState.delegated_run_summaries,
+        serverState.delegation_groups,
       ),
     };
   });
@@ -117,7 +147,11 @@ export function applySessionSnapshot(
     .getState()
     .setVisible(Boolean(serverState.workflow) || nextMode === 'plan');
 
-  if (isActiveSessionAgentState(serverState.agent_state) && !isRefresh) {
+  if (
+    (isActiveSessionAgentState(serverState.agent_state)
+      || hasActiveDelegationGroups(serverState.delegation_groups))
+    && !isRefresh
+  ) {
     get().startStatePolling(sessionId);
   }
 }

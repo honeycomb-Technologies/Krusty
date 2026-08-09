@@ -497,6 +497,12 @@ impl DelegatedRunStore {
                    FROM delegated_runs
                   WHERE wake_parent = 1
                     AND stage IN ('created', 'running', 'synthesizing')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM delegation_tasks AS replay_tasks
+                         WHERE replay_tasks.delegation_group_id = delegated_runs.delegated_run_id
+                           AND replay_tasks.executor_envelope_version = 1
+                           AND replay_tasks.executor_envelope_json IS NOT NULL
+                    )
                     AND host_owner_id IS NOT NULL
                     AND host_lease_expires_at_ms IS NOT NULL
                     AND host_lease_expires_at_ms
@@ -542,7 +548,13 @@ impl DelegatedRunStore {
                     AND host_lease_expires_at_ms
                         <= (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
                     AND wake_parent = 1
-                    AND stage IN ('created', 'running', 'synthesizing')",
+                    AND stage IN ('created', 'running', 'synthesizing')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM delegation_tasks AS replay_tasks
+                         WHERE replay_tasks.delegation_group_id = delegated_runs.delegated_run_id
+                           AND replay_tasks.executor_envelope_version = 1
+                           AND replay_tasks.executor_envelope_json IS NOT NULL
+                    )",
                 params![
                     delegated_run_id,
                     host_owner_id,

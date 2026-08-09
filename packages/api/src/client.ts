@@ -620,11 +620,23 @@ export class MitsuroClient {
 
 	async getSessionState(
 		id: string,
-		options?: { includeDelegatedHistory?: boolean },
+		options?: {
+			includeDelegatedHistory?: boolean;
+			delegationAfterCursor?: number;
+		},
 	): Promise<SessionStateResponse> {
-		const query = options?.includeDelegatedHistory
-			? "?include_delegated_history=true"
-			: "";
+		const params = new URLSearchParams();
+		if (options?.includeDelegatedHistory) {
+			params.set("include_delegated_history", "true");
+		}
+		if (options?.delegationAfterCursor !== undefined) {
+			params.set(
+				"delegation_after_cursor",
+				String(Math.max(0, Math.trunc(options.delegationAfterCursor))),
+			);
+		}
+		const encoded = params.toString();
+		const query = encoded ? `?${encoded}` : "";
 		return this.request(`/sessions/${id}/state${query}`);
 	}
 
@@ -1559,6 +1571,9 @@ export class MitsuroClient {
 				break;
 			case "delegated_progress":
 				callbacks.onDelegatedProgress?.(event as DelegatedProgressEvent);
+				break;
+			case "delegation_event":
+				callbacks.onDelegationEvent?.(event.event);
 				break;
 			case "tool_approval_required":
 				callbacks.onToolApprovalRequired?.(

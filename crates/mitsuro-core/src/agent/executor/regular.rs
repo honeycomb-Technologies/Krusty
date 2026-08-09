@@ -259,35 +259,14 @@ fn delegated_kind_from_durable_run(
 
 fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage {
     match progress.status {
-        AgentProgressStatus::Running => {
-            let action = progress
-                .current_action
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if action.contains("starting") {
-                DelegatedRunStage::Created
-            } else if action.contains("synthesizing") {
-                DelegatedRunStage::Synthesizing
-            } else {
-                DelegatedRunStage::Running
-            }
-        }
+        AgentProgressStatus::Created
+        | AgentProgressStatus::Queued
+        | AgentProgressStatus::Leased => DelegatedRunStage::Created,
+        AgentProgressStatus::Running | AgentProgressStatus::Retrying => DelegatedRunStage::Running,
         AgentProgressStatus::Complete => DelegatedRunStage::Complete,
-        AgentProgressStatus::Failed => {
-            let action = progress
-                .current_action
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if action.contains("cancel") {
-                DelegatedRunStage::Cancelled
-            } else if action.contains("degraded") {
-                DelegatedRunStage::Degraded
-            } else {
-                DelegatedRunStage::Failed
-            }
-        }
+        AgentProgressStatus::Degraded => DelegatedRunStage::Degraded,
+        AgentProgressStatus::Failed => DelegatedRunStage::Failed,
+        AgentProgressStatus::Cancelled => DelegatedRunStage::Cancelled,
     }
 }
 
@@ -388,23 +367,32 @@ mod tests {
     }
 
     #[test]
-    fn terminal_progress_preserves_degraded_and_cancelled_stage_labels() {
-        let progress = |action: Option<&str>| AgentProgress {
-            status: AgentProgressStatus::Failed,
+    fn progress_stage_uses_canonical_status_not_action_prose() {
+        let progress = |status, action: Option<&str>| AgentProgress {
+            status,
             current_action: action.map(ToString::to_string),
             ..AgentProgress::default()
         };
 
         assert_eq!(
-            delegated_stage_from_progress(&progress(Some("degraded"))),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Degraded,
+                Some("ordinary summary")
+            )),
             DelegatedRunStage::Degraded
         );
         assert_eq!(
-            delegated_stage_from_progress(&progress(Some("cancelled"))),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Cancelled,
+                Some("ordinary summary")
+            )),
             DelegatedRunStage::Cancelled
         );
         assert_eq!(
-            delegated_stage_from_progress(&progress(None)),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Failed,
+                Some("cancelled")
+            )),
             DelegatedRunStage::Failed
         );
     }

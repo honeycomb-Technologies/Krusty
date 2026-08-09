@@ -679,6 +679,7 @@ impl ChatStore {
             }
             ChatStreamEvent::ContextCompacted { .. }
             | ChatStreamEvent::DelegatedProgress { .. }
+            | ChatStreamEvent::DelegationEvent { .. }
             | ChatStreamEvent::TurnComplete { .. }
             | ChatStreamEvent::TickInjected { .. }
             | ChatStreamEvent::AgentBackgroundStarted { .. }
@@ -1142,6 +1143,10 @@ mod tests {
             }),
             delegated_tools: Vec::new(),
             recent_delegated_runs: Vec::new(),
+            delegated_run_summaries: Vec::new(),
+            delegation_groups: Vec::new(),
+            delegation_events: Vec::new(),
+            delegation_event_cursor: None,
             last_event_sequence: Some(7),
         };
 

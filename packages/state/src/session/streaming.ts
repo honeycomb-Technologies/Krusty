@@ -424,6 +424,19 @@ export function createStreamCallbacks(
 			);
 		},
 
+		onDelegationEvent: (event) => {
+			noteFirstEvent();
+			// Event IDs are global across sessions, so a session's valid sequence
+			// is inherently sparse. Keep the last HTTP-applied cursor until the
+			// canonical snapshot maps this event into group/task UI state; advancing
+			// it here would make the next metadata poll skip that remap entirely.
+			// The normal active-run poll applies it promptly, while this flag also
+			// guarantees a full reconciliation when the stream finishes first.
+			if (event.event_id > (get().delegationEventCursor ?? 0)) {
+				streamLagged = true;
+			}
+		},
+
 		onPlanUpdate: (items: PlanItem[]) => {
 			flushPendingDeltas();
 			planStore.getState().setItems(items);

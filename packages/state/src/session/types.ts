@@ -1,5 +1,7 @@
 import type {
   DelegatedRunStage,
+  DelegationGroupState,
+  DelegationTaskState,
   DelegatedToolKind,
   ModelInfo,
   ModelKey,
@@ -50,6 +52,8 @@ export interface DelegatedAgentState {
   linesAdded: number;
   linesRemoved: number;
   completedPlanTask?: string;
+  attemptCount?: number;
+  taskState?: DelegationTaskState;
 }
 
 export interface DelegatedArtifactState {
@@ -58,6 +62,7 @@ export interface DelegatedArtifactState {
   capabilities?: Array<'read' | 'write' | 'execute'>;
   delegatedRunId?: string;
   stage?: DelegatedRunStage;
+  groupState?: DelegationGroupState;
   thinking?: string;
   message?: string;
   investigationSummary?: string;
@@ -179,6 +184,8 @@ export interface SessionStoreState {
   /** Last live usage snapshot, retaining uncached/cache/output buckets. */
   tokenUsage: UsageMetrics | null;
   lastEventSequence: number | null;
+  /** Cursor for the canonical append-only delegation event stream. */
+  delegationEventCursor: number | null;
   error: string | null;
   model: string | null;
   modelKey: ModelKey | null;

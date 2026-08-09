@@ -78,6 +78,14 @@ impl ConversationProjection {
         live::apply_delegated_progress(self, event);
     }
 
+    /// Rebuild delegated agent cards from the canonical session-level ledger.
+    pub fn restore_delegation_groups(
+        &mut self,
+        groups: &[mitsuro_core::storage::DelegationGroupRecord],
+    ) {
+        live::restore_delegation_groups(self, groups);
+    }
+
     /// Restore context-window chrome after session open from durable token_count.
     pub fn set_usage_from_token_count(&mut self, token_count: Option<usize>) {
         let Some(tokens) = token_count.filter(|n| *n > 0) else {

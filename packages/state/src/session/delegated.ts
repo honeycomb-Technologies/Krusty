@@ -1,10 +1,13 @@
 import type {
   DelegatedProgressEvent,
+  DelegatedProgressStatus,
   DelegatedRunResponse,
   DelegatedRunSummaryResponse,
   DelegatedRunStage,
   DelegatedToolKind,
   DelegatedToolStateResponse,
+  DelegationGroupStateResponse,
+  DelegationTaskState,
 } from '@mitsuro/api';
 
 import type {
@@ -24,6 +27,24 @@ type ParsedToolEnvelope = {
 
 function isDelegatedKind(value: unknown): value is DelegatedToolKind {
   return value === 'explore' || value === 'plan' || value === 'verify' || value === 'build';
+}
+
+function compatibilityAgentStatus(
+  status: DelegatedProgressStatus,
+): DelegatedAgentState['status'] {
+  switch (status) {
+    case 'complete':
+    case 'degraded':
+    case 'failed':
+    case 'cancelled':
+    case 'running':
+      return status;
+    case 'created':
+    case 'queued':
+    case 'leased':
+    case 'retrying':
+      return 'pending';
+  }
 }
 
 function delegatedOutcomeForStage(
@@ -74,6 +95,111 @@ function toolCallStatusForDelegatedStage(
     default:
       return current;
   }
+}
+
+function groupStage(
+  state: DelegationGroupStateResponse['state'] | undefined,
+): DelegatedRunStage | undefined {
+  switch (state) {
+    case 'created':
+    case 'queued':
+      return 'created';
+    case 'running':
+      return 'running';
+    case 'ready_for_parent':
+    case 'synthesizing':
+      return 'synthesizing';
+    case 'complete':
+    case 'degraded':
+    case 'failed':
+    case 'cancelled':
+      return state;
+    default:
+      return undefined;
+  }
+}
+
+function groupAgents(
+  group: DelegationGroupStateResponse,
+  liveAgents: DelegatedAgentState[] = [],
+): DelegatedAgentState[] {
+  const liveByTask = new Map(liveAgents.map((agent) => [agent.taskId, agent]));
+  return group.tasks.map((task) => {
+    const live = liveByTask.get(task.delegation_task_id);
+    const status: DelegatedAgentState['status'] = task.state === 'complete'
+      ? 'complete'
+      : task.state === 'degraded'
+      ? 'degraded'
+      : task.state === 'failed'
+      ? 'failed'
+      : task.state === 'cancelled'
+      ? 'cancelled'
+      : task.state === 'running'
+      ? 'running'
+      : 'pending';
+    const canonicalAction = task.state === 'queued'
+      ? 'Queued'
+      : task.state === 'leased'
+      ? 'Waiting for provider capacity'
+      : task.state === 'retrying'
+      ? 'Retrying'
+      : task.state === 'running'
+      ? live?.currentAction
+      : undefined;
+    return {
+      ...live,
+      taskId: task.delegation_task_id,
+      name: live?.name || task.task_key,
+      // Durable lifecycle and attempts are authoritative. Process-local live
+      // progress contributes presentation detail without being allowed to
+      // reopen or regress the task after reconnect.
+      status,
+      taskState: task.state,
+      attemptCount: task.attempt_count,
+      toolCount: live?.toolCount ?? 0,
+      tokens: live?.tokens ?? 0,
+      currentAction: canonicalAction,
+      linesAdded: live?.linesAdded ?? 0,
+      linesRemoved: live?.linesRemoved ?? 0,
+    };
+  });
+}
+
+function applyGroupProjection(
+  delegated: DelegatedArtifactState,
+  group: DelegationGroupStateResponse | undefined,
+): DelegatedArtifactState {
+  if (!group) return delegated;
+  const tasks = group.tasks;
+  return {
+    ...delegated,
+    delegatedRunId: group.delegation_group_id,
+    groupState: group.state,
+    agents: groupAgents(group, delegated.agents),
+    agentCount: tasks.length,
+    totalTargets: tasks.length,
+    activeTargets: tasks.filter(
+      (task) => task.state === 'leased' || task.state === 'running',
+    ).length,
+    pendingTargets: tasks.filter(
+      (task) => task.state === 'created'
+        || task.state === 'queued'
+        || task.state === 'retrying',
+    ).length,
+    completedTargets: tasks.filter(
+      (task) => task.state === 'complete'
+        || task.state === 'degraded'
+        || task.state === 'failed'
+        || task.state === 'cancelled',
+    ).length,
+    usableAgents: tasks.filter(
+      (task) => task.state === 'complete' || task.state === 'degraded',
+    ).length,
+    successfulAgents: tasks.filter((task) => task.state === 'complete').length,
+    degradedAgents: tasks.filter((task) => task.state === 'degraded').length,
+    cancelledAgents: tasks.filter((task) => task.state === 'cancelled').length,
+    failedAgents: tasks.filter((task) => task.state === 'failed').length,
+  };
 }
 
 function delegatedAgentStatus(record: Record<string, unknown>): DelegatedAgentState['status'] {
@@ -794,11 +920,15 @@ export function applyDelegatedProgress(
   delegated.stage = event.stage;
   delegated.kind = delegatedKind;
   const index = delegated.agents.findIndex((agent) => agent.taskId === event.task_id);
+  const previous = index >= 0 ? delegated.agents[index] : undefined;
   const agent: DelegatedAgentState = {
+    ...previous,
     taskId: event.task_id,
     name: event.agent_name,
-    status: event.status as DelegatedAgentState['status'],
-    outcomeReason: undefined,
+    status: compatibilityAgentStatus(event.status),
+    taskState: event.status as DelegationTaskState,
+    attemptCount: previous?.attemptCount,
+    outcomeReason: previous?.outcomeReason,
     toolCount: event.tool_count,
     tokens: event.tokens,
     currentAction: event.current_action || undefined,
@@ -880,11 +1010,13 @@ export function applyDelegatedSessionState(
   delegatedTools: DelegatedToolStateResponse[] | null | undefined,
   recentRuns?: DelegatedRunResponse[] | null | undefined,
   runSummaries?: DelegatedRunSummaryResponse[] | null | undefined,
+  delegationGroups?: DelegationGroupStateResponse[] | null | undefined,
 ): ChatMessage[] {
   if (
     (!delegatedTools || delegatedTools.length === 0)
     && (!recentRuns || recentRuns.length === 0)
     && (!runSummaries || runSummaries.length === 0)
+    && (!delegationGroups || delegationGroups.length === 0)
   ) {
     return messages;
   }
@@ -922,12 +1054,22 @@ export function applyDelegatedSessionState(
       summaryByToolCall.set(summary.parent_tool_call_id, summary);
     }
   }
+  const groupByToolCall = new Map<string, DelegationGroupStateResponse>();
+  for (const group of delegationGroups || []) {
+    const toolCallId = group.parent_tool_call_id;
+    if (!toolCallId) continue;
+    const existing = groupByToolCall.get(toolCallId);
+    if (!existing || group.updated_at > existing.updated_at) {
+      groupByToolCall.set(toolCallId, group);
+    }
+  }
 
   return messages.map((message) => ({
     ...message,
     toolCalls: message.toolCalls?.map((toolCall) => {
       const unverifiedSnapshot = delegatedByToolCall.get(toolCall.id);
       const recentRun = recentRunByToolCall.get(toolCall.id);
+      const group = groupByToolCall.get(toolCall.id);
       // New servers expose a compact, newest-per-tool durable index. It is the
       // lifecycle authority even when the full artifact has aged out of the
       // small recent window. Older servers fall back to the recent full row.
@@ -953,7 +1095,7 @@ export function applyDelegatedSessionState(
       const sameCurrentRun = !currentRunId
         || !durableRun
         || currentRunId === durableRun.delegated_run_id;
-      const durableStage = durableRun?.stage;
+      const durableStage = groupStage(group?.state) ?? durableRun?.stage;
       const currentTerminalStage = sameCurrentRun
         && isTerminalDelegatedStage(toolCall.delegated?.stage)
         ? toolCall.delegated?.stage
@@ -991,6 +1133,7 @@ export function applyDelegatedSessionState(
         if (durableRun?.capabilities && durableRun.capabilities.length > 0) {
           delegated.capabilities = durableRun.capabilities;
         }
+        delegated = applyGroupProjection(delegated, group);
         return {
           ...toolCall,
           delegatedRunId:
@@ -1016,7 +1159,7 @@ export function applyDelegatedSessionState(
           || durableRun?.delegated_run_id
           || toolCall.delegatedRunId,
         stage: canonicalStage,
-        agents: snapshot.agents.map((agent) => ({
+        agents: group ? groupAgents(group) : snapshot.agents.map((agent) => ({
           taskId: agent.task_id,
           name: agent.agent_name,
           status: agent.status as DelegatedAgentState['status'],
@@ -1034,7 +1177,7 @@ export function applyDelegatedSessionState(
         errors: toolCall.delegated?.errors || [],
         agentCount: Math.max(
           toolCall.delegated?.agentCount || 0,
-          snapshot.agents.length,
+          group?.tasks.length ?? snapshot.agents.length,
         ),
         usableAgents: snapshot.agents.filter(
           (agent) => agent.status === 'complete' || agent.status === 'degraded',
@@ -1074,6 +1217,7 @@ export function applyDelegatedSessionState(
         canonicalDelegated.stage = canonicalStage;
         canonicalDelegated.outcome = delegatedOutcomeForStage(canonicalStage);
       }
+      canonicalDelegated = applyGroupProjection(canonicalDelegated, group);
 
       return {
         ...toolCall,

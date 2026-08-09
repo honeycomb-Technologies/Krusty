@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { MitsuroClient, type ModelKey, type StreamCallbacks } from "../src";
+import {
+	MitsuroClient,
+	type DelegationEventResponse,
+	type ModelKey,
+	type StreamCallbacks,
+} from "../src";
 
 function streamResponse(...chunks: string[]): Response {
 	const encoder = new TextEncoder();
@@ -164,6 +169,55 @@ describe("MitsuroClient streaming lifecycle", () => {
 		);
 
 		expect(steering).toEqual([["steer-1", "change direction"]]);
+	});
+
+	test("delivers typed durable delegation events with their replay cursor", async () => {
+		const events: unknown[] = [];
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"delegation_event","event":{"event_id":42,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":"task-1","event_type":"task_running","payload":{"state":"running"},"created_at":"2026-08-08T12:00:00Z"}}\n\n'
+					+ 'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+			),
+		);
+
+		await client.streamChat(
+			{ message: "hello" },
+			createCallbacks({
+				onDelegationEvent: (event) => events.push(event),
+			}),
+		);
+
+		expect(events).toEqual([{
+			event_id: 42,
+			parent_session_id: "session-1",
+			delegation_group_id: "group-1",
+			delegation_task_id: "task-1",
+			event_type: "task_running",
+			payload: { state: "running" },
+			created_at: "2026-08-08T12:00:00Z",
+		}]);
+	});
+
+	test("preserves unknown durable delegation event kinds", async () => {
+		const events: DelegationEventResponse[] = [];
+		const futureEventType: DelegationEventResponse["event_type"] =
+			"future_scheduler_event";
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"delegation_event","event":{"event_id":43,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":null,"event_type":"future_scheduler_event","payload":{"domain":"workspace"},"created_at":"2026-08-08T12:00:01Z"}}\n\n'
+					+ 'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+			),
+		);
+
+		await client.streamChat(
+			{ message: "hello" },
+			createCallbacks({
+				onDelegationEvent: (event) => events.push(event),
+			}),
+		);
+
+		expect(events[0]?.event_type).toBe(futureEventType);
+		expect(events[0]?.payload).toEqual({ domain: "workspace" });
 	});
 
 	test("does not add a premature-close error after an explicit server error", async () => {

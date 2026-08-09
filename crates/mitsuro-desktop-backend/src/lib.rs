@@ -116,4 +116,10 @@ pub use protocol::{
     ThreadUnarchiveParams, ThreadUnarchiveResponse, TranscriptMessage, TranscriptRole,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
-pub use types::{AgentError, ConnectionStatus, ItemKind, Result, TurnStreamEvent};
+pub use types::{
+    AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
+    DelegationGroupProjection, DelegationGroupStatus, DelegationKind,
+    DelegationParentContinuationStatus, DelegationRole, DelegationRunStage,
+    DelegationTaskProjection, DelegationTaskStatus, DurableDelegationEvent,
+    DurableDelegationEventKind, ItemKind, Result, SessionDelegationProjection, TurnStreamEvent,
+};

@@ -27,8 +27,8 @@ use mitsuro_core::{
     extensions::ExtensionCallContext,
     process::ProcessRegistry,
     storage::{
-        Database, PendingInteractionSnapshot, ProjectSettings, SessionManager,
-        SessionRecoveryState, SessionType, WorkMode,
+        Database, DelegationGroupRecord, DelegationStore, PendingInteractionSnapshot,
+        ProjectSettings, SessionManager, SessionRecoveryState, SessionType, WorkMode,
     },
     tools::{
         load_from_clipboard_rgba, load_from_path, load_from_url, register_agent_tool,
@@ -138,6 +138,8 @@ pub struct LoadedSession {
     pub recovery: Option<SessionRecoveryState>,
     /// Last persisted agent context size (sessions.token_count).
     pub token_count: Option<usize>,
+    /// Canonical delegated work projected independently from transcript replay.
+    pub delegation_groups: Vec<DelegationGroupRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1068,6 +1070,9 @@ impl RuntimeServices {
         }
         let messages = self.load_conversation(session_id)?;
         let recovery = manager.load_recovery_state(session_id)?;
+        let delegation_groups =
+            DelegationStore::new(Database::new(&paths::config_dir().join("mitsuro.db"))?)
+                .list_groups_for_session(session_id, 100)?;
         self.current_session_id = Some(session.id.clone());
         self.work_mode = session.work_mode;
         self.permission_mode = session.permission_mode;
@@ -1089,6 +1094,7 @@ impl RuntimeServices {
             messages,
             recovery,
             token_count: session.token_count,
+            delegation_groups,
         })
     }
 

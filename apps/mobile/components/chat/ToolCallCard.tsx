@@ -321,10 +321,20 @@ function renderBody({
                 style={[styles.agentLine, { color: colors.mutedForeground }]}
                 numberOfLines={2}
               >
-                {agent.status} · {agent.name}
+                {agent.taskState ?? agent.status} · {agent.name}
+                {agent.attemptCount && agent.attemptCount > 1
+                  ? ` · attempt ${agent.attemptCount}`
+                  : ""}
                 {agent.currentAction ? ` — ${agent.currentAction}` : ""}
               </Text>
             ))}
+            {delegated.agents.length > 8 ? (
+              <Text
+                style={[styles.agentLine, { color: colors.mutedForeground }]}
+              >
+                + {delegated.agents.length - 8} more tasks
+              </Text>
+            ) : null}
           </View>
         ) : null}
       </View>

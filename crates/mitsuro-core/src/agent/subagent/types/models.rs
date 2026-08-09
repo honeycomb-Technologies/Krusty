@@ -41,13 +41,41 @@ pub struct AgentProgress {
 /// Status of a sub-agent.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AgentProgressStatus {
+    /// Logical task exists but has not entered scheduler admission yet.
+    Created,
+    /// Logical task is waiting for local/group admission.
+    Queued,
+    /// Durable task lease is held while provider capacity is pending.
+    Leased,
     /// Agent is running.
     #[default]
     Running,
+    /// A prior attempt ended and the logical task is eligible to run again.
+    Retrying,
     /// Agent completed successfully.
     Complete,
+    /// Agent completed with usable partial evidence or output.
+    Degraded,
     /// Agent failed.
     Failed,
+    /// Agent was cancelled before completing.
+    Cancelled,
+}
+
+impl From<crate::storage::DelegationTaskState> for AgentProgressStatus {
+    fn from(state: crate::storage::DelegationTaskState) -> Self {
+        match state {
+            crate::storage::DelegationTaskState::Created => Self::Created,
+            crate::storage::DelegationTaskState::Queued => Self::Queued,
+            crate::storage::DelegationTaskState::Leased => Self::Leased,
+            crate::storage::DelegationTaskState::Running => Self::Running,
+            crate::storage::DelegationTaskState::Retrying => Self::Retrying,
+            crate::storage::DelegationTaskState::Complete => Self::Complete,
+            crate::storage::DelegationTaskState::Degraded => Self::Degraded,
+            crate::storage::DelegationTaskState::Failed => Self::Failed,
+            crate::storage::DelegationTaskState::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 /// Configuration for a sub-agent task.
@@ -68,6 +96,10 @@ pub struct SubAgentTask {
     pub sandbox_root: Option<PathBuf>,
     /// Stable delegated runtime unit identifier shared by all tasks in one parent invocation.
     pub delegated_run_id: Option<String>,
+    /// Durable logical group/task identity. These are separate from
+    /// delegated_run_id because a logical task may have multiple attempts.
+    pub delegation_group_id: Option<String>,
+    pub delegation_task_id: Option<String>,
     /// Plan task ID this agent completes (for auto-marking).
     pub plan_task_id: Option<String>,
     /// Whether thinking/reasoning is enabled for this agent.
@@ -102,6 +134,8 @@ impl SubAgentTask {
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             sandbox_root: None,
             delegated_run_id: None,
+            delegation_group_id: None,
+            delegation_task_id: None,
             plan_task_id: None,
             thinking_enabled: false,
             delegation_policy: None,
@@ -154,6 +188,16 @@ impl SubAgentTask {
 
     pub fn with_delegated_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.delegated_run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn with_delegation_task(
+        mut self,
+        group_id: impl Into<String>,
+        task_id: impl Into<String>,
+    ) -> Self {
+        self.delegation_group_id = Some(group_id.into());
+        self.delegation_task_id = Some(task_id.into());
         self
     }
 

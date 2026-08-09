@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use crate::{
     AgentError, BackendKind, BackendSessionId, DesktopBackend, FsReadDirectoryParams,
     FsReadFileParams, FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge,
-    LiveTurnOutcome, ModelListParams, PluginListParams, Result, SkillsListParams,
-    ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
+    LiveTurnOutcome, ModelListParams, PluginListParams, Result, SessionDelegationProjection,
+    SkillsListParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams,
+    ThreadStartParams, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,9 @@ pub struct ConversationMessage {
 pub struct SessionConversation {
     pub session: SessionSummary,
     pub messages: Vec<ConversationMessage>,
+    /// Canonical durable delegation state loaded alongside the transcript.
+    /// Empty for backends that do not expose the Mitsuro coordinator contract.
+    pub delegation: SessionDelegationProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +358,17 @@ impl ProductBackend for DesktopBackend {
                 item_id: message.item_id,
             })
             .collect();
-        Ok(SessionConversation { session, messages })
+        let delegation = match self {
+            DesktopBackend::Mitsuro(backend) => {
+                backend.session_delegation_projection(&id.raw).await?
+            }
+            _ => SessionDelegationProjection::default(),
+        };
+        Ok(SessionConversation {
+            session,
+            messages,
+            delegation,
+        })
     }
 
     async fn rename_session(&self, id: &BackendSessionId, title: String) -> Result<()> {

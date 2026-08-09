@@ -4,7 +4,9 @@ use axum::{
 };
 use serde::Deserialize;
 
-use mitsuro_core::storage::{Database, DelegatedRunStore, RuntimeTraceEvent, RuntimeTraceSummary};
+use mitsuro_core::storage::{
+    Database, DelegatedRunStore, DelegationStore, RuntimeTraceEvent, RuntimeTraceSummary,
+};
 use mitsuro_core::workflow::WorkflowManager;
 
 use super::{
@@ -17,6 +19,8 @@ use crate::AppState;
 
 const RECENT_DELEGATED_ARTIFACT_LIMIT: usize = 20;
 const DELEGATED_HYDRATION_SUMMARY_LIMIT: usize = 10_000;
+const DELEGATION_GROUP_SNAPSHOT_LIMIT: usize = 50;
+const DELEGATION_EVENT_REPLAY_LIMIT: usize = 200;
 
 fn core_delegated_stage_is_terminal(stage: mitsuro_core::agent::DelegatedRunStage) -> bool {
     matches!(
@@ -43,6 +47,9 @@ pub(super) struct GetSessionStateQuery {
     /// hydration. Polling callers omit it to keep the hot state endpoint small.
     #[serde(default)]
     pub include_delegated_history: bool,
+    /// Replay canonical delegation events strictly after this cursor. Omit for
+    /// a bounded latest window alongside the current group/task snapshot.
+    pub delegation_after_cursor: Option<i64>,
 }
 
 /// Get session agent state
@@ -141,6 +148,39 @@ pub(super) async fn get_session_state(
     }
     let recent_delegated_runs = recent_records.into_iter().map(Into::into).collect();
     let delegated_run_summaries = run_summaries.into_iter().map(Into::into).collect();
+    let delegation_store = DelegationStore::new(Database::new(&state.db_path)?);
+    // Capture the replay watermark before reading the materialized group/task
+    // projection. A concurrent transition may therefore make the projection
+    // newer than this cursor (which is safe and will replay idempotently), but
+    // it can never make a stale projection advance past the event that repairs
+    // it. Reading the cursor after the projection could permanently skip that
+    // event for clients that already buffered it over SSE.
+    let snapshot_cursor = delegation_store
+        .list_latest_session_events(&id, 1)?
+        .last()
+        .map(|event| event.event_id)
+        .unwrap_or(0);
+    let delegation_groups = delegation_store
+        .list_groups_for_session(&id, DELEGATION_GROUP_SNAPSHOT_LIMIT)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let mut delegation_events = match query.delegation_after_cursor {
+        Some(cursor) => delegation_store.list_session_events_after(
+            &id,
+            cursor,
+            DELEGATION_EVENT_REPLAY_LIMIT,
+        )?,
+        None => delegation_store.list_latest_session_events(&id, DELEGATION_EVENT_REPLAY_LIMIT)?,
+    };
+    // Do not attach events committed after the snapshot-start watermark. They
+    // belong to the next replay page; including one here would recreate the
+    // stale-snapshot/advanced-cursor loss mode this ordering prevents.
+    delegation_events.retain(|event| event.event_id <= snapshot_cursor);
+    let delegation_event_cursor = delegation_events
+        .last()
+        .map(|event| event.event_id)
+        .or(query.delegation_after_cursor);
 
     Ok(Json(SessionStateResponse {
         id,
@@ -156,6 +196,9 @@ pub(super) async fn get_session_state(
         delegated_tools,
         recent_delegated_runs,
         delegated_run_summaries,
+        delegation_groups,
+        delegation_events,
+        delegation_event_cursor,
         last_event_sequence,
     }))
 }

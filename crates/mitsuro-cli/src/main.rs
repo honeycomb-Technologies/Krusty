@@ -6,6 +6,7 @@
 //! - `mitsuro serve` — unified server + embedded web app + Tailscale
 //! - Clean architecture from day one
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
@@ -182,6 +183,157 @@ struct HiveSessionStatusResponse {
     tasks: Vec<HiveTaskResponse>,
     agent_state: String,
     runtime: Option<HiveRuntimeStateResponse>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DelegationSessionStateResponse {
+    #[serde(default)]
+    delegation_groups: Vec<CliDelegationGroup>,
+    #[serde(default)]
+    delegation_event_cursor: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDelegationGroup {
+    delegation_group_id: String,
+    state: String,
+    #[serde(default)]
+    tasks: Vec<CliDelegationTask>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDelegationTask {
+    delegation_task_id: String,
+    task_key: String,
+    state: String,
+    attempt_count: usize,
+}
+
+struct CliDelegationProjection {
+    session_id: String,
+    cursor: i64,
+    group_tasks: HashMap<String, Vec<(String, String)>>,
+}
+
+impl CliDelegationProjection {
+    fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            cursor: 0,
+            group_tasks: HashMap::new(),
+        }
+    }
+
+    fn hydrate(&mut self, state: &DelegationSessionStateResponse) {
+        for group in &state.delegation_groups {
+            self.group_tasks.insert(
+                group.delegation_group_id.clone(),
+                group
+                    .tasks
+                    .iter()
+                    .map(|task| (task.delegation_task_id.clone(), task.task_key.clone()))
+                    .collect(),
+            );
+            println!(
+                "[delegation:group] {} {}",
+                group.delegation_group_id, group.state
+            );
+            for task in &group.tasks {
+                println!(
+                    "[delegation:task] {} {} {} attempt={}",
+                    task.delegation_task_id, task.task_key, task.state, task.attempt_count
+                );
+            }
+        }
+        self.cursor = self.cursor.max(state.delegation_event_cursor.unwrap_or(0));
+    }
+
+    fn print_event(&mut self, envelope: &serde_json::Value) {
+        let event = envelope.get("event").unwrap_or(envelope);
+        if event
+            .get("parent_session_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(self.session_id.as_str())
+        {
+            return;
+        }
+        let event_id = event
+            .get("event_id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if event_id > 0 && event_id <= self.cursor {
+            return;
+        }
+        let kind = event
+            .get("event_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let group_id = event
+            .get("delegation_group_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let task_id = event
+            .get("delegation_task_id")
+            .and_then(serde_json::Value::as_str);
+        let payload = event
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match kind {
+            "group_created" => {
+                println!("[delegation:group] {group_id} created");
+                let tasks = payload
+                    .get("tasks")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|tasks| {
+                        tasks
+                            .iter()
+                            .filter_map(|task| {
+                                Some((
+                                    task.get("delegation_task_id")?.as_str()?.to_owned(),
+                                    task.get("task_key")?.as_str()?.to_owned(),
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for (task_id, task_key) in &tasks {
+                    println!("[delegation:task] {task_id} {task_key} created attempt=0");
+                }
+                self.group_tasks.insert(group_id.to_owned(), tasks);
+            }
+            "group_queued" => {
+                println!("[delegation:group] {group_id} queued");
+                if let Some(tasks) = self.group_tasks.get(group_id) {
+                    for (task_id, task_key) in tasks {
+                        println!("[delegation:task] {task_id} {task_key} queued");
+                    }
+                }
+            }
+            "group_state_changed" => println!(
+                "[delegation:group] {} {}",
+                group_id,
+                payload
+                    .get("to")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            "task_claimed" => println!("[delegation:task] {} leased", task_id.unwrap_or("unknown")),
+            "task_running" => {
+                println!("[delegation:task] {} running", task_id.unwrap_or("unknown"))
+            }
+            "task_state_changed" => println!(
+                "[delegation:task] {} {}",
+                task_id.unwrap_or("unknown"),
+                payload
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            _ => println!("[delegation:event] {kind} {payload}"),
+        }
+        self.cursor = self.cursor.max(event_id);
+    }
 }
 
 fn hive_server_url() -> String {
@@ -404,6 +556,18 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
     let response = ensure_success(response).await?;
 
     println!("Attaching to Hive session {}", session_id);
+    let mut delegation = CliDelegationProjection::new(session_id);
+    match request_json::<DelegationSessionStateResponse>(
+        client.get(format!(
+            "{base}/api/sessions/{session_id}/state?include_delegated_history=true"
+        )),
+        "Failed to hydrate delegation state",
+    )
+    .await
+    {
+        Ok(state) => delegation.hydrate(&state),
+        Err(error) => eprintln!("Delegation reconnect hydration unavailable: {error}"),
+    }
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
@@ -422,7 +586,7 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
 
                 let event: serde_json::Value = serde_json::from_str(data)
                     .with_context(|| format!("Failed to parse Hive event: {data}"))?;
-                if print_hive_event(&event)? {
+                if print_hive_event(&event, &mut delegation)? {
                     return Ok(());
                 }
             }
@@ -432,7 +596,10 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
     Ok(())
 }
 
-fn print_hive_event(event: &serde_json::Value) -> Result<bool> {
+fn print_hive_event(
+    event: &serde_json::Value,
+    delegation: &mut CliDelegationProjection,
+) -> Result<bool> {
     let Some(event_type) = event.get("type").and_then(|value| value.as_str()) else {
         println!("[event] {}", event);
         return Ok(false);
@@ -551,6 +718,7 @@ fn print_hive_event(event: &serde_json::Value) -> Result<bool> {
                 );
             }
         }
+        "delegation_event" => delegation.print_event(event),
         "plan_update" => {
             let count = event
                 .get("items")
@@ -752,5 +920,42 @@ mod cli_contract_tests {
             version.to_string().trim(),
             format!("mitsuro {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn delegation_projection_filters_session_and_replay_cursor() {
+        let mut projection = CliDelegationProjection::new("session-1");
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 8,
+                "parent_session_id": "other-session",
+                "delegation_group_id": "group-1",
+                "event_type": "future_event",
+                "payload": {"state": "future"}
+            }
+        }));
+        assert_eq!(projection.cursor, 0);
+
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 8,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "event_type": "future_event",
+                "payload": {"state": "future"}
+            }
+        }));
+        assert_eq!(projection.cursor, 8);
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 7,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "event_type": "task_running",
+                "delegation_task_id": "task-1",
+                "payload": {}
+            }
+        }));
+        assert_eq!(projection.cursor, 8);
     }
 }

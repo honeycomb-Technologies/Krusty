@@ -103,7 +103,79 @@ export interface SessionStateResponse {
 	delegated_tools?: DelegatedToolStateResponse[];
 	recent_delegated_runs?: DelegatedRunResponse[];
 	delegated_run_summaries?: DelegatedRunSummaryResponse[];
+	delegation_groups?: DelegationGroupStateResponse[];
+	delegation_events?: DelegationEventResponse[];
+	delegation_event_cursor?: number | null;
 	last_event_sequence?: number | null;
+}
+
+export type DelegationGroupState =
+	| "created"
+	| "queued"
+	| "running"
+	| "ready_for_parent"
+	| "synthesizing"
+	| "complete"
+	| "degraded"
+	| "failed"
+	| "cancelled";
+
+export type DelegationTaskState =
+	| "created"
+	| "queued"
+	| "leased"
+	| "running"
+	| "retrying"
+	| "complete"
+	| "degraded"
+	| "failed"
+	| "cancelled";
+
+export interface DelegationTaskStateResponse {
+	delegation_task_id: string;
+	task_key: string;
+	role: "explore" | "build" | "planner" | "verifier";
+	state: DelegationTaskState;
+	attempt_count: number;
+	updated_at: string;
+}
+
+export interface DelegationGroupStateResponse {
+	delegation_group_id: string;
+	parent_tool_call_id?: string | null;
+	state: DelegationGroupState;
+	execution_mode: "foreground" | "detached";
+	parent_continuation_state: "not_requested" | "pending" | "queued" | "promoted";
+	tasks: DelegationTaskStateResponse[];
+	updated_at: string;
+}
+
+export type KnownDelegationEventType =
+	| "group_created"
+	| "group_queued"
+	| "group_state_changed"
+	| "task_claimed"
+	| "task_running"
+	| "task_state_changed"
+	| "parent_continuation_queued"
+	| "parent_continuation_promoted";
+
+/**
+ * Event kinds are forward-compatible protocol strings. Known values retain
+ * literal completion while newer values remain visible to older clients.
+ */
+export type DelegationEventType =
+	| KnownDelegationEventType
+	| (string & Record<never, never>);
+
+export interface DelegationEventResponse {
+	event_id: number;
+	parent_session_id: string;
+	delegation_group_id: string;
+	delegation_task_id?: string | null;
+	event_type: DelegationEventType;
+	payload: Record<string, unknown>;
+	created_at: string;
 }
 
 export type GoalStatus =
@@ -528,7 +600,11 @@ export interface ImageContent {
 
 export type DelegatedToolKind = "explore" | "plan" | "verify" | "build";
 export type DelegatedProgressStatus =
+	| "created"
+	| "queued"
+	| "leased"
 	| "running"
+	| "retrying"
 	| "complete"
 	| "degraded"
 	| "cancelled"
@@ -582,6 +658,10 @@ export interface DelegatedAgentState {
 	linesAdded: number;
 	linesRemoved: number;
 	completedPlanTask?: string;
+	/** Exact durable task state; `status` remains the compatibility projection. */
+	taskState?: DelegationTaskState;
+	/** Number of execution attempts already started for this logical task. */
+	attemptCount?: number;
 }
 
 export interface DelegatedArtifactState {
@@ -590,6 +670,8 @@ export interface DelegatedArtifactState {
 	capabilities?: Array<"read" | "write" | "execute">;
 	delegatedRunId?: string;
 	stage?: DelegatedRunStage;
+	/** Exact durable group state; `stage` remains the compatibility projection. */
+	groupState?: DelegationGroupState;
 	thinking?: string;
 	message?: string;
 	investigationSummary?: string;
@@ -1307,6 +1389,7 @@ export type StreamEvent =
 	| { type: "tool_executing"; id: string; name: string }
 	| { type: "tool_output_delta"; id: string; delta: string }
 	| ({ type: "delegated_progress" } & DelegatedProgressEvent)
+	| { type: "delegation_event"; event: DelegationEventResponse }
 	| { type: "tool_result"; id: string; output: string; is_error: boolean }
 	| { type: "server_tool_start"; id: string; name: string }
 	| { type: "server_tool_complete"; id: string; name: string }
@@ -1396,6 +1479,7 @@ export interface StreamCallbacks {
 	onToolResult: (id: string, output: string, isError: boolean) => void;
 	onToolOutputDelta: (id: string, delta: string) => void;
 	onDelegatedProgress?: (event: DelegatedProgressEvent) => void;
+	onDelegationEvent?: (event: DelegationEventResponse) => void;
 	onToolApprovalRequired?: (
 		id: string,
 		name: string,

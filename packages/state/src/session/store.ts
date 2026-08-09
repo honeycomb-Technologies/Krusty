@@ -45,6 +45,7 @@ import {
 import { applyDelegatedSessionState } from './delegated';
 import {
   applySessionSnapshot,
+  hasActiveDelegationGroups,
   isActionableSessionAgentState,
   isActiveSessionAgentState,
   isTerminalSessionAgentState,
@@ -391,6 +392,7 @@ export function createSessionStore(
     tokenCount: 0,
     tokenUsage: null,
     lastEventSequence: null,
+    delegationEventCursor: null,
     error: null,
     model: null,
     modelKey: null,
@@ -429,7 +431,10 @@ export function createSessionStore(
         // Recovery runs only when SSE is unavailable; always remap transcript.
         applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
-        if (isActiveSessionAgentState(serverState.agent_state)) {
+        if (
+          isActiveSessionAgentState(serverState.agent_state)
+          || hasActiveDelegationGroups(serverState.delegation_groups)
+        ) {
           set({ isLoading: false, error: null });
           get().startStatePolling(sessionId);
           return true;
@@ -1019,6 +1024,8 @@ export function createSessionStore(
               thinkingContent:
                 cachedServerState?.live_partial_assistant?.thinking || "",
               lastEventSequence: cachedServerState?.last_event_sequence ?? null,
+              delegationEventCursor:
+                cachedServerState?.delegation_event_cursor ?? null,
               error: null,
             });
             try {
@@ -1040,7 +1047,10 @@ export function createSessionStore(
                 optimistic.targetBranch,
               );
             startPresenceTransport(optimistic.sessionId);
-            if (cachedIsStreaming) {
+            if (
+              cachedIsStreaming
+              || hasActiveDelegationGroups(cachedServerState?.delegation_groups)
+            ) {
               get().startStatePolling(optimistic.sessionId);
             }
           } else if (!get().messages.length) {
@@ -1085,7 +1095,10 @@ export function createSessionStore(
                     metadataOnly: isLocalStreamAttached(),
                   },
                 );
-                if (isActiveSessionAgentState(softState.agent_state)) {
+                if (
+                  isActiveSessionAgentState(softState.agent_state)
+                  || hasActiveDelegationGroups(softState.delegation_groups)
+                ) {
                   get().startStatePolling(sessionId);
                 }
                 if (isLocalStreamAttached()) {
@@ -1188,6 +1201,7 @@ export function createSessionStore(
                   serverState?.delegated_tools,
                   serverState?.recent_delegated_runs,
                   serverState?.delegated_run_summaries,
+                  serverState?.delegation_groups,
                 );
 
                 set((s) => {
@@ -1247,6 +1261,8 @@ export function createSessionStore(
                     thinkingContent:
                       serverState?.live_partial_assistant?.thinking || "",
                     lastEventSequence: serverState?.last_event_sequence ?? null,
+                    delegationEventCursor:
+                      serverState?.delegation_event_cursor ?? null,
                   };
                 });
                 return nextSnapshot;
@@ -1282,7 +1298,10 @@ export function createSessionStore(
 
             if (
               serverState
-              && isActiveSessionAgentState(serverState.agent_state)
+              && (
+                isActiveSessionAgentState(serverState.agent_state)
+                || hasActiveDelegationGroups(serverState.delegation_groups)
+              )
               && get().sessionId === sessionId
             ) {
               get().startStatePolling(sessionId);
@@ -1787,7 +1806,10 @@ export function createSessionStore(
       const poll = async () => {
         if (generation !== statePollingGeneration) return;
         try {
-          const serverState = await client.getSessionState(sessionId);
+          const delegationEventCursor = get().delegationEventCursor;
+          const serverState = await client.getSessionState(sessionId, {
+            delegationAfterCursor: delegationEventCursor ?? undefined,
+          });
           if (generation !== statePollingGeneration) return;
           consecutiveFailures = 0;
           rememberServerState(sessionId, serverState);
@@ -1801,7 +1823,10 @@ export function createSessionStore(
             set({ error: null });
           }
 
-          if (shouldStopSessionStatePolling(serverState.agent_state)) {
+          if (shouldStopSessionStatePolling(
+            serverState.agent_state,
+            serverState.delegation_groups,
+          )) {
             const terminalError = sessionAgentErrorMessage(serverState);
             get().stopStatePolling();
             set({

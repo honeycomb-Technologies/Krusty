@@ -55,7 +55,13 @@ use crate::protocol::{
     ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse,
 };
-use crate::types::{AgentError, ConnectionStatus, ItemKind, Result, TurnStreamEvent};
+use crate::types::{
+    AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
+    DelegationGroupProjection, DelegationGroupStatus, DelegationKind,
+    DelegationParentContinuationStatus, DelegationRole, DelegationRunStage,
+    DelegationTaskProjection, DelegationTaskStatus, DurableDelegationEvent,
+    DurableDelegationEventKind, ItemKind, Result, SessionDelegationProjection, TurnStreamEvent,
+};
 
 /// Adapter for a local or authenticated remote Mitsuro server.
 #[derive(Debug)]
@@ -100,6 +106,36 @@ impl MitsuroServerBackend {
         if let Ok(mut current) = self.status.write() {
             *current = status;
         }
+    }
+
+    /// Hydrate the canonical delegation projection used by desktop surfaces on
+    /// initial session load and reconnect.
+    pub async fn session_delegation_projection(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionDelegationProjection> {
+        self.session_delegation_projection_after(session_id, None)
+            .await
+    }
+
+    /// Hydrate a reconnect delta after a durable event cursor. Passing `None`
+    /// requests the server's initial bounded projection.
+    pub async fn session_delegation_projection_after(
+        &self,
+        session_id: &str,
+        event_cursor: Option<i64>,
+    ) -> Result<SessionDelegationProjection> {
+        self.client
+            .get_session_state_with_options(
+                session_id,
+                mitsuro_client::SessionStateOptions {
+                    delegation_after_cursor: event_cursor,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(session_delegation_projection)
+            .map_err(|error| AgentError::Other(error.to_string()))
     }
 }
 
@@ -236,6 +272,20 @@ impl MitsuroServerBackend {
                     });
                     event_count += 1;
                 }
+                ChatStreamEvent::DelegatedProgress { payload } => {
+                    let _ = event_tx.send(TurnStreamEvent::DelegatedProgress {
+                        thread_id: thread_id.clone(),
+                        progress: delegated_progress_projection(payload),
+                    });
+                    event_count += 1;
+                }
+                ChatStreamEvent::DelegationEvent { event } => {
+                    let _ = event_tx.send(TurnStreamEvent::DelegationEvent {
+                        thread_id: thread_id.clone(),
+                        event: durable_delegation_event(event),
+                    });
+                    event_count += 1;
+                }
                 ChatStreamEvent::ToolApprovalRequired {
                     id,
                     name,
@@ -278,6 +328,13 @@ impl MitsuroServerBackend {
                     break;
                 }
                 ChatStreamEvent::Error { error } => return Err(AgentError::Other(error)),
+                ChatStreamEvent::Other {
+                    event_type,
+                    payload,
+                } => {
+                    let _ = event_tx.send(unknown_mitsuro_stream_event(event_type, payload));
+                    event_count += 1;
+                }
                 other => {
                     let _ = event_tx.send(TurnStreamEvent::Other {
                         method: format!("mitsuro/{other:?}"),
@@ -293,6 +350,208 @@ impl MitsuroServerBackend {
             approvals_answered,
             completed,
         })
+    }
+}
+
+fn unknown_mitsuro_stream_event(event_type: String, payload: Value) -> TurnStreamEvent {
+    TurnStreamEvent::Other {
+        method: format!("mitsuro/{event_type}"),
+        params: Some(payload),
+    }
+}
+
+fn delegation_group_status(value: mitsuro_client::DelegationGroupState) -> DelegationGroupStatus {
+    match value {
+        mitsuro_client::DelegationGroupState::Created => DelegationGroupStatus::Created,
+        mitsuro_client::DelegationGroupState::Queued => DelegationGroupStatus::Queued,
+        mitsuro_client::DelegationGroupState::Running => DelegationGroupStatus::Running,
+        mitsuro_client::DelegationGroupState::ReadyForParent => {
+            DelegationGroupStatus::ReadyForParent
+        }
+        mitsuro_client::DelegationGroupState::Synthesizing => DelegationGroupStatus::Synthesizing,
+        mitsuro_client::DelegationGroupState::Complete => DelegationGroupStatus::Complete,
+        mitsuro_client::DelegationGroupState::Degraded => DelegationGroupStatus::Degraded,
+        mitsuro_client::DelegationGroupState::Failed => DelegationGroupStatus::Failed,
+        mitsuro_client::DelegationGroupState::Cancelled => DelegationGroupStatus::Cancelled,
+    }
+}
+
+fn delegation_task_status(value: mitsuro_client::DelegationTaskState) -> DelegationTaskStatus {
+    match value {
+        mitsuro_client::DelegationTaskState::Created => DelegationTaskStatus::Created,
+        mitsuro_client::DelegationTaskState::Queued => DelegationTaskStatus::Queued,
+        mitsuro_client::DelegationTaskState::Leased => DelegationTaskStatus::Leased,
+        mitsuro_client::DelegationTaskState::Running => DelegationTaskStatus::Running,
+        mitsuro_client::DelegationTaskState::Retrying => DelegationTaskStatus::Retrying,
+        mitsuro_client::DelegationTaskState::Complete => DelegationTaskStatus::Complete,
+        mitsuro_client::DelegationTaskState::Degraded => DelegationTaskStatus::Degraded,
+        mitsuro_client::DelegationTaskState::Failed => DelegationTaskStatus::Failed,
+        mitsuro_client::DelegationTaskState::Cancelled => DelegationTaskStatus::Cancelled,
+    }
+}
+
+fn delegated_progress_status(
+    value: mitsuro_client::DelegatedProgressStatus,
+) -> DelegationTaskStatus {
+    match value {
+        mitsuro_client::DelegatedProgressStatus::Created => DelegationTaskStatus::Created,
+        mitsuro_client::DelegatedProgressStatus::Queued => DelegationTaskStatus::Queued,
+        mitsuro_client::DelegatedProgressStatus::Leased => DelegationTaskStatus::Leased,
+        mitsuro_client::DelegatedProgressStatus::Running => DelegationTaskStatus::Running,
+        mitsuro_client::DelegatedProgressStatus::Retrying => DelegationTaskStatus::Retrying,
+        mitsuro_client::DelegatedProgressStatus::Complete => DelegationTaskStatus::Complete,
+        mitsuro_client::DelegatedProgressStatus::Degraded => DelegationTaskStatus::Degraded,
+        mitsuro_client::DelegatedProgressStatus::Cancelled => DelegationTaskStatus::Cancelled,
+        mitsuro_client::DelegatedProgressStatus::Failed => DelegationTaskStatus::Failed,
+    }
+}
+
+fn delegation_role(value: mitsuro_client::DelegatedRunRole) -> DelegationRole {
+    match value {
+        mitsuro_client::DelegatedRunRole::Explore => DelegationRole::Explore,
+        mitsuro_client::DelegatedRunRole::Build => DelegationRole::Build,
+        mitsuro_client::DelegatedRunRole::Planner => DelegationRole::Planner,
+        mitsuro_client::DelegatedRunRole::Verifier => DelegationRole::Verifier,
+    }
+}
+
+fn delegation_kind(value: mitsuro_client::DelegatedToolKind) -> DelegationKind {
+    match value {
+        mitsuro_client::DelegatedToolKind::Explore => DelegationKind::Explore,
+        mitsuro_client::DelegatedToolKind::Plan => DelegationKind::Plan,
+        mitsuro_client::DelegatedToolKind::Verify => DelegationKind::Verify,
+        mitsuro_client::DelegatedToolKind::Build => DelegationKind::Build,
+    }
+}
+
+fn delegation_run_stage(value: mitsuro_client::DelegatedRunStage) -> DelegationRunStage {
+    match value {
+        mitsuro_client::DelegatedRunStage::Created => DelegationRunStage::Created,
+        mitsuro_client::DelegatedRunStage::Running => DelegationRunStage::Running,
+        mitsuro_client::DelegatedRunStage::Synthesizing => DelegationRunStage::Synthesizing,
+        mitsuro_client::DelegatedRunStage::Complete => DelegationRunStage::Complete,
+        mitsuro_client::DelegatedRunStage::Degraded => DelegationRunStage::Degraded,
+        mitsuro_client::DelegatedRunStage::Failed => DelegationRunStage::Failed,
+        mitsuro_client::DelegatedRunStage::Cancelled => DelegationRunStage::Cancelled,
+    }
+}
+
+fn delegated_progress_projection(
+    value: mitsuro_client::DelegatedProgressEvent,
+) -> DelegatedProgressProjection {
+    DelegatedProgressProjection {
+        delegated_run_id: value.delegated_run_id,
+        tool_call_id: value.tool_call_id,
+        kind: delegation_kind(value.kind),
+        stage: delegation_run_stage(value.stage),
+        parent_session_id: value.parent_session_id,
+        task_id: value.task_id,
+        agent_name: value.agent_name,
+        status: delegated_progress_status(value.status),
+        tool_count: value.tool_count,
+        tokens: value.tokens,
+        current_action: value.current_action,
+        completion_summary: value.completion_summary,
+        lines_added: value.lines_added,
+        lines_removed: value.lines_removed,
+        completed_plan_task: value.completed_plan_task,
+    }
+}
+
+fn durable_event_kind(value: mitsuro_client::DelegationEventKind) -> DurableDelegationEventKind {
+    match value {
+        mitsuro_client::DelegationEventKind::GroupCreated => {
+            DurableDelegationEventKind::GroupCreated
+        }
+        mitsuro_client::DelegationEventKind::GroupQueued => DurableDelegationEventKind::GroupQueued,
+        mitsuro_client::DelegationEventKind::GroupStateChanged => {
+            DurableDelegationEventKind::GroupStateChanged
+        }
+        mitsuro_client::DelegationEventKind::TaskClaimed => DurableDelegationEventKind::TaskClaimed,
+        mitsuro_client::DelegationEventKind::TaskRunning => DurableDelegationEventKind::TaskRunning,
+        mitsuro_client::DelegationEventKind::TaskStateChanged => {
+            DurableDelegationEventKind::TaskStateChanged
+        }
+        mitsuro_client::DelegationEventKind::ParentContinuationQueued => {
+            DurableDelegationEventKind::ParentContinuationQueued
+        }
+        mitsuro_client::DelegationEventKind::ParentContinuationPromoted => {
+            DurableDelegationEventKind::ParentContinuationPromoted
+        }
+        mitsuro_client::DelegationEventKind::Other(value) => {
+            DurableDelegationEventKind::Other(value)
+        }
+    }
+}
+
+fn durable_delegation_event(
+    value: mitsuro_client::DelegationEventResponse,
+) -> DurableDelegationEvent {
+    DurableDelegationEvent {
+        id: value.event_id,
+        parent_session_id: value.parent_session_id,
+        group_id: value.delegation_group_id,
+        task_id: value.delegation_task_id,
+        kind: durable_event_kind(value.event_type),
+        payload: value.payload,
+        created_at: value.created_at,
+    }
+}
+
+fn session_delegation_projection(
+    value: mitsuro_client::SessionStateResponse,
+) -> SessionDelegationProjection {
+    SessionDelegationProjection {
+        groups: value
+            .delegation_groups
+            .into_iter()
+            .map(|group| DelegationGroupProjection {
+                id: group.delegation_group_id,
+                parent_tool_call_id: group.parent_tool_call_id,
+                status: delegation_group_status(group.state),
+                execution: match group.execution_mode {
+                    mitsuro_client::DelegationExecutionMode::Foreground => {
+                        DelegationExecution::Foreground
+                    }
+                    mitsuro_client::DelegationExecutionMode::Detached => {
+                        DelegationExecution::Detached
+                    }
+                },
+                parent_continuation: match group.parent_continuation_state {
+                    mitsuro_client::DelegationParentContinuationState::NotRequested => {
+                        DelegationParentContinuationStatus::NotRequested
+                    }
+                    mitsuro_client::DelegationParentContinuationState::Pending => {
+                        DelegationParentContinuationStatus::Pending
+                    }
+                    mitsuro_client::DelegationParentContinuationState::Queued => {
+                        DelegationParentContinuationStatus::Queued
+                    }
+                    mitsuro_client::DelegationParentContinuationState::Promoted => {
+                        DelegationParentContinuationStatus::Promoted
+                    }
+                },
+                tasks: group
+                    .tasks
+                    .into_iter()
+                    .map(|task| DelegationTaskProjection {
+                        id: task.delegation_task_id,
+                        key: task.task_key,
+                        role: delegation_role(task.role),
+                        status: delegation_task_status(task.state),
+                        attempt_count: task.attempt_count,
+                        updated_at: task.updated_at,
+                    })
+                    .collect(),
+                updated_at: group.updated_at,
+            })
+            .collect(),
+        events: value
+            .delegation_events
+            .into_iter()
+            .map(durable_delegation_event)
+            .collect(),
+        event_cursor: value.delegation_event_cursor,
     }
 }
 
@@ -977,6 +1236,103 @@ impl AgentBackend for MitsuroServerBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_projection_keeps_exact_task_state_cursor_and_unknown_event() {
+        let state: mitsuro_client::SessionStateResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "session-1",
+                "agent_state": "working",
+                "delegation_groups": [{
+                    "delegation_group_id": "group-1",
+                    "parent_tool_call_id": "tool-1",
+                    "state": "running",
+                    "execution_mode": "detached",
+                    "parent_continuation_state": "pending",
+                    "tasks": [{
+                        "delegation_task_id": "task-1",
+                        "task_key": "explore-api",
+                        "role": "explore",
+                        "state": "retrying",
+                        "attempt_count": 2,
+                        "updated_at": "2026-08-08T00:00:01Z"
+                    }],
+                    "updated_at": "2026-08-08T00:00:01Z"
+                }],
+                "delegation_events": [{
+                    "event_id": 44,
+                    "parent_session_id": "session-1",
+                    "delegation_group_id": "group-1",
+                    "delegation_task_id": "task-1",
+                    "event_type": "future_scheduler_event",
+                    "payload": {"lease_epoch": 9},
+                    "created_at": "2026-08-08T00:00:01Z"
+                }],
+                "delegation_event_cursor": 44
+            }))
+            .expect("typed session state");
+
+        let projection = session_delegation_projection(state);
+        assert_eq!(projection.event_cursor, Some(44));
+        assert_eq!(projection.groups[0].status, DelegationGroupStatus::Running);
+        assert_eq!(
+            projection.groups[0].execution,
+            DelegationExecution::Detached
+        );
+        assert_eq!(
+            projection.groups[0].parent_continuation,
+            DelegationParentContinuationStatus::Pending
+        );
+        assert_eq!(
+            projection.groups[0].tasks[0].status,
+            DelegationTaskStatus::Retrying
+        );
+        assert_eq!(
+            projection.events[0].kind,
+            DurableDelegationEventKind::Other("future_scheduler_event".to_owned())
+        );
+        assert_eq!(projection.events[0].payload["lease_epoch"], 9);
+    }
+
+    #[test]
+    fn live_progress_maps_to_backend_neutral_exact_lifecycle() {
+        let payload: mitsuro_client::DelegatedProgressEvent =
+            serde_json::from_value(serde_json::json!({
+                "delegated_run_id": "run-1",
+                "tool_call_id": "tool-1",
+                "kind": "verify",
+                "stage": "running",
+                "parent_session_id": "session-1",
+                "task_id": "task-1",
+                "agent_name": "Verifier",
+                "status": "leased",
+                "tool_count": 3,
+                "tokens": 144,
+                "current_action": "checking tests",
+                "completion_summary": null,
+                "lines_added": 0,
+                "lines_removed": 0,
+                "completed_plan_task": null
+            }))
+            .expect("typed delegated progress");
+
+        let progress = delegated_progress_projection(payload);
+        assert_eq!(progress.kind, DelegationKind::Verify);
+        assert_eq!(progress.stage, DelegationRunStage::Running);
+        assert_eq!(progress.status, DelegationTaskStatus::Leased);
+        assert_eq!(progress.current_action.as_deref(), Some("checking tests"));
+    }
+
+    #[test]
+    fn unknown_stream_event_retains_original_payload() {
+        let payload = serde_json::json!({"future": {"sequence": 7}});
+        let event = unknown_mitsuro_stream_event("future_event".to_owned(), payload.clone());
+        assert_eq!(event.method_name(), "mitsuro/future_event");
+        match event {
+            TurnStreamEvent::Other { params, .. } => assert_eq!(params, Some(payload)),
+            other => panic!("expected forward-compatible event, got {other:?}"),
+        }
+    }
 
     #[test]
     fn extracts_codex_text_input_for_mitsuro_chat() {

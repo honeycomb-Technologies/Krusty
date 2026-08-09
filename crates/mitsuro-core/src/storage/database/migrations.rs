@@ -94,43 +94,55 @@ impl Database {
         tx.execute_batch(&create_tmp)
             .with_context(|| format!("create rewritten table {tmp}"))?;
 
-        let insert_sql = if value_rewrites.is_empty() {
-            format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";")
-        } else {
-            let mut columns: Vec<String> = Vec::new();
-            {
-                let mut stmt = tx
-                    .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-                    .with_context(|| format!("inspect columns for {table}"))?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                for row in rows {
-                    columns.push(row?);
-                }
-            }
-            ensure!(
-                !columns.is_empty(),
-                "cannot rewrite values for empty table definition {table}"
-            );
-            let select_list = columns
-                .iter()
-                .map(|column| {
-                    if let Some((_, from_value, to_value)) = value_rewrites
-                        .iter()
-                        .find(|(name, _, _)| *name == column.as_str())
-                    {
-                        format!(
-                            "CASE WHEN \"{column}\" = '{from_value}' THEN '{to_value}' ELSE \"{column}\" END AS \"{column}\""
-                        )
-                    } else {
-                        format!("\"{column}\"")
+        let has_rows = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)"),
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        // Some migration tests intentionally model only the table being
+        // rewritten and omit its referenced parent tables. SQLite resolves
+        // those references when an INSERT executes, even if its SELECT would
+        // return no rows. Skipping a provably empty copy keeps those synthetic
+        // schemas migratable without disabling or weakening production FKs.
+        if has_rows {
+            let insert_sql = if value_rewrites.is_empty() {
+                format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";")
+            } else {
+                let mut columns: Vec<String> = Vec::new();
+                {
+                    let mut stmt = tx
+                        .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                        .with_context(|| format!("inspect columns for {table}"))?;
+                    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                    for row in rows {
+                        columns.push(row?);
                     }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("INSERT INTO \"{tmp}\" SELECT {select_list} FROM \"{table}\";")
-        };
-        tx.execute_batch(&insert_sql)
-            .with_context(|| format!("copy rows into {tmp}"))?;
+                }
+                ensure!(
+                    !columns.is_empty(),
+                    "cannot rewrite values for empty table definition {table}"
+                );
+                let select_list = columns
+                    .iter()
+                    .map(|column| {
+                        if let Some((_, from_value, to_value)) = value_rewrites
+                            .iter()
+                            .find(|(name, _, _)| *name == column.as_str())
+                        {
+                            format!(
+                                "CASE WHEN \"{column}\" = '{from_value}' THEN '{to_value}' ELSE \"{column}\" END AS \"{column}\""
+                            )
+                        } else {
+                            format!("\"{column}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("INSERT INTO \"{tmp}\" SELECT {select_list} FROM \"{table}\";")
+            };
+            tx.execute_batch(&insert_sql)
+                .with_context(|| format!("copy rows into {tmp}"))?;
+        }
 
         let mut index_sqls: Vec<String> = Vec::new();
         {
@@ -2966,6 +2978,418 @@ impl Database {
                 .context("re-enabling foreign_keys after hive identity rewrite")?;
         }
 
+        // Migration 56: add the session-level delegation authority. Groups
+        // own completion/failure policy, tasks own logical objectives, and an
+        // append-preserved attempt ledger owns each execution epoch. The
+        // existing delegated_runs row remains the compatibility aggregate.
+        if current_version < 56 {
+            info!("Running migration 56: delegation groups and tasks");
+            let delegation_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation coordinator migration lock")?;
+            delegation_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS delegation_groups (
+                    delegation_group_id TEXT PRIMARY KEY,
+                    parent_session_id TEXT NOT NULL,
+                    parent_tool_call_id TEXT,
+                    state TEXT NOT NULL
+                        CHECK (state IN (
+                            'created', 'queued', 'running', 'ready_for_parent',
+                            'synthesizing', 'complete', 'degraded', 'failed', 'cancelled'
+                        )),
+                    contract_json TEXT NOT NULL CHECK (json_valid(contract_json)),
+                    parent_continuation_state TEXT NOT NULL
+                        CHECK (parent_continuation_state IN (
+                            'not_requested', 'pending', 'queued', 'promoted'
+                        )),
+                    parent_continuation_id TEXT UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_tasks (
+                    delegation_task_id TEXT PRIMARY KEY,
+                    delegation_group_id TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                    role TEXT NOT NULL
+                        CHECK (role IN ('explore', 'build', 'planner', 'verifier')),
+                    state TEXT NOT NULL
+                        CHECK (state IN (
+                            'created', 'queued', 'leased', 'running', 'retrying',
+                            'complete', 'degraded', 'failed', 'cancelled'
+                        )),
+                    specification_json TEXT NOT NULL CHECK (json_valid(specification_json)),
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                    result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+                    error_summary TEXT,
+                    lease_owner_id TEXT,
+                    lease_expires_at_ms INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    UNIQUE (delegation_group_id, task_key),
+                    UNIQUE (delegation_group_id, ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+                    lease_owner_id TEXT NOT NULL,
+                    runtime_key TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN (
+                        'running', 'complete', 'degraded', 'failed',
+                        'cancelled', 'expired'
+                    )),
+                    artifact_json TEXT CHECK (
+                        artifact_json IS NULL OR json_valid(artifact_json)
+                    ),
+                    error_summary TEXT,
+                    started_at TEXT NOT NULL,
+                    last_heartbeat_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    UNIQUE (delegation_task_id, attempt_number)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_session_updated
+                    ON delegation_groups(parent_session_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_parent_tool
+                    ON delegation_groups(parent_tool_call_id);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_state
+                    ON delegation_groups(state, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_continuation
+                    ON delegation_groups(parent_continuation_state, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_tasks_group_ordinal
+                    ON delegation_tasks(delegation_group_id, ordinal ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_tasks_schedulable
+                    ON delegation_tasks(state, lease_expires_at_ms, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_events_session_cursor
+                    ON delegation_events(parent_session_id, event_id ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_events_group_cursor
+                    ON delegation_events(delegation_group_id, event_id ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_attempts_task_number
+                    ON delegation_attempts(delegation_task_id, attempt_number ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_attempts_group_state
+                    ON delegation_attempts(delegation_group_id, state, started_at ASC);
+                "#,
+            )?;
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "delegation_group_id") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN delegation_group_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "delegation_task_id") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN delegation_task_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "attempt_number") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1 CHECK (attempt_number >= 1)",
+                    [],
+                )?;
+            }
+            delegation_tx.execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_group_updated
+                    ON delegated_runs(delegation_group_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_task_attempt
+                    ON delegated_runs(delegation_task_id, attempt_number DESC);
+                "#,
+            )?;
+            delegation_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (56)",
+                [],
+            )?;
+            delegation_tx.commit()?;
+        }
+
+        // Migration 57: fence aggregate synthesis with the same durable lease
+        // discipline as task execution. A process crash in ReadyForParent or
+        // Synthesizing can now be reclaimed without allowing two parents to
+        // integrate patches or publish the aggregate result concurrently.
+        if current_version < 57 {
+            info!("Running migration 57: delegation synthesis leases");
+            let synthesis_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation synthesis migration lock")?;
+            if !Self::column_exists(&synthesis_tx, "delegation_groups", "synthesis_owner_id") {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &synthesis_tx,
+                "delegation_groups",
+                "synthesis_lease_expires_at_ms",
+            ) {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &synthesis_tx,
+                "delegation_groups",
+                "synthesis_attempt_count",
+            ) {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (synthesis_attempt_count >= 0)",
+                    [],
+                )?;
+            }
+            synthesis_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_groups_synthesis_lease
+                    ON delegation_groups(state, synthesis_lease_expires_at_ms);",
+            )?;
+            synthesis_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (57)",
+                [],
+            )?;
+            synthesis_tx.commit()?;
+        }
+
+        // Migration 58: make capacity admission a database authority rather
+        // than a process-local assumption. The in-process scheduler remains
+        // the fast fairness layer, while these leases provide the hard host,
+        // provider-domain, and writer-contention ceiling across every process
+        // sharing this database.
+        if current_version < 58 {
+            info!("Running migration 58: durable delegation capacity authority");
+            let capacity_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation capacity migration lock")?;
+            capacity_tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS delegation_capacity_hosts (
+                    authority_key TEXT PRIMARY KEY,
+                    target_limit INTEGER NOT NULL CHECK (target_limit > 0),
+                    minimum_limit INTEGER NOT NULL CHECK (minimum_limit > 0),
+                    maximum_limit INTEGER NOT NULL CHECK (maximum_limit >= minimum_limit),
+                    ramp_step INTEGER NOT NULL CHECK (ramp_step > 0),
+                    healthy_threshold INTEGER NOT NULL CHECK (healthy_threshold > 0),
+                    healthy_streak INTEGER NOT NULL DEFAULT 0 CHECK (healthy_streak >= 0),
+                    demand_observed INTEGER NOT NULL DEFAULT 0 CHECK (demand_observed IN (0, 1)),
+                    default_cooldown_ms INTEGER NOT NULL CHECK (default_cooldown_ms > 0),
+                    updated_at_ms INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_domains (
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    target_limit INTEGER NOT NULL CHECK (target_limit > 0),
+                    healthy_streak INTEGER NOT NULL DEFAULT 0 CHECK (healthy_streak >= 0),
+                    demand_observed INTEGER NOT NULL DEFAULT 0 CHECK (demand_observed IN (0, 1)),
+                    cooldown_until_ms INTEGER,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (authority_key, domain_key),
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_waiters (
+                    waiter_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    delegation_task_id TEXT NOT NULL UNIQUE,
+                    lease_owner_id TEXT NOT NULL,
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    partition_key TEXT NOT NULL,
+                    scheduling_class TEXT NOT NULL CHECK (scheduling_class IN (
+                        'read_only', 'write_shared', 'write_isolated', 'verification'
+                    )),
+                    isolation_group TEXT,
+                    lease_expires_at_ms INTEGER NOT NULL,
+                    enqueued_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_leases (
+                    delegation_task_id TEXT PRIMARY KEY,
+                    lease_owner_id TEXT NOT NULL,
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    partition_key TEXT NOT NULL,
+                    scheduling_class TEXT NOT NULL CHECK (scheduling_class IN (
+                        'read_only', 'write_shared', 'write_isolated', 'verification'
+                    )),
+                    isolation_group TEXT,
+                    waiter_sequence INTEGER NOT NULL,
+                    lease_expires_at_ms INTEGER NOT NULL,
+                    admitted_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_waiters_order
+                    ON delegation_capacity_waiters(authority_key, domain_key, waiter_sequence);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_waiters_expiry
+                    ON delegation_capacity_waiters(lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_host
+                    ON delegation_capacity_leases(authority_key, lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_domain
+                    ON delegation_capacity_leases(authority_key, domain_key, lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_writer
+                    ON delegation_capacity_leases(authority_key, partition_key, scheduling_class);
+                ",
+            )?;
+            capacity_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (58)",
+                [],
+            )?;
+            capacity_tx.commit()?;
+        }
+
+        // Migration 59: persist an immutable, versioned executor envelope for
+        // detached Chat/Code tasks. The envelope contains only reconstruction
+        // metadata and a digest of the already-bounded task objective; it does
+        // not duplicate parent transcripts, raw prompts, or tool outputs.
+        if current_version < 59 {
+            info!("Running migration 59: detached delegation executor envelopes");
+            let envelope_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation executor envelope migration lock")?;
+            if !Self::column_exists(
+                &envelope_tx,
+                "delegation_tasks",
+                "executor_envelope_version",
+            ) {
+                envelope_tx.execute(
+                    "ALTER TABLE delegation_tasks ADD COLUMN executor_envelope_version INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&envelope_tx, "delegation_tasks", "executor_envelope_json") {
+                envelope_tx.execute(
+                    "ALTER TABLE delegation_tasks ADD COLUMN executor_envelope_json TEXT",
+                    [],
+                )?;
+            }
+            envelope_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_tasks_replayable
+                    ON delegation_tasks(executor_envelope_version, state, delegation_group_id);",
+            )?;
+            envelope_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (59)",
+                [],
+            )?;
+            envelope_tx.commit()?;
+        }
+
+        // Migration 60: elect exactly one recovery host for a replayable
+        // detached group across startup and periodic reconciliation scans.
+        if current_version < 60 {
+            info!("Running migration 60: delegation replay owner leases");
+            let replay_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegation replay lease migration lock")?;
+            if !Self::column_exists(&replay_tx, "delegation_groups", "replay_owner_id") {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &replay_tx,
+                "delegation_groups",
+                "replay_lease_expires_at_ms",
+            ) {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&replay_tx, "delegation_groups", "replay_attempt_count") {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_attempt_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            replay_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_groups_replay_lease
+                    ON delegation_groups(state, replay_lease_expires_at_ms, delegation_group_id);",
+            )?;
+            replay_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (60)",
+                [],
+            )?;
+            replay_tx.commit()?;
+        }
+
+        // Migration 61: event kinds are an append-only protocol surface, not a
+        // closed lifecycle state machine. Keep group/task state CHECKs closed,
+        // but allow newer servers to persist event kinds that older clients
+        // safely project as `Other`/an opaque string.
+        if current_version < 61 {
+            info!("Running migration 61: extensible delegation event kinds");
+            let event_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegation event compatibility migration lock")?;
+            if Self::table_exists(&event_tx, "delegation_events") {
+                Self::rebuild_table_with_sql_rewrite_and_values(
+                    &event_tx,
+                    "delegation_events",
+                    &[r#"event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    ))"#],
+                    &["event_type TEXT NOT NULL"],
+                    &[],
+                )
+                .context("Migration 61: remove delegation event kind CHECK")?;
+
+                let create_sql: String = event_tx.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delegation_events'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    !create_sql.contains("event_type IN"),
+                    "Migration 61 could not remove the delegation event kind CHECK"
+                );
+            }
+            event_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (61)",
+                [],
+            )?;
+            event_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -3023,5 +3447,173 @@ mod privacy_checkpoint_tests {
         database
             .checkpoint_wal_without_busy_readers("released-reader")
             .expect("checkpoint should succeed after reader release");
+    }
+}
+
+#[cfg(test)]
+mod delegation_event_migration_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use tempfile::TempDir;
+
+    #[test]
+    fn migration_61_preserves_preview_events_and_accepts_future_kinds() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("delegation-event-compatibility.db");
+        let fixture = Connection::open(&db_path).expect("open preview fixture");
+        fixture
+            .execute_batch(
+                r#"
+                CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO schema_version (version) VALUES (60);
+
+                CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                CREATE TABLE delegation_groups (delegation_group_id TEXT PRIMARY KEY);
+                CREATE TABLE delegation_tasks (delegation_task_id TEXT PRIMARY KEY);
+                INSERT INTO sessions (id) VALUES ('session-1');
+                INSERT INTO delegation_groups (delegation_group_id) VALUES ('group-1');
+                INSERT INTO delegation_tasks (delegation_task_id) VALUES ('task-1');
+
+                CREATE TABLE delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_delegation_events_session_cursor
+                    ON delegation_events(parent_session_id, event_id ASC);
+                CREATE INDEX idx_delegation_events_group_cursor
+                    ON delegation_events(delegation_group_id, event_id ASC);
+                INSERT INTO delegation_events (
+                    parent_session_id, delegation_group_id, delegation_task_id,
+                    event_type, payload_json, created_at
+                ) VALUES (
+                    'session-1', 'group-1', 'task-1', 'task_running', '{}',
+                    '2026-08-08T00:00:00Z'
+                );
+                "#,
+            )
+            .expect("seed schema-60 preview database");
+        drop(fixture);
+
+        let database = Database::new(&db_path).expect("migrate preview database");
+        assert_eq!(database.get_schema_version(), 61);
+        database
+            .conn()
+            .execute(
+                "INSERT INTO delegation_events (
+                    parent_session_id, delegation_group_id, delegation_task_id,
+                    event_type, payload_json, created_at
+                 ) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                params![
+                    "session-1",
+                    "group-1",
+                    "future_scheduler_event",
+                    r#"{"domain":"workspace"}"#,
+                    "2026-08-08T00:00:01Z"
+                ],
+            )
+            .expect("persist a future event kind");
+
+        let event_kinds = database
+            .conn()
+            .prepare("SELECT event_type FROM delegation_events ORDER BY event_id ASC")
+            .expect("prepare event query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query event kinds")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect event kinds");
+        assert_eq!(event_kinds, ["task_running", "future_scheduler_event"]);
+
+        let index_count: i64 = database
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                       'idx_delegation_events_session_cursor',
+                       'idx_delegation_events_group_cursor'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count restored event indexes");
+        assert_eq!(index_count, 2);
+    }
+
+    #[test]
+    fn migration_61_handles_an_empty_synthetic_event_table_without_parent_tables() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("synthetic-delegation-events.db");
+        let fixture = Connection::open(&db_path).expect("open synthetic fixture");
+        fixture
+            .execute_batch(
+                r#"
+                CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO schema_version (version) VALUES (60);
+                CREATE TABLE delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+                "#,
+            )
+            .expect("seed synthetic schema-60 database");
+        drop(fixture);
+
+        let database = Database::new(&db_path).expect("migrate synthetic database");
+        assert_eq!(database.get_schema_version(), 61);
+        let create_sql: String = database
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'delegation_events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated event schema");
+        assert!(!create_sql.contains("event_type IN"));
+        let foreign_key_count: i64 = database
+            .conn()
+            .prepare("PRAGMA foreign_key_list(delegation_events)")
+            .expect("prepare event foreign keys")
+            .query_map([], |_| Ok(()))
+            .expect("query event foreign keys")
+            .count() as i64;
+        assert_eq!(
+            foreign_key_count, 3,
+            "migration must preserve production FKs"
+        );
     }
 }

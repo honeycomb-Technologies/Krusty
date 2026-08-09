@@ -258,7 +258,7 @@ impl Tool for AgentTool {
                 "max_turns": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional child budget; omitted means inherited or unlimited"
+                    "description": "Child turn budget; omitted inherits parent or defaults to 20"
                 },
                 "scope": {
                     "type": "string",

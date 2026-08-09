@@ -505,7 +505,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             seal_terminal_mailbox!();
             info!(task_id = %task_id, "Agent cancelled");
             send_progress(
-                AgentProgressStatus::Failed,
+                AgentProgressStatus::Cancelled,
                 "cancelled",
                 total_tool_calls,
                 estimated_tokens,

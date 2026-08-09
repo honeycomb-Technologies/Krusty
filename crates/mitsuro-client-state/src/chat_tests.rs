@@ -37,6 +37,10 @@ fn recovery_partial_restores_assistant_thinking_and_tools() {
         live_partial_assistant: None,
         delegated_tools: Vec::new(),
         recent_delegated_runs: Vec::new(),
+        delegated_run_summaries: Vec::new(),
+        delegation_groups: Vec::new(),
+        delegation_events: Vec::new(),
+        delegation_event_cursor: None,
         last_event_sequence: Some(7),
     };
 

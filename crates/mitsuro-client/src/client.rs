@@ -13,8 +13,8 @@ use crate::{
     FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleSummary, McpServer,
     ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse, OAuthStartRequest,
     OAuthStartResponse, OAuthStatusResponse, ProviderStatus, ServerAccessResponse,
-    ServerStatusResponse, SessionInfo, SessionStateResponse, SessionWithMessages,
-    SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
+    ServerStatusResponse, SessionInfo, SessionStateOptions, SessionStateResponse,
+    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
     UpdateServerAccessRequest, UpdateSessionRequest,
 };
 
@@ -138,7 +138,28 @@ impl MitsuroClient {
     }
 
     pub async fn get_session_state(&self, session_id: &str) -> Result<SessionStateResponse> {
-        self.get_json(&format!("/sessions/{session_id}/state"))
+        self.get_session_state_with_options(session_id, SessionStateOptions::default())
+            .await
+    }
+
+    pub async fn get_session_state_with_options(
+        &self,
+        session_id: &str,
+        options: SessionStateOptions,
+    ) -> Result<SessionStateResponse> {
+        let mut query = Vec::new();
+        if options.include_delegated_history {
+            query.push("include_delegated_history=true".to_string());
+        }
+        if let Some(cursor) = options.delegation_after_cursor {
+            query.push(format!("delegation_after_cursor={}", cursor.max(0)));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get_json(&format!("/sessions/{session_id}/state{suffix}"))
             .await
     }
 

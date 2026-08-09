@@ -10,7 +10,7 @@ use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::{
     Database, DelegatedRunLease, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore,
-    SessionManager,
+    DelegationStore, SessionManager,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
@@ -110,6 +110,13 @@ pub(super) fn notify_child_completion(
     );
 
     let pending_id = event.pending_id.clone();
+    let group_store = DelegationStore::new(Database::new(db_path)?);
+    if group_store.get_group(delegated_run_id)?.is_some() {
+        ensure!(
+            group_store.authorize_parent_continuation(delegated_run_id, &pending_id)?,
+            "background child completion group does not authorize this parent continuation"
+        );
+    }
     let content_json = serde_json::to_string(&event.content)?;
     let session_manager = SessionManager::new(Database::new(db_path)?);
     let queued =
@@ -133,6 +140,12 @@ pub(super) fn notify_child_completion(
             delegated_run_id,
             pending_id,
             "Re-emitting wake for an existing pending child completion"
+        );
+    }
+    if group_store.get_group(delegated_run_id)?.is_some() {
+        ensure!(
+            group_store.mark_parent_continuation_queued(delegated_run_id, &pending_id)?,
+            "background child completion group lost its continuation queue fence"
         );
     }
 
@@ -445,10 +458,14 @@ pub(super) fn existing_continuation_error(
 pub(super) fn agent_progress_for_terminal_stage(
     stage: DelegatedRunStage,
 ) -> (AgentProgressStatus, Option<String>) {
-    let status = if stage == DelegatedRunStage::Complete {
-        AgentProgressStatus::Complete
-    } else {
-        AgentProgressStatus::Failed
+    let status = match stage {
+        DelegatedRunStage::Complete => AgentProgressStatus::Complete,
+        DelegatedRunStage::Degraded => AgentProgressStatus::Degraded,
+        DelegatedRunStage::Cancelled => AgentProgressStatus::Cancelled,
+        DelegatedRunStage::Created
+        | DelegatedRunStage::Running
+        | DelegatedRunStage::Synthesizing
+        | DelegatedRunStage::Failed => AgentProgressStatus::Failed,
     };
     let current_action = match stage {
         DelegatedRunStage::Degraded => Some("degraded".to_string()),

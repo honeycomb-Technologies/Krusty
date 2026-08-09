@@ -19,6 +19,7 @@ mod database;
 #[cfg(test)]
 mod database_tests;
 mod delegated_runs;
+mod delegation;
 mod episodes;
 pub mod expo_push_devices;
 mod file_activity;
@@ -60,6 +61,18 @@ pub use delegated_runs::{
     normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunCreateOutcome, DelegatedRunLease,
     DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
     DelegatedRunStartInput, DelegatedRunStore, DelegatedRunSummary,
+};
+pub use delegation::{
+    DelegationCapacityClass, DelegationCapacityFeedback, DelegationCapacityPolicy,
+    DelegationCapacityRequest, DelegationCompletionPolicy, DelegationEventRecord,
+    DelegationEventType, DelegationExecutionMode, DelegationExecutorEnvelopeV1,
+    DelegationExecutorKind, DelegationExecutorSessionType, DelegationFailurePolicy,
+    DelegationGovernance, DelegationGroupContract, DelegationGroupRecord,
+    DelegationGroupStartInput, DelegationGroupState, DelegationLeaseRenewalBatchResult,
+    DelegationParentContinuationState, DelegationStore, DelegationSynthesisLease,
+    DelegationSynthesisLeaseRenewal, DelegationTaskLease, DelegationTaskLeaseRenewal,
+    DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState, DelegationWriterMode,
+    DELEGATION_EXECUTOR_ENVELOPE_VERSION,
 };
 pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
 pub use expo_push_devices::{ExpoPushDevice, ExpoPushDeviceRegistration, ExpoPushDeviceStore};

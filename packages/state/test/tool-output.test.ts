@@ -10,6 +10,7 @@ import type {
 	DelegatedProgressEvent,
 	DelegatedRunResponse,
 	DelegatedRunSummaryResponse,
+	DelegationGroupStateResponse,
 } from "@mitsuro/api";
 import type { ChatMessage, ToolCall } from "../src/session/types.ts";
 
@@ -405,6 +406,84 @@ Deno.test("compact durable summaries settle Agent cards outside the artifact win
 	assertEquals(restoredCall?.delegated?.stage, "failed", "summary must settle old card");
 	assertEquals(restoredCall?.delegated?.outcome, "failed", "summary must settle outcome");
 	assertEquals(restoredCall?.status, "error", "summary must settle outer status");
+});
+
+Deno.test("canonical delegation groups restore parallel task state after reconnect", () => {
+	const messages: ChatMessage[] = [{
+		id: "message-group",
+		role: "assistant",
+		content: "",
+		toolCalls: [{
+			id: "tool-group",
+			name: "agent",
+			arguments: { capabilities: ["write"], components: ["api", "ui"] },
+			status: "running",
+		}],
+	}];
+	const group: DelegationGroupStateResponse = {
+		delegation_group_id: "group-1",
+		parent_tool_call_id: "tool-group",
+		state: "running",
+		execution_mode: "detached",
+		parent_continuation_state: "pending",
+		updated_at: "2026-08-08T12:00:00Z",
+		tasks: [
+			{
+				delegation_task_id: "task-api",
+				task_key: "api",
+				role: "build",
+				state: "running",
+				attempt_count: 1,
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+			{
+				delegation_task_id: "task-ui",
+				task_key: "ui",
+				role: "build",
+				state: "queued",
+				attempt_count: 0,
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+		],
+	};
+
+	const live = applyDelegatedProgress(messages[0]!.toolCalls![0]!, {
+		parent_session_id: "session-1",
+		tool_call_id: "tool-group",
+		delegated_run_id: "group-1",
+		task_id: "task-api",
+		agent_name: "API Builder",
+		kind: "build",
+		stage: "running",
+		status: "running",
+		tool_count: 7,
+		tokens: 321,
+		current_action: "Running API tests",
+		completion_summary: null,
+		lines_added: 12,
+		lines_removed: 3,
+		completed_plan_task: null,
+	});
+	messages[0]!.toolCalls = [live];
+	const restored = applyDelegatedSessionState(messages, [], [], [], [group]);
+	const delegated = restored[0]?.toolCalls?.[0]?.delegated;
+	assertEquals(delegated?.delegatedRunId, "group-1", "group identity must win");
+	assertEquals(delegated?.groupState, "running", "exact group state must be retained");
+	assertEquals(delegated?.agents.length, 2, "both logical tasks must render");
+	assertEquals(delegated?.agents[0]?.status, "running", "active task must remain running");
+	assertEquals(delegated?.agents[0]?.name, "API Builder", "live display name must survive snapshot");
+	assertEquals(delegated?.agents[0]?.toolCount, 7, "live metrics must survive snapshot");
+	assertEquals(delegated?.agents[0]?.attemptCount, 1, "durable attempts must win");
+	assertEquals(
+		delegated?.agents[0]?.currentAction,
+		"Running API tests",
+		"live action must survive a running durable snapshot",
+	);
+	assertEquals(delegated?.agents[1]?.status, "pending", "queued task must remain pending");
+	assertEquals(delegated?.agents[1]?.taskState, "queued", "exact task state must be retained");
+	assertEquals(delegated?.agents[1]?.currentAction, "Queued", "queue state must be visible");
+	assertEquals(delegated?.activeTargets, 1, "active count must come from group tasks");
+	assertEquals(delegated?.pendingTargets, 1, "pending count must come from group tasks");
 });
 
 Deno.test("late nonterminal progress cannot reopen a terminal delegated run", () => {

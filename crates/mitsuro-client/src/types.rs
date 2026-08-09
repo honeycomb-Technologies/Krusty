@@ -661,11 +661,280 @@ pub struct SessionStateResponse {
     #[serde(default)]
     pub live_partial_assistant: Option<PartialAssistantState>,
     #[serde(default)]
-    pub delegated_tools: Vec<Value>,
+    pub delegated_tools: Vec<DelegatedToolStateResponse>,
     #[serde(default)]
-    pub recent_delegated_runs: Vec<Value>,
+    pub recent_delegated_runs: Vec<DelegatedRunResponse>,
+    #[serde(default)]
+    pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
+    #[serde(default)]
+    pub delegation_groups: Vec<DelegationGroupStateResponse>,
+    #[serde(default)]
+    pub delegation_events: Vec<DelegationEventResponse>,
+    #[serde(default)]
+    pub delegation_event_cursor: Option<i64>,
     #[serde(default)]
     pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationGroupState {
+    Created,
+    Queued,
+    Running,
+    ReadyForParent,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationTaskState {
+    Created,
+    Queued,
+    Leased,
+    Running,
+    Retrying,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationExecutionMode {
+    Foreground,
+    Detached,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationParentContinuationState {
+    NotRequested,
+    Pending,
+    Queued,
+    Promoted,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunRole {
+    Explore,
+    Build,
+    Planner,
+    Verifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationEventKind {
+    GroupCreated,
+    GroupQueued,
+    GroupStateChanged,
+    TaskClaimed,
+    TaskRunning,
+    TaskStateChanged,
+    ParentContinuationQueued,
+    ParentContinuationPromoted,
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for DelegationEventKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "group_created" => Self::GroupCreated,
+            "group_queued" => Self::GroupQueued,
+            "group_state_changed" => Self::GroupStateChanged,
+            "task_claimed" => Self::TaskClaimed,
+            "task_running" => Self::TaskRunning,
+            "task_state_changed" => Self::TaskStateChanged,
+            "parent_continuation_queued" => Self::ParentContinuationQueued,
+            "parent_continuation_promoted" => Self::ParentContinuationPromoted,
+            _ => Self::Other(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegationTaskStateResponse {
+    pub delegation_task_id: String,
+    pub task_key: String,
+    pub role: DelegatedRunRole,
+    pub state: DelegationTaskState,
+    pub attempt_count: usize,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegationGroupStateResponse {
+    pub delegation_group_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: Option<String>,
+    pub state: DelegationGroupState,
+    pub execution_mode: DelegationExecutionMode,
+    pub parent_continuation_state: DelegationParentContinuationState,
+    #[serde(default)]
+    pub tasks: Vec<DelegationTaskStateResponse>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DelegationEventResponse {
+    pub event_id: i64,
+    pub parent_session_id: String,
+    pub delegation_group_id: String,
+    #[serde(default)]
+    pub delegation_task_id: Option<String>,
+    pub event_type: DelegationEventKind,
+    #[serde(default)]
+    pub payload: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedToolKind {
+    Explore,
+    Plan,
+    Verify,
+    Build,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunStage {
+    Created,
+    Running,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedProgressStatus {
+    Created,
+    Queued,
+    Leased,
+    Running,
+    Retrying,
+    Complete,
+    Degraded,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedProgressEvent {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub parent_session_id: String,
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    #[serde(default)]
+    pub current_action: Option<String>,
+    #[serde(default)]
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    #[serde(default)]
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedAgentStateResponse {
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    #[serde(default)]
+    pub current_action: Option<String>,
+    #[serde(default)]
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    #[serde(default)]
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedToolStateResponse {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunScopeResponse {
+    pub label: String,
+    pub path: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DelegatedRunResponse {
+    pub delegated_run_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: Option<String>,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub resumable: bool,
+    #[serde(default)]
+    pub resumed_from_run_id: Option<String>,
+    #[serde(default)]
+    pub child_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub target_scope: Vec<DelegatedRunScopeResponse>,
+    #[serde(default)]
+    pub human_review: Option<String>,
+    #[serde(default)]
+    pub artifact: Option<Value>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunSummaryResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub child_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionStateOptions {
+    pub include_delegated_history: bool,
+    pub delegation_after_cursor: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -917,7 +1186,10 @@ pub enum ChatStreamEvent {
         payload: Value,
     },
     DelegatedProgress {
-        payload: Value,
+        payload: DelegatedProgressEvent,
+    },
+    DelegationEvent {
+        event: DelegationEventResponse,
     },
     AwaitingInput {
         tool_call_id: String,
@@ -1099,7 +1371,21 @@ impl ChatStreamEvent {
                 tool_use_id: string_field(&value, "tool_use_id"),
                 payload: value,
             },
-            "delegated_progress" => Self::DelegatedProgress { payload: value },
+            "delegated_progress" => serde_json::from_value(value.clone())
+                .map(|payload| Self::DelegatedProgress { payload })
+                .unwrap_or_else(|_| Self::Other {
+                    event_type: event_type.clone(),
+                    payload: value,
+                }),
+            "delegation_event" => value
+                .get("event")
+                .cloned()
+                .and_then(|event| serde_json::from_value(event).ok())
+                .map(|event| Self::DelegationEvent { event })
+                .unwrap_or_else(|| Self::Other {
+                    event_type: event_type.clone(),
+                    payload: value,
+                }),
             "awaiting_input" => Self::AwaitingInput {
                 tool_call_id: string_field(&value, "tool_call_id"),
                 tool_name: string_field(&value, "tool_name"),
@@ -1259,8 +1545,10 @@ fn u64_field(value: &Value, field: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatStreamEvent, FastMode, HiveCurrentResponse, HiveScheduleSummary, ModelInfo,
-        ReasoningControl, ReasoningEffort, SessionType, ThinkingLevel,
+        ChatStreamEvent, DelegatedProgressStatus, DelegatedRunRole, DelegationEventKind,
+        DelegationExecutionMode, DelegationParentContinuationState, FastMode, HiveCurrentResponse,
+        HiveScheduleSummary, ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse,
+        SessionType, ThinkingLevel,
     };
     use serde_json::json;
 
@@ -1356,6 +1644,130 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn session_state_parses_typed_durable_delegation_contracts() {
+        let state: SessionStateResponse = serde_json::from_value(json!({
+            "id": "session-1",
+            "agent_state": "idle",
+            "mode": "build",
+            "permission_mode": "supervised",
+            "delegated_tools": [],
+            "recent_delegated_runs": [],
+            "delegated_run_summaries": [{
+                "delegated_run_id": "run-1",
+                "parent_tool_call_id": "tool-1",
+                "kind": "plan",
+                "stage": "complete",
+                "child_name": "planner",
+                "capabilities": ["read"],
+                "updated_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_groups": [{
+                "delegation_group_id": "group-1",
+                "parent_tool_call_id": "tool-1",
+                "state": "running",
+                "execution_mode": "detached",
+                "parent_continuation_state": "pending",
+                "tasks": [{
+                    "delegation_task_id": "task-1",
+                    "task_key": "plan",
+                    "role": "planner",
+                    "state": "leased",
+                    "attempt_count": 1,
+                    "updated_at": "2026-08-08T00:00:00Z"
+                }],
+                "updated_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_events": [{
+                "event_id": 42,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "delegation_task_id": "task-1",
+                "event_type": "task_claimed",
+                "payload": {},
+                "created_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_event_cursor": 42
+        }))
+        .expect("typed delegation session state");
+
+        assert_eq!(
+            state.delegation_groups[0].execution_mode,
+            DelegationExecutionMode::Detached
+        );
+        assert_eq!(
+            state.delegation_groups[0].parent_continuation_state,
+            DelegationParentContinuationState::Pending
+        );
+        assert_eq!(
+            state.delegation_groups[0].tasks[0].role,
+            DelegatedRunRole::Planner
+        );
+        assert_eq!(
+            state.delegation_events[0].event_type,
+            DelegationEventKind::TaskClaimed
+        );
+        assert_eq!(state.delegated_run_summaries[0].delegated_run_id, "run-1");
+    }
+
+    #[test]
+    fn delegated_progress_stream_event_is_fully_typed() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "delegated_progress",
+            "delegated_run_id": "run-1",
+            "tool_call_id": "tool-1",
+            "kind": "build",
+            "stage": "running",
+            "parent_session_id": "session-1",
+            "task_id": "task-1",
+            "agent_name": "builder",
+            "status": "retrying",
+            "tool_count": 3,
+            "tokens": 1200,
+            "current_action": "testing",
+            "completion_summary": null,
+            "lines_added": 10,
+            "lines_removed": 2,
+            "completed_plan_task": null
+        }));
+
+        match event {
+            ChatStreamEvent::DelegatedProgress { payload } => {
+                assert_eq!(payload.status, DelegatedProgressStatus::Retrying);
+                assert_eq!(payload.tool_count, 3);
+                assert_eq!(payload.current_action.as_deref(), Some("testing"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegation_event_stream_preserves_unknown_durable_event_kinds() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "delegation_event",
+            "event": {
+                "event_id": 43,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "delegation_task_id": null,
+                "event_type": "future_scheduler_event",
+                "payload": {"domain": "workspace"},
+                "created_at": "2026-08-08T00:00:01Z"
+            }
+        }));
+
+        match event {
+            ChatStreamEvent::DelegationEvent { event } => {
+                assert_eq!(
+                    event.event_type,
+                    DelegationEventKind::Other("future_scheduler_event".to_owned())
+                );
+                assert_eq!(event.payload["domain"], "workspace");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

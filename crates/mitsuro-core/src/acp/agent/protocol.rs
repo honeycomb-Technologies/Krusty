@@ -284,6 +284,25 @@ impl Agent for MitsuroAgent {
                 tracing::error!("Failed to replay ACP session history: {}", error);
                 AcpSchemaError::internal_error()
             })?;
+        {
+            let notification_tx = self.notification_tx.read().await;
+            let tx = notification_tx
+                .as_ref()
+                .ok_or_else(AcpSchemaError::internal_error)?;
+            let bridge = NotificationBridge::new(tx.clone());
+            self.processor
+                .read()
+                .await
+                .replay_delegation_state(&session, &bridge)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        session_id = %session.id,
+                        "Failed to replay ACP delegation state: {error}"
+                    );
+                    AcpSchemaError::internal_error()
+                })?;
+        }
 
         let current_mode = session
             .get_mode()

@@ -28,10 +28,11 @@ use mitsuro_desktop_backend::{
     PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
     ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
     ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
-    SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
-    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
-    ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
+    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -417,11 +418,7 @@ pub fn profile_initials_from_name(name: &str) -> String {
 /// Accepts labels like `appearance`, `voice`, `pets`, `keyboard`, `usage`, etc.
 fn parse_settings_section() -> Option<SettingsSection> {
     let raw = std::env::var("MITSURO_SETTINGS_SECTION").ok()?;
-    let key = raw
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-")
-        .replace(' ', "-");
+    let key = raw.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     Some(match key.as_str() {
         "general" => SettingsSection::General,
         "linux" | "linux-desktop" => SettingsSection::LinuxDesktop,
@@ -807,6 +804,9 @@ pub struct MitsuroApp {
     focus_handle: FocusHandle,
     connection: UiConnection,
     threads: Vec<DemoThread>,
+    /// Canonical reconnect/live delegation state retained independently from
+    /// ephemeral transcript bubbles and keyed by backend-qualified thread id.
+    delegations: std::collections::HashMap<String, SessionDelegationProjection>,
     /// Per-thread transcript window. History is revealed deliberately so long
     /// sessions never force GPUI to lay out the entire conversation at once.
     transcript_visible_limits: std::collections::HashMap<String, usize>,
@@ -1094,6 +1094,7 @@ impl MitsuroApp {
             focus_handle: cx.focus_handle(),
             connection: UiConnection::Connecting,
             threads: demo_seed,
+            delegations: std::collections::HashMap::new(),
             transcript_visible_limits: std::collections::HashMap::new(),
             selected_thread: None,
             selected_chat_thread: None,
@@ -1506,19 +1507,9 @@ impl MitsuroApp {
     /// Composer placeholder: Chat home uses "Message…"; Codex home "Do anything".
     fn update_composer_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match self.active_mode {
-            ProductMode::Chat => {
-                if self.is_calm_stage() || self.is_empty_conversation() {
-                    "Message…"
-                } else {
-                    "Message…"
-                }
-            }
-            ProductMode::Codex => {
-                if self.is_calm_stage() || self.is_empty_conversation() {
-                    "Do anything"
-                } else {
-                    "Ask Mitsuro…"
-                }
+            ProductMode::Chat => "Message…",
+            ProductMode::Codex if self.is_calm_stage() || self.is_empty_conversation() => {
+                "Do anything"
             }
             _ => "Ask Mitsuro…",
         };
@@ -1784,6 +1775,13 @@ impl MitsuroApp {
             None => true,
             Some(t) => t.messages.is_empty(),
         }
+    }
+
+    pub fn selected_delegation(&self) -> Option<&SessionDelegationProjection> {
+        self.selected_thread
+            .as_ref()
+            .and_then(|thread_id| self.delegations.get(thread_id))
+            .filter(|projection| !projection.groups.is_empty())
     }
 
     pub fn terminal_session(&self) -> &TerminalSession {
@@ -2223,12 +2221,12 @@ impl MitsuroApp {
                     // Soft-fallback to fixture mock so the panel stays usable offline-ish.
                     if let Some(fixture) = self.fixture.clone() {
                         let fix_for_connect = Arc::clone(&fixture);
-                        let _ = cx.background_executor().block(async move {
+                        cx.background_executor().block(async move {
                             if !fix_for_connect.status().is_usable() {
                                 let _ = fix_for_connect.connect().await;
                             }
                         });
-                        let fix_params = params.clone();
+                        let fix_params = params;
                         let fix_for_spawn = Arc::clone(&fixture);
                         let result = cx
                             .background_executor()
@@ -2274,7 +2272,7 @@ impl MitsuroApp {
 
         if let Some(fixture) = self.fixture.clone() {
             // Ensure fixture is connected.
-            let _ = cx.background_executor().block(async {
+            cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
                     let _ = fixture.connect().await;
                 }
@@ -2329,7 +2327,7 @@ impl MitsuroApp {
             return;
         }
         let payload = if text.ends_with('\n') {
-            text.clone()
+            text
         } else {
             format!("{text}\n")
         };
@@ -3731,7 +3729,7 @@ impl MitsuroApp {
 
         // Fallback live path (no bridge waiter): write JSON-RPC result directly.
         if let Some(backend) = self.backend.clone() {
-            let pending_live = pending.clone();
+            let pending_live = pending;
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -4198,20 +4196,18 @@ impl MitsuroApp {
         }
         self.status_line = "thread/archive…".into();
         // Deselect if not showing archived
-        if !self.show_archived {
-            if self.selected_thread.as_deref() == Some(id.as_str()) {
-                self.selected_thread = self
-                    .threads
-                    .iter()
-                    .find(|t| !t.summary.archived.unwrap_or(false))
-                    .map(|t| t.summary.id.clone());
-            }
+        if !self.show_archived && self.selected_thread.as_deref() == Some(id.as_str()) {
+            self.selected_thread = self
+                .threads
+                .iter()
+                .find(|t| !t.summary.archived.unwrap_or(false))
+                .map(|t| t.summary.id.clone());
         }
 
         // Live app-server when Ready + real server id (mirror thread_name_set).
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
+                let tid = id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4271,7 +4267,7 @@ impl MitsuroApp {
 
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
+                let tid = id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4431,8 +4427,8 @@ impl MitsuroApp {
         // Live thread/fork when Ready + real source id.
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id.clone();
-                let local_id = fork_id.clone();
+                let tid = id;
+                let local_id = fork_id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
@@ -4462,7 +4458,7 @@ impl MitsuroApp {
                                     t.backend_session_id = backend_session_id;
                                 }
                                 let forked_id = summary.id.clone();
-                                app.selected_thread = Some(summary.id.clone());
+                                app.selected_thread = Some(summary.id);
                                 app.status_line = "thread/fork · done".into();
                                 // Pull turns for the new server thread if still empty.
                                 if let Some(backend) = app.live_backend() {
@@ -4512,7 +4508,7 @@ impl MitsuroApp {
                             t.summary = summary.clone();
                             t.messages = messages;
                         }
-                        app.selected_thread = Some(summary.id.clone());
+                        app.selected_thread = Some(summary.id);
                         app.status_line = "thread/fork · fixture".into();
                     } else {
                         app.status_line = format!("thread/fork · local {local_id}").into();
@@ -5034,7 +5030,7 @@ impl MitsuroApp {
         cx.spawn(async move |this, cx| {
             /// Messages from the progressive live-turn producer thread.
             enum LiveMsg {
-                Event(TurnStreamEvent),
+                Event(Box<TurnStreamEvent>),
                 Finished(Result<mitsuro_desktop_backend::LiveTurnOutcome, String>),
             }
 
@@ -5055,7 +5051,7 @@ impl MitsuroApp {
                     let forward_tx = msg_tx.clone();
                     let forwarder = std::thread::spawn(move || {
                         while let Ok(ev) = event_rx.recv() {
-                            if forward_tx.send(LiveMsg::Event(ev)).is_err() {
+                            if forward_tx.send(LiveMsg::Event(Box::new(ev))).is_err() {
                                 break;
                             }
                         }
@@ -5095,6 +5091,7 @@ impl MitsuroApp {
 
                 match next {
                     Ok(LiveMsg::Event(ev)) => {
+                        let ev = *ev;
                         let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
                         let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
                         let _ = this.update(cx, |app, cx| {
@@ -5154,6 +5151,13 @@ impl MitsuroApp {
         let Some(idx) = self.threads.iter().position(|t| t.summary.id == thread_id) else {
             return;
         };
+
+        if let TurnStreamEvent::DelegationEvent { event, .. } = &event {
+            self.delegations
+                .entry(thread_id.to_owned())
+                .or_default()
+                .apply_event(event);
+        }
 
         let mut status_update: Option<String> = None;
 
@@ -5518,6 +5522,26 @@ impl MitsuroApp {
                 } => {
                     status_update = Some(format!(
                         "Process {process_handle} exited · code {exit_code}"
+                    ));
+                }
+                TurnStreamEvent::DelegatedProgress { progress, .. } => {
+                    status_update = Some(match progress.current_action.as_deref() {
+                        Some(detail) => format!(
+                            "{} · {} · {}",
+                            progress.agent_name,
+                            progress.status.label(),
+                            detail
+                        ),
+                        None => {
+                            format!("{} · {}", progress.agent_name, progress.status.label())
+                        }
+                    });
+                }
+                TurnStreamEvent::DelegationEvent { event, .. } => {
+                    status_update = Some(format!(
+                        "Delegation {} · {}",
+                        event.group_id,
+                        event.kind.label()
                     ));
                 }
                 TurnStreamEvent::Other { .. } => {}
@@ -6027,6 +6051,8 @@ impl MitsuroApp {
                     let prepared = backend.block_on(async move {
                         match b.read_session(&session_id).await {
                             Ok(conversation) => {
+                                let delegation = conversation.delegation;
+                                let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
                                 let seen = msgs.len();
                                 eprintln!(
@@ -6058,7 +6084,13 @@ impl MitsuroApp {
                                     seen,
                                     ui.len()
                                 );
-                                Ok::<_, String>((tid, seen.max(n_chat), ui))
+                                Ok::<_, String>((
+                                    tid,
+                                    seen.max(n_chat),
+                                    ui,
+                                    delegation,
+                                    delegation_status,
+                                ))
                             }
                             Err(e) => {
                                 eprintln!("[mitsuro] thread/read failed id={tid}: {e}");
@@ -6074,9 +6106,10 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((tid, n_in, ui_msgs)) => {
+                    Ok((tid, n_in, ui_msgs, delegation, delegation_status)) => {
                         if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
                             thread.messages = ui_msgs;
+                            app.delegations.insert(tid.clone(), delegation);
                             app.selected_thread = Some(tid.clone());
                             app.selected_codex_thread = Some(tid.clone());
                             if !matches!(app.active_mode, ProductMode::Codex | ProductMode::Chat) {
@@ -6088,17 +6121,19 @@ impl MitsuroApp {
                                 n_in,
                                 thread.messages.len()
                             );
-                            app.status_line = format!(
+                            let transcript_status = format!(
                                 "thread/read · {} msgs (of {n_in})",
                                 thread.messages.len(),
-                            )
-                            .into();
+                            );
+                            app.status_line = delegation_status
+                                .map(|status| format!("{transcript_status} · {status}"))
+                                .unwrap_or(transcript_status)
+                                .into();
                         } else {
                             eprintln!(
                                 "[mitsuro] thread/read MISSING sidebar thread id={tid} n={n_in}"
                             );
-                            app.status_line =
-                                format!("thread/read · thread missing in sidebar").into();
+                            app.status_line = "thread/read · thread missing in sidebar".into();
                         }
                     }
                     Err(e) => {
@@ -6352,6 +6387,29 @@ fn find_message_mut<'a>(
         .find(|m| m.item_id.as_deref() == Some(item_id))
 }
 
+fn delegation_hydration_status(projection: &SessionDelegationProjection) -> Option<String> {
+    if projection.groups.is_empty() {
+        return None;
+    }
+    let (active_groups, active_tasks) = projection.active_counts();
+    let latest = projection
+        .latest_task()
+        .map(|task| format!("latest {} {}", task.key, task.status.label()))
+        .or_else(|| {
+            projection
+                .groups
+                .iter()
+                .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                .map(|group| format!("latest group {}", group.status.label()))
+        });
+    Some(match latest {
+        Some(latest) => {
+            format!("{active_groups} active groups · {active_tasks} active tasks · {latest}")
+        }
+        None => format!("{active_groups} active groups · {active_tasks} active tasks"),
+    })
+}
+
 /// Minimal whitespace split for `echo hello` style argv (no shell quoting).
 fn shell_split_simple(cmd: &str) -> Vec<String> {
     cmd.split_whitespace().map(str::to_string).collect()
@@ -6488,6 +6546,14 @@ fn rebind_thread_id(event: TurnStreamEvent, thread_id: &str) -> TurnStreamEvent 
             pending.thread_id = Some(thread_id.into());
             TurnStreamEvent::ApprovalRequested(pending)
         }
+        TurnStreamEvent::DelegatedProgress { progress, .. } => TurnStreamEvent::DelegatedProgress {
+            thread_id: thread_id.into(),
+            progress,
+        },
+        TurnStreamEvent::DelegationEvent { event, .. } => TurnStreamEvent::DelegationEvent {
+            thread_id: thread_id.into(),
+            event,
+        },
         other => other,
     }
 }
@@ -6588,10 +6654,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         let has_auth = b.has_usable_auth().await;
         // model/list is best-effort — missing method or error falls back to empty
         // (UI seeds fixture demo models).
-        let models = match b.list_product_models(100).await {
-            Ok(models) => models,
-            Err(_) => Vec::new(),
-        };
+        let models = b.list_product_models(100).await.unwrap_or_default();
         // config/read best-effort for Settings snippet.
         let config_snip = match b
             .config_read(ConfigReadParams {

@@ -1,6 +1,8 @@
 use mitsuro_core::ai::models::ModelKey;
 use mitsuro_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, DelegatedRunSummary, PartialAssistantState,
+    DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSummary,
+    DelegationEventRecord, DelegationExecutionMode, DelegationGroupRecord, DelegationGroupState,
+    DelegationParentContinuationState, DelegationTaskState, PartialAssistantState,
     PendingInteractionSnapshot, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
     SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
@@ -266,8 +268,60 @@ pub struct SessionStateResponse {
     /// transcript. Unlike recent_delegated_runs, these rows never carry large
     /// snapshots or artifacts.
     pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
+    /// Canonical group/task snapshots. These deliberately exclude objectives,
+    /// result artifacts, tool output, and error text.
+    pub delegation_groups: Vec<DelegationGroupStateResponse>,
+    /// Cursor-replay window from the append-only delegation event stream.
+    pub delegation_events: Vec<DelegationEventRecord>,
+    pub delegation_event_cursor: Option<i64>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegationGroupStateResponse {
+    pub delegation_group_id: String,
+    pub parent_tool_call_id: Option<String>,
+    pub state: DelegationGroupState,
+    pub execution_mode: DelegationExecutionMode,
+    pub parent_continuation_state: DelegationParentContinuationState,
+    pub tasks: Vec<DelegationTaskStateResponse>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegationTaskStateResponse {
+    pub delegation_task_id: String,
+    pub task_key: String,
+    pub role: DelegatedRunRole,
+    pub state: DelegationTaskState,
+    pub attempt_count: usize,
+    pub updated_at: String,
+}
+
+impl From<DelegationGroupRecord> for DelegationGroupStateResponse {
+    fn from(group: DelegationGroupRecord) -> Self {
+        Self {
+            delegation_group_id: group.delegation_group_id,
+            parent_tool_call_id: group.parent_tool_call_id,
+            state: group.state,
+            execution_mode: group.contract.execution_mode,
+            parent_continuation_state: group.parent_continuation_state,
+            tasks: group
+                .tasks
+                .into_iter()
+                .map(|task| DelegationTaskStateResponse {
+                    delegation_task_id: task.specification.delegation_task_id,
+                    task_key: task.specification.task_key,
+                    role: task.specification.role,
+                    state: task.state,
+                    attempt_count: task.attempt_count,
+                    updated_at: task.updated_at.to_rfc3339(),
+                })
+                .collect(),
+            updated_at: group.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +361,10 @@ impl DelegatedToolStateResponse {
         let tool_call_id = record.parent_tool_call_id.clone()?;
         let snapshot = record.snapshot.as_ref()?;
         let status = |status: &str| match status {
+            "created" => DelegatedProgressStatus::Created,
+            "queued" => DelegatedProgressStatus::Queued,
+            "leased" => DelegatedProgressStatus::Leased,
+            "retrying" => DelegatedProgressStatus::Retrying,
             "complete" => DelegatedProgressStatus::Complete,
             "degraded" => DelegatedProgressStatus::Degraded,
             "cancelled" => DelegatedProgressStatus::Cancelled,

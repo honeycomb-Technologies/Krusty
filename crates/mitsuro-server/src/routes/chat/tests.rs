@@ -1378,6 +1378,7 @@ async fn delegated_progress_survives_sse_disconnect_until_durable_terminal_state
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
 
     // One builder completing is not terminal for a parallel build while the
@@ -1534,6 +1535,7 @@ async fn foreground_finish_closes_sse_while_detached_progress_keeps_updating_sta
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
     let foreground_bridge = tokio::spawn(run_orchestrator_event_bridge(
         event_rx,
@@ -1643,6 +1645,7 @@ async fn terminal_delegated_progress_survives_full_sse_buffer_with_lag_signal() 
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
     let mut loop_skipped = 0;
     assert!(
@@ -1772,6 +1775,7 @@ async fn full_undrained_sse_does_not_hold_foreground_finish_or_session_input_ope
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
     let foreground_bridge = tokio::spawn(run_orchestrator_event_bridge(
         event_rx,
@@ -1921,6 +1925,7 @@ async fn delegated_progress_channel_closure_cleans_only_its_live_snapshots() {
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
 
     progress_tx
@@ -1991,6 +1996,7 @@ async fn delegated_progress_rejects_foreign_session_and_durable_tool_ownership()
         session_id.clone(),
         Arc::clone(&state.delegated_state),
         Arc::clone(&state.db_path),
+        None,
     ));
 
     let mut foreign_session = test_delegated_progress(

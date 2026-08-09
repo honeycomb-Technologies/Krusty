@@ -11,6 +11,9 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
+use mitsuro_desktop_backend::{
+    DelegationGroupStatus, DelegationTaskStatus, SessionDelegationProjection,
+};
 
 use crate::app::{MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer};
@@ -160,9 +163,10 @@ fn thread_main(
         .as_ref()
         .map(|t| t.messages.as_slice())
         .unwrap_or(&[]);
+    let delegation = app.selected_delegation();
     let transcript_visible_limit = app.transcript_visible_limit();
     // Selected + empty messages → loading (thread/read), not calm hero.
-    let loading_transcript = thread.is_some() && messages.is_empty();
+    let loading_transcript = thread.is_some() && messages.is_empty() && delegation.is_none();
     let empty = thread.is_none();
     let calm = app.is_calm_stage();
     // Open-thread chrome whenever a recent is selected (not calm home).
@@ -210,7 +214,7 @@ fn thread_main(
                             empty_state(surface, chat_mode, calm, composer_input, cx)
                                 .into_any_element()
                         } else {
-                            transcript(messages, surface, transcript_visible_limit, cx)
+                            transcript(messages, surface, delegation, transcript_visible_limit, cx)
                                 .into_any_element()
                         })
                         .when_some(app.pending_approval().cloned(), |this, pending| {
@@ -771,6 +775,7 @@ fn mitsuro_cloud_mark() -> impl IntoElement {
 fn transcript(
     messages: &[DemoMessage],
     surface: ThreadSurface,
+    delegation: Option<&SessionDelegationProjection>,
     visible_limit: usize,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
@@ -799,6 +804,9 @@ fn transcript(
         .children(visible.iter().enumerate().map(|(i, msg)| {
             transcript_block((first_visible_index + i) as u64, msg, simple_bubbles)
         }))
+        .when_some(delegation, |this, projection| {
+            this.child(delegation_block(projection))
+        })
 }
 
 fn transcript_tail_range(total: usize, visible_limit: usize) -> std::ops::Range<usize> {
@@ -834,6 +842,139 @@ fn show_earlier_button(
                 }))
                 .child(format!("Show {next_count} earlier · {hidden_count} hidden")),
         )
+}
+
+fn delegation_block(projection: &SessionDelegationProjection) -> impl IntoElement {
+    let colors = theme::colors();
+    let (active_groups, active_tasks) = projection.active_counts();
+    div()
+        .id("delegation-transcript-block")
+        .flex()
+        .flex_col()
+        .w_full()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_elevated)
+        .px(px(12.0))
+        .py(px(10.0))
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text_secondary)
+                        .child("Delegation"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(format!(
+                            "{active_groups} active groups · {active_tasks} active tasks"
+                        )),
+                ),
+        )
+        .children(
+            projection
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(group_index, group)| {
+                    let group_status_color = delegation_group_status_color(group.status);
+                    div()
+                        .id(("delegation-group", group_index))
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap(px(5.0))
+                        .pt(px(6.0))
+                        .border_t_1()
+                        .border_color(colors.border_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_tertiary)
+                                        .child(group.id.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(group_status_color)
+                                        .child(group.status.label()),
+                                ),
+                        )
+                        .children(group.tasks.iter().enumerate().map(|(task_index, task)| {
+                            div()
+                                .id(("delegation-task", group_index * 10_000 + task_index))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(10.0))
+                                .pl(px(8.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.text)
+                                        .child(task.key.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(delegation_task_status_color(
+                                                    task.status,
+                                                ))
+                                                .child(task.status.label()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.text_tertiary)
+                                                .child(format!("attempts {}", task.attempt_count)),
+                                        ),
+                                )
+                        }))
+                }),
+        )
+}
+
+fn delegation_group_status_color(status: DelegationGroupStatus) -> gpui::Hsla {
+    let colors = theme::colors();
+    match status {
+        DelegationGroupStatus::Complete => colors.status_ready,
+        DelegationGroupStatus::Degraded => colors.accent_orange,
+        DelegationGroupStatus::Failed => colors.status_error,
+        DelegationGroupStatus::Cancelled => colors.status_offline,
+        _ => colors.status_connecting,
+    }
+}
+
+fn delegation_task_status_color(status: DelegationTaskStatus) -> gpui::Hsla {
+    let colors = theme::colors();
+    match status {
+        DelegationTaskStatus::Complete => colors.status_ready,
+        DelegationTaskStatus::Degraded => colors.accent_orange,
+        DelegationTaskStatus::Failed => colors.status_error,
+        DelegationTaskStatus::Cancelled => colors.status_offline,
+        _ => colors.status_connecting,
+    }
 }
 
 fn transcript_block(index: u64, msg: &DemoMessage, simple_bubbles: bool) -> gpui::AnyElement {

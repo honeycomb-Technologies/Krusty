@@ -6,17 +6,22 @@ use uuid::Uuid;
 
 use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
-    build_context::SharedBuildContext, AgentCapability, AgentProgress, DelegatedProcessArtifact,
-    SubAgentPool, SubAgentResult, SubAgentTask, SubAgentTermination,
+    build_context::SharedBuildContext, AgentCapability, AgentProgress, BackpressureSignal,
+    BuildIsolationMaterializationGuard, BuildIsolationSet, DelegatedProcessArtifact, SubAgentPool,
+    SubAgentResult, SubAgentTask, SubAgentTermination,
 };
+use crate::agent::DelegationCoordinator;
 use crate::agent::{AgentCancellation, DelegatedRunStage};
 use crate::storage::{
     DelegatedRunCreateOutcome, DelegatedRunLease, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, ProjectSettings,
+    DelegatedRunStartInput, DelegationCompletionPolicy, DelegationExecutionMode,
+    DelegationExecutorKind, DelegationFailurePolicy, DelegationGovernance, DelegationGroupContract,
+    DelegationGroupStartInput, DelegationTaskSpec, DelegationWriterMode, ProjectSettings,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
 
+use super::single::build_detached_executor_envelope;
 use super::{
     agent_progress_for_terminal_stage, background_started_result, build_confidence,
     build_coverage_gap_notice, build_investigation_summary, classify_build_outcome,
@@ -56,6 +61,22 @@ async fn revalidate_background_processes(
             .as_ref()
             .map(|info| info.display_status().to_string())
             .unwrap_or_else(|| "missing".to_string());
+    }
+}
+
+async fn discard_unowned_build_isolation(
+    isolation: &mut Option<BuildIsolationSet>,
+    delegated_run_id: &str,
+) {
+    let Some(isolation) = isolation.take() else {
+        return;
+    };
+    if let Err(error) = isolation.discard().await {
+        warn!(
+            delegated_run_id,
+            %error,
+            "Failed to discard an unowned delegated build isolation batch"
+        );
     }
 }
 
@@ -283,7 +304,7 @@ impl AgentTool {
                 "Background build was not started because it has no durable parent session.",
             );
         }
-        let mut target_scope = vec![workspace_scope];
+        let mut target_scope = vec![workspace_scope.clone()];
         let parent_name = params.name.as_deref().unwrap_or("child");
         let project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
@@ -388,6 +409,122 @@ impl AgentTool {
             tasks.push(task);
         }
 
+        // Serialize the narrow pre-group materialization interval. If a prior
+        // process died after preparing these deterministic worktrees but
+        // before creating the durable group, remove only the abandoned batch
+        // after proving that no canonical group owns it.
+        let materialization_guard = if tasks.len() > 1 {
+            let guard =
+                match BuildIsolationMaterializationGuard::acquire(delegated_run_id.clone()).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return ToolResult::error_with_code(
+                            "agent_workspace_isolation_error",
+                            format!(
+                                "Parallel builders could not reserve their isolated batch: {error}"
+                            ),
+                        );
+                    }
+                };
+            if let Some(db_path) = ctx.db_path.as_ref() {
+                let coordinator = DelegationCoordinator::new(db_path.clone());
+                match coordinator.get_group(&delegated_run_id) {
+                    Ok(Some(_)) => {
+                        return ToolResult::error_with_code(
+                            "agent_persistence_error",
+                            "Delegated build was not started because its durable group already exists.",
+                        );
+                    }
+                    Ok(None) => {
+                        if let Err(error) = guard
+                            .remove_abandoned_preparation(
+                                ctx.project_dir
+                                    .as_ref()
+                                    .expect("build checked project directory")
+                                    .clone(),
+                                tasks.len(),
+                            )
+                            .await
+                        {
+                            return ToolResult::error_with_code(
+                                "agent_workspace_isolation_error",
+                                format!(
+                                    "Parallel builders found an ambiguous abandoned isolation batch and retained it for recovery: {error}"
+                                ),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        return ToolResult::error_with_code(
+                            "agent_persistence_error",
+                            format!("Parallel builders could not check durable batch ownership: {error}"),
+                        );
+                    }
+                }
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        // Real parallel writers execute in detached Git worktrees captured
+        // from the same dirty source snapshot. Non-Git projects deliberately
+        // retain the serial shared-workspace compatibility path.
+        let mut build_isolation = if tasks.len() > 1 {
+            match BuildIsolationSet::prepare(
+                ctx.project_dir
+                    .as_ref()
+                    .expect("build checked project directory")
+                    .clone(),
+                ctx.working_dir.clone(),
+                delegated_run_id.clone(),
+                tasks.iter().map(|task| task.id.clone()).collect(),
+            )
+            .await
+            {
+                Ok(isolation) => isolation,
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_workspace_isolation_error",
+                        format!(
+                            "Parallel builders were not started because isolated workspaces could not be prepared: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(isolation) = build_isolation.as_ref() {
+            for task in &mut tasks {
+                let workspace = isolation
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.task_id == task.id)
+                    .expect("isolation workspace exists for every builder");
+                let source_project = ctx
+                    .project_dir
+                    .as_ref()
+                    .expect("build checked project directory")
+                    .display()
+                    .to_string();
+                let source_working = ctx.working_dir.display().to_string();
+                task.prompt = task
+                    .prompt
+                    .replace(&source_project, &workspace.root.display().to_string())
+                    .replace(
+                        &source_working,
+                        &workspace.working_dir.display().to_string(),
+                    );
+                task.prompt.push_str(&format!(
+                    "\n\n[ISOLATED WRITE WORKSPACE]\nAll writes and commands for this attempt must remain under {}. The authoritative source workspace is unchanged until parent synthesis applies your patch.\n[/ISOLATED WRITE WORKSPACE]",
+                    workspace.root.display()
+                ));
+                task.working_dir = workspace.working_dir.clone();
+                task.sandbox_root = Some(workspace.root.clone());
+            }
+        }
+
         let durable_run_started = if let (Some(lease), Some(session_id)) =
             (delegated_lease.as_mut(), ctx.session_id.as_ref())
         {
@@ -401,7 +538,7 @@ impl AgentTool {
                 model: Some(client.config().model.clone()),
                 resumable: true,
                 resumed_from_run_id: params.resumed_from_run_id.clone(),
-                target_scope,
+                target_scope: target_scope.clone(),
             };
             let create = if background {
                 lease.create_background_run_with_child_contract(
@@ -418,9 +555,11 @@ impl AgentTool {
                     delegated_run_id,
                     resumed_from_run_id,
                 }) => {
+                    discard_unowned_build_isolation(&mut build_isolation, &delegated_run_id).await;
                     return existing_continuation_error(&resumed_from_run_id, &delegated_run_id);
                 }
                 Err(error) => {
+                    discard_unowned_build_isolation(&mut build_isolation, &delegated_run_id).await;
                     return ToolResult::error_with_code(
                         "agent_persistence_error",
                         format!(
@@ -434,11 +573,134 @@ impl AgentTool {
             false
         };
         if background && !durable_run_started {
+            discard_unowned_build_isolation(&mut build_isolation, &delegated_run_id).await;
             return ToolResult::error_with_code(
                 "agent_persistence_error",
                 "Background build was not started because durable run creation was unavailable.",
             );
         }
+
+        // Establish the parent-owned group only after its compatibility run
+        // exists. Older clients continue to consume that aggregate run while
+        // every component now executes under a distinct durable logical task.
+        let mut delegation_coordinator = None;
+        if durable_run_started && !tasks.is_empty() {
+            let db_path = ctx
+                .db_path
+                .as_ref()
+                .expect("durable delegated build has a database path");
+            let session_id = ctx
+                .session_id
+                .as_ref()
+                .expect("durable delegated build has a parent session");
+            let coordinator = DelegationCoordinator::new(db_path.clone());
+            let resolved_model = client.resolved_model().wire_model_id.clone();
+            let task_specs = match tasks
+                .iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let isolated = build_isolation.as_ref().and_then(|isolation| {
+                        isolation
+                            .workspaces()
+                            .iter()
+                            .find(|workspace| workspace.task_id == task.id)
+                    });
+                    let delegation_task_id = format!("{delegated_run_id}:task:{index}");
+                    let executor_envelope = if background {
+                        Some(build_detached_executor_envelope(
+                            ctx,
+                            &delegation_task_id,
+                            &task.name,
+                            &task.prompt,
+                            DelegationExecutorKind::Build,
+                            DelegatedRunRole::Build,
+                            &client.resolved_model().key,
+                            &resolved_model,
+                            &task.working_dir,
+                            task.sandbox_root.as_deref().unwrap_or(&task.working_dir),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok::<_, String>(DelegationTaskSpec {
+                        delegation_task_id,
+                        task_key: task.id.clone(),
+                        objective: task.prompt.clone(),
+                        role: DelegatedRunRole::Build,
+                        target_scope: vec![
+                            workspace_scope.clone(),
+                            DelegatedRunScope {
+                                label: task.name.clone(),
+                                path: task.id.clone(),
+                                kind: "component".to_string(),
+                            },
+                        ],
+                        max_attempts: 2,
+                        writer_mode: if isolated.is_some() {
+                            DelegationWriterMode::Isolated
+                        } else {
+                            DelegationWriterMode::Shared
+                        },
+                        attempt_workspace: isolated
+                            .map(|workspace| workspace.root.display().to_string()),
+                        workspace_baseline: isolated
+                            .map(|workspace| workspace.baseline_commit.clone()),
+                        executor_envelope,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(specifications) => specifications,
+                Err(error) => {
+                    discard_unowned_build_isolation(&mut build_isolation, &delegated_run_id).await;
+                    return ToolResult::error_with_code("agent_persistence_error", error);
+                }
+            };
+            let group_input = DelegationGroupStartInput {
+                delegation_group_id: delegated_run_id.clone(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: ctx.tool_use_id.clone(),
+                contract: DelegationGroupContract {
+                    execution_mode: if background {
+                        DelegationExecutionMode::Detached
+                    } else {
+                        DelegationExecutionMode::Foreground
+                    },
+                    completion_policy: DelegationCompletionPolicy::AllSettled,
+                    failure_policy: DelegationFailurePolicy::Continue,
+                    governance: DelegationGovernance {
+                        permission_mode: ctx.permission_mode,
+                        delegated_turn_budget: params.max_turns.unwrap_or(20),
+                        max_parallelism: concurrency.unwrap_or(tasks.len()).max(1).min(tasks.len()),
+                        execution_tool_allowlist: delegation_policy
+                            .execution_tool_allowlist
+                            .clone(),
+                        delegation_policy: delegation_policy.clone(),
+                    },
+                },
+                tasks: task_specs.clone(),
+            };
+            if let Err(error) = coordinator.create_group(&group_input) {
+                if matches!(coordinator.get_group(&delegated_run_id), Ok(None)) {
+                    discard_unowned_build_isolation(&mut build_isolation, &delegated_run_id).await;
+                }
+                return ToolResult::error_with_code(
+                    "agent_persistence_error",
+                    format!(
+                        "Delegated build was not started because its durable group could not be created: {error}"
+                    ),
+                );
+            }
+            for (task, specification) in tasks.iter_mut().zip(task_specs) {
+                *task = task.clone().with_delegation_task(
+                    delegated_run_id.clone(),
+                    specification.delegation_task_id,
+                );
+                task.max_turns_override = Some(params.max_turns.unwrap_or(20));
+            }
+            delegation_coordinator = Some(coordinator);
+        }
+        drop(materialization_guard);
 
         info!("Agent tool (build): Created {} builder tasks", tasks.len());
         for (i, task) in tasks.iter().enumerate() {
@@ -485,6 +747,9 @@ impl AgentTool {
         if let Some(ceiling) = concurrency {
             pool = pool.with_concurrency(ceiling);
         }
+        if let Some(coordinator) = delegation_coordinator.clone() {
+            pool = pool.with_delegation_coordinator(coordinator);
+        }
 
         info!(
             "Agent tool (build): Starting adaptive builder pool with concurrency_ceiling={:?} (components={}), background={}",
@@ -502,6 +767,9 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_process_registry = ctx.process_registry.clone();
             let bg_process_owner_id = ctx.user_id.clone();
+            let bg_group_coordinator = delegation_coordinator.clone();
+            let mut bg_build_isolation = build_isolation.take();
+            let bg_integration_workspace = workspace_scope.path.clone();
             let mut bg_runtime_registration = background_runtime_registration
                 .expect("background build registered live runtime ownership");
             let progress_tx = ctx.agent_progress_tx.clone();
@@ -516,6 +784,8 @@ impl AgentTool {
             ) {
                 Ok(heartbeat) => heartbeat,
                 Err(error) => {
+                    discard_unowned_build_isolation(&mut bg_build_isolation, &bg_delegated_run_id)
+                        .await;
                     return ToolResult::error_with_code(
                         "agent_persistence_error",
                         format!(
@@ -537,6 +807,80 @@ impl AgentTool {
                     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                     pool.execute_builders(tasks, context.clone(), tx).await
                 };
+                let synthesis_permit = if let Some(coordinator) = bg_group_coordinator.as_ref() {
+                    match coordinator.begin_synthesis(&bg_delegated_run_id) {
+                        Ok(permit) => Some(permit),
+                        Err(error) => {
+                            tracing::error!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                %error,
+                                "Stopping background aggregate because durable synthesis ownership was not acquired"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                if synthesis_permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.cancellation().is_cancelled())
+                {
+                    tracing::warn!(
+                        delegated_run_id = %bg_delegated_run_id,
+                        "Stopping background integration after durable synthesis ownership was lost"
+                    );
+                    return;
+                }
+                if let Some(isolation) = bg_build_isolation {
+                    if let Some(integration_permit) = pool
+                        .acquire_integration_writer(
+                            bg_session_id
+                                .clone()
+                                .unwrap_or_else(|| bg_delegated_run_id.clone()),
+                            bg_integration_workspace,
+                        )
+                        .await
+                    {
+                        if synthesis_permit
+                            .as_ref()
+                            .is_some_and(|permit| permit.cancellation().is_cancelled())
+                        {
+                            integration_permit.complete(BackpressureSignal::Cancelled);
+                            tracing::warn!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                "Stopping background integration after synthesis lease loss"
+                            );
+                            return;
+                        }
+                        results = isolation.integrate(results).await;
+                        let signal = if results.iter().any(|result| !result.success) {
+                            BackpressureSignal::Failed
+                        } else {
+                            BackpressureSignal::Healthy
+                        };
+                        integration_permit.complete(signal);
+                    } else {
+                        for result in &mut results {
+                            result.success = false;
+                            result.termination = SubAgentTermination::Cancelled;
+                            result.error = Some(
+                                "Isolated build integration was cancelled; recovery workspaces were retained."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                if synthesis_permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.cancellation().is_cancelled())
+                {
+                    tracing::warn!(
+                        delegated_run_id = %bg_delegated_run_id,
+                        "Suppressing background aggregate publication after synthesis lease loss"
+                    );
+                    return;
+                }
 
                 for result in &mut results {
                     revalidate_background_processes(
@@ -692,6 +1036,17 @@ impl AgentTool {
 
                 match finalization {
                     Ok(authoritative) => {
+                        if let Some(synthesis_permit) = synthesis_permit {
+                            let group_state = group_terminal_state(authoritative.stage);
+                            if let Err(error) = synthesis_permit.finalize(group_state) {
+                                tracing::error!(
+                                    delegated_run_id = %bg_delegated_run_id,
+                                    %error,
+                                    "Suppressing background parent wake because delegation group finalization failed"
+                                );
+                                return;
+                            }
+                        }
                         bg_run_lease.disarm(&bg_delegated_run_id);
                         let build_success = authoritative.stage == DelegatedRunStage::Complete;
                         let authoritative_summary = authoritative
@@ -773,6 +1128,75 @@ impl AgentTool {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             pool.execute_builders(tasks, context.clone(), tx).await
         };
+        let synthesis_permit = if let Some(coordinator) = delegation_coordinator.as_ref() {
+            match coordinator.begin_synthesis(&delegated_run_id) {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_delegation_synthesis_busy",
+                        format!("Delegation synthesis could not be claimed: {error}"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        if synthesis_permit
+            .as_ref()
+            .is_some_and(|permit| permit.cancellation().is_cancelled())
+        {
+            return ToolResult::error_with_code(
+                "agent_delegation_synthesis_lost",
+                "Delegation synthesis ownership was lost before build integration; recovery workspaces were retained.",
+            );
+        }
+        if let Some(isolation) = build_isolation {
+            if let Some(integration_permit) = pool
+                .acquire_integration_writer(
+                    ctx.session_id
+                        .clone()
+                        .unwrap_or_else(|| delegated_run_id.clone()),
+                    workspace_scope.path.clone(),
+                )
+                .await
+            {
+                if synthesis_permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.cancellation().is_cancelled())
+                {
+                    integration_permit.complete(BackpressureSignal::Cancelled);
+                    return ToolResult::error_with_code(
+                        "agent_delegation_synthesis_lost",
+                        "Delegation synthesis ownership was lost while waiting to integrate; recovery workspaces were retained.",
+                    );
+                }
+                results = isolation.integrate(results).await;
+                let signal = if results.iter().any(|result| !result.success) {
+                    BackpressureSignal::Failed
+                } else {
+                    BackpressureSignal::Healthy
+                };
+                integration_permit.complete(signal);
+            } else {
+                for result in &mut results {
+                    result.success = false;
+                    result.termination = SubAgentTermination::Cancelled;
+                    result.error = Some(
+                        "Isolated build integration was cancelled; recovery workspaces were retained."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if synthesis_permit
+            .as_ref()
+            .is_some_and(|permit| permit.cancellation().is_cancelled())
+        {
+            return ToolResult::error_with_code(
+                "agent_delegation_synthesis_lost",
+                "Delegation synthesis ownership was lost before aggregate publication; inspect the retained integration marker/workspaces.",
+            );
+        }
 
         for result in &mut results {
             revalidate_background_processes(
@@ -960,6 +1384,13 @@ impl AgentTool {
                 }
             };
             lease.disarm(&delegated_run_id);
+            if let Some(synthesis_permit) = synthesis_permit {
+                if let Err(error) =
+                    synthesis_permit.finalize(group_terminal_state(authoritative.stage))
+                {
+                    return delegated_persistence_error(&delegated_run_id, payload, &error);
+                }
+            }
             // Individual builders finish before the aggregate artifact does.
             // Re-emit one authoritative aggregate boundary after persistence
             // so the foreground card cannot be stranded in Running.
@@ -996,6 +1427,18 @@ impl AgentTool {
             ]
         };
         ToolResult::success_data_with(payload, warnings, None, None)
+    }
+}
+
+fn group_terminal_state(stage: DelegatedRunStage) -> crate::storage::DelegationGroupState {
+    match stage {
+        DelegatedRunStage::Complete => crate::storage::DelegationGroupState::Complete,
+        DelegatedRunStage::Degraded => crate::storage::DelegationGroupState::Degraded,
+        DelegatedRunStage::Failed => crate::storage::DelegationGroupState::Failed,
+        DelegatedRunStage::Cancelled => crate::storage::DelegationGroupState::Cancelled,
+        DelegatedRunStage::Created
+        | DelegatedRunStage::Running
+        | DelegatedRunStage::Synthesizing => crate::storage::DelegationGroupState::Failed,
     }
 }
 

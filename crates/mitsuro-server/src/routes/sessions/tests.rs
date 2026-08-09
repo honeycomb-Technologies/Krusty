@@ -1144,6 +1144,7 @@ async fn get_session_state_evicts_stale_live_running_and_indexes_old_terminal_ru
         Path(session_id),
         Query(state::GetSessionStateQuery {
             include_delegated_history: true,
+            delegation_after_cursor: None,
         }),
     )
     .await
