@@ -11,7 +11,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 
+use super::build_context::SharedBuildContext;
 use super::{SubAgentResult, SubAgentTermination};
 
 #[derive(Debug, Clone)]
@@ -383,7 +385,19 @@ impl BuildIsolationSet {
     /// Conflicted worktrees are retained for recovery and their task result is
     /// downgraded before aggregate synthesis.
     pub async fn integrate(self, results: Vec<SubAgentResult>) -> Vec<SubAgentResult> {
-        self.integrate_with_fence(results, None).await
+        self.integrate_with_fence(results, None, None).await
+    }
+
+    /// Apply child patches and project their authoritative diff statistics into
+    /// the aggregate build context. Child tool counters belong to isolated
+    /// worktrees, so the integration boundary is the source of truth.
+    pub async fn integrate_recording(
+        self,
+        results: Vec<SubAgentResult>,
+        context: Arc<SharedBuildContext>,
+    ) -> Vec<SubAgentResult> {
+        self.integrate_with_fence(results, None, Some(context))
+            .await
     }
 
     /// Recovery-only integration under a caller-provided durable owner fence.
@@ -394,13 +408,15 @@ impl BuildIsolationSet {
         results: Vec<SubAgentResult>,
         owner_fence: std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>,
     ) -> Vec<SubAgentResult> {
-        self.integrate_with_fence(results, Some(owner_fence)).await
+        self.integrate_with_fence(results, Some(owner_fence), None)
+            .await
     }
 
     async fn integrate_with_fence(
         self,
         results: Vec<SubAgentResult>,
         owner_fence: Option<std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+        build_context: Option<Arc<SharedBuildContext>>,
     ) -> Vec<SubAgentResult> {
         let fallback = results
             .iter()
@@ -408,7 +424,11 @@ impl BuildIsolationSet {
             .collect::<Vec<_>>();
         let mut owned_results = results;
         match tokio::task::spawn_blocking(move || {
-            self.integrate_blocking(&mut owned_results, owner_fence.as_deref())
+            self.integrate_blocking(
+                &mut owned_results,
+                owner_fence.as_deref(),
+                build_context.as_deref(),
+            )
         })
         .await
         {
@@ -438,8 +458,9 @@ impl BuildIsolationSet {
         self,
         results: &mut [SubAgentResult],
         owner_fence: Option<&(dyn Fn() -> Result<()> + Send + Sync)>,
+        build_context: Option<&SharedBuildContext>,
     ) -> Vec<SubAgentResult> {
-        if let Err(error) = self.integrate_batch(results, owner_fence) {
+        if let Err(error) = self.integrate_batch(results, owner_fence, build_context) {
             for workspace in &self.workspaces {
                 if let Some(result) = results
                     .iter_mut()
@@ -478,6 +499,7 @@ impl BuildIsolationSet {
         &self,
         results: &[SubAgentResult],
         owner_fence: Option<&(dyn Fn() -> Result<()> + Send + Sync)>,
+        build_context: Option<&SharedBuildContext>,
     ) -> Result<()> {
         let common_dir = git_common_dir(&self.repo_root)?;
         fs::create_dir_all(&common_dir)?;
@@ -501,6 +523,7 @@ impl BuildIsolationSet {
 
         const MAX_COMBINED_PATCH_BYTES: usize = 64 * 1024 * 1024;
         let mut combined = Vec::new();
+        let mut integrated_changes = Vec::new();
         for workspace in &self.workspaces {
             let should_integrate = results
                 .iter()
@@ -523,6 +546,20 @@ impl BuildIsolationSet {
                 &workspace.baseline_commit,
             ]))?
             .stdout;
+            if build_context.is_some() {
+                let numstat = command_output(Command::new("git").args([
+                    "-C",
+                    &workspace.root.display().to_string(),
+                    "diff",
+                    "--cached",
+                    "--no-renames",
+                    "--numstat",
+                    "-z",
+                    &workspace.baseline_commit,
+                ]))?
+                .stdout;
+                integrated_changes.extend(parse_integration_numstat(&workspace.task_id, &numstat));
+            }
             ensure!(
                 combined.len().saturating_add(patch.len()) <= MAX_COMBINED_PATCH_BYTES,
                 "delegated integration patch exceeds the bounded size"
@@ -583,8 +620,41 @@ impl BuildIsolationSet {
             }
         }
         persist_integration_marker(&marker, &self.group_id)?;
+        if let Some(build_context) = build_context {
+            for change in integrated_changes {
+                build_context.record_modification(change.path, change.task_id);
+                build_context.record_line_changes(change.additions, change.deletions);
+            }
+        }
         Ok(())
     }
+}
+
+struct IntegrationChange {
+    task_id: String,
+    path: PathBuf,
+    additions: usize,
+    deletions: usize,
+}
+
+fn parse_integration_numstat(task_id: &str, bytes: &[u8]) -> Vec<IntegrationChange> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .filter_map(|field| {
+            let field = String::from_utf8_lossy(field);
+            let mut parts = field.splitn(3, '\t');
+            let additions = parts.next()?.parse().unwrap_or(0);
+            let deletions = parts.next()?.parse().unwrap_or(0);
+            let path = PathBuf::from(parts.next()?);
+            Some(IntegrationChange {
+                task_id: task_id.to_string(),
+                path,
+                additions,
+                deletions,
+            })
+        })
+        .collect()
 }
 
 fn prepare_one(repo: &Path, root: &Path, source_patch: &[u8], untracked: &[u8]) -> Result<()> {
@@ -937,8 +1007,9 @@ mod tests {
         fs::write(isolation.workspaces()[1].root.join("src/b.txt"), "b\n").expect("task b output");
         assert!(!repo.join("src/a.txt").exists());
 
+        let context = Arc::new(SharedBuildContext::new());
         let results = isolation
-            .integrate(vec![result("task-a"), result("task-b")])
+            .integrate_recording(vec![result("task-a"), result("task-b")], context.clone())
             .await;
         assert!(results.iter().all(|result| result.success), "{results:?}");
         assert_eq!(fs::read_to_string(repo.join("src/a.txt")).unwrap(), "a\n");
@@ -947,6 +1018,10 @@ mod tests {
             fs::read_to_string(repo.join("src/base.txt")).unwrap(),
             "dirty source\n"
         );
+        let stats = context.stats();
+        assert_eq!(stats.files_modified, 2);
+        assert_eq!(stats.lines_added, 2);
+        assert_eq!(stats.lines_removed, 0);
     }
 
     #[tokio::test]
@@ -984,12 +1059,14 @@ mod tests {
             .map(|workspace| workspace.root.clone())
             .collect::<Vec<_>>();
 
+        let context = Arc::new(SharedBuildContext::new());
         let results = isolation
-            .integrate(vec![result("task-a"), result("task-b")])
+            .integrate_recording(vec![result("task-a"), result("task-b")], context.clone())
             .await;
 
         assert!(results.iter().all(|result| result.success), "{results:?}");
         assert!(roots.iter().all(|root| !root.exists()));
+        assert_eq!(context.stats().files_modified, 0);
     }
 
     #[tokio::test]

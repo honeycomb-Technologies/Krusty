@@ -853,7 +853,9 @@ impl AgentTool {
                             );
                             return;
                         }
-                        results = isolation.integrate(results).await;
+                        results = isolation
+                            .integrate_recording(results, context.clone())
+                            .await;
                         let signal = if results.iter().any(|result| !result.success) {
                             BackpressureSignal::Failed
                         } else {
@@ -1170,7 +1172,9 @@ impl AgentTool {
                         "Delegation synthesis ownership was lost while waiting to integrate; recovery workspaces were retained.",
                     );
                 }
-                results = isolation.integrate(results).await;
+                results = isolation
+                    .integrate_recording(results, context.clone())
+                    .await;
                 let signal = if results.iter().any(|result| !result.success) {
                     BackpressureSignal::Failed
                 } else {
