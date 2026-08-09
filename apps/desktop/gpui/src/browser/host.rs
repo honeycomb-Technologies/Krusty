@@ -1,8 +1,8 @@
-//! `BrowserHost` trait + mock / wry-linked desktop host with history.
+//! `BrowserHost` trait plus external-bridge / wry-linked URL history.
 
 use crate::app::BrowserSessionStatus;
 
-/// Contract for Atlas navigation (mock or native WebView backend).
+/// Contract for Atlas URL navigation (external or native WebView backend).
 pub trait BrowserHost {
     fn navigate(&mut self, url: &str);
     fn go_back(&mut self) -> bool;
@@ -11,7 +11,7 @@ pub trait BrowserHost {
     fn reload(&mut self);
     fn url(&self) -> &str;
     fn title(&self) -> &str;
-    /// Mock page body / summary shown until a real WebView surface is parented.
+    /// Honest page-state summary. This host never fabricates remote page content.
     fn page_body(&self) -> &str;
     fn status(&self) -> BrowserSessionStatus;
     #[allow(dead_code)] // agent session status transitions
@@ -24,7 +24,7 @@ pub trait BrowserHost {
     fn engine_version(&self) -> Option<&str>;
 }
 
-/// One history entry (URL + title + mock body).
+/// One history entry. `body` describes the bridge state, not remote page content.
 #[derive(Clone, Debug)]
 pub struct PageEntry {
     pub url: String,
@@ -36,14 +36,14 @@ pub struct PageEntry {
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // inspected via host_kind / tests
 pub enum HostBackend {
-    /// Pure mock — no wry linked.
+    /// External browser bridge — no embedded renderer linked.
     Mock,
-    /// wry compiled + WebKitGTK available; surface still mock until GPUI child embed.
+    /// wry compiled + WebKitGTK available; embedding still depends on the native bridge.
     #[cfg(feature = "browser-native")]
     WryLinked { webkit_version: Option<String> },
 }
 
-/// Desktop Atlas host: history stack + mock page content, optional wry linkage.
+/// Desktop Atlas host: local URL history plus optional wry linkage.
 #[derive(Clone, Debug)]
 pub struct DesktopBrowserHost {
     history: Vec<PageEntry>,
@@ -57,7 +57,7 @@ pub struct DesktopBrowserHost {
 pub type MockBrowserHost = DesktopBrowserHost;
 
 impl DesktopBrowserHost {
-    /// Pure mock host (also used when `browser-native` is off).
+    /// External-bridge host (used when `browser-native` is off).
     #[cfg_attr(feature = "browser-native", allow(dead_code))]
     pub fn new_mock() -> Self {
         Self::with_backend(HostBackend::Mock, BrowserSessionStatus::NoNativeHost)
@@ -73,7 +73,7 @@ impl DesktopBrowserHost {
     }
 
     fn with_backend(backend: HostBackend, status: BrowserSessionStatus) -> Self {
-        let initial = page_for_url("https://mitsuro.local/atlas/demo");
+        let initial = page_for_url("about:blank");
         Self {
             history: vec![initial],
             index: 0,
@@ -112,7 +112,7 @@ impl BrowserHost for DesktopBrowserHost {
         self.history.truncate(self.index + 1);
         self.history.push(page_for_url(&normalized));
         self.index = self.history.len() - 1;
-        // Keep explicit NoNativeHost when mock-only; otherwise Ready after a nav.
+        // Keep explicit NoNativeHost for an external-only build; otherwise Ready after a nav.
         match &self.backend {
             HostBackend::Mock => {
                 self.status = BrowserSessionStatus::NoNativeHost;
@@ -176,9 +176,9 @@ impl BrowserHost for DesktopBrowserHost {
 
     fn host_kind(&self) -> &'static str {
         match &self.backend {
-            HostBackend::Mock => "Mock (history)",
+            HostBackend::Mock => "System browser (external)",
             #[cfg(feature = "browser-native")]
-            HostBackend::WryLinked { .. } => "wry/WebKitGTK (linked · bridge/mock)",
+            HostBackend::WryLinked { .. } => "wry/WebKitGTK (linked bridge)",
         }
     }
 
@@ -228,8 +228,8 @@ fn page_for_url(url: &str) -> PageEntry {
 }
 
 fn title_for_url(url: &str) -> String {
-    if url.contains("mitsuro.local/atlas/demo") {
-        return "Mitsuro Atlas · demo page".into();
+    if url == "about:blank" {
+        return "New page".into();
     }
     if url.contains("mitsuro.local") {
         return "Mitsuro Atlas".into();
@@ -250,18 +250,10 @@ fn title_for_url(url: &str) -> String {
 }
 
 fn body_for_url(url: &str) -> String {
-    if url.contains("mitsuro.local/atlas/demo") {
-        return "Mitsuro Atlas browser-use surface. In-panel content is a live history mock. \
-                Use Open external (or MITSURO_ATLAS_EXTERNAL=1) to load the real URL in the \
-                system browser. Full wry child embed needs X11 + GTK loop — not wired for \
-                Wayland/Blade yet; see bridge status on this card."
-            .into();
+    if url == "about:blank" {
+        return "No page selected.".into();
     }
-    format!(
-        "Mock page for {url}. History is live in DesktopBrowserHost. Real pages open via the \
-         external/sibling bridge (Open external) until a wry child WebView can be parented \
-         into the GPUI Atlas panel (X11 + MITSURO_ATLAS_EMBED; Wayland unsupported by wry child)."
-    )
+    format!("URL stored locally: {url}. Remote page content is not loaded inside Mitsuro.")
 }
 
 #[cfg(test)]
@@ -273,7 +265,7 @@ mod tests {
         let mut h = DesktopBrowserHost::new_mock();
         assert!(!h.can_go_back());
         assert!(!h.can_go_forward());
-        assert!(h.url().contains("mitsuro.local"));
+        assert_eq!(h.url(), "about:blank");
 
         h.navigate("example.com");
         assert!(h.url().starts_with("https://example.com"));

@@ -18,19 +18,19 @@
 //! when `MITSURO_ATLAS_EMBED=1` and the handle is X11, and otherwise drives a
 //! **bridge**: system browser (`browser-external`) and/or Chromium `--app=` sibling.
 //!
-//! Navigation always updates the in-process mock history host; real loads go to
-//! the bridge target when available.
+//! Navigation always updates local URL history; real loads go to the bridge target
+//! or an explicitly embedded child when available.
 
 use super::external::{
     display_available, open_sibling_app_window, open_system_browser, ExternalOpenResult,
 };
 use super::host::DesktopBrowserHost;
 
-/// How Atlas content is actually shown (beyond the in-panel mock card).
+/// How Atlas opens real page content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeMode {
-    /// wry linked; surface is still the mock card.
-    LinkedMock,
+    /// wry linked, but no live page surface has been attached.
+    LinkedOnly,
     /// User/OS browser via xdg-open (or platform helper).
     External,
     /// Chromium-style `--app=` window (sibling, not parented).
@@ -42,7 +42,7 @@ pub enum BridgeMode {
 impl BridgeMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::LinkedMock => "wry linked · mock surface",
+            Self::LinkedOnly => "wry linked · no page surface",
             Self::External => "external browser bridge",
             Self::Sibling => "sibling app window",
             Self::EmbeddedChild => "wry child embed",
@@ -63,7 +63,7 @@ pub struct AttachReport {
 impl Default for AttachReport {
     fn default() -> Self {
         Self {
-            mode: BridgeMode::LinkedMock,
+            mode: BridgeMode::LinkedOnly,
             handle_kind: None,
             embed_attempted: false,
             detail: "not attached yet".into(),
@@ -110,14 +110,14 @@ impl NativeWebViewHost {
         } else if auto_external {
             BridgeMode::External
         } else {
-            BridgeMode::LinkedMock
+            BridgeMode::LinkedOnly
         };
         let detail = match mode {
             BridgeMode::Sibling => {
                 "sibling mode · Chromium --app= on navigate (not embedded)".into()
             }
             BridgeMode::External => "external mode · system browser on navigate (xdg-open)".into(),
-            BridgeMode::LinkedMock => {
+            BridgeMode::LinkedOnly => {
                 "wry linked · open external or enable MITSURO_ATLAS_EXTERNAL=1".into()
             }
             BridgeMode::EmbeddedChild => "embedded".into(),
@@ -223,7 +223,7 @@ impl NativeWebViewHost {
                 "MITSURO_ATLAS_EMBED set but Wayland: wry child is X11-only; using bridge".into();
         } else if handle_kind == Some("Wayland") {
             self.report.detail = format!(
-                "Wayland handle · child embed unsupported; bridge={} (mock card stays in-panel)",
+                "Wayland handle · child embed unsupported; bridge={}",
                 self.report.mode.label()
             );
         } else if handle_kind == Some("X11") {
@@ -302,7 +302,7 @@ impl NativeWebViewHost {
             (Some(b), true) => format!("embedded + {}", b.summary()),
             (Some(b), false) => b.summary(),
             (None, true) => "loaded in embedded WebView".into(),
-            (None, false) => "mock host only · use Open external".into(),
+            (None, false) => "URL history updated · no page surface attached".into(),
         };
 
         NativeNavOutcome {
@@ -333,7 +333,7 @@ impl Default for NativeWebViewHost {
     }
 }
 
-/// Create the wry-linked desktop history host (mock surface + version).
+/// Create the wry-linked desktop URL-history host.
 pub fn create_wry_linked_host() -> DesktopBrowserHost {
     let webkit_version = wry::webview_version().ok();
     DesktopBrowserHost::new_wry_linked(webkit_version)
@@ -387,7 +387,7 @@ mod tests {
         let out = h.navigate("https://example.com");
         assert!(!out.embedded_loaded);
         assert!(out.bridge.is_none());
-        assert!(out.summary.contains("mock") || out.summary.contains("Open external"));
+        assert!(out.summary.contains("no page surface"));
     }
 
     #[test]

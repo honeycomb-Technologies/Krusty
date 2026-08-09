@@ -38,10 +38,7 @@ use mitsuro_desktop_backend::{
 use crate::browser::open_system_browser;
 #[cfg(feature = "browser-native")]
 use crate::browser::NativeWebViewHost;
-use crate::browser::{
-    create_default_host, discover_browser_profiles, BrowserHost, DesktopBrowserHost,
-    ProfileDiscovery,
-};
+use crate::browser::{create_default_host, BrowserHost, DesktopBrowserHost};
 use crate::components;
 use crate::demo::{
     self, DemoGoal, DemoGoalStatus, DemoMessage, DemoMessageKind, DemoPlanItem, DemoThread,
@@ -603,9 +600,7 @@ pub struct BrowserSession {
     pub status: BrowserSessionStatus,
     pub can_go_back: bool,
     pub can_go_forward: bool,
-    /// Profile import label (discovery summary or stub).
-    pub profile_label: SharedString,
-    /// Mock page body text for the content card.
+    /// Page-state summary from the local bridge. Never remote page content.
     pub page_body: SharedString,
     /// Host backend chip label.
     pub host_kind: SharedString,
@@ -620,7 +615,6 @@ pub struct BrowserSession {
 impl BrowserSession {
     fn from_host(
         host: &DesktopBrowserHost,
-        profile_label: SharedString,
         bridge_detail: SharedString,
         bridge_mode: SharedString,
         host_kind_override: Option<SharedString>,
@@ -631,7 +625,6 @@ impl BrowserSession {
             status: host.status(),
             can_go_back: host.can_go_back(),
             can_go_forward: host.can_go_forward(),
-            profile_label,
             page_body: host.page_body().to_string().into(),
             host_kind: host_kind_override.unwrap_or_else(|| SharedString::from(host.host_kind())),
             engine_version: host
@@ -879,14 +872,12 @@ pub struct MitsuroApp {
     fixture_resume: Option<(String, Vec<TurnStreamEvent>)>,
     /// Live progressive turn: UI submits choice here; runner writes respond_approval.
     live_approval_bridge: Option<Arc<LiveApprovalBridge>>,
-    /// Atlas browser host (history + mock pages; wry-linked when feature on).
+    /// Atlas browser host (URL history + external/native bridge state).
     browser_host: DesktopBrowserHost,
     /// Snapshot synced from `browser_host` for the panel.
     browser: BrowserSession,
     /// Editable Atlas URL bar.
     browser_url_input: Entity<InputState>,
-    /// Last profile discovery (paths only; no secrets).
-    browser_profiles: ProfileDiscovery,
     /// Best-effort native / external bridge (wry child or xdg-open). UI-thread only.
     #[cfg(feature = "browser-native")]
     native_host: NativeWebViewHost,
@@ -948,17 +939,24 @@ impl MitsuroApp {
         let browser_host = create_default_host();
         let initial_url = browser_host.url().to_string();
         let browser_url_input = cx.new(|cx| {
+            let initial_url = if initial_url == "about:blank" {
+                String::new()
+            } else {
+                initial_url
+            };
             InputState::new(window, cx)
                 .placeholder("Enter URL")
                 .default_value(initial_url)
         });
-        // Enter in the URL bar navigates (same as Go).
+        // Enter follows the visible Atlas action: record the URL, then open the real
+        // page through the system-browser bridge.
         cx.subscribe_in(
             &browser_url_input,
             window,
             |app, _input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     app.browser_navigate(window, cx);
+                    app.browser_open_external(cx);
                 }
             },
         )
@@ -1057,14 +1055,13 @@ impl MitsuroApp {
         };
         #[cfg(not(feature = "browser-native"))]
         let (bridge_mode, bridge_detail, host_kind_override) = (
-            SharedString::from("mock only"),
-            SharedString::from("browser-native off · external open still available"),
+            SharedString::from("External"),
+            SharedString::from("System browser owns page content; Mitsuro keeps URL history only"),
             None,
         );
 
         let browser = BrowserSession::from_host(
             &browser_host,
-            "None".into(),
             bridge_detail,
             bridge_mode,
             host_kind_override,
@@ -1127,7 +1124,6 @@ impl MitsuroApp {
             browser_host,
             browser,
             browser_url_input,
-            browser_profiles: ProfileDiscovery::default(),
             #[cfg(feature = "browser-native")]
             native_host,
             terminal: TerminalSession::idle("fixture"),
@@ -2612,12 +2608,6 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Stub action button feedback in Settings rows.
-    pub fn note_settings_action(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.status_line = format!("Settings · {} · {id}", self.settings_section.label()).into();
-        cx.notify();
-    }
-
     /// Catalog models currently shown in Settings / composer chip.
     pub fn models(&self) -> &[ModelInfo] {
         &self.models
@@ -3061,11 +3051,6 @@ impl MitsuroApp {
         &self.browser_url_input
     }
 
-    #[allow(dead_code)] // Settings / profile list UI can bind later
-    pub fn browser_profiles(&self) -> &ProfileDiscovery {
-        &self.browser_profiles
-    }
-
     fn browser_host_kind_label(&self) -> String {
         #[cfg(feature = "browser-native")]
         {
@@ -3088,19 +3073,19 @@ impl MitsuroApp {
         #[cfg(not(feature = "browser-native"))]
         {
             (
-                SharedString::from("mock only"),
-                SharedString::from("browser-native off · use Open external for real URLs"),
+                SharedString::from("External"),
+                SharedString::from(
+                    "System browser owns page content; Mitsuro keeps URL history only",
+                ),
                 None,
             )
         }
     }
 
     fn sync_browser_session(&mut self) {
-        let profile = self.browser.profile_label.clone();
         let (bridge_mode, bridge_detail, host_kind_override) = self.bridge_fields();
         self.browser = BrowserSession::from_host(
             &self.browser_host,
-            profile,
             bridge_detail,
             bridge_mode,
             host_kind_override,
@@ -3210,21 +3195,6 @@ impl MitsuroApp {
         self.sync_browser_session();
         self.sync_url_bar_from_host(window, cx);
         self.status_line = format!("Forward · {url}").into();
-        cx.notify();
-    }
-
-    /// Discover Chrome/Chromium profiles under `~/.config` (paths only; no secrets).
-    pub fn browser_import_profile_stub(&mut self, cx: &mut Context<Self>) {
-        let discovery = discover_browser_profiles();
-        let label = discovery.summary_label();
-        let n = discovery.count();
-        self.browser_profiles = discovery;
-        self.browser.profile_label = label.clone().into();
-        // Keep host status; discovery does not copy files.
-        self.sync_browser_session();
-        self.browser.profile_label = label.clone().into();
-        self.status_line =
-            format!("Import profile · found {n} · no files copied (paths only)").into();
         cx.notify();
     }
 

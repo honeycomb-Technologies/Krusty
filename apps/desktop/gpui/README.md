@@ -37,6 +37,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   exposed until their product interaction and approval semantics are designed.
 - Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio retains
   interactive `process/*`; Mitsuro does not pretend its background-process API is a PTY.
+- Atlas is an explicit system-browser bridge in the default build. It stores local URL
+  history and opens real pages externally; it does not fabricate page content, import
+  browser profiles, or claim access to browser-owned cookies and history.
+- Secondary Settings actions without an implementation are non-interactive and labeled
+  `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
+  separate live implementations.
 
 ## Parity status
 
@@ -45,9 +51,10 @@ window against the reversed ChatGPT desktop reference. This is not yet feature-c
 UI parity. Pull requests and Sites retain their navigation destinations but now render
 explicit capability states: neither backend exposes a typed API for those products, so
 the native client does not show sample repositories, sample deployments, or inactive
-create/review controls. Parts of Atlas/browser and several secondary Settings actions
-remain fixture-only or unavailable. Those surfaces must be wired or retired before the
-native client can be called finalized.
+create/review controls. Atlas/browser and secondary Settings actions now follow the same
+honest capability treatment. Remaining parity work is concentrated in transcript and
+composer interaction details plus persistence or backend wiring for local-only Settings
+choices; the native client should not be called finalized until those are complete.
 
 ## Build
 

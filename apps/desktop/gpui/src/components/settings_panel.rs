@@ -625,7 +625,7 @@ fn linux_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
 
 // ─── Other sections (bar-like multi-row chrome) ─────────────────────────────
 
-fn import_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn import_body(_app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     div()
         .id("settings-import")
         .flex()
@@ -638,7 +638,7 @@ fn import_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEleme
                 .text_xs()
                 .text_color(theme::colors().text_tertiary)
                 .child(
-                    "Choose what to bring over. Your existing Mitsuro setup won’t be affected."
+                    "Import adapters are not connected in this native build. Existing settings are unchanged."
                         .to_string(),
                 ),
         )
@@ -666,26 +666,6 @@ fn import_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEleme
                     "Shared workspaces and instruction packs from Claude Cowork",
                     "Import",
                     "import-claude-cowork",
-                    cx,
-                )),
-        )
-        .child(group_label("Options"))
-        .child(
-            settings_card()
-                .child(toggle_row(
-                    "Include archived chats",
-                    "Also import conversations marked as archived",
-                    "import_archived",
-                    false,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Import history",
-                    "Review previous imports on this machine",
-                    "View",
-                    "import-history",
                     cx,
                 )),
         )
@@ -1877,7 +1857,7 @@ fn plugins_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
         )
 }
 
-fn browser_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn browser_body(_app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     div()
         .id("settings-browser")
         .flex()
@@ -1887,62 +1867,25 @@ fn browser_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
         .child(group_label("Browser"))
         .child(
             settings_card()
-                .child(select_row(
-                    "Default browser",
-                    "Where external links and Atlas “Open external” go",
-                    "default_browser",
-                    &["System default", "Firefox", "Chrome", "Chromium"],
-                    "System default",
-                    app,
-                    cx,
-                ))
+                .child(info_row("Default browser", "System default"))
                 .child(card_divider())
-                .child(select_row(
-                    "Browser engine",
-                    "How Atlas opens pages inside Mitsuro",
-                    "browser_engine",
-                    &["System", "Embedded", "External"],
-                    "System",
-                    app,
-                    cx,
-                ))
+                .child(info_row("Atlas surface", "External browser bridge"))
                 .child(card_divider())
-                .child(segment_row(
-                    "Approval",
-                    "Choose if Mitsuro asks before opening websites",
-                    "browser_approval",
-                    &["Always ask", "Always allow"],
-                    "Always ask",
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Persist cookies",
-                    "Keep session cookies between Atlas sessions",
-                    "browser_persist_cookies",
-                    true,
-                    app,
-                    cx,
-                )),
+                .child(info_row("Embedded browser", "Unavailable in this build")),
         )
         .child(group_label("Data"))
         .child(
             settings_card()
-                .child(action_row(
-                    "Clear cookies",
-                    "Delete cookies from the in-app browser",
-                    "Clear",
-                    "clear-cookies",
-                    cx,
+                .child(unavailable_action_row(
+                    "Cookies and site data",
+                    "Owned by your system browser; Mitsuro does not read or clear them",
+                    "Managed externally",
                 ))
                 .child(card_divider())
-                .child(action_row(
-                    "Clear all browsing data",
-                    "History, site data, cache, and download history",
-                    "Clear",
-                    "clear-browser",
-                    cx,
+                .child(unavailable_action_row(
+                    "Browser profile import",
+                    "Profile discovery does not copy cookies, logins, or browsing data",
+                    "Unavailable",
                 )),
         )
 }
@@ -2545,14 +2488,13 @@ fn archived_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
 fn import_source_card(
     title: &str,
     subtitle: &str,
-    button: &str,
+    _button: &str,
     id: &'static str,
-    cx: &mut Context<MitsuroApp>,
+    _cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let title = title.to_string();
     let subtitle = subtitle.to_string();
-    let button = button.to_string();
     div()
         .id(SharedId(format!("import-card-{id}")))
         .flex()
@@ -2596,20 +2538,15 @@ fn import_source_card(
                 .bg(colors.bg_button_secondary)
                 .border_1()
                 .border_color(colors.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_hover))
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.note_settings_action(id, cx);
-                }))
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text_secondary)
-                        .child(button),
+                        .text_color(colors.text_tertiary)
+                        .child("Unavailable"),
                 ),
         )
 }
@@ -2973,14 +2910,13 @@ fn segment_row(
 fn action_row(
     title: &str,
     subtitle: &str,
-    button: &str,
+    _button: &str,
     id: &'static str,
-    cx: &mut Context<MitsuroApp>,
+    _cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let title = title.to_string();
     let subtitle = subtitle.to_string();
-    let button = button.to_string();
     let row_id = format!("action-{id}");
     div()
         .id(SharedId(row_id))
@@ -3021,20 +2957,15 @@ fn action_row(
                 .bg(colors.bg_button_secondary)
                 .border_1()
                 .border_color(colors.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_hover))
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.note_settings_action(id, cx);
-                }))
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_secondary)
-                        .child(button),
+                        .text_color(colors.text_tertiary)
+                        .child("Not wired"),
                 ),
         )
 }
@@ -3108,7 +3039,7 @@ fn hotkey_row(
     subtitle: &str,
     value: &str,
     id: &'static str,
-    cx: &mut Context<MitsuroApp>,
+    _cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let title = title.to_string();
@@ -3124,11 +3055,6 @@ fn hotkey_row(
         .gap(px(16.0))
         .px(px(14.0))
         .py(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.note_settings_action(id, cx);
-        }))
         .child(
             div()
                 .flex()
@@ -3166,7 +3092,7 @@ fn hotkey_row(
                     Icon::empty()
                         .path("icons/pen-line.svg")
                         .with_size(px(14.0))
-                        .text_color(colors.text_tertiary),
+                        .text_color(colors.status_offline),
                 ),
         )
 }
