@@ -20,10 +20,10 @@ use crate::theme;
 /// Shared content width for transcript + composer (Codex chat density).
 const CONTENT_MAX_W: f32 = 720.0;
 
-/// Hard cap on bubbles painted per frame (belt-and-suspenders vs load-time cap).
-const VISIBLE_MSG_CAP: usize = 8;
-/// Display body char cap — keeps GPUI text layout cheap on open-thread first paint.
-const DISPLAY_BODY_CAP: usize = 280;
+/// History grows in deliberate pages instead of laying out an entire long session.
+const TRANSCRIPT_PAGE_SIZE: usize = 16;
+/// Protect text layout from pathological tool payloads while preserving normal replies.
+const DISPLAY_BODY_CAP: usize = 4_000;
 
 pub fn main_column(
     app: &MitsuroApp,
@@ -160,6 +160,7 @@ fn thread_main(
         .as_ref()
         .map(|t| t.messages.as_slice())
         .unwrap_or(&[]);
+    let transcript_visible_limit = app.transcript_visible_limit();
     // Selected + empty messages → loading (thread/read), not calm hero.
     let loading_transcript = thread.is_some() && messages.is_empty();
     let empty = thread.is_none();
@@ -209,7 +210,8 @@ fn thread_main(
                             empty_state(surface, chat_mode, calm, composer_input, cx)
                                 .into_any_element()
                         } else {
-                            transcript(messages, surface).into_any_element()
+                            transcript(messages, surface, transcript_visible_limit, cx)
+                                .into_any_element()
                         })
                         .when_some(app.pending_approval().cloned(), |this, pending| {
                             this.child(approval_bar::approval_bar(&pending, cx))
@@ -766,17 +768,24 @@ fn mitsuro_cloud_mark() -> impl IntoElement {
         )
 }
 
-fn transcript(messages: &[DemoMessage], surface: ThreadSurface) -> impl IntoElement {
+fn transcript(
+    messages: &[DemoMessage],
+    surface: ThreadSurface,
+    visible_limit: usize,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     // Chat mode uses a simpler bubble layout (no tool/reasoning chrome emphasis).
     let simple_bubbles = surface == ThreadSurface::Chat;
-    // Paint only the tail — even if cache is denser (demo threads / later densify).
-    let start = messages.len().saturating_sub(VISIBLE_MSG_CAP);
-    let visible = &messages[start..];
+    let visible_range = transcript_tail_range(messages.len(), visible_limit);
+    let hidden_count = visible_range.start;
+    let first_visible_index = visible_range.start;
+    let visible = &messages[visible_range];
     div()
         .id("transcript")
         .flex()
         .flex_col()
         .flex_1()
+        .h_0()
         .min_h_0()
         .px(px(20.0))
         .pt(px(18.0))
@@ -784,11 +793,46 @@ fn transcript(messages: &[DemoMessage], surface: ThreadSurface) -> impl IntoElem
         // Codex open-thread: slightly airier between blocks; chat stays denser.
         .gap(if simple_bubbles { px(12.0) } else { px(14.0) })
         .overflow_y_scroll()
-        .children(
-            visible
-                .iter()
-                .enumerate()
-                .map(|(i, msg)| transcript_block(i as u64, msg, simple_bubbles)),
+        .when(hidden_count > 0, |this| {
+            this.child(show_earlier_button(hidden_count, messages.len(), cx))
+        })
+        .children(visible.iter().enumerate().map(|(i, msg)| {
+            transcript_block((first_visible_index + i) as u64, msg, simple_bubbles)
+        }))
+}
+
+fn transcript_tail_range(total: usize, visible_limit: usize) -> std::ops::Range<usize> {
+    let visible = visible_limit.max(TRANSCRIPT_PAGE_SIZE).min(total);
+    total.saturating_sub(visible)..total
+}
+
+fn show_earlier_button(
+    hidden_count: usize,
+    total_messages: usize,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let next_count = hidden_count.min(TRANSCRIPT_PAGE_SIZE);
+    div()
+        .id(("transcript-show-earlier", hidden_count))
+        .flex()
+        .items_center()
+        .justify_center()
+        .pb(px(2.0))
+        .child(
+            div()
+                .id(("transcript-show-earlier-button", hidden_count))
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(7.0))
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover).text_color(colors.text_secondary))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.show_earlier_transcript_messages(total_messages, cx);
+                }))
+                .child(format!("Show {next_count} earlier · {hidden_count} hidden")),
         )
 }
 
@@ -848,61 +892,58 @@ fn transcript_block(index: u64, msg: &DemoMessage, simple_bubbles: bool) -> gpui
 
 /// Standard user / assistant text bubble.
 ///
-/// Flattened layout (label + single body node) to keep open-thread first paint light.
-/// When `simple` is true (Chat mode), softer alignment without heavy borders.
+/// The user is the elevated object; assistant content stays cardless in the workspace.
 fn chat_bubble(
     index: u64,
     label: &str,
     body: &str,
     streaming: bool,
     is_user: bool,
-    simple: bool,
+    _simple: bool,
 ) -> impl IntoElement {
     let colors = theme::colors();
-    let label_color = if is_user {
-        colors.accent
-    } else {
-        colors.text_tertiary
-    };
+    let label_color = colors.text_tertiary;
     let bubble_bg = if is_user {
-        colors.accent_soft
-    } else if simple {
-        colors.bg_sidebar
-    } else {
         colors.bg_elevated
+    } else {
+        theme::transparent()
     };
-    // Cap + collapse newlines so layout stays single-pass-ish on first paint.
     let display = display_body_light(body, streaming);
 
-    // Single container: label prefix on first line, body as text — one nested div max.
     div()
         .id(("msg", index))
         .flex()
         .flex_col()
         .gap(px(2.0))
         .w_full()
-        .when(simple && is_user, |this| this.items_end())
-        .when(simple && !is_user, |this| this.items_start())
+        .when(is_user, |this| this.items_end())
+        .when(!is_user, |this| this.items_start())
         .child(
             div()
-                .rounded(if simple { px(14.0) } else { px(10.0) })
-                .px(px(12.0))
-                .py(px(8.0))
-                .max_w(if simple { px(560.0) } else { px(CONTENT_MAX_W) })
+                .rounded(px(14.0))
+                .px(if is_user { px(12.0) } else { px(0.0) })
+                .py(if is_user { px(8.0) } else { px(4.0) })
+                .max_w(if is_user {
+                    px(560.0)
+                } else {
+                    px(CONTENT_MAX_W)
+                })
                 .bg(bubble_bg)
-                .when(!simple || is_user, |this| {
-                    this.border_1().border_color(colors.border)
+                .when(is_user, |this| {
+                    this.border_1().border_color(colors.border_subtle)
                 })
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(label_color)
-                        .child(label.to_string()),
-                )
+                .gap(px(4.0))
+                .when(!is_user, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(label_color)
+                            .child(label.to_string()),
+                    )
+                })
                 .child(div().text_sm().text_color(colors.text).child(display)),
         )
 }
@@ -1248,26 +1289,40 @@ fn stream_body(body: &str, streaming: bool) -> String {
     }
 }
 
-/// Cheap bubble body for open-thread paint: cap chars, collapse newlines.
+/// Preserve message formatting while bounding pathological payloads.
 fn display_body_light(body: &str, streaming: bool) -> String {
     if streaming && body.is_empty() {
         return "…".into();
     }
     let mut out = String::with_capacity(body.len().min(DISPLAY_BODY_CAP + 4));
-    let mut n = 0usize;
-    for c in body.chars() {
+    for (n, c) in body.chars().enumerate() {
         if n >= DISPLAY_BODY_CAP {
             out.push('…');
             break;
         }
-        // Collapse line breaks → spaces so text layout stays flat (fewer line boxes).
-        out.push(if c == '\n' || c == '\r' { ' ' } else { c });
-        n += 1;
+        out.push(c);
     }
     if streaming {
         out.push('▍');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_starts_with_one_bounded_page() {
+        assert_eq!(transcript_tail_range(279, 16), 263..279);
+        assert_eq!(transcript_tail_range(8, 16), 0..8);
+    }
+
+    #[test]
+    fn transcript_expansion_never_exceeds_available_history() {
+        assert_eq!(transcript_tail_range(35, 32), 3..35);
+        assert_eq!(transcript_tail_range(20, usize::MAX), 0..20);
+    }
 }
 
 fn strip_leading_number(line: &str) -> String {

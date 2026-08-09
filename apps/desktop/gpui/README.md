@@ -49,6 +49,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - The composer exposes only implemented behavior: text entry, Send, Stop, and a
   read-only model label. Attachment, voice, project, access, and model-picker stubs are
   not presented as controls.
+- Long transcripts start with a 16-message tail and reveal earlier history in bounded
+  pages. Normal replies preserve line breaks up to a defensive per-block layout limit,
+  while the composer remains pinned outside the transcript scroll region.
 
 ## Parity status
 
@@ -59,9 +62,9 @@ explicit capability states: neither backend exposes a typed API for those produc
 the native client does not show sample repositories, sample deployments, or inactive
 create/review controls. Atlas/browser, the composer, live-turn failure handling, and
 secondary Settings actions now follow the same honest capability treatment. Remaining
-parity work is concentrated in transcript behavior plus persistence or backend wiring
-for local-only Settings choices; the native client should not be called finalized until
-those are complete.
+parity work is concentrated in richer markdown/tool transcript presentation plus
+persistence or backend wiring for local-only Settings choices; the native client should
+not be called finalized until those are complete.
 
 ## Build
 

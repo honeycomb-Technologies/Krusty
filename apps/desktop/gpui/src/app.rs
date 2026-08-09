@@ -807,6 +807,9 @@ pub struct MitsuroApp {
     focus_handle: FocusHandle,
     connection: UiConnection,
     threads: Vec<DemoThread>,
+    /// Per-thread transcript window. History is revealed deliberately so long
+    /// sessions never force GPUI to lay out the entire conversation at once.
+    transcript_visible_limits: std::collections::HashMap<String, usize>,
     selected_thread: Option<String>,
     status_line: SharedString,
     /// Active product shell mode (rail selection).
@@ -1091,6 +1094,7 @@ impl MitsuroApp {
             focus_handle: cx.focus_handle(),
             connection: UiConnection::Connecting,
             threads: demo_seed,
+            transcript_visible_limits: std::collections::HashMap::new(),
             selected_thread: None,
             selected_chat_thread: None,
             selected_codex_thread: None,
@@ -3221,6 +3225,30 @@ impl MitsuroApp {
     pub fn selected_thread(&self) -> Option<&DemoThread> {
         let id = self.selected_thread.as_ref()?;
         self.threads.iter().find(|t| &t.summary.id == id)
+    }
+
+    pub fn transcript_visible_limit(&self) -> usize {
+        self.selected_thread
+            .as_ref()
+            .and_then(|id| self.transcript_visible_limits.get(id).copied())
+            .unwrap_or(16)
+    }
+
+    pub fn show_earlier_transcript_messages(
+        &mut self,
+        total_messages: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let visible = self
+            .transcript_visible_limits
+            .entry(thread_id)
+            .or_insert(16);
+        *visible = visible.saturating_add(16).min(total_messages);
+        self.status_line = format!("Transcript · showing {} of {total_messages}", *visible).into();
+        cx.notify();
     }
 
     pub fn search_query(&self) -> &str {
