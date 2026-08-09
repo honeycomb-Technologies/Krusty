@@ -679,10 +679,27 @@ impl UiConnection {
 /// How Send should produce an assistant reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendMode {
-    /// Replay `fixtures/sample-turn.jsonl` (default; no paid API).
+    /// Replay `fixtures/sample-turn.jsonl` only when explicitly selected for development.
     Fixture,
-    /// Live `turn/start` via app-server (requires Ready + auth + opt-in env).
+    /// Live product turn through the selected Ready/authenticated backend.
     Live,
+    /// The selected backend cannot currently accept a turn.
+    Unavailable,
+}
+
+fn decide_send_mode(
+    connection: &UiConnection,
+    backend_kind: Option<BackendKind>,
+    backend_present: bool,
+    force_fixture: bool,
+) -> SendMode {
+    if force_fixture || backend_kind == Some(BackendKind::Fixture) {
+        return SendMode::Fixture;
+    }
+    match connection {
+        UiConnection::Ready { has_auth: true, .. } if backend_present => SendMode::Live,
+        _ => SendMode::Unavailable,
+    }
 }
 
 /// Account / usage surface for Settings (offline fixture demo + live probe).
@@ -856,14 +873,13 @@ pub struct MitsuroApp {
     turn_cancel: Option<Arc<AtomicBool>>,
     /// When true, sidebar includes archived threads; default hides them.
     show_archived: bool,
+    #[allow(dead_code)]
     samples_loaded: bool,
     /// Demo/sample threads loaded into sidebar Recents.
     /// Mode switcher dropdown (Chat / Codex) open state.
     mode_menu_open: bool,
     /// Thread title overflow menu (Archive / Fork / Delete) open state.
     thread_menu_open: bool,
-    /// Dismissible home promo card: voice.
-    dismiss_voice_promo: bool,
     /// Dismissible home promo card: usage.
     dismiss_usage_card: bool,
     /// Active server approval request (exec / patch) awaiting user decision.
@@ -1082,7 +1098,6 @@ impl MitsuroApp {
             samples_loaded: true,
             mode_menu_open: false,
             thread_menu_open: false,
-            dismiss_voice_promo: false,
             dismiss_usage_card: false,
             active_mode: parse_start_mode().unwrap_or(ProductMode::Codex),
             settings_section: SettingsSection::General,
@@ -2436,12 +2451,6 @@ impl MitsuroApp {
         self.set_mode(ProductMode::Atlas, window, cx);
     }
 
-    /// Open Settings mode (e.g. from composer model chip / profile gear / Ctrl+,).
-    /// Always lands on General when entering from another mode.
-    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_mode(ProductMode::Settings, window, cx);
-    }
-
     /// Leave Settings via "Back to app" (restore Chat/Codex or prior mode).
     pub fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dest = match self.settings_return_mode {
@@ -2609,6 +2618,7 @@ impl MitsuroApp {
     }
 
     /// Catalog models currently shown in Settings / composer chip.
+    #[allow(dead_code)]
     pub fn models(&self) -> &[ModelInfo] {
         &self.models
     }
@@ -2618,6 +2628,7 @@ impl MitsuroApp {
         self.models.iter().find(|m| m.id == id)
     }
 
+    #[allow(dead_code)]
     pub fn selected_model_id(&self) -> Option<&str> {
         self.selected_model_id.as_deref()
     }
@@ -2643,6 +2654,7 @@ impl MitsuroApp {
         &self.skills
     }
 
+    #[allow(dead_code)]
     pub fn skills_enabled_count(&self) -> usize {
         self.skills.iter().filter(|s| s.enabled).count()
     }
@@ -3272,6 +3284,7 @@ impl MitsuroApp {
     }
 
     /// Human-readable auth line for Settings (account/read when Ready).
+    #[allow(dead_code)]
     pub fn auth_status_label(&self) -> SharedString {
         self.account_status_label()
     }
@@ -3642,6 +3655,7 @@ impl MitsuroApp {
     }
 
     /// Connection detail line for Settings.
+    #[allow(dead_code)]
     pub fn connection_status_label(&self) -> SharedString {
         match &self.connection {
             UiConnection::Demo => "Demo chrome".into(),
@@ -3792,6 +3806,7 @@ impl MitsuroApp {
     }
 
     /// Load offline sample threads into the sidebar (dev/review). Off by default for BAR first paint.
+    #[allow(dead_code)]
     pub fn toggle_samples(&mut self, cx: &mut Context<Self>) {
         if self.samples_loaded {
             // Keep user-created threads; drop demo ids.
@@ -3819,6 +3834,7 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn samples_loaded(&self) -> bool {
         self.samples_loaded
     }
@@ -3854,6 +3870,7 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn close_thread_menu(&mut self, cx: &mut Context<Self>) {
         if self.thread_menu_open {
             self.thread_menu_open = false;
@@ -3885,20 +3902,10 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    pub fn dismiss_voice_promo(&mut self, cx: &mut Context<Self>) {
-        self.dismiss_voice_promo = true;
-        cx.notify();
-    }
-
+    #[allow(dead_code)]
     pub fn dismiss_usage_card(&mut self, cx: &mut Context<Self>) {
         self.dismiss_usage_card = true;
         cx.notify();
-    }
-
-    pub fn voice_promo_visible(&self) -> bool {
-        !self.dismiss_voice_promo
-            && self.is_calm_stage()
-            && matches!(self.connection, UiConnection::Fixture | UiConnection::Demo)
     }
 
     pub fn usage_card_visible(&self) -> bool {
@@ -3940,6 +3947,7 @@ impl MitsuroApp {
     }
 
     /// Initials for solid avatar chip (e.g. "JB" from Jacob Burgess).
+    #[allow(dead_code)]
     pub fn profile_initials(&self) -> SharedString {
         SharedString::from(profile_initials_from_name(&self.profile_display_name()))
     }
@@ -4085,11 +4093,13 @@ impl MitsuroApp {
     }
 
     /// Whether the sidebar shows archived threads.
+    #[allow(dead_code)]
     pub fn show_archived(&self) -> bool {
         self.show_archived
     }
 
     /// Toggle show/hide archived threads in the sidebar.
+    #[allow(dead_code)]
     pub fn toggle_show_archived(&mut self, cx: &mut Context<Self>) {
         self.show_archived = !self.show_archived;
         self.status_line = if self.show_archived {
@@ -4568,6 +4578,7 @@ impl MitsuroApp {
     }
 
     /// Select a model by id (Settings list / chip).
+    #[allow(dead_code)]
     pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
         if self.models.iter().any(|m| m.id == id) {
             self.selected_model_id = Some(id);
@@ -4597,15 +4608,8 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Composer model chip: open Settings so the full list is visible.
-    pub fn open_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings(window, cx);
-        let label = self.model_label();
-        self.status_line = format!("Model picker · selected: {label}").into();
-        cx.notify();
-    }
-
     /// Fill the composer with a suggestion chip prompt (empty-state affordance).
+    #[allow(dead_code)]
     pub fn fill_composer(
         &mut self,
         input: &Entity<InputState>,
@@ -4637,6 +4641,22 @@ impl MitsuroApp {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             self.status_line = "Composer is empty.".into();
+            cx.notify();
+            return;
+        }
+
+        let mode = self.resolve_send_mode();
+        if matches!(mode, SendMode::Unavailable) {
+            self.status_line = match &self.connection {
+                UiConnection::Connecting => "Send unavailable · backend is connecting.".into(),
+                UiConnection::Error { message } => {
+                    format!("Send unavailable · backend error: {message}").into()
+                }
+                UiConnection::Ready {
+                    has_auth: false, ..
+                } => "Send unavailable · backend is not authenticated.".into(),
+                _ => "Send unavailable · select a connected backend.".into(),
+            };
             cx.notify();
             return;
         }
@@ -4685,7 +4705,6 @@ impl MitsuroApp {
             state.set_value("", window, cx);
         });
 
-        let mode = self.resolve_send_mode();
         let model_slug = self.selected_model_slug();
         if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
             // Still attempt live (server is source of truth) but surface the probe.
@@ -4718,6 +4737,7 @@ impl MitsuroApp {
                 self.status_line = "Streaming fixture turn…".into();
                 self.start_fixture_turn(thread_id, cx);
             }
+            SendMode::Unavailable => unreachable!("unavailable sends return before mutation"),
         }
         cx.notify();
     }
@@ -4731,7 +4751,9 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) {
         let Some(backend) = self.backend.clone() else {
-            self.start_fixture_turn(local_id, cx);
+            self.turn_in_progress = false;
+            self.status_line = "Session creation failed · no connected backend.".into();
+            cx.notify();
             return;
         };
         let cwd = self
@@ -4787,10 +4809,10 @@ impl MitsuroApp {
                     cx.notify();
                 }
                 Err(e) => {
-                    app.status_line =
-                        format!("thread/start failed ({e}); falling back to fixture stream.")
-                            .into();
-                    app.start_fixture_turn(local_id, cx);
+                    app.turn_in_progress = false;
+                    app.turn_cancel = None;
+                    app.active_turn_id = None;
+                    app.status_line = format!("Session creation failed: {e}").into();
                     cx.notify();
                 }
             });
@@ -4882,18 +4904,16 @@ impl MitsuroApp {
     }
 
     fn resolve_send_mode(&self) -> SendMode {
-        // A connected backend is not authorization to spend provider credits.
-        // Live turns require explicit opt-in in addition to auth and readiness.
+        // Fixture replay is an explicit development mode. A user pressing Send on a
+        // Ready/authenticated product backend starts a real turn on that backend.
         let force_fixture = std::env::var_os("MITSURO_FORCE_FIXTURE").is_some()
             || std::env::var_os("MITSURO_NO_LIVE_TURN").is_some();
-        let allow_live = std::env::var_os("MITSURO_ALLOW_LIVE_TURN").is_some();
-        if force_fixture || !allow_live {
-            return SendMode::Fixture;
-        }
-        match &self.connection {
-            UiConnection::Ready { has_auth: true, .. } if self.backend.is_some() => SendMode::Live,
-            _ => SendMode::Fixture,
-        }
+        decide_send_mode(
+            &self.connection,
+            self.active_backend_kind(),
+            self.backend.is_some(),
+            force_fixture,
+        )
     }
 
     fn start_fixture_turn(&mut self, thread_id: String, cx: &mut Context<Self>) {
@@ -4964,7 +4984,9 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) {
         let Some(backend) = self.backend.clone() else {
-            self.start_fixture_turn(thread_id, cx);
+            self.turn_in_progress = false;
+            self.status_line = "Live turn failed · backend disconnected.".into();
+            cx.notify();
             return;
         };
         let Some(session_id) = self.live_session_id(&thread_id) else {
@@ -5091,37 +5113,11 @@ impl MitsuroApp {
                         app.turn_in_progress = false;
                         app.active_turn_id = None;
                         app.turn_cancel = None;
-                        app.status_line =
-                            format!("Live turn failed ({e}); falling back to fixture.").into();
+                        app.status_line = format!("Live turn failed: {e}").into();
                     }
                 }
                 cx.notify();
             });
-
-            if outcome.is_err() {
-                // Fixture fallback with approval pause (same path as normal fixture).
-                if let Ok(events) = load_sample_turn_events() {
-                    let events: Vec<TurnStreamEvent> = events
-                        .into_iter()
-                        .map(|ev| rebind_thread_id(ev, &thread_id))
-                        .collect();
-                    let delay = Duration::from_millis(35);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    let _ = this.update(cx, |app, cx| {
-                        app.turn_in_progress = true;
-                        app.turn_cancel = Some(Arc::clone(&cancel));
-                        app.active_turn_id = Some("turn-fixture-stream".into());
-                        cx.notify();
-                    });
-                    replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
-                } else {
-                    let _ = this.update(cx, |app, cx| {
-                        app.turn_in_progress = false;
-                        app.status_line = "Fixture fallback failed to load.".into();
-                        cx.notify();
-                    });
-                }
-            }
         })
         .detach();
     }
@@ -6663,5 +6659,66 @@ impl Render for MitsuroApp {
                 gpui_component::Root::render_notification_layer(window, cx),
                 |this, layer| this.child(layer),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready() -> UiConnection {
+        UiConnection::Ready {
+            detail: "test".into(),
+            has_auth: true,
+        }
+    }
+
+    #[test]
+    fn ready_product_backends_send_live_by_default() {
+        assert_eq!(
+            decide_send_mode(&ready(), Some(BackendKind::MitsuroHttp), true, false),
+            SendMode::Live
+        );
+        assert_eq!(
+            decide_send_mode(&ready(), Some(BackendKind::CodexStdio), true, false),
+            SendMode::Live
+        );
+    }
+
+    #[test]
+    fn fixture_replay_must_be_explicit() {
+        assert_eq!(
+            decide_send_mode(&ready(), Some(BackendKind::Fixture), true, false),
+            SendMode::Fixture
+        );
+        assert_eq!(
+            decide_send_mode(&ready(), Some(BackendKind::MitsuroHttp), true, true),
+            SendMode::Fixture
+        );
+    }
+
+    #[test]
+    fn disconnected_or_unauthenticated_backend_cannot_send() {
+        assert_eq!(
+            decide_send_mode(
+                &UiConnection::Connecting,
+                Some(BackendKind::MitsuroHttp),
+                true,
+                false,
+            ),
+            SendMode::Unavailable
+        );
+        assert_eq!(
+            decide_send_mode(
+                &UiConnection::Ready {
+                    detail: "test".into(),
+                    has_auth: false,
+                },
+                Some(BackendKind::CodexStdio),
+                true,
+                false,
+            ),
+            SendMode::Unavailable
+        );
     }
 }

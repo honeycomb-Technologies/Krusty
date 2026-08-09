@@ -31,6 +31,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 - Sessions, models, turns, files, skills, MCP servers, and extensions use the
   transport-neutral `ProductBackend` contract.
+- An authenticated Ready Mitsuro or Codex backend sends a real turn by default.
+  Fixture turns require an explicit fixture backend or fixture environment flag, and
+  session/turn failures remain visible errors instead of replaying synthetic success.
 - Mitsuro Work is a read-only projection of `/api/hive/current`; Hive dispatch and
   task mutations are deliberately unavailable in GPUI for now.
 - Scheduled reads `/api/hive/schedules`; create, pause, resume, and delete are not
@@ -43,6 +46,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Secondary Settings actions without an implementation are non-interactive and labeled
   `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
   separate live implementations.
+- The composer exposes only implemented behavior: text entry, Send, Stop, and a
+  read-only model label. Attachment, voice, project, access, and model-picker stubs are
+  not presented as controls.
 
 ## Parity status
 
@@ -51,10 +57,11 @@ window against the reversed ChatGPT desktop reference. This is not yet feature-c
 UI parity. Pull requests and Sites retain their navigation destinations but now render
 explicit capability states: neither backend exposes a typed API for those products, so
 the native client does not show sample repositories, sample deployments, or inactive
-create/review controls. Atlas/browser and secondary Settings actions now follow the same
-honest capability treatment. Remaining parity work is concentrated in transcript and
-composer interaction details plus persistence or backend wiring for local-only Settings
-choices; the native client should not be called finalized until those are complete.
+create/review controls. Atlas/browser, the composer, live-turn failure handling, and
+secondary Settings actions now follow the same honest capability treatment. Remaining
+parity work is concentrated in transcript behavior plus persistence or backend wiring
+for local-only Settings choices; the native client should not be called finalized until
+those are complete.
 
 ## Build
 
@@ -73,8 +80,10 @@ MITSURO_BACKEND=mitsuro-http MITSURO_NO_LIVE_TURN=1 \
   cargo run -p mitsuro-gpui-desktop
 ```
 
-Use `MITSURO_BACKEND=codex-stdio` for a managed Codex app-server child. Set
-`MITSURO_ALLOW_LIVE_TURN=1` only when a provider-backed turn is intended.
+Use `MITSURO_BACKEND=codex-stdio` for a managed Codex app-server child. A Ready,
+authenticated backend sends a provider-backed turn when the user presses Send. Keep
+`MITSURO_NO_LIVE_TURN=1` for read-only visual validation; use
+`MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
 
 The optional `browser-native` feature links Wry/WebKitGTK. The default build uses the
 external-browser bridge only while native embedding remains incomplete.
