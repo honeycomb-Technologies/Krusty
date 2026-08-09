@@ -2009,7 +2009,7 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
         .unwrap_or("No transport detail available")
         .to_string();
     let active = app.active_backend_kind();
-    let servers: Vec<_> = app.mcp_servers().iter().cloned().collect();
+    let servers: Vec<_> = app.mcp_servers().to_vec();
     div()
         .id("settings-connections")
         .flex()
@@ -2738,7 +2738,7 @@ fn select_row(
     let current = app.settings_choice(key, default);
     let title = title.to_string();
     let subtitle = subtitle.to_string();
-    let label = current.clone();
+    let label = current;
     let row_id = format!("select-{key}");
     // Cycle on click through options
     let opts: Vec<&'static str> = options.to_vec();
@@ -2873,7 +2873,6 @@ fn segment_row(
                         .iter()
                         .map(|opt| {
                             let selected = current.as_str() == *opt;
-                            let key = key;
                             let value = (*opt).to_string();
                             let opt_id = format!("seg-{key}-{opt}");
                             div()

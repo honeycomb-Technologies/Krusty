@@ -60,19 +60,17 @@ fn asset_candidates(path: &str) -> Vec<PathBuf> {
     }
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut out = Vec::new();
-
-    // As requested by IconName: "icons/foo.svg"
-    out.push(path.clone());
-    // Bundled under crate assets/
-    out.push(manifest.join("assets").join(&path));
-    // If caller already prefixes assets/
-    out.push(manifest.join(&path));
-    // Cwd variants (cargo run from workspace root)
-    out.push(PathBuf::from("crates/mitsuro-desktop/assets").join(&path));
-    out.push(PathBuf::from("assets").join(&path));
-
-    out
+    vec![
+        // As requested by IconName: "icons/foo.svg"
+        path.clone(),
+        // Bundled under crate assets/
+        manifest.join("assets").join(&path),
+        // If caller already prefixes assets/
+        manifest.join(&path),
+        // Cwd variants (cargo run from workspace root)
+        PathBuf::from("crates/mitsuro-desktop/assets").join(&path),
+        PathBuf::from("assets").join(&path),
+    ]
 }
 
 fn main() {

@@ -450,7 +450,7 @@ pub fn parse_approval_request(
             let mut detail = format!("cwd: {}", parsed.cwd);
             if let Some(r) = &parsed.reason {
                 if !r.is_empty() {
-                    detail.push_str("\n");
+                    detail.push('\n');
                     detail.push_str(r);
                 }
             }
@@ -470,7 +470,7 @@ pub fn parse_approval_request(
             if let Some(r) = &parsed.reason {
                 if !r.is_empty() {
                     if !detail.is_empty() {
-                        detail.push_str("\n");
+                        detail.push('\n');
                     }
                     detail.push_str(r);
                 }

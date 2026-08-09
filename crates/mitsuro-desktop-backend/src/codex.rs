@@ -731,9 +731,8 @@ impl CodexAppServerBackend {
         let result = self
             .request("initialize", Some(params_value))
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 self.set_status(ConnectionStatus::Error(e.to_string()));
-                e
             })?;
 
         let init: InitializeResponse = serde_json::from_value(result)?;

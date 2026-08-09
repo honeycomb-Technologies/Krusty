@@ -1076,7 +1076,7 @@ impl AgentBackend for FixtureBackend {
         let new_id = format!("fixture-thread-{n}");
         let mut forked = source;
         if let Some(obj) = forked.as_object_mut() {
-            obj.insert("id".into(), Value::String(new_id.clone()));
+            obj.insert("id".into(), Value::String(new_id));
             obj.insert("archived".into(), Value::Bool(false));
             let base_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("Thread");
             obj.insert("name".into(), Value::String(format!("{base_name} (fork)")));
@@ -1297,7 +1297,7 @@ impl AgentBackend for FixtureBackend {
                 "process/spawn: processHandle required".into(),
             ));
         }
-        let handle = params.process_handle.clone();
+        let handle = params.process_handle;
         let stream_stdout =
             params.stream_stdout_stderr.unwrap_or(true) || params.tty.unwrap_or(false);
         {
@@ -1408,7 +1408,7 @@ impl AgentBackend for FixtureBackend {
 
     async fn process_kill(&self, params: ProcessKillParams) -> Result<ProcessKillResponse> {
         self.require_connected()?;
-        let handle = params.process_handle.clone();
+        let handle = params.process_handle;
         let was_running = {
             let mut map = self
                 .processes

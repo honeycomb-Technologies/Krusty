@@ -201,7 +201,7 @@ const B64_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 /// Encode bytes as standard base64 (no padding stripped).
 pub fn encode_base64(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
         let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
@@ -235,7 +235,7 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
         return Ok(Vec::new());
     }
     let mut buf = clean;
-    while buf.len() % 4 != 0 {
+    while !buf.len().is_multiple_of(4) {
         buf.push(b'=');
     }
     let mut out = Vec::with_capacity(buf.len() / 4 * 3);

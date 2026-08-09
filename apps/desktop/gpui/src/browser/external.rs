@@ -46,7 +46,7 @@ pub fn open_system_browser(url: &str) -> ExternalOpenResult {
 
     #[cfg(target_os = "linux")]
     {
-        return open_linux(url);
+        open_linux(url)
     }
     #[cfg(target_os = "macos")]
     {
