@@ -137,6 +137,9 @@ export interface DelegationTaskStateResponse {
 	role: "explore" | "build" | "planner" | "verifier";
 	state: DelegationTaskState;
 	attempt_count: number;
+	integration_state?: "pending" | "ready" | "failed" | null;
+	depends_on?: string[];
+	write_intent?: string[];
 	updated_at: string;
 }
 
@@ -701,6 +704,8 @@ export interface DelegatedArtifactState {
 	totalLockWaitMs?: number;
 	totalTargets?: number;
 	activeTargets?: number;
+	waitingTargets?: number;
+	integratingTargets?: number;
 	completedTargets?: number;
 	pendingTargets?: number;
 }

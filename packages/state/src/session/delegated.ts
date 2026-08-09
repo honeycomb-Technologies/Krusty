@@ -126,7 +126,11 @@ function groupAgents(
   const liveByTask = new Map(liveAgents.map((agent) => [agent.taskId, agent]));
   return group.tasks.map((task) => {
     const live = liveByTask.get(task.delegation_task_id);
-    const status: DelegatedAgentState['status'] = task.state === 'complete'
+    const status: DelegatedAgentState['status'] = task.integration_state === 'pending'
+      ? 'pending'
+      : task.integration_state === 'failed'
+      ? 'failed'
+      : task.state === 'complete'
       ? 'complete'
       : task.state === 'degraded'
       ? 'degraded'
@@ -137,8 +141,14 @@ function groupAgents(
       : task.state === 'running'
       ? 'running'
       : 'pending';
-    const canonicalAction = task.state === 'queued'
-      ? 'Queued'
+    const canonicalAction = task.integration_state === 'pending'
+      ? 'Integrating isolated changes'
+      : task.integration_state === 'failed'
+      ? 'Integration failed'
+      : task.state === 'queued'
+      ? (task.depends_on?.length ?? 0) > 0
+        ? `Waiting for ${task.depends_on?.join(', ')}`
+        : 'Queued'
       : task.state === 'leased'
       ? 'Waiting for provider capacity'
       : task.state === 'retrying'
@@ -155,6 +165,7 @@ function groupAgents(
       // reopen or regress the task after reconnect.
       status,
       taskState: task.state,
+      integrationState: task.integration_state,
       attemptCount: task.attempt_count,
       toolCount: live?.toolCount ?? 0,
       tokens: live?.tokens ?? 0,
@@ -178,8 +189,10 @@ function applyGroupProjection(
     agents: groupAgents(group, delegated.agents),
     agentCount: tasks.length,
     totalTargets: tasks.length,
-    activeTargets: tasks.filter(
-      (task) => task.state === 'leased' || task.state === 'running',
+    activeTargets: tasks.filter((task) => task.state === 'running').length,
+    waitingTargets: tasks.filter((task) => task.state === 'leased').length,
+    integratingTargets: tasks.filter(
+      (task) => task.integration_state === 'pending',
     ).length,
     pendingTargets: tasks.filter(
       (task) => task.state === 'created'
@@ -187,18 +200,31 @@ function applyGroupProjection(
         || task.state === 'retrying',
     ).length,
     completedTargets: tasks.filter(
-      (task) => task.state === 'complete'
-        || task.state === 'degraded'
-        || task.state === 'failed'
-        || task.state === 'cancelled',
+      (task) => (
+        (task.state === 'complete' || task.state === 'degraded')
+          && task.integration_state !== 'pending'
+          && task.integration_state !== 'failed'
+      ) || task.state === 'failed' || task.state === 'cancelled',
     ).length,
     usableAgents: tasks.filter(
-      (task) => task.state === 'complete' || task.state === 'degraded',
+      (task) => (task.state === 'complete' || task.state === 'degraded')
+        && task.integration_state !== 'pending'
+        && task.integration_state !== 'failed',
     ).length,
-    successfulAgents: tasks.filter((task) => task.state === 'complete').length,
-    degradedAgents: tasks.filter((task) => task.state === 'degraded').length,
+    successfulAgents: tasks.filter(
+      (task) => task.state === 'complete'
+        && task.integration_state !== 'pending'
+        && task.integration_state !== 'failed',
+    ).length,
+    degradedAgents: tasks.filter(
+      (task) => task.state === 'degraded'
+        && task.integration_state !== 'pending'
+        && task.integration_state !== 'failed',
+    ).length,
     cancelledAgents: tasks.filter((task) => task.state === 'cancelled').length,
-    failedAgents: tasks.filter((task) => task.state === 'failed').length,
+    failedAgents: tasks.filter(
+      (task) => task.state === 'failed' || task.integration_state === 'failed',
+    ).length,
   };
 }
 
@@ -569,22 +595,36 @@ export function annotateDelegatedArtifactState(
   const activeTargets = artifact.agents.filter(
     (agent) => agent.status === 'running',
   ).length;
+  const waitingTargets = artifact.agents.filter(
+    (agent) => agent.taskState === 'leased',
+  ).length;
+  const integratingTargets = artifact.agents.filter(
+    (agent) => agent.integrationState === 'pending',
+  ).length;
   const completedTargets = artifact.agents.filter(
     (agent) => agent.status === 'complete' || agent.status === 'degraded',
   ).length;
   const pendingTargets = Math.max(
     totalTargets
       - activeTargets
+      - waitingTargets
+      - integratingTargets
       - completedTargets
       - artifact.agents.filter(
         (agent) => agent.status === 'failed' || agent.status === 'cancelled',
       ).length,
-    artifact.agents.filter((agent) => agent.status === 'pending').length,
+    artifact.agents.filter(
+      (agent) => agent.status === 'pending'
+        && agent.taskState !== 'leased'
+        && agent.integrationState !== 'pending',
+    ).length,
   );
   return {
     ...artifact,
     totalTargets,
     activeTargets,
+    waitingTargets,
+    integratingTargets,
     completedTargets,
     pendingTargets,
   };

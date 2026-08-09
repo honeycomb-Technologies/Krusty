@@ -440,8 +440,17 @@ Deno.test("canonical delegation groups restore parallel task state after reconne
 				delegation_task_id: "task-ui",
 				task_key: "ui",
 				role: "build",
+				state: "leased",
+				attempt_count: 0,
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+			{
+				delegation_task_id: "task-verify",
+				task_key: "verify",
+				role: "verifier",
 				state: "queued",
 				attempt_count: 0,
+				depends_on: ["api", "ui"],
 				updated_at: "2026-08-08T12:00:00Z",
 			},
 		],
@@ -469,7 +478,7 @@ Deno.test("canonical delegation groups restore parallel task state after reconne
 	const delegated = restored[0]?.toolCalls?.[0]?.delegated;
 	assertEquals(delegated?.delegatedRunId, "group-1", "group identity must win");
 	assertEquals(delegated?.groupState, "running", "exact group state must be retained");
-	assertEquals(delegated?.agents.length, 2, "both logical tasks must render");
+	assertEquals(delegated?.agents.length, 3, "all logical tasks must render");
 	assertEquals(delegated?.agents[0]?.status, "running", "active task must remain running");
 	assertEquals(delegated?.agents[0]?.name, "API Builder", "live display name must survive snapshot");
 	assertEquals(delegated?.agents[0]?.toolCount, 7, "live metrics must survive snapshot");
@@ -479,10 +488,20 @@ Deno.test("canonical delegation groups restore parallel task state after reconne
 		"Running API tests",
 		"live action must survive a running durable snapshot",
 	);
-	assertEquals(delegated?.agents[1]?.status, "pending", "queued task must remain pending");
-	assertEquals(delegated?.agents[1]?.taskState, "queued", "exact task state must be retained");
-	assertEquals(delegated?.agents[1]?.currentAction, "Queued", "queue state must be visible");
+	assertEquals(delegated?.agents[1]?.status, "pending", "leased task remains non-running");
+	assertEquals(delegated?.agents[1]?.taskState, "leased", "exact leased state must be retained");
+	assertEquals(
+		delegated?.agents[1]?.currentAction,
+		"Waiting for provider capacity",
+		"capacity wait must be distinct from running",
+	);
+	assertEquals(
+		delegated?.agents[2]?.currentAction,
+		"Waiting for api, ui",
+		"dependency wait must be visible",
+	);
 	assertEquals(delegated?.activeTargets, 1, "active count must come from group tasks");
+	assertEquals(delegated?.waitingTargets, 1, "leased tasks must not inflate running count");
 	assertEquals(delegated?.pendingTargets, 1, "pending count must come from group tasks");
 });
 

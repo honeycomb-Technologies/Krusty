@@ -635,6 +635,8 @@ pub fn is_retryable_error_message(message: &str) -> bool {
         "timeout",
         "connection reset",
         "connection closed",
+        "websocket closed before completion",
+        "websocket ended before response completion",
         "network error",
         "temporarily at capacity",
         "temporarily unavailable",
@@ -843,6 +845,12 @@ mod tests {
         ));
         assert!(is_retryable_error_message(
             "AI stream ended without a finish signal"
+        ));
+        assert!(is_retryable_error_message(
+            "Codex websocket closed before completion"
+        ));
+        assert!(is_retryable_error_message(
+            "Sub-agent websocket ended before response completion"
         ));
         assert!(!is_retryable_error_message(
             "API error: 402 Payment Required - limit reached"

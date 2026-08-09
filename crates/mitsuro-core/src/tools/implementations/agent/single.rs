@@ -275,6 +275,9 @@ impl SingleTaskDelegation {
                     role,
                     target_scope: durable_scope,
                     max_attempts: 2,
+                    depends_on: Vec::new(),
+                    write_intent: Vec::new(),
+                    task_policy: Some(delegation_policy.clone()),
                     // A one-task writer still enters the shared authoritative
                     // partition. Parallel build groups must not mutate the
                     // same checkout concurrently merely because this group

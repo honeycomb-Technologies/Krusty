@@ -54,6 +54,7 @@ export interface DelegatedAgentState {
   completedPlanTask?: string;
   attemptCount?: number;
   taskState?: DelegationTaskState;
+  integrationState?: 'pending' | 'ready' | 'failed' | null;
 }
 
 export interface DelegatedArtifactState {
@@ -92,6 +93,8 @@ export interface DelegatedArtifactState {
   totalLockWaitMs?: number;
   totalTargets?: number;
   activeTargets?: number;
+  waitingTargets?: number;
+  integratingTargets?: number;
   completedTargets?: number;
   pendingTargets?: number;
 }
@@ -240,6 +243,7 @@ export interface SessionStoreState {
   stopStreaming: () => void;
   startStatePolling: (sessionId: string) => void;
   stopStatePolling: () => void;
+  refreshDelegationState: (sessionId: string) => void;
   startPresenceHeartbeat: (sessionId: string) => void;
   stopPresenceHeartbeat: (sessionId?: string | null) => void;
   cleanup: () => void;

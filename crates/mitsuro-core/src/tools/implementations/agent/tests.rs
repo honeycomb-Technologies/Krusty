@@ -1,10 +1,11 @@
+use super::build::build_execution_waves;
 use super::{
     agent_progress_for_terminal_stage, build_parent_context_brief, build_single_agent_artifact,
     build_single_agent_warnings, concise_target_label, delegated_persistence_error,
-    emit_single_agent_completion, has_explicit_empty_capabilities, notify_child_completion,
-    open_delegated_run_store, persist_delegated_artifact, persist_single_agent_artifact,
-    resolve_explore_target, should_use_parallel_component_pool, truncate_utf8,
-    validate_background_wake_host,
+    emit_single_agent_completion, has_explicit_empty_capabilities, normalize_structured_tasks,
+    notify_child_completion, open_delegated_run_store, persist_delegated_artifact,
+    persist_single_agent_artifact, resolve_explore_target, should_use_parallel_component_pool,
+    truncate_utf8, validate_background_wake_host,
 };
 use crate::agent::subagent::{
     AgentExecutionProfile, AgentProgressStatus, AgentRuntimeManager, DelegatedEvidenceKind,
@@ -153,6 +154,120 @@ fn explicit_empty_capabilities_are_rejected_instead_of_widened() {
     assert!(!has_explicit_empty_capabilities(&serde_json::json!({
         "profile": "build"
     })));
+}
+
+#[test]
+fn structured_task_graph_is_topologically_ordered_and_builds_union_ceiling() {
+    let mut params: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "feature-team",
+        "tasks": [
+            {
+                "id": "verify",
+                "instructions": "Run focused validation",
+                "capabilities": ["read", "execute"],
+                "depends_on": ["backend", "frontend"]
+            },
+            {
+                "id": "frontend",
+                "instructions": "Implement the client projection",
+                "capabilities": ["read", "write"]
+            },
+            {
+                "id": "backend",
+                "instructions": "Implement the server contract",
+                "capabilities": ["read", "write"]
+            }
+        ]
+    }))
+    .expect("structured params");
+
+    assert!(normalize_structured_tasks(&mut params).expect("valid task graph"));
+    let tasks = params.tasks.expect("normalized tasks");
+    assert_eq!(
+        tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["frontend", "backend", "verify"]
+    );
+    assert_eq!(
+        params.capabilities,
+        vec![
+            "execute".to_string(),
+            "read".to_string(),
+            "write".to_string()
+        ]
+    );
+    assert!(params.prompt.contains("frontend"));
+}
+
+#[test]
+fn structured_task_graph_rejects_cycles_before_workspace_materialization() {
+    let mut params: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "cycle",
+        "instructions": "This must not start",
+        "tasks": [
+            {"id": "a", "instructions": "A", "depends_on": ["b"]},
+            {"id": "b", "instructions": "B", "depends_on": ["a"]}
+        ]
+    }))
+    .expect("structured params");
+    let error = normalize_structured_tasks(&mut params).expect_err("cycle must fail");
+    assert!(error.contains("dependency cycle"));
+}
+
+#[test]
+fn structured_runtime_waves_keep_independent_roots_together() {
+    let mut params: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "waves",
+        "tasks": [
+            {"id": "verify", "instructions": "Verify", "depends_on": ["api", "ui"]},
+            {"id": "ui", "instructions": "Build UI", "capabilities": ["read", "write"]},
+            {"id": "api", "instructions": "Build API", "capabilities": ["read", "write"]},
+            {"id": "release", "instructions": "Release proof", "depends_on": ["verify"]}
+        ]
+    }))
+    .expect("structured params");
+    normalize_structured_tasks(&mut params).expect("normalize graph");
+    let runtime = params
+        .tasks
+        .as_ref()
+        .expect("tasks")
+        .iter()
+        .map(|task| crate::agent::subagent::SubAgentTask::new(&task.id, task.objective()))
+        .collect::<Vec<_>>();
+    let waves = build_execution_waves(&runtime, params.tasks.as_deref());
+    assert_eq!(
+        waves
+            .iter()
+            .map(|wave| wave.iter().map(|task| task.id.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![vec!["ui", "api"], vec!["verify"], vec!["release"]]
+    );
+}
+
+#[test]
+fn structured_graph_requires_ordering_for_declared_overlapping_writes() {
+    let mut unordered: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "overlap",
+        "tasks": [
+            {"id": "a", "instructions": "A", "capabilities": ["write"], "write_intent": ["src"]},
+            {"id": "b", "instructions": "B", "capabilities": ["write"], "write_intent": ["src/app.ts"]}
+        ]
+    }))
+    .expect("unordered params");
+    let error = normalize_structured_tasks(&mut unordered).expect_err("overlap must fail");
+    assert!(error.contains("overlapping write_intent"));
+
+    let mut ordered: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "ordered-overlap",
+        "tasks": [
+            {"id": "a", "instructions": "A", "capabilities": ["write"], "write_intent": ["src"]},
+            {"id": "b", "instructions": "B", "capabilities": ["write"], "write_intent": ["src/app.ts"], "depends_on": ["a"]}
+        ]
+    }))
+    .expect("ordered params");
+    normalize_structured_tasks(&mut ordered).expect("dependency makes overlap explicit");
 }
 
 #[test]

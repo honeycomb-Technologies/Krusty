@@ -385,6 +385,35 @@ pub struct DelegationPolicy {
 }
 
 impl DelegationPolicy {
+    /// Whether this policy is an equal-or-narrower executable subset of a
+    /// parent/group ceiling. Surface labels describe intent and may differ;
+    /// executable authority is defined by permission, turn, read/write/bash,
+    /// approval, and exact tool allowlists.
+    pub fn is_within(&self, ceiling: &Self) -> bool {
+        if self.inherited_permission_mode != ceiling.inherited_permission_mode
+            || (self.supervised_approval_granted && !ceiling.supervised_approval_granted)
+            || (!self.read_only_only && ceiling.read_only_only)
+            || (self.bash_allowed && !ceiling.bash_allowed)
+        {
+            return false;
+        }
+
+        match (self.max_turns, ceiling.max_turns) {
+            (Some(requested), Some(limit)) if requested > limit => return false,
+            (None, Some(_)) => return false,
+            _ => {}
+        }
+
+        match (
+            self.execution_tool_allowlist.as_ref(),
+            ceiling.execution_tool_allowlist.as_ref(),
+        ) {
+            (Some(requested), Some(allowed)) => requested.is_subset(allowed),
+            (None, Some(_)) => false,
+            _ => true,
+        }
+    }
+
     pub fn for_subagent_explore(
         inherited_permission_mode: PermissionMode,
         max_turns: Option<usize>,

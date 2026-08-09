@@ -49,6 +49,7 @@ interface StreamCallbackDependencies {
 	) => Promise<void>;
 	isActive?: () => boolean;
 	onFirstEvent?: () => void;
+	onDelegationEvent?: () => void;
 }
 
 function appendBounded(existing: string, delta: string, max: number): string {
@@ -133,6 +134,7 @@ export function createStreamCallbacks(
 		persistSessionMode,
 		isActive = () => true,
 		onFirstEvent,
+		onDelegationEvent,
 	}: StreamCallbackDependencies,
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
@@ -434,6 +436,7 @@ export function createStreamCallbacks(
 			// guarantees a full reconciliation when the stream finishes first.
 			if (event.event_id > (get().delegationEventCursor ?? 0)) {
 				streamLagged = true;
+				onDelegationEvent?.();
 			}
 		},
 

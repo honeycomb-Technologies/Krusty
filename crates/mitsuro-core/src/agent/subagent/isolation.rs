@@ -1,4 +1,4 @@
-//! Per-attempt Git worktrees for parallel builders.
+//! Per-attempt isolated workspaces for parallel builders.
 //!
 //! Parallel write children never mutate the authoritative workspace directly.
 //! Each receives the same captured source snapshot in a detached worktree;
@@ -30,7 +30,17 @@ pub struct BuildIsolationSet {
     repo_root: PathBuf,
     base_dir: PathBuf,
     workspaces: Vec<IsolatedBuildWorkspace>,
+    backend: IsolationBackend,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IsolationBackend {
+    GitWorktree,
+    SnapshotRepository,
+}
+
+const SNAPSHOT_BASELINE_PREFIX: &str = "snapshot:";
+const SNAPSHOT_REPOSITORY_NAME: &str = ".snapshot.git";
 
 /// Cross-process ownership for the narrow interval between preparing a Hive
 /// batch's worktrees and persisting its immutable delegation group. The lock
@@ -81,8 +91,6 @@ impl BuildIsolationMaterializationGuard {
             if !base_dir.exists() {
                 return Ok(false);
             }
-            let repo = resolve_repo(&project_dir)?;
-            let expected_common_dir = git_common_dir(&repo)?;
             let metadata = fs::symlink_metadata(&base_dir)?;
             ensure!(
                 metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -90,7 +98,19 @@ impl BuildIsolationMaterializationGuard {
             );
             let allowed = (0..expected_task_count)
                 .map(|ordinal| format!("task-{ordinal:04}"))
+                .chain([SNAPSHOT_REPOSITORY_NAME.to_string()])
                 .collect::<std::collections::HashSet<_>>();
+            let snapshot_repository = base_dir.join(SNAPSHOT_REPOSITORY_NAME);
+            let backend = if snapshot_repository.exists() {
+                IsolationBackend::SnapshotRepository
+            } else {
+                IsolationBackend::GitWorktree
+            };
+            let repo = match backend {
+                IsolationBackend::GitWorktree => resolve_repo(&project_dir)?,
+                IsolationBackend::SnapshotRepository => snapshot_repository.clone(),
+            };
+            let expected_common_dir = git_common_dir(&repo)?;
             let mut roots = Vec::new();
             for entry in fs::read_dir(&base_dir)? {
                 let entry = entry?;
@@ -102,6 +122,9 @@ impl BuildIsolationMaterializationGuard {
                     allowed.contains(&name),
                     "abandoned isolation batch contains an unexpected entry"
                 );
+                if name == SNAPSHOT_REPOSITORY_NAME {
+                    continue;
+                }
                 let entry_metadata = fs::symlink_metadata(entry.path())?;
                 ensure!(
                     entry_metadata.is_dir() && !entry_metadata.file_type().is_symlink(),
@@ -125,6 +148,14 @@ impl BuildIsolationMaterializationGuard {
                 );
                 remove_worktree(&repo, &root)?;
             }
+            if backend == IsolationBackend::SnapshotRepository {
+                fs::remove_dir_all(&snapshot_repository).with_context(|| {
+                    format!(
+                        "remove abandoned snapshot repository {}",
+                        snapshot_repository.display()
+                    )
+                })?;
+            }
             fs::remove_dir(&base_dir).with_context(|| {
                 format!("remove abandoned isolation batch {}", base_dir.display())
             })?;
@@ -136,8 +167,9 @@ impl BuildIsolationMaterializationGuard {
 }
 
 impl BuildIsolationSet {
-    /// Returns `Ok(None)` for non-Git workspaces. Those callers must retain the
-    /// serial shared-writer scheduling class.
+    /// Materialize one isolated workspace per task. Established Git projects
+    /// use detached worktrees; unborn and non-Git projects use a private bare
+    /// snapshot repository without mutating the authoritative workspace.
     pub async fn prepare(
         project_dir: PathBuf,
         working_dir: PathBuf,
@@ -157,15 +189,38 @@ impl BuildIsolationSet {
         group_id: &str,
         task_ids: &[String],
     ) -> Result<Option<Self>> {
-        let repo = command_output(Command::new("git").args([
+        let discovered_repo = command_output(Command::new("git").args([
             "-C",
             &project_dir.display().to_string(),
             "rev-parse",
             "--show-toplevel",
         ]));
-        let repo = match repo {
-            Ok(output) => PathBuf::from(String::from_utf8(output.stdout)?.trim()),
-            Err(error) if error.to_string().contains("not a git repository") => return Ok(None),
+        let (repo, backend) = match discovered_repo {
+            Ok(output) => {
+                let repo = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+                let has_head = command_output(Command::new("git").args([
+                    "-C",
+                    &repo.display().to_string(),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD",
+                ]))
+                .is_ok();
+                (
+                    repo,
+                    if has_head {
+                        IsolationBackend::GitWorktree
+                    } else {
+                        IsolationBackend::SnapshotRepository
+                    },
+                )
+            }
+            Err(error) if error.to_string().contains("not a git repository") => (
+                project_dir
+                    .canonicalize()
+                    .context("canonicalize non-Git project workspace")?,
+                IsolationBackend::SnapshotRepository,
+            ),
             Err(error) => return Err(error).context("resolve parallel build repository"),
         };
         ensure!(
@@ -177,7 +232,7 @@ impl BuildIsolationSet {
             .context("resolve delegated working directory inside repository")?;
         validate_group_id(group_id)?;
         ensure!(
-            !integration_marker(&repo, group_id)?.exists(),
+            !integration_marker_for(&repo, group_id, backend)?.exists(),
             "delegation batch already has a durable integration marker"
         );
         let base_dir = isolation_root()?.join(group_id);
@@ -188,29 +243,50 @@ impl BuildIsolationSet {
         fs::create_dir_all(&base_dir)
             .with_context(|| format!("create isolation root {}", base_dir.display()))?;
 
-        let source_patch = command_output(Command::new("git").args([
-            "-C",
-            &repo.display().to_string(),
-            "diff",
-            "--binary",
-            "HEAD",
-        ]))?
-        .stdout;
-        let untracked = command_output(Command::new("git").args([
-            "-C",
-            &repo.display().to_string(),
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ]))?
-        .stdout;
+        let (source_patch, untracked, snapshot_commit) = match backend {
+            IsolationBackend::GitWorktree => (
+                command_output(Command::new("git").args([
+                    "-C",
+                    &repo.display().to_string(),
+                    "diff",
+                    "--binary",
+                    "HEAD",
+                ]))?
+                .stdout,
+                command_output(Command::new("git").args([
+                    "-C",
+                    &repo.display().to_string(),
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                ]))?
+                .stdout,
+                None,
+            ),
+            IsolationBackend::SnapshotRepository => (
+                Vec::new(),
+                Vec::new(),
+                Some(create_snapshot_repository(&repo, &base_dir)?),
+            ),
+        };
 
         let mut workspaces: Vec<IsolatedBuildWorkspace> = Vec::new();
         for (ordinal, task_id) in task_ids.iter().enumerate() {
             let root = base_dir.join(format!("task-{ordinal:04}"));
             let prepared = (|| -> Result<IsolatedBuildWorkspace> {
-                prepare_one(&repo, &root, &source_patch, &untracked)?;
+                match backend {
+                    IsolationBackend::GitWorktree => {
+                        prepare_one(&repo, &root, &source_patch, &untracked)?;
+                    }
+                    IsolationBackend::SnapshotRepository => prepare_snapshot_worktree(
+                        &base_dir.join(SNAPSHOT_REPOSITORY_NAME),
+                        &root,
+                        snapshot_commit
+                            .as_deref()
+                            .context("snapshot baseline commit is missing")?,
+                    )?,
+                }
                 let baseline_commit = String::from_utf8(
                     command_output(Command::new("git").args([
                         "-C",
@@ -222,6 +298,11 @@ impl BuildIsolationSet {
                 )?
                 .trim()
                 .to_string();
+                let baseline_commit = if backend == IsolationBackend::SnapshotRepository {
+                    format!("{SNAPSHOT_BASELINE_PREFIX}{baseline_commit}")
+                } else {
+                    baseline_commit
+                };
                 Ok(IsolatedBuildWorkspace {
                     task_id: task_id.clone(),
                     working_dir: root.join(relative_working_dir),
@@ -232,9 +313,14 @@ impl BuildIsolationSet {
             match prepared {
                 Ok(workspace) => workspaces.push(workspace),
                 Err(error) => {
-                    let _ = remove_worktree(&repo, &root);
+                    let cleanup_repo = if backend == IsolationBackend::SnapshotRepository {
+                        base_dir.join(SNAPSHOT_REPOSITORY_NAME)
+                    } else {
+                        repo.clone()
+                    };
+                    let _ = remove_worktree(&cleanup_repo, &root);
                     for workspace in &workspaces {
-                        let _ = remove_worktree(&repo, &workspace.root);
+                        let _ = remove_worktree(&cleanup_repo, &workspace.root);
                     }
                     let _ = fs::remove_dir_all(&base_dir);
                     return Err(error);
@@ -247,6 +333,7 @@ impl BuildIsolationSet {
             repo_root: repo,
             base_dir,
             workspaces,
+            backend,
         }))
     }
 
@@ -261,9 +348,28 @@ impl BuildIsolationSet {
     ) -> Result<Self> {
         tokio::task::spawn_blocking(move || {
             validate_group_id(&group_id)?;
-            let repo = resolve_repo(&project_dir)?;
+            let backend = if workspaces
+                .iter()
+                .all(|(_, _, baseline)| baseline.starts_with(SNAPSHOT_BASELINE_PREFIX))
+            {
+                IsolationBackend::SnapshotRepository
+            } else {
+                ensure!(
+                    workspaces
+                        .iter()
+                        .all(|(_, _, baseline)| !baseline.starts_with(SNAPSHOT_BASELINE_PREFIX)),
+                    "durable isolation batch mixes workspace backends"
+                );
+                IsolationBackend::GitWorktree
+            };
+            let repo = match backend {
+                IsolationBackend::GitWorktree => resolve_repo(&project_dir)?,
+                IsolationBackend::SnapshotRepository => project_dir
+                    .canonicalize()
+                    .context("canonicalize snapshot project workspace")?,
+            };
             let base_dir = isolation_root()?.join(&group_id);
-            let marker = integration_marker(&repo, &group_id)?;
+            let marker = integration_marker_for(&repo, &group_id, backend)?;
             let already_integrated = integration_marker_is_valid(&marker, &group_id)?;
             if !base_dir.exists() {
                 ensure!(
@@ -275,6 +381,7 @@ impl BuildIsolationSet {
                     repo_root: repo,
                     base_dir,
                     workspaces: Vec::new(),
+                    backend,
                 });
             }
             let base_metadata = fs::symlink_metadata(&base_dir)?;
@@ -282,9 +389,23 @@ impl BuildIsolationSet {
                 base_metadata.is_dir() && !base_metadata.file_type().is_symlink(),
                 "durable isolation root is not an owned directory"
             );
-            let expected_common_dir = git_common_dir(&repo)?;
+            let expected_common_dir = match backend {
+                IsolationBackend::GitWorktree => git_common_dir(&repo)?,
+                IsolationBackend::SnapshotRepository => {
+                    let snapshot_repository = base_dir.join(SNAPSHOT_REPOSITORY_NAME);
+                    ensure!(
+                        snapshot_repository.exists(),
+                        "durable snapshot repository is missing before integration"
+                    );
+                    git_common_dir(&snapshot_repository)?
+                }
+            };
             let allowed = (0..workspaces.len())
                 .map(|ordinal| format!("task-{ordinal:04}"))
+                .chain(
+                    (backend == IsolationBackend::SnapshotRepository)
+                        .then(|| SNAPSHOT_REPOSITORY_NAME.to_string()),
+                )
                 .collect::<std::collections::HashSet<_>>();
             for entry in fs::read_dir(&base_dir)? {
                 let entry = entry?;
@@ -301,10 +422,7 @@ impl BuildIsolationSet {
             for (ordinal, (task_id, root, baseline_commit)) in workspaces.into_iter().enumerate() {
                 let expected = base_dir.join(format!("task-{ordinal:04}"));
                 ensure!(root == expected, "durable isolation root escaped its batch");
-                ensure!(
-                    !baseline_commit.trim().is_empty(),
-                    "durable isolation baseline is missing"
-                );
+                let raw_baseline = raw_baseline_commit(&baseline_commit)?;
                 if !root.exists() {
                     ensure!(
                         already_integrated,
@@ -331,7 +449,7 @@ impl BuildIsolationSet {
                     &root.display().to_string(),
                     "cat-file",
                     "-e",
-                    &format!("{baseline_commit}^{{commit}}"),
+                    &format!("{raw_baseline}^{{commit}}"),
                 ]))
                 .context("durable isolation baseline is not a repository commit")?;
                 restored.push(IsolatedBuildWorkspace {
@@ -346,6 +464,7 @@ impl BuildIsolationSet {
                 repo_root: repo,
                 base_dir,
                 workspaces: restored,
+                backend,
             })
         })
         .await
@@ -356,9 +475,20 @@ impl BuildIsolationSet {
     pub async fn discard(self) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             let mut first_error = None;
+            let cleanup_repo = match self.backend {
+                IsolationBackend::GitWorktree => self.repo_root.clone(),
+                IsolationBackend::SnapshotRepository => {
+                    self.base_dir.join(SNAPSHOT_REPOSITORY_NAME)
+                }
+            };
             for workspace in &self.workspaces {
-                if let Err(error) = remove_worktree(&self.repo_root, &workspace.root) {
+                if let Err(error) = remove_worktree(&cleanup_repo, &workspace.root) {
                     first_error.get_or_insert(error);
+                }
+            }
+            if self.backend == IsolationBackend::SnapshotRepository && cleanup_repo.exists() {
+                if let Err(error) = fs::remove_dir_all(&cleanup_repo) {
+                    first_error.get_or_insert(error.into());
                 }
             }
             if self.base_dir.exists() {
@@ -484,12 +614,28 @@ impl BuildIsolationSet {
                 continue;
             };
             rewrite_result_paths(result, &workspace.root, &self.repo_root);
-            if let Err(error) = remove_worktree(&self.repo_root, &workspace.root) {
+            let cleanup_repo = match self.backend {
+                IsolationBackend::GitWorktree => self.repo_root.clone(),
+                IsolationBackend::SnapshotRepository => {
+                    // All private snapshot worktrees share this bare repository.
+                    // Retain it whenever a failed workspace remains recoverable.
+                    self.base_dir.join(SNAPSHOT_REPOSITORY_NAME)
+                }
+            };
+            if let Err(error) = remove_worktree(&cleanup_repo, &workspace.root) {
                 result.error = Some(format!(
                     "Build patch integrated, but isolated workspace cleanup failed at {}: {error}",
                     workspace.root.display()
                 ));
             }
+        }
+        if self.backend == IsolationBackend::SnapshotRepository
+            && self
+                .workspaces
+                .iter()
+                .all(|workspace| !workspace.root.exists())
+        {
+            let _ = fs::remove_dir_all(self.base_dir.join(SNAPSHOT_REPOSITORY_NAME));
         }
         let _ = fs::remove_dir(&self.base_dir);
         results.to_vec()
@@ -501,9 +647,17 @@ impl BuildIsolationSet {
         owner_fence: Option<&(dyn Fn() -> Result<()> + Send + Sync)>,
         build_context: Option<&SharedBuildContext>,
     ) -> Result<()> {
-        let common_dir = git_common_dir(&self.repo_root)?;
-        fs::create_dir_all(&common_dir)?;
-        let lock_path = common_dir.join("mitsuro-delegation-integration.lock");
+        let lock_path = match self.backend {
+            IsolationBackend::GitWorktree => {
+                let common_dir = git_common_dir(&self.repo_root)?;
+                fs::create_dir_all(&common_dir)?;
+                common_dir.join("mitsuro-delegation-integration.lock")
+            }
+            IsolationBackend::SnapshotRepository => isolation_root()?.join(format!(
+                ".integration-{:02}.lock",
+                materialization_lock_slot(&self.group_id)
+            )),
+        };
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -516,7 +670,7 @@ impl BuildIsolationSet {
         if let Some(owner_fence) = owner_fence {
             owner_fence().context("detached build recovery lost its durable owner fence")?;
         }
-        let marker = integration_marker(&self.repo_root, &self.group_id)?;
+        let marker = integration_marker_for(&self.repo_root, &self.group_id, self.backend)?;
         if integration_marker_is_valid(&marker, &self.group_id)? {
             return Ok(());
         }
@@ -537,13 +691,14 @@ impl BuildIsolationSet {
                 "add",
                 "-A",
             ]))?;
+            let baseline_commit = raw_baseline_commit(&workspace.baseline_commit)?;
             let patch = command_output(Command::new("git").args([
                 "-C",
                 &workspace.root.display().to_string(),
                 "diff",
                 "--cached",
                 "--binary",
-                &workspace.baseline_commit,
+                baseline_commit,
             ]))?
             .stdout;
             if build_context.is_some() {
@@ -555,7 +710,7 @@ impl BuildIsolationSet {
                     "--no-renames",
                     "--numstat",
                     "-z",
-                    &workspace.baseline_commit,
+                    baseline_commit,
                 ]))?
                 .stdout;
                 integrated_changes.extend(parse_integration_numstat(&workspace.task_id, &numstat));
@@ -705,6 +860,95 @@ fn prepare_one(repo: &Path, root: &Path, source_patch: &[u8], untracked: &[u8]) 
     Ok(())
 }
 
+fn create_snapshot_repository(authoritative: &Path, base_dir: &Path) -> Result<String> {
+    let snapshot_repository = base_dir.join(SNAPSHOT_REPOSITORY_NAME);
+    command_output(Command::new("git").args([
+        "init",
+        "--bare",
+        &snapshot_repository.display().to_string(),
+    ]))?;
+
+    let mut add = Command::new("git");
+    add.current_dir(authoritative)
+        .env("GIT_DIR", &snapshot_repository)
+        .env("GIT_WORK_TREE", authoritative)
+        .args(["add", "-A", "--", "."]);
+    command_output(&mut add).context("capture authoritative snapshot index")?;
+
+    let mut listed = Command::new("git");
+    listed
+        .current_dir(authoritative)
+        .env("GIT_DIR", &snapshot_repository)
+        .env("GIT_WORK_TREE", authoritative)
+        .args(["ls-files", "-s", "-z"]);
+    let indexed = command_output(&mut listed)?.stdout;
+    ensure!(
+        !indexed
+            .split(|byte| *byte == 0)
+            .any(|entry| entry.starts_with(b"120000 ")),
+        "symlinks are not supported in unborn or non-Git isolated snapshots"
+    );
+
+    let mut write_tree = Command::new("git");
+    write_tree
+        .current_dir(authoritative)
+        .env("GIT_DIR", &snapshot_repository)
+        .env("GIT_WORK_TREE", authoritative)
+        .arg("write-tree");
+    let tree = String::from_utf8(command_output(&mut write_tree)?.stdout)?
+        .trim()
+        .to_string();
+    ensure!(!tree.is_empty(), "snapshot tree was not created");
+
+    let mut commit_tree = Command::new("git");
+    commit_tree
+        .env("GIT_DIR", &snapshot_repository)
+        .env("GIT_AUTHOR_NAME", "Mitsuro")
+        .env("GIT_AUTHOR_EMAIL", "runtime@mitsuro.local")
+        .env("GIT_COMMITTER_NAME", "Mitsuro")
+        .env("GIT_COMMITTER_EMAIL", "runtime@mitsuro.local")
+        .args(["commit-tree", &tree]);
+    let commit = String::from_utf8(
+        command_with_stdin(&mut commit_tree, b"mitsuro isolated snapshot baseline\n")?.stdout,
+    )?
+    .trim()
+    .to_string();
+    ensure!(!commit.is_empty(), "snapshot commit was not created");
+    command_output(Command::new("git").args([
+        "--git-dir",
+        &snapshot_repository.display().to_string(),
+        "update-ref",
+        "refs/heads/snapshot",
+        &commit,
+    ]))?;
+    Ok(commit)
+}
+
+fn prepare_snapshot_worktree(snapshot_repository: &Path, root: &Path, commit: &str) -> Result<()> {
+    command_output(Command::new("git").args([
+        "--git-dir",
+        &snapshot_repository.display().to_string(),
+        "worktree",
+        "add",
+        "--detach",
+        &root.display().to_string(),
+        commit,
+    ]))?;
+    Ok(())
+}
+
+fn raw_baseline_commit(baseline: &str) -> Result<&str> {
+    let baseline = baseline
+        .strip_prefix(SNAPSHOT_BASELINE_PREFIX)
+        .unwrap_or(baseline)
+        .trim();
+    ensure!(
+        !baseline.is_empty(),
+        "durable isolation baseline is missing"
+    );
+    Ok(baseline)
+}
+
 fn copy_snapshot_entry(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("inspect snapshot entry {}", source.display()))?;
@@ -821,11 +1065,20 @@ fn git_common_dir(repo: &Path) -> Result<PathBuf> {
     })
 }
 
-fn integration_marker(repo: &Path, group_id: &str) -> Result<PathBuf> {
+fn integration_marker_for(
+    repo: &Path,
+    group_id: &str,
+    backend: IsolationBackend,
+) -> Result<PathBuf> {
     validate_group_id(group_id)?;
-    Ok(git_common_dir(repo)?
-        .join("mitsuro-delegation-integrated")
-        .join(group_id))
+    match backend {
+        IsolationBackend::GitWorktree => Ok(git_common_dir(repo)?
+            .join("mitsuro-delegation-integrated")
+            .join(group_id)),
+        IsolationBackend::SnapshotRepository => {
+            Ok(isolation_root()?.join("integrated").join(group_id))
+        }
+    }
 }
 
 fn persist_integration_marker(path: &Path, group_id: &str) -> Result<()> {
@@ -1022,6 +1275,112 @@ mod tests {
         assert_eq!(stats.files_modified, 2);
         assert_eq!(stats.lines_added, 2);
         assert_eq!(stats.lines_removed, 0);
+    }
+
+    #[tokio::test]
+    async fn unborn_git_workspace_uses_private_snapshot_without_creating_head() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::create_dir_all(repo.join("src")).expect("src directory");
+        fs::write(repo.join("src/main.js"), "export const ready = false;\n")
+            .expect("unborn source");
+
+        let group_id = format!("group-{}", uuid::Uuid::new_v4());
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            group_id,
+            vec!["task-a".to_string(), "task-b".to_string()],
+        )
+        .await
+        .expect("prepare unborn isolation")
+        .expect("unborn isolation");
+        assert_eq!(isolation.backend, IsolationBackend::SnapshotRepository);
+        assert!(isolation.workspaces().iter().all(|workspace| workspace
+            .baseline_commit
+            .starts_with(SNAPSHOT_BASELINE_PREFIX)));
+        fs::write(
+            isolation.workspaces()[0].root.join("src/a.js"),
+            "export const a = 1;\n",
+        )
+        .expect("task a output");
+        fs::write(
+            isolation.workspaces()[1].root.join("src/b.js"),
+            "export const b = 2;\n",
+        )
+        .expect("task b output");
+
+        let results = isolation
+            .integrate(vec![result("task-a"), result("task-b")])
+            .await;
+        assert!(results.iter().all(|result| result.success), "{results:?}");
+        assert!(repo.join("src/a.js").exists());
+        assert!(repo.join("src/b.js").exists());
+        assert!(
+            !Command::new("git")
+                .args(["rev-parse", "--verify", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .expect("inspect unborn head")
+                .status
+                .success(),
+            "snapshot isolation must not create the authoritative first commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_git_workspace_isolated_snapshot_integrates_and_restores_without_git_metadata() {
+        let temp = tempfile::TempDir::new().expect("temp project");
+        let project = temp.path();
+        fs::create_dir_all(project.join("src")).expect("src directory");
+        fs::write(project.join("src/main.txt"), "source\n").expect("source file");
+        fs::write(project.join(".gitignore"), "ignored.txt\n").expect("ignore file");
+        fs::write(project.join("ignored.txt"), "do not snapshot\n").expect("ignored file");
+
+        let group_id = format!("group-{}", uuid::Uuid::new_v4());
+        let isolation = BuildIsolationSet::prepare(
+            project.to_path_buf(),
+            project.to_path_buf(),
+            group_id.clone(),
+            vec!["task-a".to_string(), "task-b".to_string()],
+        )
+        .await
+        .expect("prepare non-git isolation")
+        .expect("non-git isolation");
+        assert_eq!(isolation.backend, IsolationBackend::SnapshotRepository);
+        assert!(!isolation.workspaces()[0].root.join("ignored.txt").exists());
+        let durable = isolation
+            .workspaces()
+            .iter()
+            .map(|workspace| {
+                (
+                    workspace.task_id.clone(),
+                    workspace.root.clone(),
+                    workspace.baseline_commit.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        fs::write(isolation.workspaces()[0].root.join("src/a.txt"), "a\n").expect("task a output");
+        fs::write(isolation.workspaces()[1].root.join("src/b.txt"), "b\n").expect("task b output");
+        drop(isolation);
+
+        let restored = BuildIsolationSet::restore(project.to_path_buf(), group_id, durable)
+            .await
+            .expect("restore non-git isolation");
+        let results = restored
+            .integrate(vec![result("task-a"), result("task-b")])
+            .await;
+        assert!(results.iter().all(|result| result.success), "{results:?}");
+        assert_eq!(
+            fs::read_to_string(project.join("src/a.txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("src/b.txt")).unwrap(),
+            "b\n"
+        );
+        assert!(!project.join(".git").exists());
     }
 
     #[tokio::test]

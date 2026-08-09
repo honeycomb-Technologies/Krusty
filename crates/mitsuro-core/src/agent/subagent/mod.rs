@@ -605,6 +605,11 @@ fn finish_coordinated_task(
         "duration_ms": result.duration_ms,
         "turns_used": result.turns_used,
         "evidence": result.evidence,
+        "integration_state": if permit.task().specification.writer_mode == crate::storage::DelegationWriterMode::Isolated {
+            "pending"
+        } else {
+            "ready"
+        },
     });
     let (outcome, mut terminal_status) = if result.termination == SubAgentTermination::Cancelled {
         (

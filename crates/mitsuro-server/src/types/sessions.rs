@@ -296,6 +296,9 @@ pub struct DelegationTaskStateResponse {
     pub role: DelegatedRunRole,
     pub state: DelegationTaskState,
     pub attempt_count: usize,
+    pub integration_state: Option<String>,
+    pub depends_on: Vec<String>,
+    pub write_intent: Vec<String>,
     pub updated_at: String,
 }
 
@@ -310,13 +313,25 @@ impl From<DelegationGroupRecord> for DelegationGroupStateResponse {
             tasks: group
                 .tasks
                 .into_iter()
-                .map(|task| DelegationTaskStateResponse {
-                    delegation_task_id: task.specification.delegation_task_id,
-                    task_key: task.specification.task_key,
-                    role: task.specification.role,
-                    state: task.state,
-                    attempt_count: task.attempt_count,
-                    updated_at: task.updated_at.to_rfc3339(),
+                .map(|task| {
+                    let integration_state = task
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("integration_state"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|state| matches!(*state, "pending" | "ready" | "failed"))
+                        .map(ToString::to_string);
+                    DelegationTaskStateResponse {
+                        delegation_task_id: task.specification.delegation_task_id,
+                        task_key: task.specification.task_key,
+                        role: task.specification.role,
+                        state: task.state,
+                        attempt_count: task.attempt_count,
+                        integration_state,
+                        depends_on: task.specification.depends_on,
+                        write_intent: task.specification.write_intent,
+                        updated_at: task.updated_at.to_rfc3339(),
+                    }
                 })
                 .collect(),
             updated_at: group.updated_at.to_rfc3339(),

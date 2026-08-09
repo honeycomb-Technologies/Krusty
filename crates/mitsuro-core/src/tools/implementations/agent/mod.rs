@@ -15,6 +15,7 @@ mod tests;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -145,6 +146,12 @@ struct Params {
     #[serde(default)]
     components: Option<Vec<String>>,
 
+    /// A heterogeneous durable task graph. Ready tasks run concurrently while
+    /// dependencies, task-scoped capabilities, and write intent remain
+    /// explicit orchestration contracts.
+    #[serde(default)]
+    tasks: Option<Vec<StructuredAgentTaskParams>>,
+
     /// Coding conventions all builders must follow (build only)
     #[serde(default)]
     conventions: Option<Vec<String>>,
@@ -172,6 +179,40 @@ struct Params {
     description: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct StructuredAgentTaskParams {
+    #[serde(default, alias = "task_key")]
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    expected_output: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    write_intent: Vec<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    max_turns: Option<usize>,
+}
+
+impl StructuredAgentTaskParams {
+    fn objective(&self) -> &str {
+        self.instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.prompt.trim())
+    }
+}
+
 #[async_trait]
 impl Tool for AgentTool {
     fn name(&self) -> &str {
@@ -179,12 +220,12 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn and supervise agnostic child agents directed by the parent. Use for parallel or deep multi-file work — not simple lookups or one-file edits. Required product fields: name (from your plan) and instructions (or prompt). Optional capabilities: read, write, execute (parent policy is the ceiling). Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates results."
+        "Delegate substantial independent work in parallel, not simple lookups or tightly coupled edits. Prefer one tasks graph: ready tasks run together and dependencies run later; avoid repeated sibling spawns. Each task supports capabilities, scope, write_intent, depends_on, and max_turns. Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates and verifies."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Spawn a named child with clear instructions for substantial independent work. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence. Keep multi-scope digs on children so the parent transcript stays thin.",
+            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
         )
     }
 
@@ -198,36 +239,29 @@ impl Tool for AgentTool {
                     "description": "Spawn or supervise a delegated child; defaults to spawn"
                 },
                 "delegated_run_id": {
-                    "type": "string",
-                    "description": "Run targeted by status, wait, message, followup, interrupt, or resume"
+                    "type": "string"
                 },
                 "message": {
-                    "type": "string",
-                    "description": "Steering for a live child, or the next objective when followup resumes a completed child"
+                    "type": "string"
                 },
                 "wait_timeout_ms": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 300000,
-                    "description": "Maximum status wait"
+                    "maximum": 300000
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 100,
-                    "description": "Maximum runs returned by list"
+                    "maximum": 100
                 },
                 "name": {
-                    "type": "string",
-                    "description": "Parent-chosen task name for status and completion (from your plan)"
+                    "type": "string"
                 },
                 "instructions": {
-                    "type": "string",
-                    "description": "Full parent instructions that shape this child (preferred over prompt)"
+                    "type": "string"
                 },
                 "prompt": {
-                    "type": "string",
-                    "description": "Alias of instructions — objective for the child"
+                    "type": "string"
                 },
                 "capabilities": {
                     "type": "array",
@@ -235,39 +269,65 @@ impl Tool for AgentTool {
                     "items": {
                         "type": "string",
                         "enum": ["read", "write", "execute"]
-                    },
-                    "description": "Requested capabilities; parent governance is the ceiling. write enables edits; execute enables bash when write is not set"
+                    }
                 },
                 "profile": {
                     "type": "string",
                     "description": "Optional legacy label (explore/build/plan/verify/custom). Prefer name + instructions + capabilities"
                 },
                 "expected_output": {
-                    "type": "string",
-                    "description": "Expected result or proof contract"
+                    "type": "string"
                 },
                 "delegation_reason": {
-                    "type": "string",
-                    "description": "Why delegation improves this task"
+                    "type": "string"
                 },
                 "context": {
                     "type": "string",
-                    "enum": ["auto", "project", "brief", "full"],
-                    "description": "Parent context inherited by the child"
+                    "enum": ["auto", "project", "brief", "full"]
                 },
                 "max_turns": {
                     "type": "integer",
-                    "minimum": 1,
-                    "description": "Child turn budget; omitted inherits parent or defaults to 20"
+                    "minimum": 1
                 },
                 "scope": {
-                    "type": "string",
-                    "description": "Optional path scope for the child"
+                    "type": "string"
                 },
                 "components": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional parallel write components (one child per component)"
+                },
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "instructions": {"type": "string"},
+                            "prompt": {"type": "string"},
+                            "expected_output": {"type": "string"},
+                            "capabilities": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string", "enum": ["read", "write", "execute"]}
+                            },
+                            "scope": {"type": "string"},
+                            "write_intent": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            },
+                            "max_turns": {"type": "integer", "minimum": 1}
+                        },
+                        "additionalProperties": false
+                    }
                 },
                 "conventions": {
                     "type": "array",
@@ -341,6 +401,12 @@ fn has_explicit_empty_capabilities(params: &Value) -> bool {
 
 impl AgentTool {
     async fn execute_spawn(&self, mut params: Params, ctx: &ToolContext) -> ToolResult {
+        let structured_group = match normalize_structured_tasks(&mut params) {
+            Ok(structured_group) => structured_group,
+            Err(error) => {
+                return ToolResult::error_with_code("invalid_agent_task_graph", error);
+            }
+        };
         let spec = match AgentSpec::resolve(
             params.profile.as_deref(),
             params.agent_type.as_deref(),
@@ -383,7 +449,7 @@ impl AgentTool {
         }
         let parallel_components =
             should_use_parallel_component_pool(execution_profile, params.components.as_deref());
-        if !parallel_components {
+        if !parallel_components && !structured_group {
             if let Some(component) = params
                 .components
                 .as_ref()
@@ -421,12 +487,206 @@ impl AgentTool {
             "Resolved delegated AgentSpec (agnostic child)"
         );
 
-        if parallel_components {
+        if parallel_components || structured_group {
             self.execute_build(params, ctx).await
         } else {
             self.execute_child(params, ctx).await
         }
     }
+}
+
+fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
+    let Some(tasks) = params.tasks.as_mut() else {
+        return Ok(false);
+    };
+    if tasks.is_empty() {
+        return Err("Agent task graph requires at least one task".to_string());
+    }
+    if tasks.len() > 32 {
+        return Err("Agent task graph cannot exceed 32 tasks".to_string());
+    }
+    if params
+        .components
+        .as_ref()
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err("Use either tasks or legacy components, not both".to_string());
+    }
+
+    let mut positions = BTreeMap::new();
+    let mut group_capabilities = BTreeSet::new();
+    for (index, task) in tasks.iter_mut().enumerate() {
+        task.id = task.id.trim().to_string();
+        if task.id.is_empty() || task.id.len() > 128 {
+            return Err("Every Agent task requires an id of 128 characters or fewer".to_string());
+        }
+        if positions.insert(task.id.clone(), index).is_some() {
+            return Err(format!("Duplicate Agent task id '{}'", task.id));
+        }
+        if task.objective().is_empty() {
+            return Err(format!("Agent task '{}' requires instructions", task.id));
+        }
+        if task.capabilities.is_empty() {
+            task.capabilities.push("read".to_string());
+        }
+        for capability in &task.capabilities {
+            let parsed = crate::agent::subagent::AgentCapability::parse(capability)?;
+            group_capabilities.insert(match parsed {
+                crate::agent::subagent::AgentCapability::Read => "read".to_string(),
+                crate::agent::subagent::AgentCapability::Write => "write".to_string(),
+                crate::agent::subagent::AgentCapability::Execute => "execute".to_string(),
+            });
+        }
+        task.depends_on = task
+            .depends_on
+            .iter()
+            .map(|dependency| dependency.trim().to_string())
+            .collect();
+        task.write_intent = task
+            .write_intent
+            .iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect();
+    }
+
+    let mut indegree = vec![0usize; tasks.len()];
+    let mut dependents = vec![Vec::new(); tasks.len()];
+    for (index, task) in tasks.iter().enumerate() {
+        let mut unique = BTreeSet::new();
+        for dependency in &task.depends_on {
+            let Some(&dependency_index) = positions.get(dependency) else {
+                return Err(format!(
+                    "Agent task '{}' references unknown dependency '{}'",
+                    task.id, dependency
+                ));
+            };
+            if dependency_index == index {
+                return Err(format!("Agent task '{}' cannot depend on itself", task.id));
+            }
+            if !unique.insert(dependency.clone()) {
+                return Err(format!(
+                    "Agent task '{}' repeats dependency '{}'",
+                    task.id, dependency
+                ));
+            }
+            indegree[index] += 1;
+            dependents[dependency_index].push(index);
+        }
+    }
+
+    // Stable Kahn ordering places every ready wave before its dependents. This
+    // prevents dependency waiters from occupying all local pool slots ahead
+    // of runnable roots while the durable coordinator remains authoritative.
+    let mut ready = (0..tasks.len())
+        .filter(|index| indegree[*index] == 0)
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(tasks.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for dependent in &dependents[index] {
+            indegree[*dependent] -= 1;
+            if indegree[*dependent] == 0 {
+                ready.insert(*dependent);
+            }
+        }
+    }
+    if order.len() != tasks.len() {
+        return Err("Agent task graph contains a dependency cycle".to_string());
+    }
+    let original = tasks.clone();
+    let ordered = order
+        .into_iter()
+        .map(|index| original[index].clone())
+        .collect::<Vec<_>>();
+    let mut ancestors = BTreeMap::<String, BTreeSet<String>>::new();
+    for task in &ordered {
+        let mut task_ancestors = BTreeSet::new();
+        for dependency in &task.depends_on {
+            task_ancestors.insert(dependency.clone());
+            if let Some(inherited) = ancestors.get(dependency) {
+                task_ancestors.extend(inherited.iter().cloned());
+            }
+        }
+        ancestors.insert(task.id.clone(), task_ancestors);
+    }
+    for (index, left) in ordered.iter().enumerate() {
+        if !left
+            .capabilities
+            .iter()
+            .any(|capability| capability == "write")
+            || left.write_intent.is_empty()
+        {
+            continue;
+        }
+        for right in ordered.iter().skip(index + 1) {
+            if !right
+                .capabilities
+                .iter()
+                .any(|capability| capability == "write")
+                || right.write_intent.is_empty()
+                || ancestors
+                    .get(&left.id)
+                    .is_some_and(|items| items.contains(&right.id))
+                || ancestors
+                    .get(&right.id)
+                    .is_some_and(|items| items.contains(&left.id))
+            {
+                continue;
+            }
+            if left.write_intent.iter().any(|left_path| {
+                right
+                    .write_intent
+                    .iter()
+                    .any(|right_path| write_intents_overlap(left_path, right_path))
+            }) {
+                return Err(format!(
+                    "Agent tasks '{}' and '{}' have overlapping write_intent but no dependency ordering",
+                    left.id, right.id
+                ));
+            }
+        }
+    }
+    *tasks = ordered;
+
+    params.capabilities = group_capabilities.into_iter().collect();
+    if params.prompt.trim().is_empty()
+        && params
+            .instructions
+            .as_deref()
+            .is_none_or(|instructions| instructions.trim().is_empty())
+    {
+        params.prompt = format!(
+            "Coordinate this structured task graph to completion: {}",
+            tasks
+                .iter()
+                .map(|task| task.name.as_deref().unwrap_or(&task.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(true)
+}
+
+fn write_intents_overlap(left: &str, right: &str) -> bool {
+    fn normalized(value: &str) -> String {
+        value
+            .trim()
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .to_string()
+    }
+    let left = normalized(left);
+    let right = normalized(right);
+    !left.is_empty()
+        && !right.is_empty()
+        && (left == right
+            || left
+                .strip_prefix(&right)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+            || right
+                .strip_prefix(&left)
+                .is_some_and(|suffix| suffix.starts_with('/')))
 }
 
 fn validate_background_wake_host(

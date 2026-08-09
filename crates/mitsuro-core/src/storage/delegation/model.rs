@@ -406,6 +406,20 @@ pub struct DelegationTaskSpec {
     #[serde(default)]
     pub target_scope: Vec<DelegatedRunScope>,
     pub max_attempts: usize,
+    /// Task keys that must produce usable terminal results before this task is
+    /// eligible for admission. Keys, rather than generated durable IDs, keep
+    /// the graph portable across foreground, detached, and replayed runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    /// Parent-declared paths or path prefixes this task expects to modify.
+    /// This is a planning and diagnostics contract only: isolated workspaces
+    /// and integration-time patches remain the authoritative safety boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_intent: Vec<String>,
+    /// Exact task-level policy. Legacy records inherit the group policy, while
+    /// structured groups may persist a narrower capability subset per task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_policy: Option<DelegationPolicy>,
     #[serde(default)]
     pub writer_mode: DelegationWriterMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -449,6 +463,26 @@ impl DelegationTaskSpec {
         ensure!(
             self.max_attempts > 0,
             "delegation task max attempts must be greater than zero"
+        );
+        ensure!(
+            self.depends_on.len() <= 128,
+            "delegation task dependency list exceeds the item limit"
+        );
+        ensure!(
+            self.depends_on
+                .iter()
+                .all(|dependency| !dependency.trim().is_empty() && dependency.len() <= 512),
+            "delegation task dependency key is empty or too long"
+        );
+        ensure!(
+            self.write_intent.len() <= 256,
+            "delegation task write intent exceeds the item limit"
+        );
+        ensure!(
+            self.write_intent
+                .iter()
+                .all(|path| !path.trim().is_empty() && path.len() <= 4 * 1024),
+            "delegation task write intent path is empty or too long"
         );
         if let Some(envelope) = self.executor_envelope.as_ref() {
             envelope.validate(&self.objective)?;

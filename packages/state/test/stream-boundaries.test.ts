@@ -49,6 +49,31 @@ function testHarness() {
   return { callbacks, ref, state: () => state, setCount: () => setCount };
 }
 
+Deno.test('delegation SSE events request an immediate canonical refresh', () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  let refreshes = 0;
+  const state: any = { messages: [ref.current], delegationEventCursor: 40 };
+  const callbacks = createStreamCallbacks(ref, () => {}, () => state, {
+    planStore: { getState: () => ({ setItems() {} }) } as never,
+    sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+    persistSessionMode: async () => {},
+    onDelegationEvent: () => refreshes += 1,
+  });
+  const event = {
+    event_id: 41,
+    parent_session_id: 'session-1',
+    delegation_group_id: 'group-1',
+    delegation_task_id: 'task-1',
+    event_type: 'task_running' as const,
+    payload: { state: 'running' },
+    created_at: '2026-08-08T12:00:00Z',
+  };
+  callbacks.onDelegationEvent?.(event);
+  assertEquals(refreshes, 1, 'new delegation lifecycle events trigger canonical refresh');
+  callbacks.onDelegationEvent?.({ ...event, event_id: 39 });
+  assertEquals(refreshes, 1, 'already-applied events do not trigger duplicate refreshes');
+});
+
 Deno.test('duplicate tool starts remain one live tool block', () => {
   const { callbacks, ref } = testHarness();
 

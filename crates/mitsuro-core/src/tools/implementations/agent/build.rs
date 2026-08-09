@@ -27,7 +27,7 @@ use super::{
     build_coverage_gap_notice, build_investigation_summary, classify_build_outcome,
     delegated_persistence_error, delegated_workspace_scope, existing_continuation_error,
     notify_child_completion, open_delegated_run_store, persist_background_delegated_artifact,
-    persist_delegated_artifact, AgentTool, Params,
+    persist_delegated_artifact, AgentTool, Params, StructuredAgentTaskParams,
 };
 
 fn deduplicate_background_processes(processes: &mut Vec<DelegatedProcessArtifact>) {
@@ -221,6 +221,198 @@ fn build_summary_with_handoff(
     }
 }
 
+fn structured_task_policy(
+    task: &StructuredAgentTaskParams,
+    ctx: &ToolContext,
+    group_turn_budget: Option<usize>,
+) -> DelegationPolicy {
+    let capabilities = task
+        .capabilities
+        .iter()
+        .map(|capability| AgentCapability::parse(capability))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .expect("structured Agent capabilities were normalized before execution");
+    let max_turns = match (task.max_turns, group_turn_budget) {
+        (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
+        (Some(requested), None) => Some(requested),
+        (None, ceiling) => ceiling,
+    };
+    DelegationPolicy::for_subagent_child(
+        ctx.permission_mode,
+        max_turns,
+        capabilities.contains(&AgentCapability::Read),
+        capabilities.contains(&AgentCapability::Write),
+        capabilities.contains(&AgentCapability::Execute),
+    )
+    .with_supervised_approval(ctx.supervised_approval_granted)
+    .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref())
+}
+
+fn delegated_role_for_policy(policy: &DelegationPolicy) -> DelegatedRunRole {
+    if !policy.read_only_only {
+        DelegatedRunRole::Build
+    } else if policy.bash_allowed {
+        DelegatedRunRole::Verifier
+    } else {
+        DelegatedRunRole::Explore
+    }
+}
+
+pub(super) fn build_execution_waves(
+    tasks: &[SubAgentTask],
+    structured: Option<&[StructuredAgentTaskParams]>,
+) -> Vec<Vec<SubAgentTask>> {
+    let Some(structured) = structured else {
+        return vec![tasks.to_vec()];
+    };
+    let mut depths = std::collections::BTreeMap::<String, usize>::new();
+    for task in structured {
+        let depth = task
+            .depends_on
+            .iter()
+            .filter_map(|dependency| depths.get(dependency))
+            .max()
+            .copied()
+            .unwrap_or(0)
+            + usize::from(!task.depends_on.is_empty());
+        depths.insert(task.id.clone(), depth);
+    }
+    let max_depth = depths.values().copied().max().unwrap_or(0);
+    (0..=max_depth)
+        .map(|depth| {
+            tasks
+                .iter()
+                .filter(|task| depths.get(&task.id).copied().unwrap_or(0) == depth)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|wave| !wave.is_empty())
+        .collect()
+}
+
+async fn execute_builder_waves(
+    pool: &SubAgentPool,
+    waves: Vec<Vec<SubAgentTask>>,
+    context: Arc<SharedBuildContext>,
+    progress_tx: tokio::sync::mpsc::UnboundedSender<AgentProgress>,
+    mut isolation: Option<BuildIsolationSet>,
+    coordinator: Option<&DelegationCoordinator>,
+    delegation_group_id: &str,
+    integration_owner: String,
+    integration_workspace: String,
+) -> Vec<SubAgentResult> {
+    let mut all_results = Vec::new();
+    for wave in waves {
+        let mut wave_results = pool
+            .execute_builders(wave, context.clone(), progress_tx.clone())
+            .await;
+        if let Some(isolation_set) = isolation.take() {
+            if let Some(integration_permit) = pool
+                .acquire_integration_writer(
+                    integration_owner.clone(),
+                    integration_workspace.clone(),
+                )
+                .await
+            {
+                wave_results = isolation_set
+                    .integrate_recording(wave_results, context.clone())
+                    .await;
+                let signal = if wave_results.iter().any(|result| !result.success) {
+                    BackpressureSignal::Failed
+                } else {
+                    BackpressureSignal::Healthy
+                };
+                integration_permit.complete(signal);
+            } else {
+                for result in &mut wave_results {
+                    result.success = false;
+                    result.termination = SubAgentTermination::Cancelled;
+                    result.error = Some(
+                        "Isolated build integration was cancelled; recovery workspaces were retained."
+                            .to_string(),
+                    );
+                }
+            }
+
+            if let Some(coordinator) = coordinator {
+                let isolated_tasks = match coordinator.get_group(delegation_group_id) {
+                    Ok(Some(group)) => group
+                        .tasks
+                        .into_iter()
+                        .filter(|task| {
+                            task.specification.writer_mode == DelegationWriterMode::Isolated
+                        })
+                        .map(|task| {
+                            (
+                                task.specification.delegation_task_id,
+                                task.specification.task_key,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    Ok(None) => {
+                        let error = format!(
+                            "Durable delegation group {delegation_group_id} disappeared before isolated integration could be recorded"
+                        );
+                        tracing::error!(%error);
+                        for result in &mut wave_results {
+                            result.success = false;
+                            result.termination = SubAgentTermination::Failed;
+                            result.error = Some(error.clone());
+                        }
+                        Vec::new()
+                    }
+                    Err(error) => {
+                        let error = format!(
+                            "Could not load durable delegation group {delegation_group_id} after isolated integration: {error}"
+                        );
+                        tracing::error!(%error);
+                        for result in &mut wave_results {
+                            result.success = false;
+                            result.termination = SubAgentTermination::Failed;
+                            result.error = Some(error.clone());
+                        }
+                        Vec::new()
+                    }
+                };
+
+                for (delegation_task_id, task_key) in isolated_tasks {
+                    let Some(result_index) = wave_results
+                        .iter()
+                        .position(|result| result.task_id == task_key)
+                    else {
+                        continue;
+                    };
+                    let succeeded = wave_results[result_index].success;
+                    let integration_error = wave_results[result_index].error.clone();
+                    let update = coordinator.complete_task_integration(
+                        &delegation_task_id,
+                        succeeded,
+                        integration_error.as_deref(),
+                    );
+                    if !matches!(update, Ok(true)) {
+                        let error = match update {
+                            Ok(false) => format!(
+                                "Durable integration state for task {task_key} was not updated"
+                            ),
+                            Err(error) => format!(
+                                "Could not record durable integration state for task {task_key}: {error}"
+                            ),
+                            Ok(true) => unreachable!(),
+                        };
+                        tracing::error!(%error);
+                        let result = &mut wave_results[result_index];
+                        result.success = false;
+                        result.termination = SubAgentTermination::Failed;
+                        result.error = Some(error);
+                    }
+                }
+            }
+        }
+        all_results.extend(wave_results);
+    }
+    all_results
+}
+
 impl AgentTool {
     // Build
     // -----------------------------------------------------------------------
@@ -263,7 +455,12 @@ impl AgentTool {
 
         // Adaptive scheduling starts every component eagerly. An explicit value
         // is a user ceiling, not a hidden product cap.
-        let num_components = params.components.as_ref().map(|c| c.len()).unwrap_or(1);
+        let num_components = params
+            .tasks
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| params.components.as_ref().map(Vec::len))
+            .unwrap_or(1);
         let concurrency = params.max_concurrency;
 
         // Build tasks - all use Opus for high-quality code generation
@@ -309,7 +506,90 @@ impl AgentTool {
         let project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
 
-        if let Some(ref components) = params.components {
+        if let Some(ref structured_tasks) = params.tasks {
+            let total = structured_tasks.len();
+            let graph_summary = structured_tasks
+                .iter()
+                .map(|task| {
+                    let dependencies = if task.depends_on.is_empty() {
+                        "ready immediately".to_string()
+                    } else {
+                        format!("after {}", task.depends_on.join(", "))
+                    };
+                    format!("  - {} ({dependencies})", task.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for (index, structured) in structured_tasks.iter().enumerate() {
+                let task_policy = structured_task_policy(structured, ctx, params.max_turns);
+                let name = structured
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&structured.id)
+                    .to_string();
+                let dependencies = if structured.depends_on.is_empty() {
+                    "None; this task is ready immediately.".to_string()
+                } else {
+                    structured.depends_on.join(", ")
+                };
+                let scope = structured.scope.as_deref().unwrap_or("project workspace");
+                let write_intent = if structured.write_intent.is_empty() {
+                    "No declared paths.".to_string()
+                } else {
+                    structured.write_intent.join(", ")
+                };
+                let expected_output = structured
+                    .expected_output
+                    .as_deref()
+                    .map(|expected| format!("\nEXPECTED OUTPUT:\n{expected}\n"))
+                    .unwrap_or_default();
+                let task_prompt = format!(
+                    "You are task {} of {} in one coordinated Agent task graph.\n\n\
+                     TASK ID: {}\nTASK NAME: {}\n\nTASK INSTRUCTIONS:\n{}\n{}\n\
+                     GROUP OBJECTIVE:\n{}\n\nDEPENDENCIES:\n{}\n\nPRIMARY SCOPE:\n{}\n\n\
+                     DECLARED WRITE INTENT:\n{}\n\nTASK GRAPH:\n{}\n\n\
+                     Execute only this bounded task. Respect its exact capability policy. Return concrete evidence and validation for parent synthesis.\n\n\
+                     PROJECT CONTEXT:\n{}",
+                    index + 1,
+                    total,
+                    structured.id,
+                    name,
+                    structured.objective(),
+                    expected_output,
+                    params.prompt,
+                    dependencies,
+                    scope,
+                    write_intent,
+                    graph_summary,
+                    project_context,
+                );
+                let mut task = SubAgentTask::new(structured.id.clone(), task_prompt)
+                    .with_name(name.clone())
+                    .with_working_dir(ctx.working_dir.clone())
+                    .with_delegated_run_id(delegated_run_id.clone())
+                    .with_delegation_policy(task_policy.clone())
+                    .with_process_context(
+                        ctx.process_registry.clone(),
+                        ctx.user_id.clone(),
+                        ctx.session_id.clone(),
+                    )
+                    .with_provider_call_trace(ctx.provider_call_trace.clone());
+                if let Some(sandbox_root) = ctx.sandbox_root.clone() {
+                    task = task.with_sandbox_root(sandbox_root);
+                }
+                if let Some(max_turns) = task_policy.max_turns {
+                    task = task.with_max_turns(max_turns);
+                }
+                target_scope.push(DelegatedRunScope {
+                    label: name,
+                    path: structured.scope.clone().unwrap_or_else(|| ".".to_string()),
+                    kind: "task".to_string(),
+                });
+                tasks.push(task);
+            }
+        } else if let Some(ref components) = params.components {
             let total = components.len();
             let other_components: Vec<_> = components.iter().map(|c| c.as_str()).collect();
 
@@ -413,7 +693,34 @@ impl AgentTool {
         // process died after preparing these deterministic worktrees but
         // before creating the durable group, remove only the abandoned batch
         // after proving that no canonical group owns it.
-        let materialization_guard = if tasks.len() > 1 {
+        let candidate_isolated_task_ids = if params
+            .tasks
+            .as_ref()
+            .is_some_and(|tasks| tasks.iter().any(|task| !task.depends_on.is_empty()))
+        {
+            params
+                .tasks
+                .as_ref()
+                .expect("structured dependency tasks")
+                .iter()
+                .filter(|task| task.depends_on.is_empty())
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>()
+        };
+        let isolated_task_ids = candidate_isolated_task_ids
+            .into_iter()
+            .filter(|task_id| {
+                tasks
+                    .iter()
+                    .find(|task| task.id == *task_id)
+                    .and_then(|task| task.delegation_policy.as_ref())
+                    .is_some_and(|policy| !policy.read_only_only)
+            })
+            .collect::<Vec<_>>();
+        let requires_isolation = tasks.len() > 1 && !isolated_task_ids.is_empty();
+        let materialization_guard = if requires_isolation {
             let guard =
                 match BuildIsolationMaterializationGuard::acquire(delegated_run_id.clone()).await {
                     Ok(guard) => guard,
@@ -442,7 +749,7 @@ impl AgentTool {
                                     .as_ref()
                                     .expect("build checked project directory")
                                     .clone(),
-                                tasks.len(),
+                                isolated_task_ids.len(),
                             )
                             .await
                         {
@@ -467,10 +774,10 @@ impl AgentTool {
             None
         };
 
-        // Real parallel writers execute in detached Git worktrees captured
-        // from the same dirty source snapshot. Non-Git projects deliberately
-        // retain the serial shared-workspace compatibility path.
-        let mut build_isolation = if tasks.len() > 1 {
+        // Parallel writers execute in isolated workspaces captured from one
+        // source snapshot. Established Git repositories use detached
+        // worktrees; unborn and non-Git projects use a private snapshot repo.
+        let mut build_isolation = if requires_isolation {
             match BuildIsolationSet::prepare(
                 ctx.project_dir
                     .as_ref()
@@ -478,7 +785,7 @@ impl AgentTool {
                     .clone(),
                 ctx.working_dir.clone(),
                 delegated_run_id.clone(),
-                tasks.iter().map(|task| task.id.clone()).collect(),
+                isolated_task_ids,
             )
             .await
             {
@@ -497,11 +804,13 @@ impl AgentTool {
         };
         if let Some(isolation) = build_isolation.as_ref() {
             for task in &mut tasks {
-                let workspace = isolation
+                let Some(workspace) = isolation
                     .workspaces()
                     .iter()
                     .find(|workspace| workspace.task_id == task.id)
-                    .expect("isolation workspace exists for every builder");
+                else {
+                    continue;
+                };
                 let source_project = ctx
                     .project_dir
                     .as_ref()
@@ -606,14 +915,29 @@ impl AgentTool {
                             .find(|workspace| workspace.task_id == task.id)
                     });
                     let delegation_task_id = format!("{delegated_run_id}:task:{index}");
+                    let structured = params
+                        .tasks
+                        .as_ref()
+                        .and_then(|tasks| tasks.iter().find(|candidate| candidate.id == task.id));
+                    let task_policy = task
+                        .delegation_policy
+                        .clone()
+                        .unwrap_or_else(|| delegation_policy.clone());
+                    let task_role = delegated_role_for_policy(&task_policy);
+                    let executor_kind = match task_role {
+                        DelegatedRunRole::Build => DelegationExecutorKind::Build,
+                        DelegatedRunRole::Verifier => DelegationExecutorKind::Verify,
+                        DelegatedRunRole::Planner => DelegationExecutorKind::Plan,
+                        DelegatedRunRole::Explore => DelegationExecutorKind::Explore,
+                    };
                     let executor_envelope = if background {
                         Some(build_detached_executor_envelope(
                             ctx,
                             &delegation_task_id,
                             &task.name,
                             &task.prompt,
-                            DelegationExecutorKind::Build,
-                            DelegatedRunRole::Build,
+                            executor_kind,
+                            task_role.clone(),
                             &client.resolved_model().key,
                             &resolved_model,
                             &task.working_dir,
@@ -626,7 +950,7 @@ impl AgentTool {
                         delegation_task_id,
                         task_key: task.id.clone(),
                         objective: task.prompt.clone(),
-                        role: DelegatedRunRole::Build,
+                        role: task_role,
                         target_scope: vec![
                             workspace_scope.clone(),
                             DelegatedRunScope {
@@ -636,6 +960,13 @@ impl AgentTool {
                             },
                         ],
                         max_attempts: 2,
+                        depends_on: structured
+                            .map(|task| task.depends_on.clone())
+                            .unwrap_or_default(),
+                        write_intent: structured
+                            .map(|task| task.write_intent.clone())
+                            .unwrap_or_default(),
+                        task_policy: Some(task_policy),
                         writer_mode: if isolated.is_some() {
                             DelegationWriterMode::Isolated
                         } else {
@@ -696,7 +1027,9 @@ impl AgentTool {
                     delegated_run_id.clone(),
                     specification.delegation_task_id,
                 );
-                task.max_turns_override = Some(params.max_turns.unwrap_or(20));
+                if task.max_turns_override.is_none() {
+                    task.max_turns_override = Some(params.max_turns.unwrap_or(20));
+                }
             }
             delegation_coordinator = Some(coordinator);
         }
@@ -750,6 +1083,7 @@ impl AgentTool {
         if let Some(coordinator) = delegation_coordinator.clone() {
             pool = pool.with_delegation_coordinator(coordinator);
         }
+        let execution_waves = build_execution_waves(&tasks, params.tasks.as_deref());
 
         info!(
             "Agent tool (build): Starting adaptive builder pool with concurrency_ceiling={:?} (components={}), background={}",
@@ -769,6 +1103,7 @@ impl AgentTool {
             let bg_process_owner_id = ctx.user_id.clone();
             let bg_group_coordinator = delegation_coordinator.clone();
             let mut bg_build_isolation = build_isolation.take();
+            let bg_execution_waves = execution_waves.clone();
             let bg_integration_workspace = workspace_scope.path.clone();
             let mut bg_runtime_registration = background_runtime_registration
                 .expect("background build registered live runtime ownership");
@@ -800,13 +1135,24 @@ impl AgentTool {
                 // Keep a clone for the completion event after execute_builders consumes the tx
                 let completion_tx = progress_tx.clone();
 
-                let mut results = if let Some(progress_tx) = progress_tx {
-                    pool.execute_builders(tasks, context.clone(), progress_tx)
-                        .await
-                } else {
+                let progress_tx = progress_tx.unwrap_or_else(|| {
                     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-                    pool.execute_builders(tasks, context.clone(), tx).await
-                };
+                    tx
+                });
+                let mut results = execute_builder_waves(
+                    &pool,
+                    bg_execution_waves,
+                    context.clone(),
+                    progress_tx,
+                    bg_build_isolation.take(),
+                    bg_group_coordinator.as_ref(),
+                    &bg_delegated_run_id,
+                    bg_session_id
+                        .clone()
+                        .unwrap_or_else(|| bg_delegated_run_id.clone()),
+                    bg_integration_workspace,
+                )
+                .await;
                 let synthesis_permit = if let Some(coordinator) = bg_group_coordinator.as_ref() {
                     match coordinator.begin_synthesis(&bg_delegated_run_id) {
                         Ok(permit) => Some(permit),
@@ -831,47 +1177,6 @@ impl AgentTool {
                         "Stopping background integration after durable synthesis ownership was lost"
                     );
                     return;
-                }
-                if let Some(isolation) = bg_build_isolation {
-                    if let Some(integration_permit) = pool
-                        .acquire_integration_writer(
-                            bg_session_id
-                                .clone()
-                                .unwrap_or_else(|| bg_delegated_run_id.clone()),
-                            bg_integration_workspace,
-                        )
-                        .await
-                    {
-                        if synthesis_permit
-                            .as_ref()
-                            .is_some_and(|permit| permit.cancellation().is_cancelled())
-                        {
-                            integration_permit.complete(BackpressureSignal::Cancelled);
-                            tracing::warn!(
-                                delegated_run_id = %bg_delegated_run_id,
-                                "Stopping background integration after synthesis lease loss"
-                            );
-                            return;
-                        }
-                        results = isolation
-                            .integrate_recording(results, context.clone())
-                            .await;
-                        let signal = if results.iter().any(|result| !result.success) {
-                            BackpressureSignal::Failed
-                        } else {
-                            BackpressureSignal::Healthy
-                        };
-                        integration_permit.complete(signal);
-                    } else {
-                        for result in &mut results {
-                            result.success = false;
-                            result.termination = SubAgentTermination::Cancelled;
-                            result.error = Some(
-                                "Isolated build integration was cancelled; recovery workspaces were retained."
-                                    .to_string(),
-                            );
-                        }
-                    }
                 }
                 if synthesis_permit
                     .as_ref()
@@ -1122,14 +1427,24 @@ impl AgentTool {
         // ── Synchronous mode (existing behavior) ─────────────────────
 
         // Execute builders with progress channel if available
-        let mut results = if let Some(ref progress_tx) = ctx.agent_progress_tx {
-            pool.execute_builders(tasks, context.clone(), progress_tx.clone())
-                .await
-        } else {
-            // Fallback: create a dummy channel and discard progress
+        let progress_tx = ctx.agent_progress_tx.clone().unwrap_or_else(|| {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            pool.execute_builders(tasks, context.clone(), tx).await
-        };
+            tx
+        });
+        let mut results = execute_builder_waves(
+            &pool,
+            execution_waves,
+            context.clone(),
+            progress_tx,
+            build_isolation.take(),
+            delegation_coordinator.as_ref(),
+            &delegated_run_id,
+            ctx.session_id
+                .clone()
+                .unwrap_or_else(|| delegated_run_id.clone()),
+            workspace_scope.path.clone(),
+        )
+        .await;
         let synthesis_permit = if let Some(coordinator) = delegation_coordinator.as_ref() {
             match coordinator.begin_synthesis(&delegated_run_id) {
                 Ok(permit) => Some(permit),
@@ -1151,46 +1466,6 @@ impl AgentTool {
                 "agent_delegation_synthesis_lost",
                 "Delegation synthesis ownership was lost before build integration; recovery workspaces were retained.",
             );
-        }
-        if let Some(isolation) = build_isolation {
-            if let Some(integration_permit) = pool
-                .acquire_integration_writer(
-                    ctx.session_id
-                        .clone()
-                        .unwrap_or_else(|| delegated_run_id.clone()),
-                    workspace_scope.path.clone(),
-                )
-                .await
-            {
-                if synthesis_permit
-                    .as_ref()
-                    .is_some_and(|permit| permit.cancellation().is_cancelled())
-                {
-                    integration_permit.complete(BackpressureSignal::Cancelled);
-                    return ToolResult::error_with_code(
-                        "agent_delegation_synthesis_lost",
-                        "Delegation synthesis ownership was lost while waiting to integrate; recovery workspaces were retained.",
-                    );
-                }
-                results = isolation
-                    .integrate_recording(results, context.clone())
-                    .await;
-                let signal = if results.iter().any(|result| !result.success) {
-                    BackpressureSignal::Failed
-                } else {
-                    BackpressureSignal::Healthy
-                };
-                integration_permit.complete(signal);
-            } else {
-                for result in &mut results {
-                    result.success = false;
-                    result.termination = SubAgentTermination::Cancelled;
-                    result.error = Some(
-                        "Isolated build integration was cancelled; recovery workspaces were retained."
-                            .to_string(),
-                    );
-                }
-            }
         }
         if synthesis_permit
             .as_ref()

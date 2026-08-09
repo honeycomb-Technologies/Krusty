@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use crate::storage::Database;
@@ -167,6 +167,12 @@ impl DelegationStore {
                 task_keys.insert(task.task_key.as_str()),
                 "duplicate delegation task key"
             );
+            if let Some(task_policy) = task.task_policy.as_ref() {
+                ensure!(
+                    task_policy.is_within(&input.contract.governance.delegation_policy),
+                    "delegation task policy exceeds its immutable group governance"
+                );
+            }
             if let Some(envelope) = task.executor_envelope.as_ref() {
                 ensure!(
                     input.contract.execution_mode
@@ -201,6 +207,7 @@ impl DelegationStore {
                 );
             }
         }
+        validate_task_graph(&input.tasks)?;
 
         let now = Utc::now().to_rfc3339();
         let contract_json = serde_json::to_string(&input.contract)?;
@@ -271,6 +278,8 @@ impl DelegationStore {
                 "tasks": input.tasks.iter().map(|task| serde_json::json!({
                     "delegation_task_id": task.delegation_task_id,
                     "task_key": task.task_key,
+                    "depends_on": task.depends_on,
+                    "write_intent": task.write_intent,
                 })).collect::<Vec<_>>(),
             }),
             &now,
@@ -362,6 +371,7 @@ impl DelegationStore {
         // append-only state events so reconnect consumers can replay the same
         // retry/failure decision that the authoritative snapshot contains.
         recover_expired_task_leases(&tx, delegation_group_id, now_ms, &now)?;
+        cancel_tasks_blocked_by_failed_dependencies(&tx, delegation_group_id, &now)?;
 
         let active: usize = tx.query_row(
             "SELECT COUNT(*)
@@ -382,8 +392,21 @@ impl DelegationStore {
         let task_ids = {
             let mut statement = tx.prepare(
                 "SELECT delegation_task_id
-                   FROM delegation_tasks
+                   FROM delegation_tasks AS candidate
                   WHERE delegation_group_id = ?1 AND state = 'queued'
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM json_each(candidate.specification_json, '$.depends_on') AS required
+                          LEFT JOIN delegation_tasks AS dependency
+                            ON dependency.delegation_group_id = candidate.delegation_group_id
+                           AND dependency.task_key = required.value
+                         WHERE dependency.delegation_task_id IS NULL
+                            OR dependency.state NOT IN ('complete', 'degraded')
+                            OR COALESCE(
+                                json_extract(dependency.result_json, '$.integration_state'),
+                                'ready'
+                            ) != 'ready'
+                    )
                   ORDER BY ordinal ASC
                   LIMIT ?2",
             )?;
@@ -514,6 +537,7 @@ impl DelegationStore {
         let contract: DelegationGroupContract = serde_json::from_str(&contract_json)?;
 
         recover_expired_task_leases(&tx, &group_id, now_ms, &now)?;
+        cancel_tasks_blocked_by_failed_dependencies(&tx, &group_id, &now)?;
         let task_state = tx.query_row(
             "SELECT state FROM delegation_tasks WHERE delegation_task_id = ?1",
             params![delegation_task_id],
@@ -522,6 +546,31 @@ impl DelegationStore {
         if task_state != "queued" {
             tx.commit()?;
             let _ = self.reconcile_group(&group_id)?;
+            return Ok(None);
+        }
+        let dependencies_ready: bool = tx.query_row(
+            "SELECT NOT EXISTS (
+                SELECT 1
+                  FROM delegation_tasks AS candidate,
+                       json_each(candidate.specification_json, '$.depends_on') AS required
+                  LEFT JOIN delegation_tasks AS dependency
+                    ON dependency.delegation_group_id = candidate.delegation_group_id
+                   AND dependency.task_key = required.value
+                 WHERE candidate.delegation_task_id = ?1
+                   AND (
+                       dependency.delegation_task_id IS NULL
+                       OR dependency.state NOT IN ('complete', 'degraded')
+                       OR COALESCE(
+                           json_extract(dependency.result_json, '$.integration_state'),
+                           'ready'
+                       ) != 'ready'
+                   )
+            )",
+            params![delegation_task_id],
+            |row| row.get(0),
+        )?;
+        if !dependencies_ready {
+            tx.commit()?;
             return Ok(None);
         }
         let active = tx.query_row(
@@ -1227,6 +1276,59 @@ impl DelegationStore {
         )
     }
 
+    /// Publish the authoritative outcome of an isolated patch. A successful
+    /// child loop with a pending integration result is not dependency-ready
+    /// and cannot satisfy group completion until this phase is durable.
+    pub fn complete_task_integration(
+        &self,
+        delegation_task_id: &str,
+        succeeded: bool,
+        error_summary: Option<&str>,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let integration_state = if succeeded { "ready" } else { "failed" };
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE delegation_tasks
+                SET result_json = json_set(
+                        COALESCE(result_json, '{}'),
+                        '$.integration_state', ?2
+                    ),
+                    error_summary = CASE
+                        WHEN ?2 = 'failed' THEN COALESCE(?3, error_summary, 'isolated patch integration failed')
+                        ELSE error_summary
+                    END,
+                    updated_at = ?4
+              WHERE delegation_task_id = ?1
+                AND state IN ('complete', 'degraded')
+                AND json_extract(result_json, '$.integration_state') = 'pending'",
+            params![delegation_task_id, integration_state, error_summary, now],
+        )?;
+        let group_id = if changed == 1 {
+            let group_id: String = tx.query_row(
+                "SELECT delegation_group_id FROM delegation_tasks WHERE delegation_task_id = ?1",
+                params![delegation_task_id],
+                |row| row.get(0),
+            )?;
+            append_event(
+                &tx,
+                &group_id,
+                Some(delegation_task_id),
+                DelegationEventType::Other("task_integration_changed".to_string()),
+                &serde_json::json!({"integration_state": integration_state}),
+                &now,
+            )?;
+            Some(group_id)
+        } else {
+            None
+        };
+        tx.commit()?;
+        if let Some(group_id) = group_id {
+            self.reconcile_group(&group_id)?;
+        }
+        Ok(changed == 1)
+    }
+
     /// Complete the task, release its durable capacity slot, and update the
     /// shared adaptive domain in one immediate transaction. A crash cannot
     /// publish completion while leaving a ghost slot or feedback that only one
@@ -1370,10 +1472,10 @@ impl DelegationStore {
         let contract: DelegationGroupContract = serde_json::from_str(&contract_json)?;
         let (total, complete, degraded, failed, terminal): (i64, i64, i64, i64, i64) = tx.query_row(
             "SELECT COUNT(*),
-                    SUM(CASE WHEN state = 'complete' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN state = 'degraded' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN state IN ('complete', 'degraded', 'failed', 'cancelled') THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN state = 'complete' AND COALESCE(json_extract(result_json, '$.integration_state'), 'ready') = 'ready' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'degraded' AND COALESCE(json_extract(result_json, '$.integration_state'), 'ready') = 'ready' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state = 'failed' OR json_extract(result_json, '$.integration_state') = 'failed' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state IN ('failed', 'cancelled') OR (state IN ('complete', 'degraded') AND COALESCE(json_extract(result_json, '$.integration_state'), 'ready') != 'pending') THEN 1 ELSE 0 END)
                FROM delegation_tasks WHERE delegation_group_id = ?1",
             params![delegation_group_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -2168,6 +2270,58 @@ impl DelegationStore {
     }
 }
 
+fn validate_task_graph(tasks: &[DelegationTaskSpec]) -> Result<()> {
+    let tasks_by_key = tasks
+        .iter()
+        .map(|task| (task.task_key.as_str(), task))
+        .collect::<BTreeMap<_, _>>();
+    for task in tasks {
+        let mut unique = BTreeSet::new();
+        for dependency in &task.depends_on {
+            ensure!(
+                dependency != &task.task_key,
+                "delegation task cannot depend on itself"
+            );
+            ensure!(
+                tasks_by_key.contains_key(dependency.as_str()),
+                "delegation task references an unknown dependency '{dependency}'"
+            );
+            ensure!(
+                unique.insert(dependency.as_str()),
+                "delegation task contains a duplicate dependency"
+            );
+        }
+    }
+
+    fn visit<'a>(
+        key: &'a str,
+        tasks: &BTreeMap<&'a str, &'a DelegationTaskSpec>,
+        states: &mut BTreeMap<&'a str, u8>,
+    ) -> Result<()> {
+        match states.get(key).copied().unwrap_or_default() {
+            1 => anyhow::bail!("delegation task graph contains a dependency cycle"),
+            2 => return Ok(()),
+            _ => {}
+        }
+        states.insert(key, 1);
+        for dependency in &tasks[key].depends_on {
+            visit(
+                tasks.get_key_value(dependency.as_str()).unwrap().0,
+                tasks,
+                states,
+            )?;
+        }
+        states.insert(key, 2);
+        Ok(())
+    }
+
+    let mut states = BTreeMap::new();
+    for key in tasks_by_key.keys().copied() {
+        visit(key, &tasks_by_key, &mut states)?;
+    }
+    Ok(())
+}
+
 fn parse_datetime(value: String, column: usize) -> rusqlite::Result<DateTime<Utc>> {
     value.parse::<DateTime<Utc>>().map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(column, Type::Text, error.into())
@@ -2444,6 +2598,62 @@ fn recover_expired_task_leases(
                     now,
                 )?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn cancel_tasks_blocked_by_failed_dependencies(
+    tx: &Transaction<'_>,
+    delegation_group_id: &str,
+    now: &str,
+) -> Result<()> {
+    let blocked = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT candidate.delegation_task_id
+               FROM delegation_tasks AS candidate,
+                    json_each(candidate.specification_json, '$.depends_on') AS required
+               JOIN delegation_tasks AS dependency
+                 ON dependency.delegation_group_id = candidate.delegation_group_id
+                AND dependency.task_key = required.value
+              WHERE candidate.delegation_group_id = ?1
+                AND candidate.state IN ('created', 'queued', 'retrying')
+                AND (
+                    dependency.state IN ('failed', 'cancelled')
+                    OR json_extract(dependency.result_json, '$.integration_state') = 'failed'
+                )
+              ORDER BY candidate.ordinal ASC",
+        )?;
+        let task_ids = statement
+            .query_map(params![delegation_group_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        task_ids
+    };
+    for task_id in blocked {
+        let changed = tx.execute(
+            "UPDATE delegation_tasks
+                SET state = 'cancelled', updated_at = ?2,
+                    completed_at = COALESCE(completed_at, ?2),
+                    error_summary = COALESCE(
+                        error_summary,
+                        'dependency did not produce a usable result'
+                    )
+              WHERE delegation_task_id = ?1
+                AND state IN ('created', 'queued', 'retrying')",
+            params![task_id, now],
+        )?;
+        if changed == 1 {
+            append_event(
+                tx,
+                delegation_group_id,
+                Some(&task_id),
+                DelegationEventType::TaskStateChanged,
+                &serde_json::json!({
+                    "state": DelegationTaskState::Cancelled,
+                    "reason": "dependency_unusable",
+                }),
+                now,
+            )?;
         }
     }
     Ok(())

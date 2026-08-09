@@ -448,20 +448,6 @@ fn validate_replayable_detached_group(
             ),
             "isolated build recovery requires the canonical all-settled continuation contract"
         );
-        ensure!(
-            group.tasks.iter().all(|task| {
-                task.specification.role == mitsuro_core::storage::DelegatedRunRole::Build
-                    && task.specification.writer_mode == DelegationWriterMode::Isolated
-                    && task
-                        .specification
-                        .executor_envelope
-                        .as_ref()
-                        .is_some_and(|envelope| {
-                            matches!(envelope.kind, DelegationExecutorKind::Build)
-                        })
-            }),
-            "shared-writer or mixed build replay remains fail closed"
-        );
     }
     let session_surface = match session.session_type {
         SessionType::Chat => DelegationExecutorSessionType::Chat,
@@ -514,15 +500,13 @@ fn validate_replayable_detached_group(
                 task.specification.role == mitsuro_core::storage::DelegatedRunRole::Build,
                 "build executor kind and role are incompatible"
             );
-            ensure!(
-                task.specification.writer_mode == DelegationWriterMode::Isolated,
-                "shared-writer build replay remains fail closed"
-            );
-            ensure!(
-                task.specification.attempt_workspace.is_some()
-                    && task.specification.workspace_baseline.is_some(),
-                "isolated build replay is missing its durable patch contract"
-            );
+            if task.specification.writer_mode == DelegationWriterMode::Isolated {
+                ensure!(
+                    task.specification.attempt_workspace.is_some()
+                        && task.specification.workspace_baseline.is_some(),
+                    "isolated build replay is missing its durable patch contract"
+                );
+            }
         }
         let working_dir =
             canonical_replay_envelope_path(&envelope.working_dir, "executor working directory")?;
@@ -576,7 +560,6 @@ fn validate_replayable_detached_group(
             }
             DelegationExecutorKind::Build => {
                 task.specification.role == mitsuro_core::storage::DelegatedRunRole::Build
-                    && task.specification.writer_mode == DelegationWriterMode::Isolated
             }
         };
         ensure!(kind_matches, "executor kind and role are incompatible");
@@ -686,9 +669,8 @@ async fn replay_detached_delegation_group_inner(
         .get_session(&group.parent_session_id)?
         .context("replayable parent session disappeared")?;
     validate_replayable_detached_group(&group, &session)?;
-    let isolated_build = group.tasks.iter().all(|task| {
-        task.specification.role == mitsuro_core::storage::DelegatedRunRole::Build
-            && task.specification.writer_mode == DelegationWriterMode::Isolated
+    let isolated_build = group.tasks.iter().any(|task| {
+        task.specification.writer_mode == DelegationWriterMode::Isolated
             && task
                 .specification
                 .executor_envelope
@@ -696,23 +678,67 @@ async fn replay_detached_delegation_group_inner(
                 .is_some_and(|envelope| matches!(envelope.kind, DelegationExecutorKind::Build))
     });
 
-    let mut workers = tokio::task::JoinSet::new();
-    for task in group.tasks.clone() {
-        let worker_state = state.clone();
-        let worker_cancellation = cancellation.clone();
-        workers.spawn(async move {
-            replay_detached_task(&worker_state, task, &worker_cancellation).await
-        });
-    }
-    while let Some(result) = workers.join_next().await {
-        result.context("detached replay worker panicked")??;
+    for wave in delegation_task_waves(&group.tasks) {
+        let wave_has_isolated = wave
+            .iter()
+            .any(|task| task.specification.writer_mode == DelegationWriterMode::Isolated);
+        let mut workers = tokio::task::JoinSet::new();
+        for task in wave {
+            let worker_state = state.clone();
+            let worker_cancellation = cancellation.clone();
+            workers.spawn(async move {
+                replay_detached_task(&worker_state, task, &worker_cancellation).await
+            });
+        }
+        while let Some(result) = workers.join_next().await {
+            result.context("detached replay worker panicked")??;
+        }
+        if wave_has_isolated {
+            let store = DelegationStore::new(Database::new(&state.db_path)?);
+            let wave_group = store
+                .get_group(delegation_group_id)?
+                .context("replayed delegation group disappeared before integration")?;
+            let project_dir = session
+                .project_dir
+                .as_deref()
+                .or(session.working_dir.as_deref())
+                .context("isolated build parent session has no project directory")?;
+            recover_isolated_build_integration(
+                state,
+                PathBuf::from(project_dir),
+                &wave_group,
+                delegation_group_id,
+                replay_owner_id,
+                cancellation,
+            )
+            .await?;
+        }
     }
 
     let store = DelegationStore::new(Database::new(&state.db_path)?);
-    let _ = store.reconcile_group(delegation_group_id)?;
-    let group = store
+    let mut group = store
         .get_group(delegation_group_id)?
         .context("replayed delegation group disappeared")?;
+    if isolated_build && group_has_pending_integration(&group) {
+        let project_dir = session
+            .project_dir
+            .as_deref()
+            .or(session.working_dir.as_deref())
+            .context("isolated build parent session has no project directory")?;
+        recover_isolated_build_integration(
+            state,
+            PathBuf::from(project_dir),
+            &group,
+            delegation_group_id,
+            replay_owner_id,
+            cancellation,
+        )
+        .await?;
+    }
+    let _ = store.reconcile_group(delegation_group_id)?;
+    group = store
+        .get_group(delegation_group_id)?
+        .context("reconciled delegation group disappeared")?;
     let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
     let delegated = delegated_store
         .get_run(delegation_group_id)?
@@ -754,79 +780,6 @@ async fn replay_detached_delegation_group_inner(
             return Err(error);
         }
     };
-    if isolated_build {
-        ensure!(
-            !cancellation.child_token().is_cancelled() && !synthesis.cancellation().is_cancelled(),
-            "isolated build recovery lost ownership before patch restoration"
-        );
-        let project_dir = session
-            .project_dir
-            .as_deref()
-            .or(session.working_dir.as_deref())
-            .context("isolated build parent session has no project directory")?;
-        let durable_workspaces = group
-            .tasks
-            .iter()
-            .map(|task| {
-                Ok::<_, anyhow::Error>((
-                    task.specification.task_key.clone(),
-                    PathBuf::from(
-                        task.specification
-                            .attempt_workspace
-                            .as_deref()
-                            .context("isolated build task has no durable workspace")?,
-                    ),
-                    task.specification
-                        .workspace_baseline
-                        .clone()
-                        .context("isolated build task has no durable baseline")?,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let isolation = BuildIsolationSet::restore(
-            PathBuf::from(project_dir),
-            delegation_group_id.to_string(),
-            durable_workspaces,
-        )
-        .await?;
-        let recovered_results = recovered_build_results(&group);
-        let db_path = state.db_path.clone();
-        let fence_group_id = delegation_group_id.to_string();
-        let fence_owner_id = replay_owner_id.to_string();
-        let replay_cancellation = cancellation.child_token();
-        let synthesis_cancellation = synthesis.cancellation();
-        let synthesis_owner_fence = synthesis.owner_fence();
-        let owner_fence = Arc::new(move || {
-            ensure!(
-                !replay_cancellation.is_cancelled() && !synthesis_cancellation.is_cancelled(),
-                "detached build recovery ownership was cancelled"
-            );
-            let store = DelegationStore::new(Database::new(&db_path)?);
-            ensure!(
-                store.renew_replay_owner(&fence_group_id, &fence_owner_id)?,
-                "detached build recovery owner lease is no longer current"
-            );
-            synthesis_owner_fence.renew_current()?;
-            ensure!(
-                !replay_cancellation.is_cancelled() && !synthesis_cancellation.is_cancelled(),
-                "detached build recovery ownership was lost during renewal"
-            );
-            Ok(())
-        });
-        let integrated = isolation
-            .integrate_recovered(recovered_results, owner_fence)
-            .await;
-        ensure!(
-            group
-                .tasks
-                .iter()
-                .filter(|task| task.state == DelegationTaskState::Complete)
-                .all(|task| integrated.iter().any(|result| {
-                    result.task_id == task.specification.task_key && result.success
-                })),
-            "isolated build aggregate patch integration failed; recovery worktrees were retained"
-        );
-    }
     let terminal = replay_terminal_group_state(&group);
     let stage = group_stage_from_state(terminal);
     let artifact = replay_group_artifact(&group, "recovered_after_restart");
@@ -838,6 +791,142 @@ async fn replay_detached_delegation_group_inner(
         delegated.resumable,
     )?;
     synthesis.finalize(terminal)?;
+    Ok(())
+}
+
+fn delegation_task_waves(tasks: &[DelegationTaskRecord]) -> Vec<Vec<DelegationTaskRecord>> {
+    let mut depths = std::collections::BTreeMap::<String, usize>::new();
+    for task in tasks {
+        let depth = task
+            .specification
+            .depends_on
+            .iter()
+            .filter_map(|dependency| depths.get(dependency))
+            .max()
+            .copied()
+            .unwrap_or(0)
+            + usize::from(!task.specification.depends_on.is_empty());
+        depths.insert(task.specification.task_key.clone(), depth);
+    }
+    let max_depth = depths.values().copied().max().unwrap_or(0);
+    (0..=max_depth)
+        .map(|depth| {
+            tasks
+                .iter()
+                .filter(|task| {
+                    depths
+                        .get(&task.specification.task_key)
+                        .copied()
+                        .unwrap_or(0)
+                        == depth
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|wave| !wave.is_empty())
+        .collect()
+}
+
+fn group_has_pending_integration(group: &DelegationGroupRecord) -> bool {
+    group.tasks.iter().any(|task| {
+        task.result
+            .as_ref()
+            .and_then(|result| result.get("integration_state"))
+            .and_then(serde_json::Value::as_str)
+            == Some("pending")
+    })
+}
+
+async fn recover_isolated_build_integration(
+    state: &AppState,
+    project_dir: PathBuf,
+    group: &DelegationGroupRecord,
+    delegation_group_id: &str,
+    replay_owner_id: &str,
+    cancellation: &AgentCancellation,
+) -> anyhow::Result<()> {
+    ensure!(
+        !cancellation.child_token().is_cancelled(),
+        "isolated build recovery lost ownership before patch restoration"
+    );
+    let isolated_tasks = group
+        .tasks
+        .iter()
+        .filter(|task| task.specification.writer_mode == DelegationWriterMode::Isolated)
+        .collect::<Vec<_>>();
+    if isolated_tasks.is_empty() {
+        return Ok(());
+    }
+    let durable_workspaces = isolated_tasks
+        .iter()
+        .map(|task| {
+            Ok::<_, anyhow::Error>((
+                task.specification.task_key.clone(),
+                PathBuf::from(
+                    task.specification
+                        .attempt_workspace
+                        .as_deref()
+                        .context("isolated build task has no durable workspace")?,
+                ),
+                task.specification
+                    .workspace_baseline
+                    .clone()
+                    .context("isolated build task has no durable baseline")?,
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let isolation = BuildIsolationSet::restore(
+        project_dir,
+        delegation_group_id.to_string(),
+        durable_workspaces,
+    )
+    .await?;
+    let recovered_results = recovered_build_results(group);
+    let db_path = state.db_path.clone();
+    let fence_group_id = delegation_group_id.to_string();
+    let fence_owner_id = replay_owner_id.to_string();
+    let replay_cancellation = cancellation.child_token();
+    let owner_fence = Arc::new(move || {
+        ensure!(
+            !replay_cancellation.is_cancelled(),
+            "detached build recovery ownership was cancelled"
+        );
+        let store = DelegationStore::new(Database::new(&db_path)?);
+        ensure!(
+            store.renew_replay_owner(&fence_group_id, &fence_owner_id)?,
+            "detached build recovery owner lease is no longer current"
+        );
+        ensure!(
+            !replay_cancellation.is_cancelled(),
+            "detached build recovery ownership was lost during renewal"
+        );
+        Ok(())
+    });
+    let integrated = isolation
+        .integrate_recovered(recovered_results, owner_fence)
+        .await;
+    let store = DelegationStore::new(Database::new(&state.db_path)?);
+    for task in &isolated_tasks {
+        if let Some(result) = integrated
+            .iter()
+            .find(|result| result.task_id == task.specification.task_key)
+        {
+            let _ = store.complete_task_integration(
+                &task.specification.delegation_task_id,
+                result.success,
+                result.error.as_deref(),
+            )?;
+        }
+    }
+    ensure!(
+        isolated_tasks.iter().all(|task| {
+            task.state != DelegationTaskState::Complete
+                || integrated
+                    .iter()
+                    .any(|result| result.task_id == task.specification.task_key && result.success)
+        }),
+        "isolated build aggregate patch integration failed; recovery worktrees were retained"
+    );
     Ok(())
 }
 
@@ -871,10 +960,18 @@ async fn replay_detached_task(
     let group = coordinator
         .get_group(&task.delegation_group_id)?
         .context("replay task group disappeared")?;
-    let policy = group.contract.governance.delegation_policy.clone();
+    let policy = task
+        .specification
+        .task_policy
+        .clone()
+        .unwrap_or_else(|| group.contract.governance.delegation_policy.clone());
     runtime_task = runtime_task
         .with_delegation_policy(policy.clone())
-        .with_max_turns(group.contract.governance.delegated_turn_budget)
+        .with_max_turns(
+            policy
+                .max_turns
+                .unwrap_or(group.contract.governance.delegated_turn_budget),
+        )
         .with_process_context(
             Some(state.process_registry.clone()),
             envelope.user_id.clone(),
@@ -2017,6 +2114,9 @@ mod tests {
                         kind: "workspace".to_string(),
                     }],
                     max_attempts: 2,
+                    depends_on: Vec::new(),
+                    write_intent: Vec::new(),
+                    task_policy: None,
                     writer_mode: DelegationWriterMode::Shared,
                     attempt_workspace: None,
                     workspace_baseline: None,
@@ -2119,10 +2219,8 @@ mod tests {
             .expect("writer envelope");
         writer_envelope.role = DelegatedRunRole::Build;
         writer_envelope.kind = DelegationExecutorKind::Build;
-        assert!(validate_replayable_detached_group(&shared_writer, &session)
-            .expect_err("shared writers must not be replayed")
-            .to_string()
-            .contains("fail closed"));
+        validate_replayable_detached_group(&shared_writer, &session)
+            .expect("shared writers replay under durable wave and scheduler serialization");
 
         let mut isolated_writer = shared_writer;
         let isolated_task = isolated_writer.tasks.first_mut().expect("isolated task");

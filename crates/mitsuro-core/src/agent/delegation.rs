@@ -33,7 +33,11 @@ const DEFAULT_TASK_LEASE_TTL_MS: i64 = 120_000;
 const DEFAULT_SYNTHESIS_LEASE_TTL_MS: i64 = 120_000;
 const DEFAULT_CAPACITY_AUTHORITY: &str = "delegation-host-v1";
 const RENEWAL_BATCH_COALESCE: Duration = Duration::from_millis(2);
-const RENEWAL_CONNECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(2);
+// Ordinary task/group transactions can briefly own SQLite's single writer.
+// Give the dedicated renewal connection a small bounded window to absorb that
+// expected contention without producing noisy false alarms or shortening the
+// effective lease. This remains tiny relative to the minimum renewal slack.
+const RENEWAL_CONNECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 
 static RENEWAL_SERVICES: OnceLock<Mutex<HashMap<PathBuf, Weak<LeaseRenewalService>>>> =
     OnceLock::new();
@@ -471,6 +475,16 @@ impl DelegationCoordinator {
         self.store()?.get_group(delegation_group_id)
     }
 
+    pub fn complete_task_integration(
+        &self,
+        delegation_task_id: &str,
+        succeeded: bool,
+        error_summary: Option<&str>,
+    ) -> Result<bool> {
+        self.store()?
+            .complete_task_integration(delegation_task_id, succeeded, error_summary)
+    }
+
     pub fn validate_task_runtime(
         &self,
         delegation_task_id: &str,
@@ -486,9 +500,18 @@ impl DelegationCoordinator {
             .context("delegation task group disappeared")?;
         let runtime_policy = runtime_policy
             .context("coordinated delegated execution requires runtime policy metadata")?;
+        let expected_policy = task
+            .specification
+            .task_policy
+            .as_ref()
+            .unwrap_or(&group.contract.governance.delegation_policy);
         ensure!(
-            runtime_policy == &group.contract.governance.delegation_policy,
-            "runtime delegation policy exceeds or differs from the immutable group contract"
+            runtime_policy == expected_policy,
+            "runtime delegation policy exceeds or differs from the immutable task contract"
+        );
+        ensure!(
+            expected_policy.is_within(&group.contract.governance.delegation_policy),
+            "immutable task policy exceeds its group governance"
         );
         ensure!(
             runtime_policy.inherited_permission_mode == group.contract.governance.permission_mode,
@@ -1261,6 +1284,9 @@ mod tests {
                     role: DelegatedRunRole::Explore,
                     target_scope: Vec::new(),
                     max_attempts: 2,
+                    depends_on: Vec::new(),
+                    write_intent: Vec::new(),
+                    task_policy: None,
                     writer_mode: crate::storage::DelegationWriterMode::Shared,
                     attempt_workspace: None,
                     workspace_baseline: None,
@@ -1282,6 +1308,9 @@ mod tests {
                 role: DelegatedRunRole::Explore,
                 target_scope: Vec::new(),
                 max_attempts: 2,
+                depends_on: Vec::new(),
+                write_intent: Vec::new(),
+                task_policy: None,
                 writer_mode: crate::storage::DelegationWriterMode::Shared,
                 attempt_workspace: None,
                 workspace_baseline: None,

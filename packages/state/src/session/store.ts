@@ -142,6 +142,7 @@ export function createSessionStore(
   planStore: ReturnType<typeof createPlanStore>,
 ) {
   let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
+  let delegationRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let statePollingGeneration = 0;
   let streamAttachmentGeneration = 0;
   let sessionSelectionGeneration = 0;
@@ -371,6 +372,7 @@ export function createSessionStore(
     | "stopStreaming"
     | "startStatePolling"
     | "stopStatePolling"
+    | "refreshDelegationState"
     | "startPresenceHeartbeat"
     | "stopPresenceHeartbeat"
     | "cleanup"
@@ -720,6 +722,9 @@ export function createSessionStore(
               persistSessionMode: persistMode,
               isActive: isStreamAttached,
               onFirstEvent: finishConnectSpan,
+              onDelegationEvent: () => {
+                if (pollingSessionId) get().refreshDelegationState(pollingSessionId);
+              },
             }),
             pollingSessionId,
             streamRecovery,
@@ -1670,6 +1675,9 @@ export function createSessionStore(
               persistSessionMode: persistMode,
               isActive: isStreamAttached,
               onFirstEvent: finishConnectSpan,
+              onDelegationEvent: () => {
+                if (state.sessionId) get().refreshDelegationState(state.sessionId);
+              },
             }),
             state.sessionId,
             streamRecovery,
@@ -1883,6 +1891,36 @@ export function createSessionStore(
       releaseStatePollingResource = null;
     },
 
+    refreshDelegationState(sessionId: string) {
+      if (get().sessionId !== sessionId || delegationRefreshTimer) return;
+      const selectionGeneration = sessionSelectionGeneration;
+      // Coalesce lifecycle bursts while keeping the UI event-driven. The
+      // canonical snapshot remains authoritative; SSE is the prompt trigger.
+      delegationRefreshTimer = setTimeout(() => {
+        delegationRefreshTimer = null;
+        const delegationEventCursor = get().delegationEventCursor;
+        void client
+          .getSessionState(sessionId, {
+            delegationAfterCursor: delegationEventCursor ?? undefined,
+          })
+          .then((serverState) => {
+            if (
+              selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+            rememberServerState(sessionId, serverState);
+            applySessionSnapshot(sessionId, serverState, true, set, get, planStore, {
+              metadataOnly: isLocalStreamAttached(),
+            });
+          })
+          .catch(() => {
+            // The ordinary bounded state poll retains retry/backoff ownership.
+          });
+      }, 50);
+    },
+
     // -- presence heartbeat -------------------------------------------------
 
     startPresenceHeartbeat(sessionId: string) {
@@ -1912,6 +1950,10 @@ export function createSessionStore(
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
+      if (delegationRefreshTimer) {
+        clearTimeout(delegationRefreshTimer);
+        delegationRefreshTimer = null;
+      }
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
       // Dispose heavy in-memory retention so mode/store teardown cannot sludge RAM.

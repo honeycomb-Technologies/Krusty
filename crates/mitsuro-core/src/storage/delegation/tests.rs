@@ -56,6 +56,9 @@ fn input() -> DelegationGroupStartInput {
                     kind: "directory".to_string(),
                 }],
                 max_attempts: 2,
+                depends_on: Vec::new(),
+                write_intent: Vec::new(),
+                task_policy: None,
                 writer_mode: DelegationWriterMode::Shared,
                 attempt_workspace: None,
                 workspace_baseline: None,
@@ -68,6 +71,9 @@ fn input() -> DelegationGroupStartInput {
                 role: DelegatedRunRole::Planner,
                 target_scope: Vec::new(),
                 max_attempts: 1,
+                depends_on: Vec::new(),
+                write_intent: Vec::new(),
+                task_policy: None,
                 writer_mode: DelegationWriterMode::Shared,
                 attempt_workspace: None,
                 workspace_baseline: None,
@@ -340,6 +346,192 @@ fn invalid_task_set_rolls_back_the_entire_group() {
 }
 
 #[test]
+fn dependency_graph_admits_only_ready_tasks_and_releases_dependents() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks[1].depends_on = vec!["storage".to_string()];
+    store.create_group(&graph).expect("create dependency graph");
+    store
+        .queue_group("group-1")
+        .expect("queue dependency graph");
+
+    let first = store
+        .claim_tasks("group-1", "owner-first", 2, 10_000)
+        .expect("claim ready roots");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].task.specification.task_key, "storage");
+    assert!(store
+        .complete_task(
+            "task-storage",
+            "owner-first",
+            DelegationTaskState::Complete,
+            Some(&serde_json::json!({"summary": "mapped storage"})),
+            None,
+        )
+        .expect("complete prerequisite"));
+
+    let second = store
+        .claim_tasks("group-1", "owner-second", 2, 10_000)
+        .expect("claim released dependent");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].task.specification.task_key, "ui");
+}
+
+#[test]
+fn isolated_dependency_waits_for_durable_integration_barrier() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks[0].writer_mode = DelegationWriterMode::Isolated;
+    graph.tasks[0].attempt_workspace = Some("/tmp/isolated-task".to_string());
+    graph.tasks[0].workspace_baseline = Some("baseline".to_string());
+    graph.tasks[1].depends_on = vec!["storage".to_string()];
+    store.create_group(&graph).expect("create dependency graph");
+    store.queue_group("group-1").expect("queue graph");
+    store
+        .claim_task("task-storage", "owner-first", 10_000)
+        .expect("claim prerequisite")
+        .expect("prerequisite lease");
+    assert!(store
+        .complete_task(
+            "task-storage",
+            "owner-first",
+            DelegationTaskState::Complete,
+            Some(&serde_json::json!({"integration_state": "pending"})),
+            None,
+        )
+        .expect("complete child loop"));
+    assert!(store
+        .claim_task("task-ui", "owner-second", 10_000)
+        .expect("check blocked dependent")
+        .is_none());
+    assert_eq!(
+        store
+            .get_group("group-1")
+            .expect("read group")
+            .expect("group")
+            .state,
+        DelegationGroupState::Running
+    );
+
+    assert!(store
+        .complete_task_integration("task-storage", true, None)
+        .expect("publish integration"));
+    assert!(store
+        .claim_task("task-ui", "owner-second", 10_000)
+        .expect("claim integrated dependent")
+        .is_some());
+}
+
+#[test]
+fn failed_dependency_cancels_downstream_task_and_settles_group() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks[1].depends_on = vec!["storage".to_string()];
+    store.create_group(&graph).expect("create dependency graph");
+    store
+        .queue_group("group-1")
+        .expect("queue dependency graph");
+    store
+        .claim_task("task-storage", "owner-first", 10_000)
+        .expect("claim prerequisite")
+        .expect("prerequisite lease");
+    assert!(store
+        .complete_task(
+            "task-storage",
+            "owner-first",
+            DelegationTaskState::Failed,
+            None,
+            Some("prerequisite failed"),
+        )
+        .expect("fail prerequisite"));
+
+    assert!(store
+        .claim_tasks("group-1", "owner-second", 2, 10_000)
+        .expect("reconcile blocked tasks")
+        .is_empty());
+    let dependent = store
+        .get_task("task-ui")
+        .expect("read dependent")
+        .expect("dependent task");
+    assert_eq!(dependent.state, DelegationTaskState::Cancelled);
+    assert_eq!(
+        store
+            .get_group("group-1")
+            .expect("read group")
+            .expect("group")
+            .state,
+        DelegationGroupState::Failed
+    );
+}
+
+#[test]
+fn invalid_dependency_graphs_are_rejected_atomically() {
+    for (group_id, dependency, expected) in [
+        ("unknown-dependency", "missing", "unknown dependency"),
+        ("self-dependency", "ui", "cannot depend on itself"),
+    ] {
+        let (store, _temp_dir) = create_store();
+        let mut graph = input_for(group_id);
+        graph.tasks[1].depends_on = vec![dependency.to_string()];
+        let error = store
+            .create_group(&graph)
+            .expect_err("invalid dependency graph must fail");
+        assert!(error.to_string().contains(expected), "{error:#}");
+        assert!(store.get_group(group_id).expect("read group").is_none());
+    }
+
+    let (store, _temp_dir) = create_store();
+    let mut cyclic = input_for("cyclic-dependency");
+    cyclic.tasks[0].depends_on = vec!["ui".to_string()];
+    cyclic.tasks[1].depends_on = vec!["storage".to_string()];
+    let error = store
+        .create_group(&cyclic)
+        .expect_err("cyclic dependency graph must fail");
+    assert!(error.to_string().contains("cycle"), "{error:#}");
+    assert!(store
+        .get_group("cyclic-dependency")
+        .expect("read group")
+        .is_none());
+}
+
+#[test]
+fn task_governance_may_narrow_but_not_expand_the_group_ceiling() {
+    let (store, _temp_dir) = create_store();
+    let mut narrower = input_for("narrow-task-policy");
+    let mut task_policy = crate::tools::registry::DelegationPolicy::for_subagent_explore(
+        PermissionMode::Supervised,
+        Some(4),
+    );
+    task_policy.execution_tool_allowlist = Some(BTreeSet::from(["read".to_string()]));
+    narrower.tasks[0].task_policy = Some(task_policy);
+    store
+        .create_group(&narrower)
+        .expect("narrower task policy should be accepted");
+
+    let (store, _temp_dir) = create_store();
+    let mut broader = input_for("broad-task-policy");
+    broader.tasks[0].task_policy = Some(
+        crate::tools::registry::DelegationPolicy::for_subagent_build(
+            PermissionMode::Supervised,
+            Some(12),
+        ),
+    );
+    let error = store
+        .create_group(&broader)
+        .expect_err("broader task policy must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds its immutable group governance"),
+        "{error:#}"
+    );
+    assert!(store
+        .get_group("broad-task-policy")
+        .expect("read group")
+        .is_none());
+}
+
+#[test]
 fn state_machines_reject_terminal_rewrites() {
     let (store, _temp_dir) = create_store();
     store.create_group(&input()).expect("create group");
@@ -547,6 +739,9 @@ fn durable_capacity_is_a_cross_connection_hard_ceiling_and_fifo_queue() {
         role: DelegatedRunRole::Explore,
         target_scope: Vec::new(),
         max_attempts: 1,
+        depends_on: Vec::new(),
+        write_intent: Vec::new(),
+        task_policy: None,
         writer_mode: DelegationWriterMode::Shared,
         attempt_workspace: None,
         workspace_baseline: None,

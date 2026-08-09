@@ -59,7 +59,7 @@ impl DelegationMode {
         };
 
         format!(
-            "[DELEGATION MODE: {}]\n{} The parent must coordinate, inspect evidence, and verify delegated results.",
+            "[DELEGATION MODE: {}]\n{} The parent must coordinate, inspect evidence, and verify delegated results. For one decomposable operation, prefer one agent spawn with a structured tasks graph over several separate spawn calls: give every task a stable id, bounded instructions, minimum capabilities, scope, declared write_intent, and real depends_on edges. Independent ready tasks may run concurrently. Tasks that must consume another task's edits, or that intentionally touch the same mutable files, must be dependency-ordered instead of described as parallel. Do not create multiple agents merely to multiply activity.",
             self.as_str().to_ascii_uppercase(),
             guidance
         )

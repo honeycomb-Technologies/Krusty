@@ -390,6 +390,8 @@ function buildMeta(
         ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? "" : "s"}`
         : undefined,
       delegated?.activeTargets ? `${delegated.activeTargets} running` : undefined,
+      delegated?.waitingTargets ? `${delegated.waitingTargets} waiting for capacity` : undefined,
+      delegated?.integratingTargets ? `${delegated.integratingTargets} integrating` : undefined,
       delegated?.pendingTargets ? `${delegated.pendingTargets} queued` : undefined,
       delegated?.completedTargets ? `${delegated.completedTargets} settled` : undefined,
       delegated?.degradedAgents ? `${delegated.degradedAgents} degraded` : undefined,
