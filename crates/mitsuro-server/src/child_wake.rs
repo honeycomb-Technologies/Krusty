@@ -87,9 +87,7 @@ pub async fn install_child_completion_wake(runtime: AgentRuntimeManager, state: 
             // Replayable groups use their own cross-process owner lease. This
             // recurring adoption scan closes the window where a detached host
             // dies after this Honey process has already started.
-            if let Err(error) =
-                reconcile_orphaned_delegation_groups_on_startup(&durable_recovery_state)
-            {
+            if let Err(error) = reconcile_replayable_detached_groups(&durable_recovery_state) {
                 tracing::warn!(%error, "Failed to reconcile replayable delegation groups");
             }
             // Re-scan both newly expired owners and every durable pending or
@@ -177,8 +175,31 @@ enum StartupDelegationDisposition {
 fn reconcile_orphaned_delegation_groups_on_startup(
     state: &AppState,
 ) -> anyhow::Result<StartupDelegationRecoveryReport> {
+    reconcile_orphaned_delegation_groups(state, true)
+}
+
+/// Periodic recovery runs while this server may own healthy foreground work.
+/// Only detached groups carry the durable host/replay authority needed for a
+/// second process to adopt them safely. Foreground groups are fenced only by
+/// the one-time startup scan, after the prior server process is known to have
+/// exited.
+fn reconcile_replayable_detached_groups(
+    state: &AppState,
+) -> anyhow::Result<StartupDelegationRecoveryReport> {
+    reconcile_orphaned_delegation_groups(state, false)
+}
+
+fn reconcile_orphaned_delegation_groups(
+    state: &AppState,
+    include_foreground: bool,
+) -> anyhow::Result<StartupDelegationRecoveryReport> {
     let groups = DelegationStore::new(Database::new(&state.db_path)?)
-        .list_recoverable_groups(STARTUP_DELEGATION_RECOVERY_LIMIT)?;
+        .list_recoverable_groups(STARTUP_DELEGATION_RECOVERY_LIMIT)?
+        .into_iter()
+        .filter(|group| {
+            include_foreground || group.contract.execution_mode == DelegationExecutionMode::Detached
+        })
+        .collect::<Vec<_>>();
     let mut report = StartupDelegationRecoveryReport {
         examined: groups.len(),
         ..StartupDelegationRecoveryReport::default()
@@ -2293,6 +2314,39 @@ mod tests {
             .expect("wake scan should run")
             .iter()
             .all(|completion| completion.delegated_run_id != group_id));
+    }
+
+    #[tokio::test]
+    async fn recurring_recovery_never_fences_live_foreground_work() {
+        let (state, _temp, workspace) = test_state();
+        let (_event, session_id) = seed_completion(&state, &workspace);
+        let group_id = "live-foreground";
+        seed_recoverable_group(
+            &state,
+            &workspace,
+            &session_id,
+            group_id,
+            DelegationExecutionMode::Foreground,
+        );
+
+        let report = reconcile_replayable_detached_groups(&state)
+            .expect("recurring recovery should scan only detached groups");
+        assert_eq!(report.examined, 0);
+        assert_eq!(report.fenced, 0);
+
+        let group = DelegationStore::new(
+            Database::new(&state.db_path).expect("group database should open"),
+        )
+        .get_group(group_id)
+        .expect("group should load")
+        .expect("group should exist");
+        assert_eq!(group.state, DelegationGroupState::Queued);
+        assert!(DelegatedRunStore::new(
+            Database::new(&state.db_path).expect("compatibility database should open")
+        )
+        .get_run(group_id)
+        .expect("compatibility lookup should succeed")
+        .is_none());
     }
 
     #[tokio::test]
