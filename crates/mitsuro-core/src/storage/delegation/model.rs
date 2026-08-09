@@ -40,6 +40,11 @@ pub enum DelegationWriterMode {
 }
 
 pub const DELEGATION_EXECUTOR_ENVELOPE_VERSION: u16 = 1;
+/// Durable task objectives include the bounded project instruction bundle plus
+/// the coordinator's assignment and recovery wrapper. Project instructions
+/// alone may consume 32 KiB, so the task envelope needs explicit headroom while
+/// remaining small enough for bounded replay and session projection.
+pub const MAX_DELEGATION_TASK_OBJECTIVE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -428,7 +433,7 @@ impl DelegationTaskSpec {
             "delegation task objective is required"
         );
         ensure!(
-            self.objective.len() <= 32 * 1024,
+            self.objective.len() <= MAX_DELEGATION_TASK_OBJECTIVE_BYTES,
             "delegation task objective exceeds the durable size limit"
         );
         ensure!(

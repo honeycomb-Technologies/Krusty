@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
+use super::model::MAX_DELEGATION_TASK_OBJECTIVE_BYTES;
 use super::*;
 use crate::ai::models::{ApiFormat, ModelKey};
 use crate::ai::providers::ProviderId;
@@ -83,6 +84,28 @@ fn input_for(group_id: &str) -> DelegationGroupStartInput {
         task.delegation_task_id = format!("{group_id}-task-{index}");
     }
     input
+}
+
+#[test]
+fn durable_objective_budget_keeps_project_context_headroom_but_stays_bounded() {
+    let (store, _temp_dir) = create_store();
+    let mut group = input();
+    group.tasks.truncate(1);
+    group.contract.governance.max_parallelism = 1;
+    group.tasks[0].objective = "x".repeat(40 * 1024);
+    store
+        .create_group(&group)
+        .expect("bounded project context plus coordinator wrapper should persist");
+
+    let mut oversized = input_for("oversized-objective");
+    oversized.tasks.truncate(1);
+    oversized.contract.governance.max_parallelism = 1;
+    oversized.tasks[0].objective = "x".repeat(MAX_DELEGATION_TASK_OBJECTIVE_BYTES + 1);
+    assert!(store
+        .create_group(&oversized)
+        .expect_err("oversized durable objective must fail closed")
+        .to_string()
+        .contains("objective exceeds"));
 }
 
 fn replayable_input_for(group_id: &str, workspace: &std::path::Path) -> DelegationGroupStartInput {
