@@ -527,6 +527,9 @@ impl BuildIsolationSet {
                 combined.len().saturating_add(patch.len()) <= MAX_COMBINED_PATCH_BYTES,
                 "delegated integration patch exceeds the bounded size"
             );
+            if patch.is_empty() {
+                continue;
+            }
             combined.extend_from_slice(&patch);
             if !combined.ends_with(b"\n") {
                 combined.push(b'\n');
@@ -944,6 +947,49 @@ mod tests {
             fs::read_to_string(repo.join("src/base.txt")).unwrap(),
             "dirty source\n"
         );
+    }
+
+    #[tokio::test]
+    async fn successful_no_op_builds_integrate_without_a_synthetic_patch() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        run(
+            repo,
+            &[
+                "-c",
+                "user.name=Mitsuro Test",
+                "-c",
+                "user.email=test@mitsuro.local",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["task-a".to_string(), "task-b".to_string()],
+        )
+        .await
+        .expect("prepare isolation")
+        .expect("git isolation");
+        let roots = isolation
+            .workspaces()
+            .iter()
+            .map(|workspace| workspace.root.clone())
+            .collect::<Vec<_>>();
+
+        let results = isolation
+            .integrate(vec![result("task-a"), result("task-b")])
+            .await;
+
+        assert!(results.iter().all(|result| result.success), "{results:?}");
+        assert!(roots.iter().all(|root| !root.exists()));
     }
 
     #[tokio::test]
