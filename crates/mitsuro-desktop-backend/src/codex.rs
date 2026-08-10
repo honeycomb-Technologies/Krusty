@@ -1343,6 +1343,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_login_keeps_async_completion_on_lifecycle_stream() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let mut lifecycle = backend.subscribe_lifecycle_events();
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "account/login/start");
+            assert_eq!(request["params"]["type"], "chatgpt");
+            assert_eq!(request["params"]["appBrand"], "codex");
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "type": "chatgpt",
+                            "loginId": "login-live",
+                            "authUrl": "https://auth.openai.com/authorize"
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+            responder
+                .inject_stdout_line(
+                    r#"{"method":"account/login/completed","params":{"loginId":"login-live","success":true,"error":null}}"#,
+                )
+                .await;
+        });
+
+        let login = backend
+            .account_login_start(LoginAccountParams::chatgpt())
+            .await
+            .unwrap();
+        assert_eq!(login.login_id(), Some("login-live"));
+        let completed = tokio::time::timeout(Duration::from_secs(1), lifecycle.recv())
+            .await
+            .expect("login completion timeout")
+            .expect("login completion event");
+        assert_eq!(completed.method, "account/login/completed");
+        assert_eq!(
+            completed
+                .params
+                .as_ref()
+                .and_then(|params| params.get("success"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn current_time_server_request_is_answered_without_ui_round_trip() {
         let (client_writer, mut server_reader) = duplex(64 * 1024);
         let backend = CodexAppServerBackend::with_defaults();

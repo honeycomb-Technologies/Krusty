@@ -53,6 +53,7 @@ backend or are shown as unavailable.
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
 | Fork | Unsupported, capability-gated | Live | Typed fixture |
 | Review changes | Unsupported, capability-gated | Live streamed `review/start` with approvals | Unsupported, hidden |
+| Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
 | Extensions/MCP/skills | Live installed extensions, MCP status, and skills | Partially live | Typed fixture |
@@ -100,6 +101,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   thread identity, and reuse the progressive transcript and approval pipeline. The
   selected-thread action requests an inline review of real uncommitted changes; it is
   hidden for Mitsuro until the HTTP API exposes an equivalent contract.
+- Codex account sign-in starts the real browser OAuth flow, retains the server login
+  identity for cancel/reopen, and waits for `account/login/completed` before claiming
+  success or loading authenticated usage. Failed logout keeps the last server snapshot
+  visible instead of pretending local sign-out succeeded.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

@@ -271,7 +271,7 @@ pub trait AgentBackend: Send + Sync {
     /// Read account profile via `account/read` (no paid model call).
     async fn account_read(&self, params: GetAccountParams) -> Result<GetAccountResponse>;
 
-    /// Start login via `account/login/start` (fixture returns device URL + code; no network).
+    /// Start login via `account/login/start` (live backends may complete asynchronously).
     async fn account_login_start(&self, params: LoginAccountParams)
         -> Result<LoginAccountResponse>;
 

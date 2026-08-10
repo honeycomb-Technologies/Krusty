@@ -18,26 +18,26 @@ use mitsuro_desktop_backend::{
     fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, ActivityFields,
     AgentBackend, ApprovalChoice, BackendKind, BackendSelection, BackendSessionId,
-    CollaborationModeListParams, CollaborationModeMask, ConfigReadParams, CreateSession,
-    DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
-    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
-    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
-    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
-    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
-    ModelListParams, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
-    PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
-    ProductModel, ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule,
-    ProductSkill, ProductSteer, ProductTurn, ReasoningEffortOption, SessionDelegationProjection,
-    SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
-    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
-    ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
+    CollaborationModeMask, ConfigReadParams, CreateSession, DesktopBackend, EnvironmentInfoParams,
+    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
+    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
+    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, LifecycleNotification,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
+    McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginAuthPolicy,
+    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
+    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSteer, ProductTurn, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
+    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
     TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
-#[cfg(not(feature = "browser-native"))]
 use crate::browser::open_system_browser;
 #[cfg(feature = "browser-native")]
 use crate::browser::NativeWebViewHost;
@@ -746,8 +746,12 @@ pub struct AccountSession {
     pub usage: GetAccountTokenUsageResponse,
     /// Rate-limit windows for usage bars.
     pub rate_limits: GetAccountRateLimitsResponse,
-    /// Last device-code / OAuth stub line (URL + code).
-    pub login_stub_detail: Option<String>,
+    /// Current OAuth/device-code status shown in Settings.
+    pub login_detail: Option<String>,
+    /// Server identity for an asynchronous login that may be canceled.
+    pub pending_login_id: Option<String>,
+    /// Login URL retained so the user can reopen the browser flow.
+    pub pending_login_url: Option<String>,
     /// Backend source label for status chips.
     pub source: &'static str,
 }
@@ -776,7 +780,9 @@ impl AccountSession {
             plan_label: plan,
             usage: fixture_demo_usage(),
             rate_limits: fixture_demo_rate_limits(),
-            login_stub_detail: None,
+            login_detail: None,
+            pending_login_id: None,
+            pending_login_url: None,
             source: "fixture",
         }
     }
@@ -793,7 +799,9 @@ impl AccountSession {
             rate_limits: GetAccountRateLimitsResponse {
                 rate_limits: Default::default(),
             },
-            login_stub_detail: None,
+            login_detail: None,
+            pending_login_id: None,
+            pending_login_url: None,
             source,
         }
     }
@@ -832,6 +840,35 @@ impl AccountSession {
     pub fn lifetime_tokens(&self) -> i64 {
         self.usage.summary.lifetime_tokens.unwrap_or(0)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AccountLoginCompletion {
+    success: bool,
+    login_id: Option<String>,
+    error: Option<String>,
+}
+
+fn account_login_completion(event: &LifecycleNotification) -> Option<AccountLoginCompletion> {
+    if event.method != "account/login/completed" {
+        return None;
+    }
+    let params = event.params.as_ref()?;
+    Some(AccountLoginCompletion {
+        success: params
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        login_id: params
+            .get("loginId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        error: params
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 pub struct MitsuroApp {
@@ -3445,7 +3482,7 @@ impl MitsuroApp {
         usage: GetAccountTokenUsageResponse,
         rate_limits: GetAccountRateLimitsResponse,
         source: &'static str,
-        login_stub: Option<String>,
+        login_detail: Option<String>,
     ) {
         let signed_in = account.as_ref().is_some_and(|a| a.is_signed_in());
         let email_display = account.as_ref().and_then(|a| a.email_display());
@@ -3453,13 +3490,18 @@ impl MitsuroApp {
             .as_ref()
             .and_then(|a| a.plan_type())
             .map(|p: PlanType| p.label().to_string());
+        let previous_detail = self.account.login_detail.clone();
+        let pending_login_id = self.account.pending_login_id.clone();
+        let pending_login_url = self.account.pending_login_url.clone();
         self.account = AccountSession {
             signed_in,
             email_display,
             plan_label,
             usage,
             rate_limits,
-            login_stub_detail: login_stub.or(self.account.login_stub_detail.clone()),
+            login_detail: login_detail.or(previous_detail),
+            pending_login_id,
+            pending_login_url,
             source,
         };
         if let UiConnection::Ready { has_auth, .. } = &mut self.connection {
@@ -3493,14 +3535,20 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let usage = backend
-                                .account_usage_read()
-                                .await
-                                .map_err(|error| format!("account/usage/read: {error}"))?;
-                            let limits = backend
-                                .account_rate_limits_read()
-                                .await
-                                .map_err(|error| format!("account/rateLimits/read: {error}"))?;
+                            let (usage, limits) = if acc.has_account() {
+                                let usage = backend
+                                    .account_usage_read()
+                                    .await
+                                    .map_err(|error| format!("account/usage/read: {error}"))?;
+                                let limits = backend
+                                    .account_rate_limits_read()
+                                    .await
+                                    .map_err(|error| format!("account/rateLimits/read: {error}"))?;
+                                (usage, limits)
+                            } else {
+                                let empty = AccountSession::empty("app-server");
+                                (empty.usage, empty.rate_limits)
+                            };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
@@ -3590,14 +3638,20 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let usage = backend
-                                .account_usage_read()
-                                .await
-                                .map_err(|error| format!("account/usage/read: {error}"))?;
-                            let limits = backend
-                                .account_rate_limits_read()
-                                .await
-                                .map_err(|error| format!("account/rateLimits/read: {error}"))?;
+                            let (usage, limits) = if acc.has_account() {
+                                let usage = backend
+                                    .account_usage_read()
+                                    .await
+                                    .map_err(|error| format!("account/usage/read: {error}"))?;
+                                let limits = backend
+                                    .account_rate_limits_read()
+                                    .await
+                                    .map_err(|error| format!("account/rateLimits/read: {error}"))?;
+                                (usage, limits)
+                            } else {
+                                let empty = AccountSession::empty("app-server");
+                                (empty.usage, empty.rate_limits)
+                            };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
@@ -3668,17 +3722,36 @@ impl MitsuroApp {
         .detach();
     }
 
-    /// Sign-in stub: `account/login/start` device code (fixture returns URL + code; no network).
+    /// Start the real Codex browser login flow (or the explicit fixture flow).
     pub fn account_sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account.pending_login_id.is_some() {
+            self.account_open_sign_in(cx);
+            return;
+        }
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
         let use_fixture = self.is_explicit_fixture();
-        let was_live = use_live;
-        self.status_line = "Account · sign in (stub)…".into();
+        self.status_line = "Account · starting sign-in…".into();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            enum SignInResult {
+                Pending {
+                    login_id: String,
+                    url: String,
+                    user_code: Option<String>,
+                },
+                Fixture(Box<FixtureSignIn>),
+            }
+
+            struct FixtureSignIn {
+                account: Option<Account>,
+                usage: GetAccountTokenUsageResponse,
+                limits: GetAccountRateLimitsResponse,
+                detail: String,
+            }
+
             let result = cx
                 .background_spawn(async move {
                     if use_live {
@@ -3689,29 +3762,21 @@ impl MitsuroApp {
                                 );
                             }
                             match backend
-                                .account_login_start(LoginAccountParams::device_code())
+                                .account_login_start(LoginAccountParams::chatgpt())
                                 .await
                             {
                                 Ok(login) => {
-                                    let detail = format!(
-                                        "device login · {} · code {}",
-                                        login.device_url().unwrap_or("—"),
-                                        login.user_code().unwrap_or("—")
-                                    );
-                                    // Re-read account after start (may still be pending on live).
-                                    let acc = backend
-                                        .account_read(GetAccountParams::default())
-                                        .await
-                                        .ok()
-                                        .and_then(|r| r.account);
-                                    let usage = backend
-                                        .account_usage_read()
-                                        .await
-                                        .map_err(|error| format!("account/usage/read: {error}"))?;
-                                    let limits = backend.account_rate_limits_read().await.map_err(
-                                        |error| format!("account/rateLimits/read: {error}"),
-                                    )?;
-                                    return Ok((acc, usage, limits, "app-server", Some(detail)));
+                                    let login_id = login.login_id().ok_or_else(|| {
+                                        "login/start response is missing loginId".to_owned()
+                                    })?;
+                                    let url = login.device_url().ok_or_else(|| {
+                                        "login/start response is missing authUrl".to_owned()
+                                    })?;
+                                    return Ok(SignInResult::Pending {
+                                        login_id: login_id.to_owned(),
+                                        url: url.to_owned(),
+                                        user_code: login.user_code().map(str::to_owned),
+                                    });
                                 }
                                 Err(e) => {
                                     return Err(format!("login/start: {e}"));
@@ -3752,39 +3817,49 @@ impl MitsuroApp {
                         .account_rate_limits_read()
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok((acc, usage, limits, "fixture", Some(detail)))
+                    Ok(SignInResult::Fixture(Box::new(FixtureSignIn {
+                        account: acc,
+                        usage,
+                        limits,
+                        detail,
+                    })))
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((account, usage, limits, source, stub)) => {
-                        app.apply_account_snapshot(account, usage, limits, source, stub.clone());
-                        app.account_state = if source == "fixture" {
-                            SurfaceDataState::Fixture
-                        } else {
-                            SurfaceDataState::Live
-                        };
-                        app.status_line = format!(
-                            "Account · signed in · {}",
-                            stub.as_deref().unwrap_or(source)
-                        )
-                        .into();
+                    Ok(SignInResult::Pending {
+                        login_id,
+                        url,
+                        user_code,
+                    }) => {
+                        let open_result = open_system_browser(&url);
+                        let code = user_code
+                            .map(|code| format!(" · code {code}"))
+                            .unwrap_or_default();
+                        app.account.pending_login_id = Some(login_id);
+                        app.account.pending_login_url = Some(url.clone());
+                        app.account.login_detail =
+                            Some(format!("Waiting for browser sign-in · {url}{code}"));
+                        app.account.source = "app-server";
+                        app.account_state = SurfaceDataState::Live;
+                        app.status_line =
+                            format!("Account · sign-in pending · {}", open_result.summary()).into();
+                    }
+                    Ok(SignInResult::Fixture(fixture)) => {
+                        app.apply_account_snapshot(
+                            fixture.account,
+                            fixture.usage,
+                            fixture.limits,
+                            "fixture",
+                            Some(fixture.detail.clone()),
+                        );
+                        app.account_state = SurfaceDataState::Fixture;
+                        app.status_line =
+                            format!("Account · fixture signed in · {}", fixture.detail).into();
                     }
                     Err(message) => {
-                        let source = if was_live {
-                            "app-server"
-                        } else if use_fixture {
-                            "fixture"
-                        } else {
-                            "unavailable"
-                        };
-                        app.account = AccountSession::empty(source);
-                        app.account_state = if use_fixture {
-                            SurfaceDataState::Fixture
-                        } else {
-                            SurfaceDataState::Error
-                        };
+                        app.account.login_detail = Some(format!("Sign-in failed · {message}"));
                         app.status_line = format!("Account sign-in failed · {message}").into();
                     }
                 }
@@ -3795,7 +3870,74 @@ impl MitsuroApp {
         let _ = window;
     }
 
-    /// Sign-out stub: `account/logout` (fixture clears demo profile).
+    pub fn account_open_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.account.pending_login_url.clone() else {
+            self.status_line = "Account · no pending sign-in URL".into();
+            cx.notify();
+            return;
+        };
+        let result = open_system_browser(&url);
+        self.status_line = format!("Account · {}", result.summary()).into();
+        cx.notify();
+    }
+
+    pub fn account_cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(login_id) = self.account.pending_login_id.clone() else {
+            self.status_line = "Account · no pending sign-in".into();
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Account · cannot cancel while backend is unavailable".into();
+            cx.notify();
+            return;
+        };
+        if backend.kind() == BackendKind::MitsuroHttp {
+            self.status_line = "Account login is not exposed by the Mitsuro server.".into();
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        self.status_line = "Account · canceling sign-in…".into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .account_login_cancel(CancelLoginAccountParams::new(login_id))
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(response) => {
+                        app.account.pending_login_id = None;
+                        app.account.pending_login_url = None;
+                        app.account.login_detail = None;
+                        app.status_line = match response.status {
+                            CancelLoginAccountStatus::Canceled => {
+                                "Account · sign-in canceled".into()
+                            }
+                            CancelLoginAccountStatus::NotFound => {
+                                "Account · sign-in was already resolved".into()
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        app.status_line = format!("Account · cancel failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Sign out through the selected backend (fixture clears only fixture state).
     pub fn account_sign_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
@@ -3814,7 +3956,10 @@ impl MitsuroApp {
                                     "account logout is not exposed by the Mitsuro server".into()
                                 );
                             }
-                            let _ = backend.account_logout().await;
+                            backend
+                                .account_logout()
+                                .await
+                                .map_err(|error| format!("account/logout: {error}"))?;
                             let acc = backend
                                 .account_read(GetAccountParams::default())
                                 .await
@@ -3856,17 +4001,16 @@ impl MitsuroApp {
                         } else {
                             SurfaceDataState::Live
                         };
-                        app.account.login_stub_detail = None;
+                        app.account.login_detail = None;
+                        app.account.pending_login_id = None;
+                        app.account.pending_login_url = None;
                         app.status_line = format!("Account · signed out · {source}").into();
                     }
                     Err(message) => {
-                        app.account.signed_in = false;
-                        app.account.email_display = None;
-                        app.account.plan_label = None;
-                        app.account.login_stub_detail = None;
-                        app.account_state = SurfaceDataState::Error;
-                        app.status_line =
-                            format!("Account sign-out stub ({message}); local cleared.").into();
+                        app.status_line = format!(
+                            "Account sign-out failed · {message} · retained last server snapshot"
+                        )
+                        .into();
                     }
                 }
                 cx.notify();
@@ -6739,6 +6883,27 @@ impl MitsuroApp {
             self.mcp_form_values.clear();
         }
 
+        let login_completion = account_login_completion(&event);
+        if let Some(completion) = login_completion.as_ref() {
+            let matches_pending = self.account.pending_login_id.as_deref().is_none()
+                || completion.login_id.is_none()
+                || self.account.pending_login_id.as_deref() == completion.login_id.as_deref();
+            if matches_pending {
+                self.account.pending_login_id = None;
+                self.account.pending_login_url = None;
+                self.account.login_detail = if completion.success {
+                    None
+                } else {
+                    Some(
+                        completion
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Sign-in did not complete".to_owned()),
+                    )
+                };
+            }
+        }
+
         let thread_idx = event.thread_id.as_ref().and_then(|thread_id| {
             self.threads.iter().position(|thread| {
                 thread.summary.id == *thread_id
@@ -6808,7 +6973,10 @@ impl MitsuroApp {
         if matches!(
             event.family,
             mitsuro_desktop_backend::NotificationFamily::Account
-        ) && matches!(self.connection, UiConnection::Ready { .. })
+        ) && login_completion
+            .as_ref()
+            .is_none_or(|result| result.success)
+            && matches!(self.connection, UiConnection::Ready { .. })
         {
             self.kick_account_refresh(cx);
         }
@@ -8326,5 +8494,44 @@ mod tests {
         assert!(!turn_update_is_current(7, Some("thread-a"), 7, "thread-b"));
         assert!(!turn_update_is_current(8, Some("thread-a"), 7, "thread-a"));
         assert!(!turn_update_is_current(7, None, 7, "thread-a"));
+    }
+
+    #[test]
+    fn account_login_completion_preserves_server_identity_and_failure() {
+        let success = LifecycleNotification::from_known(
+            "account/login/completed",
+            Some(&serde_json::json!({
+                "loginId": "login-7",
+                "success": true,
+                "error": null
+            })),
+        )
+        .expect("known account lifecycle event");
+        assert_eq!(
+            account_login_completion(&success),
+            Some(AccountLoginCompletion {
+                success: true,
+                login_id: Some("login-7".to_owned()),
+                error: None,
+            })
+        );
+
+        let failure = LifecycleNotification::from_known(
+            "account/login/completed",
+            Some(&serde_json::json!({
+                "loginId": "login-8",
+                "success": false,
+                "error": "authorization declined"
+            })),
+        )
+        .expect("known account lifecycle event");
+        assert_eq!(
+            account_login_completion(&failure),
+            Some(AccountLoginCompletion {
+                success: false,
+                login_id: Some("login-8".to_owned()),
+                error: Some("authorization declined".to_owned()),
+            })
+        );
     }
 }

@@ -3266,7 +3266,9 @@ fn account_section(
     let secondary_pct = account.secondary_used_percent().clamp(0, 100) as f32;
     let lifetime = account.lifetime_tokens();
     let lifetime_label = format_token_count(lifetime);
-    let login_stub = account.login_stub_detail.clone();
+    let login_detail = account.login_detail.clone();
+    let login_pending = account.pending_login_id.is_some();
+    let login_url_available = account.pending_login_url.is_some();
     let signed_in = account.signed_in;
     let source = account.source;
     let profile = profile_name.to_string();
@@ -3361,7 +3363,7 @@ fn account_section(
                         .child(format!("Lifetime tokens · {lifetime_label}")),
                 ),
         )
-        .when_some(login_stub, |this, stub| {
+        .when_some(login_detail, |this, detail| {
             this.child(
                 div()
                     .px(px(10.0))
@@ -3371,7 +3373,7 @@ fn account_section(
                     .text_xs()
                     .font_family("monospace")
                     .text_color(colors.text_secondary)
-                    .child(stub),
+                    .child(detail),
             )
         })
         .child(
@@ -3380,20 +3382,42 @@ fn account_section(
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(account_action_button(
-                    "account-sign-in",
-                    "Sign in",
-                    true,
-                    cx,
-                    |app, window, cx| app.account_sign_in(window, cx),
-                ))
-                .child(account_action_button(
-                    "account-sign-out",
-                    "Sign out",
-                    false,
-                    cx,
-                    |app, window, cx| app.account_sign_out(window, cx),
-                ))
+                .when(!signed_in && !login_pending, |this| {
+                    this.child(account_action_button(
+                        "account-sign-in",
+                        "Sign in",
+                        true,
+                        cx,
+                        |app, window, cx| app.account_sign_in(window, cx),
+                    ))
+                })
+                .when(login_pending && login_url_available, |this| {
+                    this.child(account_action_button(
+                        "account-open-sign-in",
+                        "Open sign-in",
+                        true,
+                        cx,
+                        |app, _window, cx| app.account_open_sign_in(cx),
+                    ))
+                })
+                .when(login_pending, |this| {
+                    this.child(account_action_button(
+                        "account-cancel-sign-in",
+                        "Cancel",
+                        false,
+                        cx,
+                        |app, _window, cx| app.account_cancel_sign_in(cx),
+                    ))
+                })
+                .when(signed_in, |this| {
+                    this.child(account_action_button(
+                        "account-sign-out",
+                        "Sign out",
+                        false,
+                        cx,
+                        |app, window, cx| app.account_sign_out(window, cx),
+                    ))
+                })
                 .child(account_action_button(
                     "account-refresh",
                     "Refresh",

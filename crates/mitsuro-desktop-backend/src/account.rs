@@ -619,6 +619,28 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_browser_login_matches_generated_contract() {
+        let params = serde_json::to_value(LoginAccountParams::chatgpt()).unwrap();
+        assert_eq!(
+            params,
+            serde_json::json!({"type": "chatgpt", "appBrand": "codex"})
+        );
+
+        let response: LoginAccountResponse = serde_json::from_value(serde_json::json!({
+            "type": "chatgpt",
+            "loginId": "login-live",
+            "authUrl": "https://auth.openai.com/authorize"
+        }))
+        .unwrap();
+        assert_eq!(response.login_id(), Some("login-live"));
+        assert_eq!(
+            response.device_url(),
+            Some("https://auth.openai.com/authorize")
+        );
+        assert_eq!(response.user_code(), None);
+    }
+
+    #[test]
     fn cancel_and_logout_shapes() {
         let c = CancelLoginAccountResponse {
             status: CancelLoginAccountStatus::Canceled,
