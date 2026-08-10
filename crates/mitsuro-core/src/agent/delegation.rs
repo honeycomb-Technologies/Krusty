@@ -37,7 +37,10 @@ const RENEWAL_BATCH_COALESCE: Duration = Duration::from_millis(2);
 // Give the dedicated renewal connection a small bounded window to absorb that
 // expected contention without producing noisy false alarms or shortening the
 // effective lease. This remains tiny relative to the minimum renewal slack.
-const RENEWAL_CONNECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
+// Lease renewal shares SQLite with trace and workflow writes. A 25 ms window
+// produced avoidable lock warnings during healthy parallel groups; this stays
+// far below the lease interval while tolerating an ordinary write burst.
+const RENEWAL_CONNECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 static RENEWAL_SERVICES: OnceLock<Mutex<HashMap<PathBuf, Weak<LeaseRenewalService>>>> =
     OnceLock::new();

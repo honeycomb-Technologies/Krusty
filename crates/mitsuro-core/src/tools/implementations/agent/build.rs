@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -115,6 +116,165 @@ struct BuildResultCounts {
     cancelled: usize,
     usable: usize,
     failed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggregateEvidenceKind {
+    Build,
+    Report,
+}
+
+fn aggregate_evidence_kind(params: &Params) -> AggregateEvidenceKind {
+    let requests_write = params.tasks.as_ref().map_or_else(
+        || {
+            params
+                .capabilities
+                .iter()
+                .any(|capability| capability == "write")
+        },
+        |tasks| {
+            tasks.iter().any(|task| {
+                task.capabilities
+                    .iter()
+                    .any(|capability| capability == "write")
+                    || !task.write_intent.is_empty()
+            })
+        },
+    );
+    if requests_write {
+        AggregateEvidenceKind::Build
+    } else {
+        AggregateEvidenceKind::Report
+    }
+}
+
+fn aggregate_outcome(
+    evidence_kind: AggregateEvidenceKind,
+    results_len: usize,
+    counts: BuildResultCounts,
+    files_modified: usize,
+    has_active_process_handoff: bool,
+) -> &'static str {
+    if counts.cancelled > 0 {
+        return "cancelled";
+    }
+    let incomplete = counts
+        .degraded
+        .saturating_add(counts.cancelled)
+        .saturating_add(counts.failed);
+    match evidence_kind {
+        AggregateEvidenceKind::Build => classify_build_outcome_with_handoff(
+            results_len,
+            incomplete,
+            files_modified,
+            has_active_process_handoff,
+        ),
+        AggregateEvidenceKind::Report if counts.complete == results_len && results_len > 0 => {
+            "success"
+        }
+        AggregateEvidenceKind::Report if counts.usable > 0 => "partial",
+        AggregateEvidenceKind::Report => "failed",
+    }
+}
+
+fn aggregate_outcome_reason(
+    evidence_kind: AggregateEvidenceKind,
+    counts: BuildResultCounts,
+    files_modified: usize,
+    has_active_process_handoff: bool,
+) -> &'static str {
+    let incomplete = counts
+        .degraded
+        .saturating_add(counts.cancelled)
+        .saturating_add(counts.failed);
+    if counts.cancelled > 0 {
+        return "cancelled";
+    }
+    match evidence_kind {
+        AggregateEvidenceKind::Report if counts.complete > 0 && incomplete == 0 => {
+            "report_evidence"
+        }
+        AggregateEvidenceKind::Report if counts.usable > 0 => "mixed_report_evidence",
+        AggregateEvidenceKind::Report => "no_usable_evidence",
+        AggregateEvidenceKind::Build if files_modified > 0 && incomplete == 0 => {
+            "file_modifications"
+        }
+        AggregateEvidenceKind::Build if files_modified > 0 => "mixed",
+        AggregateEvidenceKind::Build if has_active_process_handoff && incomplete == 0 => {
+            "active_process_handoff_readiness_unverified"
+        }
+        AggregateEvidenceKind::Build if has_active_process_handoff => "partial_process_handoff",
+        AggregateEvidenceKind::Build => "no_usable_evidence",
+    }
+}
+
+fn aggregate_confidence(
+    evidence_kind: AggregateEvidenceKind,
+    counts: BuildResultCounts,
+    files_modified: usize,
+    has_active_process_handoff: bool,
+) -> &'static str {
+    let incomplete = counts
+        .degraded
+        .saturating_add(counts.cancelled)
+        .saturating_add(counts.failed);
+    match evidence_kind {
+        AggregateEvidenceKind::Build => {
+            build_confidence_with_handoff(incomplete, files_modified, has_active_process_handoff)
+        }
+        AggregateEvidenceKind::Report if counts.complete > 0 && incomplete == 0 => "high",
+        AggregateEvidenceKind::Report if counts.usable > 0 => "medium",
+        AggregateEvidenceKind::Report => "low",
+    }
+}
+
+fn aggregate_summary(
+    evidence_kind: AggregateEvidenceKind,
+    counts: BuildResultCounts,
+    files_modified: usize,
+    lines_added: usize,
+    lines_removed: usize,
+    process_handoff: Option<&str>,
+) -> String {
+    match evidence_kind {
+        AggregateEvidenceKind::Build => build_summary_with_handoff(
+            counts.complete,
+            counts.degraded,
+            counts.cancelled,
+            counts.failed,
+            files_modified,
+            lines_added,
+            lines_removed,
+            process_handoff,
+        ),
+        AggregateEvidenceKind::Report => format!(
+            "Delegated investigation completed with {} complete, {} degraded, {} cancelled, and {} failed reports. Read-only report evidence does not require file modifications.",
+            counts.complete, counts.degraded, counts.cancelled, counts.failed
+        ),
+    }
+}
+
+fn structured_task_working_dir(project_dir: &Path, scope: Option<&str>) -> PathBuf {
+    let project = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let Some(scope) = scope.map(str::trim).filter(|scope| !scope.is_empty()) else {
+        return project;
+    };
+    let requested = Path::new(scope);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        project.join(requested)
+    };
+    let resolved = std::fs::canonicalize(&candidate).ok().map(|path| {
+        if path.is_file() {
+            path.parent().map(Path::to_path_buf).unwrap_or(path)
+        } else {
+            path
+        }
+    });
+    resolved
+        .filter(|path| path.starts_with(&project))
+        .unwrap_or(project)
 }
 
 fn is_complete_build_result(result: &SubAgentResult) -> bool {
@@ -424,6 +584,8 @@ impl AgentTool {
             );
         }
 
+        let evidence_kind = aggregate_evidence_kind(&params);
+
         let client = self.resolve_client(ctx);
         let workspace_scope = match delegated_workspace_scope(
             ctx.project_dir
@@ -545,6 +707,12 @@ impl AgentTool {
                     .as_deref()
                     .map(|expected| format!("\nEXPECTED OUTPUT:\n{expected}\n"))
                     .unwrap_or_default();
+                let task_working_dir = structured_task_working_dir(
+                    ctx.project_dir
+                        .as_deref()
+                        .expect("build checked project directory"),
+                    structured.scope.as_deref(),
+                );
                 let task_prompt = format!(
                     "You are task {} of {} in one coordinated Agent task graph.\n\n\
                      TASK ID: {}\nTASK NAME: {}\n\nTASK INSTRUCTIONS:\n{}\n{}\n\
@@ -567,7 +735,7 @@ impl AgentTool {
                 );
                 let mut task = SubAgentTask::new(structured.id.clone(), task_prompt)
                     .with_name(name.clone())
-                    .with_working_dir(ctx.working_dir.clone())
+                    .with_working_dir(task_working_dir)
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(task_policy.clone())
                     .with_process_context(
@@ -1241,46 +1409,29 @@ impl AgentTool {
                 }
 
                 let counts = build_result_counts(&results);
-                let incomplete_builders = counts
-                    .degraded
-                    .saturating_add(counts.cancelled)
-                    .saturating_add(counts.failed);
                 let process_handoff = active_process_handoff_summary(&background_processes);
-                let outcome = if counts.cancelled > 0 {
-                    "cancelled"
-                } else {
-                    classify_build_outcome_with_handoff(
-                        results.len(),
-                        incomplete_builders,
-                        stats.files_modified,
-                        process_handoff.is_some(),
-                    )
-                };
-                let confidence = build_confidence_with_handoff(
-                    incomplete_builders,
+                let outcome = aggregate_outcome(
+                    evidence_kind,
+                    results.len(),
+                    counts,
                     stats.files_modified,
                     process_handoff.is_some(),
                 );
-                let outcome_reason = if counts.cancelled > 0 {
-                    "cancelled"
-                } else if stats.files_modified > 0 {
-                    if incomplete_builders == 0 {
-                        "file_modifications"
-                    } else {
-                        "mixed"
-                    }
-                } else if process_handoff.is_some() && incomplete_builders == 0 {
-                    "active_process_handoff_readiness_unverified"
-                } else if process_handoff.is_some() {
-                    "partial_process_handoff"
-                } else {
-                    "no_usable_evidence"
-                };
-                let investigation_summary = build_summary_with_handoff(
-                    counts.complete,
-                    counts.degraded,
-                    counts.cancelled,
-                    counts.failed,
+                let confidence = aggregate_confidence(
+                    evidence_kind,
+                    counts,
+                    stats.files_modified,
+                    process_handoff.is_some(),
+                );
+                let outcome_reason = aggregate_outcome_reason(
+                    evidence_kind,
+                    counts,
+                    stats.files_modified,
+                    process_handoff.is_some(),
+                );
+                let investigation_summary = aggregate_summary(
+                    evidence_kind,
+                    counts,
                     stats.files_modified,
                     stats.lines_added,
                     stats.lines_removed,
@@ -1296,15 +1447,23 @@ impl AgentTool {
 
                 let payload = json!({
                     "delegated_run_id": bg_delegated_run_id,
-                    "message": format!(
-                        "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
-                        results.len(), total_turns, stats.lines_added, stats.lines_removed, stats.files_modified,
-                    ),
+                    "message": match evidence_kind {
+                        AggregateEvidenceKind::Build => format!(
+                            "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
+                            results.len(), total_turns, stats.lines_added, stats.lines_removed, stats.files_modified,
+                        ),
+                        AggregateEvidenceKind::Report => format!(
+                            "Investigation completed: {} agents produced report evidence in {} turns",
+                            results.len(), total_turns,
+                        ),
+                    },
+                    "evidence_kind": match evidence_kind { AggregateEvidenceKind::Build => "build", AggregateEvidenceKind::Report => "report" },
                     "investigation_summary": investigation_summary,
                     "outcome": outcome,
                     "outcome_reason": outcome_reason,
                     "confidence": confidence,
-                    "builder_count": results.len(),
+                    "builder_count": if evidence_kind == AggregateEvidenceKind::Build { results.len() } else { 0 },
+                    "report_count": if evidence_kind == AggregateEvidenceKind::Report { results.len() } else { 0 },
                     "agent_count": results.len(),
                     "successful_agents": counts.complete,
                     "usable_agents": counts.usable,
@@ -1314,7 +1473,9 @@ impl AgentTool {
                     "total_turns": total_turns,
                     "total_duration_ms": total_duration_ms,
                     "files_examined": unique_files,
-                    "builders": builders,
+                    "agents": builders.clone(),
+                    "builders": if evidence_kind == AggregateEvidenceKind::Build { builders.clone() } else { Vec::new() },
+                    "reports": if evidence_kind == AggregateEvidenceKind::Report { builders } else { Vec::new() },
                     "background_processes": background_processes,
                     "lines_added": stats.lines_added,
                     "lines_removed": stats.lines_removed,
@@ -1532,55 +1693,45 @@ impl AgentTool {
             }
         }
 
-        let message = format!(
-            "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
-            results.len(),
-            total_turns,
-            stats.lines_added,
-            stats.lines_removed,
-            stats.files_modified,
-        );
-        let counts = build_result_counts(&results);
-        let incomplete_builders = counts
-            .degraded
-            .saturating_add(counts.cancelled)
-            .saturating_add(counts.failed);
-        let process_handoff = active_process_handoff_summary(&background_processes);
-        let outcome = if counts.cancelled > 0 {
-            "cancelled"
-        } else {
-            classify_build_outcome_with_handoff(
+        let message = match evidence_kind {
+            AggregateEvidenceKind::Build => format!(
+                "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
                 results.len(),
-                incomplete_builders,
+                total_turns,
+                stats.lines_added,
+                stats.lines_removed,
                 stats.files_modified,
-                process_handoff.is_some(),
-            )
+            ),
+            AggregateEvidenceKind::Report => format!(
+                "Investigation completed: {} agents produced report evidence in {} turns",
+                results.len(),
+                total_turns
+            ),
         };
-        let confidence = build_confidence_with_handoff(
-            incomplete_builders,
+        let counts = build_result_counts(&results);
+        let process_handoff = active_process_handoff_summary(&background_processes);
+        let outcome = aggregate_outcome(
+            evidence_kind,
+            results.len(),
+            counts,
             stats.files_modified,
             process_handoff.is_some(),
         );
-        let outcome_reason = if counts.cancelled > 0 {
-            "cancelled"
-        } else if stats.files_modified > 0 {
-            if incomplete_builders == 0 {
-                "file_modifications"
-            } else {
-                "mixed"
-            }
-        } else if process_handoff.is_some() && incomplete_builders == 0 {
-            "active_process_handoff_readiness_unverified"
-        } else if process_handoff.is_some() {
-            "partial_process_handoff"
-        } else {
-            "no_usable_evidence"
-        };
-        let investigation_summary = build_summary_with_handoff(
-            counts.complete,
-            counts.degraded,
-            counts.cancelled,
-            counts.failed,
+        let confidence = aggregate_confidence(
+            evidence_kind,
+            counts,
+            stats.files_modified,
+            process_handoff.is_some(),
+        );
+        let outcome_reason = aggregate_outcome_reason(
+            evidence_kind,
+            counts,
+            stats.files_modified,
+            process_handoff.is_some(),
+        );
+        let investigation_summary = aggregate_summary(
+            evidence_kind,
+            counts,
             stats.files_modified,
             stats.lines_added,
             stats.lines_removed,
@@ -1608,11 +1759,13 @@ impl AgentTool {
         let payload = json!({
             "delegated_run_id": delegated_run_id,
             "message": message,
+            "evidence_kind": match evidence_kind { AggregateEvidenceKind::Build => "build", AggregateEvidenceKind::Report => "report" },
             "investigation_summary": investigation_summary,
             "confidence": confidence,
             "outcome": outcome,
             "outcome_reason": outcome_reason,
-            "builder_count": results.len(),
+            "builder_count": if evidence_kind == AggregateEvidenceKind::Build { results.len() } else { 0 },
+            "report_count": if evidence_kind == AggregateEvidenceKind::Report { results.len() } else { 0 },
             "agent_count": results.len(),
             "successful_agents": counts.complete,
             "usable_agents": counts.usable,
@@ -1624,7 +1777,9 @@ impl AgentTool {
             "paths_examined": unique_files,
             "paths_examined_count": unique_files.len(),
             "files_examined": unique_files,
-            "builders": builders,
+            "agents": builders.clone(),
+            "builders": if evidence_kind == AggregateEvidenceKind::Build { builders.clone() } else { Vec::new() },
+            "reports": if evidence_kind == AggregateEvidenceKind::Report { builders } else { Vec::new() },
             "background_processes": background_processes,
             "lines_added": stats.lines_added,
             "lines_removed": stats.lines_removed,
@@ -1732,8 +1887,10 @@ mod tests {
     use crate::process::ProcessRegistry;
 
     use super::{
-        active_process_handoff_summary, build_confidence_with_handoff, build_result_counts,
-        classify_build_outcome_with_handoff, revalidate_background_processes, BuildResultCounts,
+        active_process_handoff_summary, aggregate_outcome, aggregate_outcome_reason,
+        build_confidence_with_handoff, build_result_counts, classify_build_outcome_with_handoff,
+        revalidate_background_processes, structured_task_working_dir, AggregateEvidenceKind,
+        BuildResultCounts,
     };
 
     fn result_with_termination(
@@ -1802,6 +1959,49 @@ mod tests {
         assert_eq!(
             classify_build_outcome_with_handoff(3, 1, 0, true),
             "partial"
+        );
+    }
+
+    #[test]
+    fn read_only_group_accepts_reports_without_file_modifications() {
+        let counts = BuildResultCounts {
+            complete: 3,
+            degraded: 0,
+            cancelled: 0,
+            usable: 3,
+            failed: 0,
+        };
+
+        assert_eq!(
+            aggregate_outcome(AggregateEvidenceKind::Report, 3, counts, 0, false),
+            "success"
+        );
+        assert_eq!(
+            aggregate_outcome_reason(AggregateEvidenceKind::Report, counts, 0, false),
+            "report_evidence"
+        );
+        assert_eq!(
+            aggregate_outcome(AggregateEvidenceKind::Build, 3, counts, 0, false),
+            "failed",
+            "write-capable groups must still prove a mutation or process handoff"
+        );
+    }
+
+    #[test]
+    fn structured_scope_narrows_child_working_directory() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let project = temp.path().join("workspace");
+        let scoped = project.join("tetris-pwa");
+        std::fs::create_dir_all(&scoped).expect("scoped directory");
+
+        assert_eq!(
+            structured_task_working_dir(&project, Some(scoped.to_string_lossy().as_ref())),
+            std::fs::canonicalize(&scoped).expect("canonical scope")
+        );
+        assert_eq!(
+            structured_task_working_dir(&project, Some("../outside")),
+            std::fs::canonicalize(&project).expect("canonical project"),
+            "a task scope must never widen beyond the selected project"
         );
     }
 

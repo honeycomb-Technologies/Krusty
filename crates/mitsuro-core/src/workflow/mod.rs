@@ -10,9 +10,9 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-/// Mandatory safety envelope for one automatically continued Goal attempt.
-/// User/project overrides may be more restrictive; an active Goal never falls
-/// back to the unlimited interactive default.
+/// Safety envelope for one Goal execution attempt. Exhausting an attempt rolls
+/// the claimed step back to ready work; it does not terminate the approved
+/// Goal. Explicit parent-run and token ceilings remain separate contracts.
 pub const DEFAULT_GOAL_ATTEMPT_MAX_TURNS: u32 = 24;
 pub const DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS: u32 = 96;
 pub const DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS: u64 = 900;

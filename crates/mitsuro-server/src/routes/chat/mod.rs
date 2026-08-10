@@ -90,6 +90,31 @@ pub(crate) async fn resume_child_completion_session(
     let permission_mode = ctx.permission_mode;
     start_orchestrator_detached(state, ctx, work_mode, permission_mode).await
 }
+
+/// Start an approved Goal using the same persisted session contract as chat.
+/// The workflow route acquires the canonical session guard before mutating the
+/// Goal, preventing approval from racing a second foreground loop.
+pub(crate) async fn start_workflow_session_with_guard(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    session_id: &str,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), AppError> {
+    let ctx = setup_chat_session_with_guard(
+        state,
+        user,
+        session_id,
+        RequestedModel::Unspecified,
+        crate::types::ThinkingLevel::Off,
+        false,
+        false,
+        Some(guard),
+    )
+    .await?;
+    let work_mode = ctx.work_mode;
+    let permission_mode = ctx.permission_mode;
+    start_orchestrator_detached(state, ctx, work_mode, permission_mode).await
+}
 // ── Handlers ─────────────────────────────────────────────────────────
 
 async fn chat(

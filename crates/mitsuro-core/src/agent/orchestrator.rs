@@ -316,12 +316,55 @@ fn finish_active_attempt_for_stop(db_path: &Path, session_id: &str, reason: &str
     }
 }
 
+#[derive(Debug, Default)]
+struct AttemptProgressTracker {
+    attempt_id: Option<String>,
+    turn_baseline: usize,
+    tool_call_baseline: usize,
+    research_action_baseline: usize,
+}
+
+impl AttemptProgressTracker {
+    fn local_counts(
+        &mut self,
+        attempt_id: &str,
+        run_turn_count: usize,
+        run_tool_call_count: usize,
+        run_research_action_count: usize,
+        current_turn_tool_calls: usize,
+        current_turn_research_actions: usize,
+    ) -> (u32, u32, u32) {
+        if self.attempt_id.as_deref() != Some(attempt_id) {
+            self.attempt_id = Some(attempt_id.to_string());
+            self.turn_baseline = run_turn_count.saturating_sub(1);
+            self.tool_call_baseline = run_tool_call_count.saturating_sub(current_turn_tool_calls);
+            self.research_action_baseline =
+                run_research_action_count.saturating_sub(current_turn_research_actions);
+        }
+
+        (
+            run_turn_count
+                .saturating_sub(self.turn_baseline)
+                .min(u32::MAX as usize) as u32,
+            run_tool_call_count
+                .saturating_sub(self.tool_call_baseline)
+                .min(u32::MAX as usize) as u32,
+            run_research_action_count
+                .saturating_sub(self.research_action_baseline)
+                .min(u32::MAX as usize) as u32,
+        )
+    }
+}
+
 fn record_active_attempt_progress(
     db_path: &Path,
     session_id: &str,
+    tracker: &mut AttemptProgressTracker,
     turn_count: usize,
     tool_call_count: usize,
     research_action_count: usize,
+    current_turn_tool_calls: usize,
+    current_turn_research_actions: usize,
     material_progress: bool,
     blocker_fingerprint: Option<String>,
 ) -> Option<(GoalStatus, Option<String>)> {
@@ -334,6 +377,14 @@ fn record_active_attempt_progress(
         .latest_attempt
         .as_ref()
         .filter(|attempt| attempt.status == AttemptStatus::Running)?;
+    let (turn_count, tool_call_count, research_action_count) = tracker.local_counts(
+        &attempt.id,
+        turn_count,
+        tool_call_count,
+        research_action_count,
+        current_turn_tool_calls,
+        current_turn_research_actions,
+    );
     let mutation = manager
         .record_attempt_progress(
             session_id,
@@ -341,9 +392,9 @@ fn record_active_attempt_progress(
             &attempt.id,
             snapshot.aggregate_revision,
             AttemptProgressInput {
-                turn_count: turn_count.min(u32::MAX as usize) as u32,
-                tool_call_count: tool_call_count.min(u32::MAX as usize) as u32,
-                research_action_count: research_action_count.min(u32::MAX as usize) as u32,
+                turn_count,
+                tool_call_count,
+                research_action_count,
                 material_progress,
                 blocker_fingerprint,
             },
@@ -827,6 +878,7 @@ impl AgenticOrchestrator {
         let mut iteration = 0usize;
         let mut goal_tool_call_count = 0usize;
         let mut goal_research_action_count = 0usize;
+        let mut attempt_progress_tracker = AttemptProgressTracker::default();
         let mut loop_guard_landing = None::<LoopGuardLanding>;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
@@ -883,6 +935,7 @@ impl AgenticOrchestrator {
 
         loop {
             input_inbox.collect_ready();
+            emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1604,6 +1657,8 @@ impl AgenticOrchestrator {
             }
 
             input_inbox.collect_ready();
+            let workflow_updated =
+                emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1628,7 +1683,7 @@ impl AgenticOrchestrator {
                     &db_path,
                     &session_id,
                 );
-                if !injected_steering.is_empty() {
+                if !injected_steering.is_empty() || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
                     empty_stream_retry_attempted = false;
@@ -1710,7 +1765,7 @@ impl AgenticOrchestrator {
                     &db_path,
                     &session_id,
                 );
-                if no_tool_completion_should_continue(&injected_steering) {
+                if no_tool_completion_should_continue(&injected_steering) || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
                     empty_stream_retry_attempted = false;
@@ -1974,21 +2029,17 @@ impl AgenticOrchestrator {
             );
             let tool_results = tool_batch.results;
             let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
-            goal_tool_call_count = goal_tool_call_count.saturating_add(result.tool_calls.len());
-            goal_research_action_count = goal_research_action_count.saturating_add(
-                result
-                    .tool_calls
-                    .iter()
-                    .filter(|call| {
-                        is_research_action(
-                            call,
-                            &tool_results,
-                            delegated_store.as_ref(),
-                            &session_id,
-                        )
-                    })
-                    .count(),
-            );
+            let current_turn_tool_calls = result.tool_calls.len();
+            let current_turn_research_actions = result
+                .tool_calls
+                .iter()
+                .filter(|call| {
+                    is_research_action(call, &tool_results, delegated_store.as_ref(), &session_id)
+                })
+                .count();
+            goal_tool_call_count = goal_tool_call_count.saturating_add(current_turn_tool_calls);
+            goal_research_action_count =
+                goal_research_action_count.saturating_add(current_turn_research_actions);
 
             if tool_batch.cancelled {
                 let tool_msg = ModelMessage {
@@ -2068,9 +2119,12 @@ impl AgenticOrchestrator {
                 record_active_attempt_progress(
                     &db_path,
                     &session_id,
+                    &mut attempt_progress_tracker,
                     iteration,
                     goal_tool_call_count,
                     goal_research_action_count,
+                    current_turn_tool_calls,
+                    current_turn_research_actions,
                     tool_batch_made_material_progress(&tool_results),
                     blocker_fingerprint,
                 )
@@ -2332,6 +2386,21 @@ fn emit_steering_events(
             message: input.message,
         });
     }
+}
+
+fn emit_workflow_update_inputs(
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    updates: Vec<(String, u64, String)>,
+) -> bool {
+    let changed = !updates.is_empty();
+    for (goal_id, aggregate_revision, operation_id) in updates {
+        let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+            goal_id,
+            aggregate_revision,
+            operation_id,
+        });
+    }
+    changed
 }
 
 fn steering_display_message(content: &[Content]) -> String {
@@ -2645,6 +2714,7 @@ mod tests {
     use super::successful_task_completion_finished_plan;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
+    use super::AttemptProgressTracker;
     use super::EmptyCompletionAction;
     use super::LoopGuardLanding;
     use super::VALIDATION_REMINDER;
@@ -2670,6 +2740,20 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn workflow_attempt_progress_uses_attempt_local_counters() {
+        let mut tracker = AttemptProgressTracker::default();
+
+        assert_eq!(tracker.local_counts("attempt-a", 1, 3, 2, 3, 2), (1, 3, 2));
+        assert_eq!(tracker.local_counts("attempt-a", 4, 8, 5, 2, 1), (4, 8, 5));
+        assert_eq!(
+            tracker.local_counts("attempt-b", 5, 10, 6, 2, 1),
+            (1, 2, 1),
+            "a new workflow attempt must not inherit prior step counters"
+        );
+        assert_eq!(tracker.local_counts("attempt-b", 7, 13, 7, 1, 0), (3, 5, 2));
+    }
 
     fn seed_research_accounting_run(
         store: &DelegatedRunStore,

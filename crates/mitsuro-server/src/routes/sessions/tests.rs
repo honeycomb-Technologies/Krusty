@@ -222,6 +222,19 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
         mitsuro_core::workflow::GoalStatus::Draft
     );
 
+    // Model an already-running planning loop. Activation must wake that loop
+    // through the control plane instead of requiring a synthetic chat message.
+    let active_guard = state
+        .try_lock_session(&session_id)
+        .await
+        .expect("test should hold the session run lock");
+    let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), workflow_tx);
+
     let Json(activated) = execute_workflow_command(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
@@ -238,6 +251,17 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
         activated.snapshot.goal.status,
         mitsuro_core::workflow::GoalStatus::Active
     );
+    assert!(matches!(
+        workflow_rx.recv().await,
+        Some(LoopInput::WorkflowUpdated {
+            goal_id,
+            aggregate_revision,
+            operation_id,
+        }) if goal_id == activated.snapshot.goal.id
+            && aggregate_revision == activated.snapshot.aggregate_revision
+            && operation_id == "route-activate"
+    ));
+    drop(active_guard);
     assert_eq!(
         session_manager
             .get_session(&session_id)

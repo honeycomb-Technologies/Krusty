@@ -1120,12 +1120,10 @@ impl WorkflowManager {
                     release_attempt_step(tx, attempt_id, WorkflowStepStatus::Blocked)?;
                     "goal_blocked"
                 } else {
-                    tx.execute(
-                        "UPDATE workflow_goals
-                            SET status = 'paused', status_reason = ?1, updated_at = ?2
-                          WHERE id = ?3",
-                        params![reason, timestamp, goal_id],
-                    )?;
+                    // A bounded attempt is a resumable execution slice, not a
+                    // terminal budget for the approved Goal. Keep the Goal
+                    // active and release the step so the same parent loop (or
+                    // a later continuation) can claim a fresh attempt.
                     release_attempt_step(tx, attempt_id, WorkflowStepStatus::Pending)?;
                     "attempt_budget_exhausted"
                 }
