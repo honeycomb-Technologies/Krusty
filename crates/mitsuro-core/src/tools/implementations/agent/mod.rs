@@ -225,7 +225,7 @@ impl Tool for AgentTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. Budget a final handoff turn after inspect/edit/verify; multi-step writers usually need at least 4 turns. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
+            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. Reserve a final handoff turn after inspect/read/edit/verify; tasks that read prerequisites, write, and verify usually need at least 5 turns. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
         )
     }
 
@@ -327,7 +327,7 @@ impl Tool for AgentTool {
                             "max_turns": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "Include a final handoff turn"
+                                "description": "Reserve a final handoff turn; prerequisite-reading writers that verify usually need at least 5 turns"
                             }
                         },
                         "additionalProperties": false

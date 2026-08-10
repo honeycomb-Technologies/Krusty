@@ -59,7 +59,7 @@ impl DelegationMode {
         };
 
         format!(
-            "[DELEGATION MODE: {}]\n{} The parent must coordinate, inspect evidence, and verify delegated results. For one decomposable operation, prefer one agent spawn with a structured tasks graph over several separate spawn calls: give every task a stable id, bounded instructions, minimum capabilities, scope, declared write_intent, and real depends_on edges. Independent ready tasks may run concurrently. Tasks that must consume another task's edits, or that intentionally touch the same mutable files, must be dependency-ordered instead of described as parallel. When setting max_turns, include a final handoff turn after expected inspect, edit, and verification phases; multi-step writers normally need at least 4 turns unless the inherited ceiling is lower. Do not create multiple agents merely to multiply activity.",
+            "[DELEGATION MODE: {}]\n{} The parent must coordinate, inspect evidence, and verify delegated results. For one decomposable operation, prefer one agent spawn with a structured tasks graph over several separate spawn calls: give every task a stable id, bounded instructions, minimum capabilities, scope, declared write_intent, and real depends_on edges. Independent ready tasks may run concurrently. Tasks that must consume another task's edits, or that intentionally touch the same mutable files, must be dependency-ordered instead of described as parallel. When setting max_turns, reserve a final handoff turn after all expected inspect, read, edit, and verification phases; a task that reads prerequisites, writes, and verifies normally needs at least 5 turns unless the inherited ceiling is lower. Do not create multiple agents merely to multiply activity.",
             self.as_str().to_ascii_uppercase(),
             guidance
         )
@@ -363,7 +363,7 @@ mod tests {
     fn delegation_guidance_budgets_child_finalization() {
         let contract = DelegationMode::Orchestrator.prompt_contract();
         assert!(contract.contains("final handoff turn"));
-        assert!(contract.contains("at least 4 turns"));
+        assert!(contract.contains("at least 5 turns"));
     }
 
     #[test]
