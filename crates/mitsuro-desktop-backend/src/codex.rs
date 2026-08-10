@@ -272,6 +272,41 @@ impl CodexAppServerBackend {
         Some(rx)
     }
 
+    /// Subscribe only to normalized non-turn lifecycle notifications.
+    ///
+    /// Desktop shells keep this receiver alive for the full backend connection,
+    /// so account, extension, and thread-list changes are observed even while no
+    /// turn is running. Turn/item events remain on [`Self::subscribe_turn_events`]
+    /// and are deliberately excluded to avoid replaying transcript deltas twice.
+    pub fn subscribe_lifecycle_events(
+        &self,
+    ) -> mpsc::UnboundedReceiver<crate::notifications::LifecycleNotification> {
+        let mut raw = self.subscribe_notifications();
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.pump_rt.spawn(async move {
+            loop {
+                match raw.recv().await {
+                    Ok(notification) => {
+                        let event = map_notification_to_event(
+                            &notification.method,
+                            notification.params.as_ref(),
+                        );
+                        if let TurnStreamEvent::Lifecycle(event) = event {
+                            if tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "app-server lifecycle subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        rx
+    }
+
     /// Answer a server-originated JSON-RPC request with a raw `result` value.
     pub async fn respond_to_server_request(&self, id: JsonRpcId, result: Value) -> Result<()> {
         let body = serde_json::json!({
@@ -1453,6 +1488,28 @@ mod tests {
             .expect("timeout")
             .expect("later turn note");
         assert_eq!(later_note.method, "turn/started");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_subscription_filters_turn_events_and_survives_idle_time() {
+        let backend = CodexAppServerBackend::with_defaults();
+        let mut lifecycle = backend.subscribe_lifecycle_events();
+
+        backend
+            .inject_stdout_line(
+                r#"{"method":"item/agentMessage/delta","params":{"threadId":"t1","delta":"hi"}}"#,
+            )
+            .await;
+        backend
+            .inject_stdout_line(r#"{"method":"account/updated","params":{"message":"signed in"}}"#)
+            .await;
+
+        let event = tokio::time::timeout(Duration::from_secs(1), lifecycle.recv())
+            .await
+            .expect("timeout")
+            .expect("lifecycle event");
+        assert_eq!(event.method, "account/updated");
+        assert_eq!(event.detail, "signed in");
     }
 }
 

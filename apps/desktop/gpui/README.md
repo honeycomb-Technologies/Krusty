@@ -116,6 +116,9 @@ environment, realtime, and background-terminal protocol families. The reviewed
 `codex-cli 0.147.0` contract is checked with generated inventories: all 70
 notifications must map to a typed transcript/lifecycle event, and all 11 server
 requests must have an approval, interaction, or automatic transport disposition.
+The GPUI shell keeps a backend-generation-scoped lifecycle subscription alive outside
+active turns, refreshing account, extension, thread-list, and file state without
+duplicating turn transcript events.
 
 ```bash
 scripts/gpui-codex-protocol-check.sh

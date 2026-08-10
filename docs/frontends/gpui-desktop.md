@@ -81,7 +81,9 @@ generic success payloads.
 - GPUI and GPUI Component resolve from crates.io; there is no machine-specific
   `/home/.../vendor/gpui` patch.
 - Codex notifications use an application-lifetime broadcast hub. Independent
-  turn subscribers do not consume each other's events.
+  turn subscribers do not consume each other's events. The GPUI shell owns one
+  backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,
+  thread-list, and file updates; turn transcript deltas remain single-delivery.
 - Reopened and live Codex transcripts preserve every current thread item type. Tool,
   search, image, collaboration, review-mode, compaction, hook, and sleep items render as
   real activity rows; unknown future variants remain visible rather than disappearing.

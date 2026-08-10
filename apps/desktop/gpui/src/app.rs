@@ -23,18 +23,18 @@ use mitsuro_desktop_backend::{
     EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginAuthPolicy,
-    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
-    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
-    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
+    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
+    ModelListParams, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
+    PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
+    ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
+    ProductModel, ProductProcess, ProductSchedule, ProductSkill, ProductTurn,
+    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
+    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -3015,13 +3015,24 @@ impl MitsuroApp {
 
     /// Refresh MCP + plugin + skills lists (live app-server when Ready, else fixture).
     pub fn refresh_extensions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_extensions_data(true, cx);
+    }
+
+    /// Refresh extension state without replacing lifecycle status chrome.
+    fn kick_extensions_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_extensions_data(false, cx);
+    }
+
+    fn refresh_extensions_data(&mut self, announce: bool, cx: &mut Context<Self>) {
         let fixture = self.fixture.clone();
         let backend = self.live_backend();
         let use_live = backend.is_some();
         let use_fixture = self.is_explicit_fixture();
         let was_live = use_live;
-        self.status_line = "Extensions · refreshing…".into();
-        cx.notify();
+        if announce {
+            self.status_line = "Extensions · refreshing…".into();
+            cx.notify();
+        }
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -3117,13 +3128,15 @@ impl MitsuroApp {
                         } else {
                             label.to_string()
                         };
-                        app.status_line = format!(
-                            "Extensions · {empty_note} · {} MCP · {} plugin(s) · {} skill(s)",
-                            app.mcp_servers.len(),
-                            app.plugins.len(),
-                            app.skills.len()
-                        )
-                        .into();
+                        if announce {
+                            app.status_line = format!(
+                                "Extensions · {empty_note} · {} MCP · {} plugin(s) · {} skill(s)",
+                                app.mcp_servers.len(),
+                                app.plugins.len(),
+                                app.skills.len()
+                            )
+                            .into();
+                        }
                     }
                     Err(message) => {
                         app.apply_mcp_servers(Vec::new());
@@ -3134,7 +3147,10 @@ impl MitsuroApp {
                         } else {
                             SurfaceDataState::Fixture
                         };
-                        app.status_line = format!("Extensions refresh failed · {message}").into();
+                        if announce {
+                            app.status_line =
+                                format!("Extensions refresh failed · {message}").into();
+                        }
                     }
                 }
                 cx.notify();
@@ -5760,6 +5776,14 @@ impl MitsuroApp {
     }
 
     fn apply_stream_event(&mut self, thread_id: &str, event: TurnStreamEvent) {
+        // Codex lifecycle notifications are owned by the application-lifetime
+        // subscriber. The turn stream still carries them for non-GPUI clients,
+        // but applying both subscriptions here would duplicate activity rows.
+        if matches!(event, TurnStreamEvent::Lifecycle(_))
+            && self.active_backend_kind() == Some(BackendKind::CodexStdio)
+        {
+            return;
+        }
         let Some(idx) = self.threads.iter().position(|t| t.summary.id == thread_id) else {
             return;
         };
@@ -6311,6 +6335,193 @@ impl MitsuroApp {
         }
     }
 
+    fn start_backend_lifecycle_listener(
+        &mut self,
+        backend: &Arc<DesktopBackend>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut events) = backend.subscribe_lifecycle_events() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                let current = this
+                    .update(cx, |app, cx| {
+                        if app.backend_generation != generation {
+                            return false;
+                        }
+                        app.apply_backend_lifecycle_event(event, cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply_backend_lifecycle_event(
+        &mut self,
+        event: LifecycleNotification,
+        cx: &mut Context<Self>,
+    ) {
+        if event.method == "serverRequest/resolved" {
+            self.pending_approval = None;
+            self.pending_user_input = None;
+            self.user_input_answers.clear();
+            self.pending_mcp_elicitation = None;
+            self.mcp_form_values.clear();
+        }
+
+        let thread_idx = event.thread_id.as_ref().and_then(|thread_id| {
+            self.threads.iter().position(|thread| {
+                thread.summary.id == *thread_id
+                    || thread
+                        .backend_session_id
+                        .as_ref()
+                        .is_some_and(|session| session.raw == *thread_id)
+            })
+        });
+        if let Some(idx) = thread_idx {
+            let thread = &mut self.threads[idx];
+            match event.method.as_str() {
+                "thread/name/updated" => {
+                    if let Some(name) = event
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        thread.summary.name = Some(name.to_owned());
+                    }
+                }
+                "thread/archived" | "thread/deleted" | "thread/closed" => {
+                    thread.summary.archived = Some(true);
+                }
+                "thread/unarchived" => thread.summary.archived = Some(false),
+                _ => {}
+            }
+
+            if event.is_transcript_activity() {
+                let body = if event.detail.is_empty() {
+                    event.method.clone()
+                } else {
+                    event.detail.clone()
+                };
+                if matches!(
+                    event.severity,
+                    mitsuro_desktop_backend::NotificationSeverity::Error
+                ) {
+                    thread.messages.push(DemoMessage::error(body));
+                } else {
+                    thread.messages.push(DemoMessage::activity(
+                        event.method.clone(),
+                        event.title.clone(),
+                        body,
+                        format!("{:?}", event.severity).to_ascii_lowercase(),
+                        event.item_id.clone(),
+                    ));
+                }
+            }
+        }
+
+        if event.is_transcript_activity()
+            || matches!(
+                event.family,
+                mitsuro_desktop_backend::NotificationFamily::Account
+                    | mitsuro_desktop_backend::NotificationFamily::RemoteControl
+            )
+        {
+            self.status_line = if event.detail.is_empty() {
+                event.title.clone().into()
+            } else {
+                format!("{} · {}", event.title, event.detail).into()
+            };
+        }
+
+        if matches!(
+            event.family,
+            mitsuro_desktop_backend::NotificationFamily::Account
+        ) && matches!(self.connection, UiConnection::Ready { .. })
+        {
+            self.kick_account_refresh(cx);
+        }
+        if matches!(
+            event.method.as_str(),
+            "skills/changed"
+                | "mcpServer/oauthLogin/completed"
+                | "mcpServer/startupStatus/updated"
+                | "app/list/updated"
+        ) && matches!(self.connection, UiConnection::Ready { .. })
+        {
+            self.kick_extensions_refresh(cx);
+        }
+        if event.method == "thread/started" && matches!(self.connection, UiConnection::Ready { .. })
+        {
+            self.kick_thread_list_refresh(cx);
+        }
+        if event.method == "fs/changed" && self.active_mode == ProductMode::Files {
+            self.files_refresh_directory_data(cx);
+        }
+
+        if self.selected_thread.as_deref() == event.thread_id.as_deref() {
+            self.transcript_scroll_handle.scroll_to_bottom();
+        }
+    }
+
+    fn kick_thread_list_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        let generation = self.backend_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .list_sessions(100)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                if let Ok(sessions) = result {
+                    for session in sessions {
+                        let raw_id = session.id.raw.clone();
+                        let backend_session_id = session.id.clone();
+                        let summary = thread_summary_from_session(session);
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == raw_id)
+                        {
+                            thread.backend_session_id = Some(backend_session_id);
+                            thread.summary = summary;
+                        } else {
+                            app.threads.insert(
+                                0,
+                                DemoThread {
+                                    backend_session_id: Some(backend_session_id),
+                                    summary,
+                                    surface: ThreadSurface::Codex,
+                                    messages: Vec::new(),
+                                },
+                            );
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn bootstrap_fixture(&mut self, cx: &mut Context<Self>) {
         let fixture = self
             .fixture
@@ -6563,6 +6774,7 @@ impl MitsuroApp {
         let generation = self.backend_generation;
         let backend_label = backend.kind().id();
         self.backend = Some(Arc::clone(&backend));
+        self.start_backend_lifecycle_listener(&backend, generation, cx);
         self.clear_live_backend_state(backend.kind());
         self.connection = UiConnection::Connecting;
         self.status_line = format!("Connecting to {backend_label}…").into();

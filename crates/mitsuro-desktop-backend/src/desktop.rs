@@ -7,9 +7,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LiveApprovalBridge,
-    LiveTurnOutcome, MitsuroServerBackend, PendingApproval, Result, TurnStartParams,
-    TurnStreamEvent,
+    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
+    LiveApprovalBridge, LiveTurnOutcome, MitsuroServerBackend, PendingApproval, Result,
+    TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -255,6 +255,19 @@ impl DesktopBackend {
             Self::Mitsuro(_) => Err(AgentError::Protocol(
                 "Mitsuro HTTP does not expose Codex JSON-RPC server requests".to_owned(),
             )),
+        }
+    }
+
+    /// Application-lifetime lifecycle stream for backends that expose one.
+    ///
+    /// Mitsuro HTTP currently projects lifecycle through its typed REST/SSE
+    /// surfaces, so only the Codex app-server transport returns a receiver here.
+    pub fn subscribe_lifecycle_events(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<LifecycleNotification>> {
+        match self {
+            Self::Codex(backend) => Some(backend.subscribe_lifecycle_events()),
+            Self::Mitsuro(_) => None,
         }
     }
 
