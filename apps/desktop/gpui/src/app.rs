@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, ScrollHandle, SharedString,
-    Styled as _, Window,
+    div, AppContext as _, Context, Entity, FocusHandle, Focusable, ImageFormat,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    ScrollHandle, SharedString, Styled as _, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
@@ -21,16 +22,16 @@ use mitsuro_desktop_backend::{
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, ActivityFields,
     AgentBackend, ApprovalChoice, BackendKind, BackendSelection, BackendSessionId,
     CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
-    CollaborationModeMask, ConfigReadParams, CreateSession, DesktopBackend, EnvironmentInfoParams,
-    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
-    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, LifecycleNotification,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginAuthPolicy,
-    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
-    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
+    CollaborationModeMask, ConfigReadParams, ConversationImage, CreateSession, DesktopBackend,
+    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
+    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
+    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
+    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
+    ModelListParams, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
+    PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
     ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
     ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
     ProductSchedule, ProductSkill, ProductSteer, ProductTurn, ReasoningEffortOption,
@@ -47,8 +48,8 @@ use crate::browser::NativeWebViewHost;
 use crate::browser::{create_default_host, BrowserHost, DesktopBrowserHost};
 use crate::components;
 use crate::demo::{
-    self, DemoGoal, DemoGoalStatus, DemoMessage, DemoMessageKind, DemoPlanItem, DemoThread,
-    ThreadSurface,
+    self, DemoGoal, DemoGoalStatus, DemoImageAttachment, DemoImageSource, DemoMessage,
+    DemoMessageKind, DemoPlanItem, DemoThread, ThreadSurface,
 };
 use crate::preferences::DesktopPreferences;
 use crate::theme;
@@ -5648,6 +5649,14 @@ impl MitsuroApp {
             .iter()
             .map(|attachment| attachment.name.clone())
             .collect::<Vec<_>>();
+        let demo_images = self
+            .composer_attachments
+            .iter()
+            .map(|attachment| DemoImageAttachment {
+                label: attachment.name.clone(),
+                source: DemoImageSource::LocalPath(attachment.path.clone()),
+            })
+            .collect::<Vec<_>>();
         let visible_user_text = if attachment_names.is_empty() {
             trimmed.to_owned()
         } else if trimmed.is_empty() {
@@ -5659,7 +5668,9 @@ impl MitsuroApp {
         // Append user bubble immediately; auto-name from first message when still default.
         let mut auto_name: Option<String> = None;
         if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == thread_id) {
-            thread.messages.push(DemoMessage::user(&visible_user_text));
+            thread
+                .messages
+                .push(DemoMessage::user_with_images(trimmed, demo_images));
             thread.summary.preview = Some(visible_user_text.chars().take(64).collect());
             let is_default_name = thread
                 .summary
@@ -7740,7 +7751,10 @@ impl MitsuroApp {
                                     .into_iter()
                                     .map(|m| {
                                         let mut msg = match m.role {
-                                            MessageRole::User => DemoMessage::user(m.body),
+                                            MessageRole::User => DemoMessage::user_with_images(
+                                                m.body,
+                                                demo_image_attachments(m.images),
+                                            ),
                                             MessageRole::Assistant => {
                                                 DemoMessage::assistant(m.body)
                                             }
@@ -8387,6 +8401,59 @@ async fn replay_fixture_events(
     });
 }
 
+fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttachment> {
+    const MAX_EMBEDDED_BASE64_CHARS: usize = 28 * 1024 * 1024;
+    const MAX_DECODED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+    images
+        .into_iter()
+        .map(|image| match image {
+            ConversationImage::LocalPath(path) => {
+                let label = Path::new(&path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Attached image")
+                    .to_owned();
+                DemoImageAttachment {
+                    label,
+                    source: DemoImageSource::LocalPath(path),
+                }
+            }
+            ConversationImage::Url(url) => {
+                let label = url
+                    .split(['/', '?'])
+                    .rfind(|part| !part.is_empty())
+                    .unwrap_or("Attached image")
+                    .to_owned();
+                DemoImageAttachment {
+                    label,
+                    source: DemoImageSource::Url(url),
+                }
+            }
+            ConversationImage::Embedded { media_type, data } => {
+                let format = ImageFormat::from_mime_type(&media_type);
+                let decoded = if data.len() <= MAX_EMBEDDED_BASE64_CHARS {
+                    base64::engine::general_purpose::STANDARD.decode(data).ok()
+                } else {
+                    None
+                };
+                let source = match (format, decoded) {
+                    (Some(format), Some(bytes)) if bytes.len() <= MAX_DECODED_IMAGE_BYTES => {
+                        DemoImageSource::Decoded(Arc::new(gpui::Image::from_bytes(format, bytes)))
+                    }
+                    _ => DemoImageSource::Unavailable(
+                        "Embedded image could not be decoded safely".to_owned(),
+                    ),
+                };
+                DemoImageAttachment {
+                    label: format!("Attached {media_type}"),
+                    source,
+                }
+            }
+        })
+        .collect()
+}
+
 fn disconnect_backend_best_effort(
     backend: Option<Arc<DesktopBackend>>,
     cx: &mut Context<MitsuroApp>,
@@ -8689,5 +8756,45 @@ mod tests {
                 error: Some("authorization declined".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn conversation_images_become_renderable_transcript_attachments() {
+        let images = demo_image_attachments(vec![
+            ConversationImage::LocalPath("/tmp/reference.png".to_owned()),
+            ConversationImage::Url("https://example.com/remote.webp".to_owned()),
+            ConversationImage::Embedded {
+                media_type: "image/png".to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"png bytes"),
+            },
+        ]);
+
+        assert_eq!(images.len(), 3);
+        assert_eq!(images[0].label, "reference.png");
+        assert!(matches!(
+            &images[0].source,
+            DemoImageSource::LocalPath(path) if path == "/tmp/reference.png"
+        ));
+        assert_eq!(images[1].label, "remote.webp");
+        assert!(matches!(
+            &images[1].source,
+            DemoImageSource::Url(url) if url == "https://example.com/remote.webp"
+        ));
+        assert!(matches!(&images[2].source, DemoImageSource::Decoded(_)));
+    }
+
+    #[test]
+    fn unsafe_embedded_images_remain_visible_as_unavailable_attachments() {
+        let images = demo_image_attachments(vec![ConversationImage::Embedded {
+            media_type: "text/plain".to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"not an image"),
+        }]);
+
+        assert_eq!(images.len(), 1);
+        assert!(matches!(
+            &images[0].source,
+            DemoImageSource::Unavailable(reason)
+                if reason == "Embedded image could not be decoded safely"
+        ));
     }
 }

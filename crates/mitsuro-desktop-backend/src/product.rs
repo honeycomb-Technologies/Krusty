@@ -15,8 +15,8 @@ use crate::{
     LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
     ReviewTarget, SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams,
     ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams,
-    TurnStreamEvent,
+    TranscriptImageSource, TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams,
+    TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +50,14 @@ pub struct ConversationMessage {
     pub command: Option<CommandExecutionFields>,
     pub file_change: Option<FileChangeFields>,
     pub activity: Option<ActivityFields>,
+    pub images: Vec<ConversationImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationImage {
+    LocalPath(String),
+    Url(String),
+    Embedded { media_type: String, data: String },
 }
 
 fn conversation_message_from_transcript(message: TranscriptMessage) -> ConversationMessage {
@@ -68,6 +76,17 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
         command: message.command,
         file_change: message.file_change,
         activity: message.activity,
+        images: message
+            .images
+            .into_iter()
+            .map(|image| match image.source {
+                TranscriptImageSource::LocalPath(path) => ConversationImage::LocalPath(path),
+                TranscriptImageSource::Url(url) => ConversationImage::Url(url),
+                TranscriptImageSource::Embedded { media_type, data } => {
+                    ConversationImage::Embedded { media_type, data }
+                }
+            })
+            .collect(),
     }
 }
 
@@ -907,6 +926,7 @@ mod tests {
             command: Some(command.clone()),
             file_change: None,
             activity: None,
+            images: Vec::new(),
         });
 
         assert_eq!(message.role, MessageRole::CommandExecution);

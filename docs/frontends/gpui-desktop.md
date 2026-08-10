@@ -108,8 +108,11 @@ work, not as feature completion; the matrix test must change with each typed ada
   visible instead of pretending local sign-out succeeded.
 - The composer path picker accepts up to four supported images at 20 MiB each. Codex
   receives absolute `localImage` user inputs; Mitsuro reads the selected file and sends
-  a real MIME-labeled base64 content block. Attachments are cleared on backend switch
-  and never fall back to fixture data.
+  a real MIME-labeled base64 content block. Both thread-read adapters preserve persisted
+  local-path, remote, and embedded image inputs, and GPUI renders them in the originating
+  user message. Missing files, failed remote loads, invalid MIME types, oversized data,
+  and decode failures use explicit visual fallbacks. Attachments are cleared on backend
+  switch and never fall back to fixture data.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

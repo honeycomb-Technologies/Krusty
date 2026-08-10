@@ -6,8 +6,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, relative, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _,
+    div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
 };
 use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
@@ -17,7 +17,9 @@ use mitsuro_desktop_backend::{
 
 use crate::app::{MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer, markdown};
-use crate::demo::{DemoMessage, DemoMessageKind, ThreadSurface};
+use crate::demo::{
+    DemoImageAttachment, DemoImageSource, DemoMessage, DemoMessageKind, ThreadSurface,
+};
 use crate::theme;
 
 /// Shared content width for transcript + composer (Codex chat density).
@@ -1023,10 +1025,11 @@ fn transcript_block(
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     match &msg.kind {
-        DemoMessageKind::User { body } => chat_bubble(
+        DemoMessageKind::User { body, images } => chat_bubble(
             index,
             "You",
             body,
+            images,
             msg.streaming,
             true,
             simple_bubbles,
@@ -1039,6 +1042,7 @@ fn transcript_block(
             index,
             "Mitsuro",
             body,
+            &[],
             msg.streaming,
             false,
             simple_bubbles,
@@ -1054,6 +1058,7 @@ fn transcript_block(
                     index,
                     "Thinking",
                     body,
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1072,6 +1077,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     body,
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1096,6 +1102,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     command,
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1118,6 +1125,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     paths_summary,
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1285,6 +1293,7 @@ fn chat_bubble(
     index: u64,
     label: &str,
     body: &str,
+    images: &[DemoImageAttachment],
     streaming: bool,
     is_user: bool,
     _simple: bool,
@@ -1335,14 +1344,19 @@ fn chat_bubble(
                             .child(label.to_string()),
                     )
                 })
-                .child(if is_user {
-                    div()
-                        .text_sm()
-                        .text_color(colors.text)
-                        .child(display)
-                        .into_any_element()
-                } else {
-                    markdown::markdown_body(index, &display).into_any_element()
+                .when(!images.is_empty(), |this| {
+                    this.child(user_image_grid(index, images))
+                })
+                .when(!display.is_empty(), |this| {
+                    this.child(if is_user {
+                        div()
+                            .text_sm()
+                            .text_color(colors.text)
+                            .child(display)
+                            .into_any_element()
+                    } else {
+                        markdown::markdown_body(index, &display).into_any_element()
+                    })
                 })
                 .when(truncated || expanded, |this| {
                     let key = message_key.clone();
@@ -1365,6 +1379,60 @@ fn chat_bubble(
                     )
                 }),
         )
+}
+
+fn user_image_grid(index: u64, images: &[DemoImageAttachment]) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(("message-images", index))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(6.0))
+        .children(images.iter().enumerate().map(|(image_index, attachment)| {
+            let fallback_label = attachment.label.clone();
+            let image = match &attachment.source {
+                DemoImageSource::LocalPath(path) => img(std::path::PathBuf::from(path)),
+                DemoImageSource::Url(url) => img(url.clone()),
+                DemoImageSource::Decoded(image) => img(std::sync::Arc::clone(image)),
+                DemoImageSource::Unavailable(reason) => {
+                    return div()
+                        .id(("message-image-unavailable", index * 10 + image_index as u64))
+                        .w(px(150.0))
+                        .h(px(96.0))
+                        .rounded(px(10.0))
+                        .bg(colors.bg_sidebar)
+                        .border_1()
+                        .border_color(colors.border_subtle)
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(format!("{} · {reason}", attachment.label))
+                        .into_any_element();
+                }
+            };
+            image
+                .id(("message-image", index * 10 + image_index as u64))
+                .w(px(150.0))
+                .h(px(112.0))
+                .rounded(px(10.0))
+                .object_fit(gpui::ObjectFit::Cover)
+                .with_fallback(move || {
+                    div()
+                        .w_full()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(8.0))
+                        .text_xs()
+                        .text_color(theme::colors().text_tertiary)
+                        .child(fallback_label.clone())
+                        .into_any_element()
+                })
+                .into_any_element()
+        }))
 }
 
 /// Collapsible-looking muted reasoning / thinking block (smaller text).

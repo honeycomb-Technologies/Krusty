@@ -62,7 +62,10 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - The composer exposes only implemented behavior: text entry, real image attachments,
   Send, Stop, and backend-scoped model cycling. GPUI's native path prompt supplies
   absolute image paths; Codex receives `localImage` input and Mitsuro receives encoded
-  image content. Voice, project, and access stubs are not presented as controls.
+  image content. Reopened threads restore local-path, remote, and embedded image inputs
+  as real transcript thumbnails; missing or unsafe image data remains visible as an
+  unavailable attachment instead of disappearing. Voice, project, and access stubs are
+  not presented as controls.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

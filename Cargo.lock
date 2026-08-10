@@ -5933,6 +5933,7 @@ name = "mitsuro-gpui-desktop"
 version = "0.9.21"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "gpui",
  "gpui-component",
  "mitsuro-desktop-backend",

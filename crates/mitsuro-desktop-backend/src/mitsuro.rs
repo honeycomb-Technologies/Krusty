@@ -649,6 +649,47 @@ fn message_text(value: &Value) -> String {
     }
 }
 
+fn mitsuro_user_content(value: &Value) -> Vec<Value> {
+    let parts = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if parts.is_empty() {
+        let text = message_text(value);
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![serde_json::json!({"type": "text", "text": text})]
+        };
+    }
+
+    parts
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("text") => part
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|text| serde_json::json!({"type": "text", "text": text})),
+            Some("image") => {
+                let source = part.get("source")?;
+                match source.get("type").and_then(Value::as_str) {
+                    Some("url") => source
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(|url| serde_json::json!({"type": "image", "url": url})),
+                    Some("base64") => {
+                        let media_type = source.get("media_type").and_then(Value::as_str)?;
+                        let data = source.get("data").and_then(Value::as_str)?;
+                        Some(serde_json::json!({
+                            "type": "image",
+                            "url": format!("data:{media_type};base64,{data}")
+                        }))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn session_json(session: &mitsuro_client::SessionInfo) -> Value {
     serde_json::json!({
         "id": session.id,
@@ -804,7 +845,7 @@ impl AgentBackend for MitsuroServerBackend {
                     serde_json::json!({
                         "id": format!("mitsuro-message-{index}"),
                         "type": "userMessage",
-                        "content": [{"type": "text", "text": text}],
+                        "content": mitsuro_user_content(&message.content),
                     })
                 } else {
                     serde_json::json!({
@@ -1448,6 +1489,23 @@ mod tests {
                     data: base64::engine::general_purpose::STANDARD.encode(b"png-bytes"),
                 }
             }
+        );
+    }
+
+    #[test]
+    fn preserves_persisted_mitsuro_image_blocks_for_thread_hydration() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "look"},
+            {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "cG5n"}}
+        ]);
+        assert_eq!(
+            mitsuro_user_content(&content),
+            vec![
+                serde_json::json!({"type": "text", "text": "look"}),
+                serde_json::json!({"type": "image", "url": "https://example.com/a.png"}),
+                serde_json::json!({"type": "image", "url": "data:image/png;base64,cG5n"})
+            ]
         );
     }
 

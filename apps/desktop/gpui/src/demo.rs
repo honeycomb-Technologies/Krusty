@@ -1,7 +1,23 @@
 //! Static demo threads and transcript so the shell is usable offline
 //! without live models or a running app-server.
 
+use std::sync::Arc;
+
 use mitsuro_desktop_backend::{BackendSessionId, ThreadSummary};
+
+#[derive(Clone, Debug)]
+pub struct DemoImageAttachment {
+    pub label: String,
+    pub source: DemoImageSource,
+}
+
+#[derive(Clone, Debug)]
+pub enum DemoImageSource {
+    LocalPath(String),
+    Url(String),
+    Decoded(Arc<gpui::Image>),
+    Unavailable(String),
+}
 
 /// One transcript block in the main column (user, assistant, tools, plan, …).
 #[derive(Clone, Debug)]
@@ -17,6 +33,7 @@ pub struct DemoMessage {
 pub enum DemoMessageKind {
     User {
         body: String,
+        images: Vec<DemoImageAttachment>,
     },
     Assistant {
         body: String,
@@ -52,7 +69,21 @@ pub enum DemoMessageKind {
 impl DemoMessage {
     pub fn user(body: impl Into<String>) -> Self {
         Self {
-            kind: DemoMessageKind::User { body: body.into() },
+            kind: DemoMessageKind::User {
+                body: body.into(),
+                images: Vec::new(),
+            },
+            item_id: None,
+            streaming: false,
+        }
+    }
+
+    pub fn user_with_images(body: impl Into<String>, images: Vec<DemoImageAttachment>) -> Self {
+        Self {
+            kind: DemoMessageKind::User {
+                body: body.into(),
+                images,
+            },
             item_id: None,
             streaming: false,
         }
@@ -158,7 +189,7 @@ impl DemoMessage {
     /// Mutable primary text buffer for streaming deltas (body / output / patch).
     pub fn text_mut(&mut self) -> &mut String {
         match &mut self.kind {
-            DemoMessageKind::User { body }
+            DemoMessageKind::User { body, .. }
             | DemoMessageKind::Assistant { body }
             | DemoMessageKind::Reasoning { body }
             | DemoMessageKind::Plan { body } => body,

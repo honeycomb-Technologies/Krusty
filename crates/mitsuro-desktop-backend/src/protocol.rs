@@ -388,6 +388,20 @@ pub struct TranscriptMessage {
     /// Populated for every non-chat activity item so reopening a thread keeps
     /// the same semantic block that was shown while the turn streamed.
     pub activity: Option<ActivityFields>,
+    /// Image inputs attached to a persisted user message.
+    pub images: Vec<TranscriptImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptImage {
+    pub source: TranscriptImageSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptImageSource {
+    LocalPath(String),
+    Url(String),
+    Embedded { media_type: String, data: String },
 }
 
 impl TranscriptMessage {
@@ -399,6 +413,7 @@ impl TranscriptMessage {
             command: None,
             file_change: None,
             activity: None,
+            images: Vec::new(),
         }
     }
 }
@@ -487,11 +502,15 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
     let id = item.get("id").and_then(|v| v.as_str()).map(str::to_string);
     match ty {
         "userMessage" => {
-            let body = user_input_text(item.get("content")?);
-            if body.is_empty() {
+            let content = item.get("content")?;
+            let body = user_input_text(content);
+            let images = user_input_images(content);
+            if body.is_empty() && images.is_empty() {
                 return None;
             }
-            Some(TranscriptMessage::plain(TranscriptRole::User, body, id))
+            let mut message = TranscriptMessage::plain(TranscriptRole::User, body, id);
+            message.images = images;
+            Some(message)
         }
         "agentMessage" => {
             let body = item.get("text")?.as_str()?.to_string();
@@ -560,6 +579,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 command: Some(fields),
                 file_change: None,
                 activity: None,
+                images: Vec::new(),
             })
         }
         "fileChange" => {
@@ -580,6 +600,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 command: None,
                 file_change: Some(fields),
                 activity: None,
+                images: Vec::new(),
             })
         }
         _ => {
@@ -591,6 +612,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 command: None,
                 file_change: None,
                 activity: Some(activity),
+                images: Vec::new(),
             })
         }
     }
@@ -781,6 +803,46 @@ fn user_input_text(content: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn user_input_images(content: &Value) -> Vec<TranscriptImage> {
+    let Some(parts) = content.as_array() else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("localImage") => {
+                part.get("path")
+                    .and_then(Value::as_str)
+                    .map(|path| TranscriptImage {
+                        source: TranscriptImageSource::LocalPath(path.to_owned()),
+                    })
+            }
+            Some("image") => part
+                .get("url")
+                .and_then(Value::as_str)
+                .map(|url| TranscriptImage {
+                    source: data_image_parts(url)
+                        .map(|(media_type, data)| TranscriptImageSource::Embedded {
+                            media_type: media_type.to_owned(),
+                            data: data.to_owned(),
+                        })
+                        .unwrap_or_else(|| TranscriptImageSource::Url(url.to_owned())),
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn data_image_parts(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    let media_type = metadata.strip_suffix(";base64")?;
+    if !media_type.starts_with("image/") || data.is_empty() {
+        return None;
+    }
+    Some((media_type, data))
 }
 
 // ---------------------------------------------------------------------------
@@ -2563,6 +2625,46 @@ mod event_tests {
         assert!(fc.patch_preview.contains("fn main"));
         assert_eq!(fc.status, "completed");
         assert_eq!(msgs[4].role, TranscriptRole::Plan);
+    }
+
+    #[test]
+    fn extract_transcript_preserves_local_remote_and_embedded_user_images() {
+        let thread = serde_json::json!({
+            "turns": [{
+                "items": [{
+                    "id": "user-images",
+                    "type": "userMessage",
+                    "content": [
+                        {"type": "text", "text": "compare these"},
+                        {"type": "localImage", "path": "/tmp/local.png", "detail": null},
+                        {"type": "image", "url": "https://example.com/remote.webp", "detail": null},
+                        {"type": "image", "url": "data:image/png;base64,cG5n", "detail": null}
+                    ]
+                }]
+            }]
+        });
+        let messages = extract_transcript_from_thread(&thread);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "compare these");
+        assert_eq!(
+            messages[0].images,
+            vec![
+                TranscriptImage {
+                    source: TranscriptImageSource::LocalPath("/tmp/local.png".to_owned())
+                },
+                TranscriptImage {
+                    source: TranscriptImageSource::Url(
+                        "https://example.com/remote.webp".to_owned()
+                    )
+                },
+                TranscriptImage {
+                    source: TranscriptImageSource::Embedded {
+                        media_type: "image/png".to_owned(),
+                        data: "cG5n".to_owned()
+                    }
+                }
+            ]
+        );
     }
 
     #[test]
