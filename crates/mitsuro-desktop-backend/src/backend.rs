@@ -12,6 +12,11 @@ use crate::apps::{
     AppsInstalledParams, AppsInstalledResponse, AppsListParams, AppsListResponse, AppsReadParams,
     AppsReadResponse,
 };
+use crate::command::{
+    CommandExecParams, CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
+    CommandExecWriteResponse,
+};
 use crate::environment::{
     CollaborationModeListParams, CollaborationModeListResponse, EnvironmentAddParams,
     EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse,
@@ -253,6 +258,40 @@ pub trait AgentBackend: Send + Sync {
 
     /// Terminate a running process by client-supplied handle.
     async fn process_kill(&self, params: ProcessKillParams) -> Result<ProcessKillResponse>;
+
+    /// Run a standalone command in the Codex server sandbox. The response resolves on exit.
+    async fn command_exec(&self, _params: CommandExecParams) -> Result<CommandExecResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "standalone command execution is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn command_exec_write(
+        &self,
+        _params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "standalone command stdin is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn command_exec_resize(
+        &self,
+        _params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "standalone command PTY resizing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn command_exec_terminate(
+        &self,
+        _params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "standalone command termination is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// List shell processes retained by one Codex thread.
     async fn thread_background_terminals_list(

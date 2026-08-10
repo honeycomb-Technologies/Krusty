@@ -1,7 +1,8 @@
-//! Terminal / process panel — `process/spawn` surface (Codex dark theme).
+//! Terminal / process panel — current `command/exec*` plus retained process inventory.
 //!
 //! Offline path uses [`mitsuro_desktop_backend::FixtureBackend`] process mock.
-//! Live path forwards to app-server `process/*` methods when Ready.
+//! Live Codex commands use sandboxed `command/exec*`; Mitsuro exposes its real
+//! tracked-process catalog without pretending to support interactive spawn.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -24,6 +25,7 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
     let running = session.running;
     let handle = session.process_handle.clone();
     let status = session.status;
+    let contract = app.terminal_contract_label();
 
     div()
         .id("terminal-panel")
@@ -36,6 +38,7 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
         .child(terminal_title_bar(
             session.status_label(),
             session.backend_label.as_ref(),
+            contract,
         ))
         .child(command_bar(
             &cmd_input,
@@ -44,9 +47,18 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
             cx,
         ))
         .child(background_processes_panel(app, cx))
-        .child(output_scroll(session.output.as_ref(), handle.as_deref()))
+        .child(output_scroll(
+            session.output.as_ref(),
+            handle.as_deref(),
+            contract,
+        ))
         .child(stdin_bar(app, &stdin_input, running, cx))
-        .child(status_footer(status, handle.as_deref(), session.exit_code))
+        .child(status_footer(
+            status,
+            handle.as_deref(),
+            session.exit_code,
+            contract,
+        ))
 }
 
 fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> gpui::AnyElement {
@@ -366,7 +378,7 @@ fn format_memory_kb(kb: u64) -> String {
     }
 }
 
-fn terminal_title_bar(status: &str, backend: &str) -> impl IntoElement {
+fn terminal_title_bar(status: &str, backend: &str, contract: &str) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("terminal-title")
@@ -406,7 +418,7 @@ fn terminal_title_bar(status: &str, backend: &str) -> impl IntoElement {
                             div()
                                 .text_xs()
                                 .text_color(colors.text_tertiary)
-                                .child(format!("process/* · {backend}")),
+                                .child(format!("{contract} · {backend}")),
                         ),
                 ),
         )
@@ -558,7 +570,7 @@ fn command_bar(
         )
 }
 
-fn output_scroll(output: &str, handle: Option<&str>) -> impl IntoElement {
+fn output_scroll(output: &str, handle: Option<&str>, contract: &str) -> impl IntoElement {
     let colors = theme::colors();
     let empty = output.is_empty();
     div()
@@ -626,7 +638,7 @@ fn output_scroll(output: &str, handle: Option<&str>) -> impl IntoElement {
                                 .text_sm()
                                 .font_family("monospace")
                                 .text_color(colors.text_tertiary)
-                                .child("# Ready · process/spawn"),
+                                .child(format!("# Ready · {contract}")),
                         )
                         .child(
                             div()
@@ -728,6 +740,7 @@ fn status_footer(
     status: TerminalSessionStatus,
     handle: Option<&str>,
     exit_code: Option<i32>,
+    contract: &str,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let detail = match (status, handle, exit_code) {
@@ -736,7 +749,7 @@ fn status_footer(
             format!("exited {code} · {h}")
         }
         (TerminalSessionStatus::Error, _, _) => "error".into(),
-        _ => "idle · process/spawn".into(),
+        _ => format!("idle · {contract}"),
     };
     div()
         .id("terminal-status")
@@ -759,6 +772,6 @@ fn status_footer(
             div()
                 .text_xs()
                 .text_color(colors.text_tertiary)
-                .child("Mitsuro · process/*"),
+                .child(format!("Mitsuro · {contract}")),
         )
 }

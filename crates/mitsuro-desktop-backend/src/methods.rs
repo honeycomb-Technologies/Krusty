@@ -165,6 +165,10 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "app/list",
     "app/read",
     "collaborationMode/list",
+    "command/exec",
+    "command/exec/resize",
+    "command/exec/terminate",
+    "command/exec/write",
     "config/mcpServer/reload",
     "config/read",
     "config/value/write",
@@ -347,7 +351,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 73);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 77);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

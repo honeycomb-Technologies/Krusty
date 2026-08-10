@@ -17,21 +17,23 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
-    activity_item_fields, command_execution_fields, file_change_fields,
+    activity_item_fields, command_execution_fields, decode_base64_lossy, file_change_fields,
     fixture_demo_account_response, fixture_demo_collaboration_modes, fixture_demo_config,
     fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
     fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, valid_mcp_server_name,
     Account, ActivityFields, AgentBackend, AppInfo, ApprovalChoice, AppsInstalledParams,
     AppsListParams, BackendKind, BackendSelection, BackendSessionId, CancelLoginAccountParams,
-    CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask, ConfigReadParams,
-    ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
-    ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
-    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsChangedNotification,
-    FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams,
-    FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask,
+    CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
+    CommandExecTerminateParams, CommandExecWriteParams, ConfigReadParams, ConfigWriteStatus,
+    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
+    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
+    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
+    EnvironmentSummary, FixtureBackend, FsChangedNotification, FsCopyParams,
+    FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams,
+    FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams, FuzzyFileSearchParams,
+    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
     GetAccountTokenUsageResponse, HookMetadata, HooksListEntry, HooksListParams, InstalledApp,
     LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
     McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
@@ -529,6 +531,15 @@ pub enum TerminalSessionStatus {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum TerminalTransport {
+    #[default]
+    None,
+    CodexCommandExec,
+    LegacyProcess,
+    FixtureProcess,
+}
+
 /// Snapshot for the Files panel (`fs/*` + fuzzy search).
 #[derive(Clone, Debug)]
 pub struct FilesSession {
@@ -572,6 +583,7 @@ pub struct TerminalSession {
     pub status: TerminalSessionStatus,
     pub exit_code: Option<i32>,
     pub backend_label: SharedString,
+    transport: TerminalTransport,
 }
 
 impl TerminalSession {
@@ -583,6 +595,7 @@ impl TerminalSession {
             status: TerminalSessionStatus::Idle,
             exit_code: None,
             backend_label: backend_label.into(),
+            transport: TerminalTransport::None,
         }
     }
 
@@ -595,6 +608,8 @@ impl TerminalSession {
         }
     }
 }
+
+const TERMINAL_OUTPUT_MAX_BYTES: usize = 160 * 1024;
 
 /// Atlas / agent browser-use session state (fixture until wry host lands).
 ///
@@ -2162,8 +2177,37 @@ impl MitsuroApp {
     pub fn terminal_interactive_available(&self) -> bool {
         self.backend
             .as_ref()
-            .map(|backend| backend.capabilities().processes)
+            .map(|backend| {
+                let capabilities = backend.capabilities();
+                capabilities.command_exec || capabilities.processes
+            })
             .unwrap_or_else(|| self.is_explicit_fixture())
+    }
+
+    pub fn terminal_contract_label(&self) -> &'static str {
+        match self.terminal.transport {
+            TerminalTransport::CodexCommandExec => "command/exec*",
+            TerminalTransport::LegacyProcess | TerminalTransport::FixtureProcess => "process/*",
+            TerminalTransport::None => self
+                .backend
+                .as_ref()
+                .map(|backend| {
+                    if backend.capabilities().command_exec {
+                        "command/exec*"
+                    } else if backend.capabilities().processes {
+                        "process/*"
+                    } else {
+                        "read-only"
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if self.is_explicit_fixture() {
+                        "process/*"
+                    } else {
+                        "unavailable"
+                    }
+                }),
+        }
     }
 
     pub fn thread_background_terminals(&self) -> &[ThreadBackgroundTerminal] {
@@ -2562,8 +2606,8 @@ impl MitsuroApp {
     }
 
     fn terminal_backend_label(&self) -> SharedString {
-        if self.live_backend().is_some() {
-            "app-server".into()
+        if let Some(backend) = self.live_backend() {
+            backend.kind().id().into()
         } else if self.is_explicit_fixture() {
             "fixture".into()
         } else {
@@ -3151,9 +3195,7 @@ impl MitsuroApp {
         for ev in events {
             match ev {
                 TurnStreamEvent::ProcessOutputDelta { delta, .. } => {
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(delta);
-                    self.terminal.output = out.into();
+                    self.append_terminal_output(delta);
                 }
                 TurnStreamEvent::ProcessExited {
                     exit_code,
@@ -3163,20 +3205,14 @@ impl MitsuroApp {
                     ..
                 } => {
                     if !stdout.is_empty() {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(stdout);
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(stdout);
                     }
                     if !stderr.is_empty() {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(stderr);
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(stderr);
                     }
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(&format!(
+                    self.append_terminal_output(&format!(
                         "\n[exited {exit_code}] processHandle={process_handle}\n"
                     ));
-                    self.terminal.output = out.into();
                     self.terminal.running = false;
                     self.terminal.status = TerminalSessionStatus::Exited;
                     self.terminal.exit_code = Some(*exit_code);
@@ -3186,6 +3222,25 @@ impl MitsuroApp {
         }
     }
 
+    fn append_terminal_output(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut output = self.terminal.output.to_string();
+        output.push_str(text);
+        if output.len() > TERMINAL_OUTPUT_MAX_BYTES {
+            let mut tail_start = output.len() - TERMINAL_OUTPUT_MAX_BYTES;
+            while !output.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
+            output = format!(
+                "[earlier terminal output truncated]\n{}",
+                &output[tail_start..]
+            );
+        }
+        self.terminal.output = output.into();
+    }
+
     /// Start a process via the selected live backend or explicit fixture backend.
     pub fn terminal_spawn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.running {
@@ -3193,10 +3248,10 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
-        if self
-            .live_backend()
-            .is_some_and(|backend| !backend.capabilities().processes)
-        {
+        if self.live_backend().is_some_and(|backend| {
+            let capabilities = backend.capabilities();
+            !capabilities.command_exec && !capabilities.processes
+        }) {
             self.status_line = "Terminal spawn is not supported by the selected backend.".into();
             self.terminal.status = TerminalSessionStatus::Error;
             cx.notify();
@@ -3223,14 +3278,6 @@ impl MitsuroApp {
         } else {
             "/tmp/mitsuro-fixture".into()
         };
-        let params = if cmd.starts_with("echo ") || !cmd.contains(' ') {
-            // Simple argv: `echo hello…` or single token.
-            let parts: Vec<String> = shell_split_simple(&cmd);
-            ProcessSpawnParams::streaming(parts, handle.clone(), cwd)
-        } else {
-            ProcessSpawnParams::bash_lc(cmd.clone(), handle.clone(), cwd)
-        };
-
         self.terminal.backend_label = self.terminal_backend_label();
         self.terminal.process_handle = Some(handle.clone());
         self.terminal.output = format!("$ {cmd}\n").into();
@@ -3242,6 +3289,73 @@ impl MitsuroApp {
 
         // Live failures remain live failures; production never substitutes a fixture process.
         if let Some(backend) = self.live_backend() {
+            if backend.capabilities().command_exec {
+                let params = CommandExecParams::terminal_shell(cmd, handle.clone(), cwd);
+                let generation = self.backend_generation;
+                self.terminal.transport = TerminalTransport::CodexCommandExec;
+                self.terminal.backend_label = backend.kind().id().into();
+                self.status_line = format!("Terminal · command/exec · {handle}").into();
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let runner = Arc::clone(&backend);
+                            backend.block_on(async move {
+                                runner
+                                    .exec_command(params)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        if app.backend_generation != generation
+                            || app.terminal.transport != TerminalTransport::CodexCommandExec
+                            || app.terminal.process_handle.as_deref() != Some(handle.as_str())
+                        {
+                            return;
+                        }
+                        match result {
+                            Ok(response) => {
+                                if !response.stdout.is_empty() {
+                                    app.append_terminal_output(&response.stdout);
+                                }
+                                if !response.stderr.is_empty() {
+                                    app.append_terminal_output(&response.stderr);
+                                }
+                                app.append_terminal_output(&format!(
+                                    "\n[exited {} · command/exec · {}]\n",
+                                    response.exit_code, handle
+                                ));
+                                app.terminal.running = false;
+                                app.terminal.status = TerminalSessionStatus::Exited;
+                                app.terminal.exit_code = Some(response.exit_code);
+                                app.status_line =
+                                    format!("Terminal · exited {}", response.exit_code).into();
+                            }
+                            Err(error) => {
+                                app.append_terminal_output(&format!("[command error] {error}\n"));
+                                app.terminal.running = false;
+                                app.terminal.status = TerminalSessionStatus::Error;
+                                app.status_line =
+                                    format!("Terminal · command/exec failed: {error}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                let _ = window;
+                return;
+            }
+
+            let params = if cmd.starts_with("echo ") || !cmd.contains(' ') {
+                let parts: Vec<String> = shell_split_simple(&cmd);
+                ProcessSpawnParams::streaming(parts, handle, cwd)
+            } else {
+                ProcessSpawnParams::bash_lc(cmd, handle, cwd)
+            };
+            self.terminal.transport = TerminalTransport::LegacyProcess;
             let result = cx
                 .background_executor()
                 .block(async move { backend.process_spawn(params).await });
@@ -3250,21 +3364,17 @@ impl MitsuroApp {
                     if let Some(h) = resp.process_handle {
                         self.terminal.process_handle = Some(h);
                     }
-                    self.terminal.backend_label = "app-server".into();
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(
+                    self.append_terminal_output(
                         "[process/spawn · app-server]\n\
                          (stdout/stderr via process/outputDelta when notification bridge is active)\n",
                     );
-                    self.terminal.output = out.into();
                     self.status_line = "Terminal · process/spawn (app-server)".into();
                 }
                 Err(e) => {
                     self.terminal.running = false;
                     self.terminal.status = TerminalSessionStatus::Error;
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(&format!("[error] {e}\n"));
-                    self.terminal.output = out.into();
+                    self.terminal.transport = TerminalTransport::None;
+                    self.append_terminal_output(&format!("[error] {e}\n"));
                     self.status_line = format!("Terminal · spawn failed: {e}").into();
                 }
             }
@@ -3280,6 +3390,13 @@ impl MitsuroApp {
                 self.status_line = "Terminal · fixture backend unavailable".into();
                 cx.notify();
                 return;
+            };
+            self.terminal.transport = TerminalTransport::FixtureProcess;
+            let params = if cmd.starts_with("echo ") || !cmd.contains(' ') {
+                let parts: Vec<String> = shell_split_simple(&cmd);
+                ProcessSpawnParams::streaming(parts, handle, cwd)
+            } else {
+                ProcessSpawnParams::bash_lc(cmd, handle, cwd)
             };
             // Ensure fixture is connected.
             cx.background_executor().block(async {
@@ -3307,22 +3424,22 @@ impl MitsuroApp {
                 Err(e) => {
                     self.terminal.running = false;
                     self.terminal.status = TerminalSessionStatus::Error;
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(&format!("[error] {e}\n"));
-                    self.terminal.output = out.into();
+                    self.terminal.transport = TerminalTransport::None;
+                    self.append_terminal_output(&format!("[error] {e}\n"));
                     self.status_line = format!("Terminal · spawn failed: {e}").into();
                 }
             }
         } else {
             self.terminal.running = false;
             self.terminal.status = TerminalSessionStatus::Error;
+            self.terminal.transport = TerminalTransport::None;
             self.status_line = "Terminal · no backend".into();
         }
         let _ = window;
         cx.notify();
     }
 
-    /// Write stdin via live `process/writeStdin` when the session is app-server, else fixture.
+    /// Write stdin through the transport that owns the running terminal session.
     pub fn terminal_write_stdin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = match self.terminal.process_handle.clone() {
             Some(h) if self.terminal.running => h,
@@ -3341,29 +3458,72 @@ impl MitsuroApp {
         } else {
             format!("{text}\n")
         };
-        let params = ProcessWriteStdinParams::text(&handle, &payload);
-        let use_live =
-            self.terminal.backend_label.as_ref() == "app-server" && self.live_backend().is_some();
+        if self.terminal.transport == TerminalTransport::CodexCommandExec {
+            let Some(backend) = self.live_backend() else {
+                self.status_line = "Terminal · command backend disconnected".into();
+                cx.notify();
+                return;
+            };
+            let generation = self.backend_generation;
+            let params = CommandExecWriteParams::text(&handle, &payload);
+            self.terminal_stdin_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+            self.status_line = "Terminal · writing stdin…".into();
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        let runner = Arc::clone(&backend);
+                        backend.block_on(async move {
+                            runner
+                                .write_command_stdin(params)
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.backend_generation != generation
+                        || app.terminal.transport != TerminalTransport::CodexCommandExec
+                        || app.terminal.process_handle.as_deref() != Some(handle.as_str())
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(_) => {
+                            app.append_terminal_output(&format!("→ {payload}"));
+                            app.status_line = "Terminal · stdin sent via command/exec/write".into();
+                        }
+                        Err(error) => {
+                            app.append_terminal_output(&format!("[stdin error] {error}\n"));
+                            app.status_line =
+                                format!("Terminal · command stdin failed: {error}").into();
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
 
-        if use_live {
+        let params = ProcessWriteStdinParams::text(&handle, &payload);
+        if self.terminal.transport == TerminalTransport::LegacyProcess {
             if let Some(backend) = self.live_backend() {
                 let result = cx
                     .background_executor()
                     .block(async move { backend.process_write_stdin(params).await });
                 match result {
                     Ok(_) => {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("→ {payload}"));
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(&format!("→ {payload}"));
                         self.terminal_stdin_input.update(cx, |state, cx| {
                             state.set_value("", window, cx);
                         });
                         self.status_line = "Terminal · writeStdin (app-server)".into();
                     }
                     Err(e) => {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("[stdin error] {e}\n"));
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(&format!("[stdin error] {e}\n"));
                         self.status_line = format!("Terminal · writeStdin failed: {e}").into();
                     }
                 }
@@ -3372,7 +3532,9 @@ impl MitsuroApp {
             }
         }
 
-        if self.is_explicit_fixture() && self.terminal.backend_label.as_ref() == "fixture" {
+        if self.is_explicit_fixture()
+            && self.terminal.transport == TerminalTransport::FixtureProcess
+        {
             if let Some(fixture) = self.fixture.clone() {
                 let result = cx
                     .background_executor()
@@ -3387,9 +3549,7 @@ impl MitsuroApp {
                         self.status_line = "Terminal · writeStdin (fixture)".into();
                     }
                     Err(e) => {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("[stdin error] {e}\n"));
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(&format!("[stdin error] {e}\n"));
                         self.status_line = format!("Terminal · writeStdin failed: {e}").into();
                     }
                 }
@@ -3398,7 +3558,7 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Kill the running process via live `process/kill` when session is app-server, else fixture.
+    /// Terminate the running command through the transport that created it.
     pub fn terminal_kill(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let handle = match self.terminal.process_handle.clone() {
             Some(h) if self.terminal.running => h,
@@ -3408,10 +3568,56 @@ impl MitsuroApp {
                 return;
             }
         };
-        let use_live =
-            self.terminal.backend_label.as_ref() == "app-server" && self.live_backend().is_some();
+        if self.terminal.transport == TerminalTransport::CodexCommandExec {
+            let Some(backend) = self.live_backend() else {
+                self.status_line = "Terminal · command backend disconnected".into();
+                cx.notify();
+                return;
+            };
+            let generation = self.backend_generation;
+            let params = CommandExecTerminateParams::new(&handle);
+            self.status_line = format!("Terminal · terminating {handle}…").into();
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        let runner = Arc::clone(&backend);
+                        backend.block_on(async move {
+                            runner
+                                .terminate_command(params)
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.backend_generation != generation
+                        || app.terminal.transport != TerminalTransport::CodexCommandExec
+                        || app.terminal.process_handle.as_deref() != Some(handle.as_str())
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(_) => {
+                            app.append_terminal_output(
+                                "\n[terminate requested · command/exec/terminate]\n",
+                            );
+                            app.status_line = "Terminal · waiting for command exit…".into();
+                        }
+                        Err(error) => {
+                            app.append_terminal_output(&format!("[terminate error] {error}\n"));
+                            app.status_line =
+                                format!("Terminal · terminate failed: {error}").into();
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
 
-        if use_live {
+        if self.terminal.transport == TerminalTransport::LegacyProcess {
             if let Some(backend) = self.live_backend() {
                 let result = cx.background_executor().block(async move {
                     backend.process_kill(ProcessKillParams::new(handle)).await
@@ -3421,15 +3627,13 @@ impl MitsuroApp {
                         self.terminal.running = false;
                         self.terminal.status = TerminalSessionStatus::Exited;
                         self.terminal.exit_code = Some(137);
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str("\n[killed · process/kill · app-server · exit 137]\n");
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(
+                            "\n[killed · process/kill · app-server · exit 137]\n",
+                        );
                         self.status_line = "Terminal · killed (app-server)".into();
                     }
                     Err(e) => {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("[kill error] {e}\n"));
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(&format!("[kill error] {e}\n"));
                         self.status_line = format!("Terminal · kill failed: {e}").into();
                     }
                 }
@@ -3438,7 +3642,9 @@ impl MitsuroApp {
             }
         }
 
-        if self.is_explicit_fixture() && self.terminal.backend_label.as_ref() == "fixture" {
+        if self.is_explicit_fixture()
+            && self.terminal.transport == TerminalTransport::FixtureProcess
+        {
             if let Some(fixture) = self.fixture.clone() {
                 let result = cx
                     .background_executor()
@@ -3450,9 +3656,7 @@ impl MitsuroApp {
                         self.status_line = "Terminal · killed (fixture)".into();
                     }
                     Err(e) => {
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("[kill error] {e}\n"));
-                        self.terminal.output = out.into();
+                        self.append_terminal_output(&format!("[kill error] {e}\n"));
                         self.status_line = format!("Terminal · kill failed: {e}").into();
                     }
                 }
@@ -9804,6 +10008,43 @@ impl MitsuroApp {
         event: LifecycleNotification,
         cx: &mut Context<Self>,
     ) {
+        if event.method == "command/exec/outputDelta" {
+            match event
+                .params
+                .and_then(|params| serde_json::from_value(params).ok())
+            {
+                Some(output) => {
+                    let output: CommandExecOutputDeltaNotification = output;
+                    if self.terminal.transport == TerminalTransport::CodexCommandExec
+                        && self.terminal.process_handle.as_deref()
+                            == Some(output.process_id.as_str())
+                    {
+                        let text = decode_base64_lossy(&output.delta_base64);
+                        self.append_terminal_output(&text);
+                        if output.cap_reached
+                            && !self
+                                .terminal
+                                .output
+                                .contains("[command output cap reached]")
+                        {
+                            let stream = match output.stream {
+                                CommandExecOutputStream::Stdout => "stdout",
+                                CommandExecOutputStream::Stderr => "stderr",
+                            };
+                            self.append_terminal_output(&format!(
+                                "\n[command output cap reached · {stream}]\n"
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    self.status_line =
+                        "Terminal · ignored malformed command/exec/outputDelta".into();
+                }
+            }
+            cx.notify();
+            return;
+        }
         if let Some(realtime) = RealtimeEvent::from_lifecycle(&event) {
             self.apply_realtime_event(realtime);
             cx.notify();

@@ -85,8 +85,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 73 typed adapters
-and 60 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 77 typed adapters
+and 56 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -99,11 +99,14 @@ work, not as feature completion; the matrix test must change with each typed ada
   and Mitsuro/fixture remain explicitly read-only. Watch events are coalesced before
   refreshing, and large directory layouts render a bounded 200-row window with an
   exact overflow disclosure and fuzzy search for the remainder.
-- Terminal keeps independent process contracts explicit: Codex `process/*` powers the
-  desktop-launched interactive session, Codex `thread/backgroundTerminals/*` lists,
+- Terminal keeps independent process contracts explicit: Codex `command/exec*` powers
+  the desktop-launched sandboxed interactive session and streams output through the
+  application-lifetime lifecycle subscription. Its deferred exec response is not
+  subject to the generic JSON-RPC timeout. Codex `thread/backgroundTerminals/*` lists,
   cleans, and terminates processes retained by the selected thread, and Mitsuro uses
   its real global `/processes` catalog and `/:id/kill` endpoint. Mitsuro does not
-  advertise interactive spawn/stdin/PTY because that contract is absent.
+  advertise interactive spawn/stdin/PTY because that contract is absent; `process/*`
+  remains only for compatibility and explicit fixture testing.
 - The Extensions marketplace renders only backend data. Codex plugin Install/Remove
   actions call typed `plugin/install` and `plugin/uninstall`, disable concurrent
   mutations, and refresh the live catalog after success. Mitsuro and explicit fixture

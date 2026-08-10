@@ -22,6 +22,11 @@ use crate::account::{
 };
 use crate::approvals::{ApprovalChoice, PendingApproval};
 use crate::backend::AgentBackend;
+use crate::command::{
+    CommandExecParams, CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
+    CommandExecWriteResponse,
+};
 use crate::environment::{
     CollaborationModeListParams, CollaborationModeListResponse, EnvironmentAddParams,
     EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse,
@@ -591,11 +596,32 @@ impl CodexAppServerBackend {
         serde_json::from_value(value).map_err(AgentError::from)
     }
 
+    async fn request_typed_without_timeout<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<T> {
+        let value = self
+            .request_with_optional_timeout(method, params, None)
+            .await?;
+        serde_json::from_value(value).map_err(AgentError::from)
+    }
+
     /// Generic JSON-RPC request returning raw JSON result.
     ///
     /// Child stdin/stdout I/O always runs on [`Self::pump_rt`] so callers may
     /// await from any runtime (desktop `current_thread`, gpui workers, etc.).
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        self.request_with_optional_timeout(method, params, Some(self.config.request_timeout))
+            .await
+    }
+
+    async fn request_with_optional_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let status = self.status();
         match &status {
             ConnectionStatus::Ready | ConnectionStatus::Connecting | ConnectionStatus::Fixture => {}
@@ -608,7 +634,6 @@ impl CodexAppServerBackend {
         }
 
         let method = method.to_string();
-        let timeout = self.config.request_timeout;
         let inner = Arc::clone(&self.inner);
         let pump = Arc::clone(&self.pump_rt);
 
@@ -629,7 +654,7 @@ impl CodexAppServerBackend {
         inner: Arc<Inner>,
         method: String,
         params: Option<Value>,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Value> {
         let id = {
             let n = inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -650,14 +675,22 @@ impl CodexAppServerBackend {
             return Err(e);
         }
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(e))) => Err(e),
-            Ok(Err(_)) => Err(AgentError::ChannelClosed),
-            Err(_) => {
-                let mut pending = inner.pending.lock().await;
-                pending.remove(&Self::id_key(&id));
-                Err(AgentError::Timeout(timeout))
+        if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(value))) => Ok(value),
+                Ok(Ok(Err(e))) => Err(e),
+                Ok(Err(_)) => Err(AgentError::ChannelClosed),
+                Err(_) => {
+                    let mut pending = inner.pending.lock().await;
+                    pending.remove(&Self::id_key(&id));
+                    Err(AgentError::Timeout(timeout))
+                }
+            }
+        } else {
+            match rx.await {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(AgentError::ChannelClosed),
             }
         }
     }
@@ -1139,6 +1172,40 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("process/kill", Some(value)).await
     }
 
+    async fn command_exec(&self, params: CommandExecParams) -> Result<CommandExecResponse> {
+        let value = serde_json::to_value(params)?;
+        // The app-server intentionally defers this response until process exit.
+        // Server-side timeout policy remains explicit in `params`; a generic
+        // 30-second JSON-RPC timeout would orphan otherwise healthy terminals.
+        self.request_typed_without_timeout("command/exec", Some(value))
+            .await
+    }
+
+    async fn command_exec_write(
+        &self,
+        params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("command/exec/write", Some(value)).await
+    }
+
+    async fn command_exec_resize(
+        &self,
+        params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("command/exec/resize", Some(value)).await
+    }
+
+    async fn command_exec_terminate(
+        &self,
+        params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("command/exec/terminate", Some(value))
+            .await
+    }
+
     async fn thread_background_terminals_list(
         &self,
         params: ThreadBackgroundTerminalsListParams,
@@ -1541,6 +1608,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.turn_id, "turn-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn command_exec_family_matches_contract_and_exec_has_no_generic_timeout() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let mut config = CodexAppServerConfig::default();
+        config.request_timeout = Duration::from_millis(20);
+        let backend = Arc::new(CodexAppServerBackend::new(config));
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let (command_seen_tx, command_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            let mut command_seen_tx = Some(command_seen_tx);
+            for expected in [
+                "command/exec",
+                "command/exec/write",
+                "command/exec/resize",
+                "command/exec/terminate",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                match expected {
+                    "command/exec" => {
+                        assert_eq!(
+                            request["params"]["command"],
+                            serde_json::json!(["bash", "-lc", "read line; printf '%s' \"$line\""])
+                        );
+                        assert_eq!(request["params"]["processId"], "term-live");
+                        assert_eq!(request["params"]["streamStdin"], true);
+                        assert_eq!(request["params"]["streamStdoutStderr"], true);
+                        assert_eq!(request["params"]["disableTimeout"], true);
+                        if let Some(tx) = command_seen_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        let id = request["id"].clone();
+                        let delayed = Arc::clone(&responder);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            delayed
+                                .inject_stdout_line(
+                                    &serde_json::json!({
+                                        "id": id,
+                                        "result": {
+                                            "exitCode": 0,
+                                            "stdout": "typed",
+                                            "stderr": ""
+                                        }
+                                    })
+                                    .to_string(),
+                                )
+                                .await;
+                        });
+                        continue;
+                    }
+                    "command/exec/write" => {
+                        assert_eq!(request["params"]["processId"], "term-live");
+                        assert_eq!(request["params"]["deltaBase64"], "dHlwZWQK");
+                    }
+                    "command/exec/resize" => {
+                        assert_eq!(request["params"]["processId"], "term-live");
+                        assert_eq!(
+                            request["params"]["size"],
+                            serde_json::json!({"rows": 42, "cols": 132})
+                        );
+                    }
+                    "command/exec/terminate" => {
+                        assert_eq!(request["params"]["processId"], "term-live");
+                    }
+                    _ => unreachable!(),
+                }
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": {}}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let command_backend = Arc::clone(&backend);
+        let command = tokio::spawn(async move {
+            command_backend
+                .command_exec(CommandExecParams::terminal_shell(
+                    "read line; printf '%s' \"$line\"",
+                    "term-live",
+                    "/tmp",
+                ))
+                .await
+        });
+        command_seen_rx.await.unwrap();
+        backend
+            .command_exec_write(CommandExecWriteParams::text("term-live", "typed\n"))
+            .await
+            .unwrap();
+        backend
+            .command_exec_resize(CommandExecResizeParams::new("term-live", 42, 132))
+            .await
+            .unwrap();
+        backend
+            .command_exec_terminate(CommandExecTerminateParams::new("term-live"))
+            .await
+            .unwrap();
+
+        let response = command.await.unwrap().unwrap();
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.stdout, "typed");
         server.await.unwrap();
     }
 
@@ -2711,6 +2894,33 @@ mod integration_tests {
             .fs_remove(FsRemoveParams::new(root))
             .await
             .expect("remove test directory");
+        backend.disconnect().await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn real_app_server_command_exec_round_trip() {
+        if !should_run_integration() {
+            eprintln!("skip: codex binary not available");
+            return;
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        let response = backend
+            .command_exec(CommandExecParams::buffered(
+                vec![
+                    "bash".to_owned(),
+                    "-lc".to_owned(),
+                    "printf mitsuro-command-exec".to_owned(),
+                ],
+                "/tmp",
+                5_000,
+            ))
+            .await
+            .expect("command/exec");
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.stdout, "mitsuro-command-exec");
+        assert!(response.stderr.is_empty());
         backend.disconnect().await.expect("disconnect");
     }
 

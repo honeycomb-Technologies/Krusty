@@ -28,8 +28,12 @@ to `http://127.0.0.1:3000` and can be changed with `MITSURO_SERVER_URL`. Remote 
 
 The Mitsuro process API can inspect and control processes already tracked by the server,
 but it cannot spawn an interactive PTY. The GPUI terminal therefore disables live spawn
-for Mitsuro instead of substituting fixture output. Codex stdio retains its interactive
-process contract. Hive current state, global schedules, and background processes are
+for Mitsuro instead of substituting fixture output. Codex stdio uses the current
+`command/exec`, `command/exec/write`, `command/exec/resize`, and
+`command/exec/terminate` contract for standalone interactive commands. The initial
+request intentionally has no generic client timeout because app-server resolves it only
+after process exit; the request itself carries explicit server timeout/output policy.
+Hive current state, global schedules, and background processes are
 read-only product surfaces in GPUI; their mutation routes are intentionally not exposed.
 
 ## Transport assumptions (Codex app-server)
@@ -57,7 +61,7 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `thread/list`
 - `thread/start`
 - `thread/read`
-- `turn/start` (live; UI defaults to fixtures)
+- `turn/start` (live; fixture replay requires explicit fixture mode)
 - `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
 - `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
 

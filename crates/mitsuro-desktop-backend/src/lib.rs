@@ -5,6 +5,7 @@ pub mod approvals;
 pub mod apps;
 pub mod backend;
 pub mod codex;
+pub mod command;
 pub mod desktop;
 pub mod environment;
 pub mod extensions;
@@ -55,6 +56,12 @@ pub use apps::{
 pub use backend::AgentBackend;
 pub use codex::{
     codex_bin_available, resolve_codex_bin, CodexAppServerBackend, CodexAppServerConfig,
+};
+pub use command::{
+    CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
+    CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminalSize, CommandExecTerminateParams, CommandExecTerminateResponse,
+    CommandExecWriteParams, CommandExecWriteResponse,
 };
 pub use desktop::{
     BackendCapabilities, BackendKind, BackendSelection, BackendSessionId, DesktopBackend,
@@ -156,10 +163,10 @@ pub use protocol::{
     ActivityFields, ClientInfo, CollaborationMode, CollaborationModeSettings,
     CommandExecutionFields, ConfigReadParams, ConfigReadResponse, FileChangeFields,
     InitializeCapabilities, InitializeParams, InitializeResponse, JsonRpcError, JsonRpcId,
-    JsonRpcMessage, ModelInfo, ModelListParams, ModelListResponse, ModelServiceTier, Notification,
-    ReasoningEffortOption, ReviewDelivery, ReviewStartParams, ReviewStartResponse, ReviewTarget,
-    SandboxPolicy, SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse,
-    ThreadArchiveParams, ThreadArchiveResponse, ThreadCompactStartParams,
+    JsonRpcMessage, ModelInfo, ModelListParams, ModelListResponse, ModelServiceTier, NetworkAccess,
+    Notification, ReasoningEffortOption, ReviewDelivery, ReviewStartParams, ReviewStartResponse,
+    ReviewTarget, SandboxPolicy, SkillMetadata, SkillsListEntry, SkillsListParams,
+    SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams,
     ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
     ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,

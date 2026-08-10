@@ -1025,6 +1025,13 @@ pub struct TurnStartParams {
 }
 
 /// Schema-exact Codex app-server sandbox policy variants used by the access picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkAccess {
+    Restricted,
+    Enabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SandboxPolicy {
@@ -1034,6 +1041,11 @@ pub enum SandboxPolicy {
     ReadOnly {
         #[serde(default, rename = "networkAccess")]
         network_access: bool,
+    },
+    #[serde(rename = "externalSandbox")]
+    ExternalSandbox {
+        #[serde(rename = "networkAccess")]
+        network_access: NetworkAccess,
     },
     #[serde(rename = "workspaceWrite")]
     WorkspaceWrite {

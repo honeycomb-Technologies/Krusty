@@ -7,21 +7,24 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, FsCopyParams, FsCopyResponse,
-    FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse,
-    FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams,
-    FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome,
-    McpServerConfigAddParams, McpServerOauthLoginParams, McpServerOauthLoginResponse,
-    MitsuroServerBackend, PendingApproval, PluginInstallParams, PluginInstallResponse,
-    PluginUninstallParams, PluginUninstallResponse, Result, ThreadBackgroundTerminalsCleanParams,
-    ThreadBackgroundTerminalsCleanResponse, ThreadBackgroundTerminalsListParams,
-    ThreadBackgroundTerminalsListResponse, ThreadBackgroundTerminalsTerminateParams,
-    ThreadBackgroundTerminalsTerminateResponse, ThreadRealtimeAppendAudioParams,
-    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
-    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
-    ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
-    ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams, ThreadRealtimeStartResponse,
-    ThreadRealtimeStopParams, ThreadRealtimeStopResponse, TurnStartParams, TurnStreamEvent,
+    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, CommandExecParams,
+    CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
+    CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
+    CommandExecWriteResponse, FsCopyParams, FsCopyResponse, FsCreateDirectoryParams,
+    FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse, FsUnwatchParams,
+    FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams, FsWriteFileResponse,
+    LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams,
+    McpServerOauthLoginParams, McpServerOauthLoginResponse, MitsuroServerBackend, PendingApproval,
+    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
+    Result, ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
+    ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
+    ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
+    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
+    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
+    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
+    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
+    TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -74,6 +77,7 @@ pub struct BackendCapabilities {
     pub file_mutations: bool,
     pub file_watches: bool,
     pub processes: bool,
+    pub command_exec: bool,
     pub background_terminals: bool,
     pub tracked_process_kill: bool,
     pub extensions: bool,
@@ -112,6 +116,7 @@ impl BackendCapabilities {
             file_mutations: true,
             file_watches: true,
             processes: true,
+            command_exec: true,
             background_terminals: true,
             tracked_process_kill: false,
             extensions: true,
@@ -153,6 +158,7 @@ impl BackendCapabilities {
             // does not expose the interactive spawn/stdin/PTY contract used by
             // the native terminal panel.
             processes: false,
+            command_exec: false,
             background_terminals: false,
             tracked_process_kill: true,
             extensions: true,
@@ -473,6 +479,51 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn exec_command(&self, params: CommandExecParams) -> Result<CommandExecResponse> {
+        match self {
+            Self::Codex(backend) => backend.command_exec(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex standalone command contract".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn write_command_stdin(
+        &self,
+        params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResponse> {
+        match self {
+            Self::Codex(backend) => backend.command_exec_write(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose standalone command stdin".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn resize_command_pty(
+        &self,
+        params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResponse> {
+        match self {
+            Self::Codex(backend) => backend.command_exec_resize(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose standalone command PTY resizing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn terminate_command(
+        &self,
+        params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResponse> {
+        match self {
+            Self::Codex(backend) => backend.command_exec_terminate(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose standalone command termination".to_owned(),
+            )),
+        }
+    }
+
     pub async fn list_thread_background_terminals(
         &self,
         session: &BackendSessionId,
@@ -758,6 +809,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().archive);
         assert!(!BackendCapabilities::codex().hive);
         assert!(!BackendCapabilities::mitsuro().processes);
+        assert!(BackendCapabilities::codex().command_exec);
+        assert!(!BackendCapabilities::mitsuro().command_exec);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
         assert!(BackendCapabilities::mitsuro().image_attachments);

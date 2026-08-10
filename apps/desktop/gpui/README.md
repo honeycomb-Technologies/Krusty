@@ -60,8 +60,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   task mutations are deliberately unavailable in GPUI for now.
 - Scheduled reads `/api/hive/schedules`; create, pause, resume, and delete are not
   exposed until their product interaction and approval semantics are designed.
-- Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio retains
-  interactive `process/*`; Mitsuro does not pretend its background-process API is a PTY.
+- Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio launches
+  standalone commands through the current sandboxed `command/exec*` family, including
+  streamed stdout/stderr, stdin, resize, termination, and the process-exit response.
+  The older `process/*` adapter remains only as an explicit compatibility/fixture path;
+  Mitsuro does not pretend its background-process API is an interactive PTY.
 - Computer can register a real Codex remote exec-server with `environment/add`, then
   retains the submitted id and URL for the app session and probes typed status/info.
   The form is hidden for Mitsuro because its HTTP API has no equivalent mutation, and
