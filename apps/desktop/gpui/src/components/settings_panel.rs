@@ -1,8 +1,8 @@
 //! Settings surface: two-column tree matching ChatGPT/Codex desktop (bar 1:1).
 //!
 //! LEFT (~260px): Back to app · search · Personal / Integrations / Coding / Archived
-//! RIGHT: section content with real UI chrome (toggles, selects, cards).
-//! Fixture/local only — density over live backends.
+//! RIGHT: section content with persisted desktop preferences plus explicitly
+//! labeled live backend/account/catalog controls.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -308,6 +308,7 @@ fn settings_content(
                 .px(px(40.0))
                 .py(px(28.0))
                 .child(content_title(section.label()))
+                .child(settings_scope_notice(section))
                 .child(section_body(app, section, cx)),
         )
 }
@@ -320,6 +321,32 @@ fn content_title(title: &str) -> impl IntoElement {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(colors.text)
         .child(title.to_string())
+}
+
+fn settings_scope_notice(section: SettingsSection) -> impl IntoElement {
+    let colors = theme::colors();
+    let copy = match section {
+        SettingsSection::Connections => {
+            "Backend selection and reconnect are live. Unavailable connection mutations are labeled on their rows."
+        }
+        SettingsSection::Account | SettingsSection::UsageBilling => {
+            "Account and usage data come from the connected backend. Unsupported account actions are labeled before use."
+        }
+        _ => {
+            "Preferences below are saved on this device. They do not change Mitsuro server or ChatGPT / Codex configuration unless a row is explicitly labeled live."
+        }
+    };
+    div()
+        .mb(px(18.0))
+        .w_full()
+        .max_w(px(720.0))
+        .border_l_2()
+        .border_color(colors.border)
+        .pl(px(11.0))
+        .py(px(2.0))
+        .text_xs()
+        .text_color(colors.text_tertiary)
+        .child(copy)
 }
 
 fn section_body(
@@ -366,7 +393,7 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
             settings_card()
                 .child(toggle_row(
                     "Default permissions",
-                    "By default, Mitsuro can read and edit files in its workspace. It can ask for additional access when needed",
+                    "Saved locally for desktop parity; the connected backend remains the authority for actual tool permissions",
                     "default_permissions",
                     true,
                     app,
@@ -2022,7 +2049,7 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                 .child(backend_choice_row(
                     BackendKind::MitsuroHttp,
                     "Mitsuro server",
-                    "Native sessions, Hive, schedules, files, skills, and extensions over HTTP/SSE",
+                    "Sessions and streamed turns over HTTP/SSE; Hive, schedules, and process catalogs are currently read-only",
                     active,
                     app.connection(),
                     cx,
@@ -2979,7 +3006,7 @@ fn full_access_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
     let colors = theme::colors();
     let on = app.settings_toggle("full_access", true);
     // Single flowing paragraph; only "Learn more" is accent-colored.
-    const BODY: &str = "When Mitsuro runs with full access, it can edit any file on your computer and run commands with network, without your approval. This significantly increases the risk of data loss, leaks, or unexpected behavior. Learn more about elevated risks.";
+    const BODY: &str = "Saved locally only. The GPUI client does not currently change backend sandbox or approval policy from this control. Full access can permit file, command, and network mutations when a backend explicitly supports it. Learn more about elevated risks.";
     const LINK: &str = "Learn more";
     let link_start = BODY.find(LINK).expect("Learn more in full-access body");
     let link_end = link_start + LINK.len();

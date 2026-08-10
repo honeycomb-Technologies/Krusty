@@ -1,8 +1,8 @@
 //! Transport-neutral chat composer.
 //!
-//! Only implemented controls are interactive: text entry, Send, and Stop. Model state
-//! remains visible but read-only until a real picker is wired. Voice, attachments,
-//! speed presets, and project selection are deliberately absent.
+//! Implemented controls are interactive: text entry, backend-scoped model cycling,
+//! Send, and Stop. Voice, attachments, speed presets, and project selection are
+//! deliberately absent until their backend contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -100,7 +100,7 @@ fn codex_composer(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(model_chip(&model))
+                        .child(model_chip(&model, cx))
                         .child(div().flex_1())
                         .child(if streaming {
                             round_action(
@@ -310,7 +310,7 @@ fn usage_card(_cx: &mut Context<MitsuroApp>) -> impl IntoElement {
         )
 }
 
-fn model_chip(label: &str) -> impl IntoElement {
+fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
     div()
@@ -322,12 +322,20 @@ fn model_chip(label: &str) -> impl IntoElement {
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(8.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(|app, _, _, cx| app.cycle_model(cx)))
         .child(div().text_xs().text_color(colors.text_tertiary).child("✧"))
         .child(
             div()
                 .text_xs()
                 .text_color(colors.text_tertiary)
                 .child(label),
+        )
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .with_size(px(11.0))
+                .text_color(colors.text_tertiary),
         )
 }
 

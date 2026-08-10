@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -21,6 +21,14 @@ pub struct DesktopPreferences {
     pub selected_session: Option<BackendSessionId>,
     #[serde(default)]
     pub sessions_by_backend: HashMap<BackendKind, BackendSessionId>,
+    /// Desktop-local settings values. These are intentionally separate from
+    /// Mitsuro/Codex server configuration and contain no credentials.
+    #[serde(default)]
+    pub settings_toggles: HashMap<String, bool>,
+    #[serde(default)]
+    pub settings_choices: HashMap<String, String>,
+    #[serde(default)]
+    pub models_by_backend: HashMap<BackendKind, String>,
 }
 
 impl Default for DesktopPreferences {
@@ -30,6 +38,9 @@ impl Default for DesktopPreferences {
             selected_backend: None,
             selected_session: None,
             sessions_by_backend: HashMap::new(),
+            settings_toggles: HashMap::new(),
+            settings_choices: HashMap::new(),
+            models_by_backend: HashMap::new(),
         }
     }
 }
@@ -92,6 +103,10 @@ impl DesktopPreferences {
         self.selected_session = Some(session.clone());
         self.sessions_by_backend.insert(session.backend, session);
     }
+
+    pub fn remember_model(&mut self, backend: BackendKind, model_id: String) {
+        self.models_by_backend.insert(backend, model_id);
+    }
 }
 
 fn default_path() -> PathBuf {
@@ -142,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn model_selection_is_namespaced_by_backend() {
+        let mut state = DesktopPreferences::default();
+        state.remember_model(BackendKind::MitsuroHttp, "grok-4.5".into());
+        state.remember_model(BackendKind::CodexStdio, "gpt-5.6".into());
+        assert_eq!(
+            state.models_by_backend.get(&BackendKind::MitsuroHttp),
+            Some(&"grok-4.5".to_owned())
+        );
+        assert_eq!(
+            state.models_by_backend.get(&BackendKind::CodexStdio),
+            Some(&"gpt-5.6".to_owned())
+        );
+    }
+
+    #[test]
     fn loads_v1_session_into_the_per_backend_map() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("state.json");
@@ -163,5 +193,19 @@ mod tests {
                 .map(|session| session.raw.as_str()),
             Some("legacy-session")
         );
+    }
+
+    #[test]
+    fn round_trips_privacy_safe_local_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        let mut state = DesktopPreferences::default();
+        state.settings_toggles.insert("reduce_motion".into(), true);
+        state.settings_choices.insert("theme".into(), "Dark".into());
+        state.save(&path).expect("save");
+
+        let restored = DesktopPreferences::load(&path).expect("load");
+        assert_eq!(restored.settings_toggles, state.settings_toggles);
+        assert_eq!(restored.settings_choices, state.settings_choices);
     }
 }

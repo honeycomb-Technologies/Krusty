@@ -946,6 +946,10 @@ impl MitsuroApp {
             eprintln!("[mitsuro] desktop preference load failed: {error}");
             DesktopPreferences::default()
         });
+        let mut settings_toggles = default_settings_toggles();
+        settings_toggles.extend(preferences.settings_toggles.clone());
+        let mut settings_choices = default_settings_choices();
+        settings_choices.extend(preferences.settings_choices.clone());
         let composer_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Do anything")
@@ -1120,8 +1124,8 @@ impl MitsuroApp {
             settings_return_mode: ProductMode::Codex,
             settings_search_query: String::new(),
             settings_search_input,
-            settings_toggles: default_settings_toggles(),
-            settings_choices: default_settings_choices(),
+            settings_toggles,
+            settings_choices,
             goals,
             selected_goal,
             goals_are_live_hive: false,
@@ -2604,8 +2608,12 @@ impl MitsuroApp {
     pub fn flip_settings_toggle(&mut self, key: &str, default: bool, cx: &mut Context<Self>) {
         let next = !self.settings_toggle(key, default);
         self.settings_toggles.insert(key.to_string(), next);
+        self.preferences
+            .settings_toggles
+            .insert(key.to_string(), next);
+        self.save_preferences_best_effort();
         self.status_line = format!(
-            "Settings · {} · {}",
+            "Settings · {} · {} · saved locally (runtime wiring unchanged)",
             self.settings_section.label(),
             if next { "on" } else { "off" }
         )
@@ -2628,7 +2636,15 @@ impl MitsuroApp {
     ) {
         let value = value.into();
         self.settings_choices.insert(key.to_string(), value.clone());
-        self.status_line = format!("Settings · {} · {value}", self.settings_section.label()).into();
+        self.preferences
+            .settings_choices
+            .insert(key.to_string(), value.clone());
+        self.save_preferences_best_effort();
+        self.status_line = format!(
+            "Settings · {} · {value} · saved locally (runtime wiring unchanged)",
+            self.settings_section.label()
+        )
+        .into();
         cx.notify();
     }
 
@@ -2679,6 +2695,11 @@ impl MitsuroApp {
         if models.is_empty() {
             return;
         }
+        let remembered = self
+            .active_backend_kind()
+            .and_then(|kind| self.preferences.models_by_backend.get(&kind))
+            .and_then(|id| models.iter().find(|model| &model.id == id))
+            .map(|model| model.id.clone());
         let keep = self
             .selected_model_id
             .as_ref()
@@ -2689,7 +2710,7 @@ impl MitsuroApp {
             .or_else(|| models.iter().find(|m| !m.hidden))
             .or_else(|| models.first())
             .map(|m| m.id.clone());
-        self.selected_model_id = keep.or(default_id);
+        self.selected_model_id = remembered.or(keep).or(default_id);
         self.models = models;
     }
 
@@ -4637,6 +4658,7 @@ impl MitsuroApp {
     pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
         if self.models.iter().any(|m| m.id == id) {
             self.selected_model_id = Some(id);
+            self.remember_selected_model();
             let label = self.model_label();
             self.status_line = format!("Model: {label}").into();
             cx.notify();
@@ -4658,6 +4680,7 @@ impl MitsuroApp {
             .unwrap_or(0);
         let next = (idx + 1) % self.models.len();
         self.selected_model_id = Some(self.models[next].id.clone());
+        self.remember_selected_model();
         let label = self.model_label();
         self.status_line = format!("Model: {label}").into();
         cx.notify();
@@ -4927,6 +4950,17 @@ impl MitsuroApp {
         if let Err(error) = self.preferences.save_default() {
             eprintln!("[mitsuro] desktop preference save failed: {error}");
         }
+    }
+
+    fn remember_selected_model(&mut self) {
+        let Some(kind) = self.active_backend_kind() else {
+            return;
+        };
+        let Some(model_id) = self.selected_model_id.clone() else {
+            return;
+        };
+        self.preferences.remember_model(kind, model_id);
+        self.save_preferences_best_effort();
     }
 
     fn live_session_id(&self, ui_id: &str) -> Option<BackendSessionId> {
