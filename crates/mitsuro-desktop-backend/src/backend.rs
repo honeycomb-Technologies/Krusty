@@ -55,7 +55,9 @@ use crate::protocol::{
     TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{ConnectionStatus, Result};
-use crate::{HooksListParams, HooksListResponse};
+use crate::{
+    HooksListParams, HooksListResponse, SkillsConfigWriteParams, SkillsConfigWriteResponse,
+};
 
 /// Abstraction over Codex app-server, offline fixtures, and a future Mitsuro server.
 ///
@@ -174,6 +176,16 @@ pub trait AgentBackend: Send + Sync {
 
     /// List skills via `skills/list` (best-effort; fixture returns demo skills).
     async fn skills_list(&self, params: SkillsListParams) -> Result<SkillsListResponse>;
+
+    /// Enable or disable one discovered Codex skill.
+    async fn skills_config_write(
+        &self,
+        _params: SkillsConfigWriteParams,
+    ) -> Result<SkillsConfigWriteResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "skill configuration writes are not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// List discovered lifecycle hooks via `hooks/list`.
     async fn hooks_list(&self, _params: HooksListParams) -> Result<HooksListResponse> {

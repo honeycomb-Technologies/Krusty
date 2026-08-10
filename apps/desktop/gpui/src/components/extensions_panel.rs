@@ -35,6 +35,8 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let source = data_state.label();
     let mutations_available = app.plugin_mutations_available();
     let mutating_plugin_id = app.plugin_mutation_id().map(ToOwned::to_owned);
+    let skill_mutations_available = app.skill_mutations_available();
+    let mutating_skill_id = app.skill_mutation_id().map(ToOwned::to_owned);
     let search_input = app.plugins_search_input().clone();
     let query = search_input.read(cx).value().trim().to_ascii_lowercase();
     let expanded_sections = app.expanded_plugin_sections().clone();
@@ -85,9 +87,15 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                         cx,
                     )
                     .into_any_element(),
-                    PluginsSurfaceTab::Skills => {
-                        skills_body(&skills, source, &query).into_any_element()
-                    }
+                    PluginsSurfaceTab::Skills => skills_body(
+                        &skills,
+                        source,
+                        &query,
+                        skill_mutations_available,
+                        mutating_skill_id.as_deref(),
+                        cx,
+                    )
+                    .into_any_element(),
                 }),
         )
 }
@@ -1880,7 +1888,14 @@ fn dot_at(x: f32, y: f32, d: f32, color: u32) -> impl IntoElement {
         .bg(theme::hex(color))
 }
 
-fn skills_body(skills: &[SkillMetadata], source: &str, query: &str) -> impl IntoElement {
+fn skills_body(
+    skills: &[SkillMetadata],
+    source: &str,
+    query: &str,
+    mutations_available: bool,
+    mutating_skill_id: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let filtered: Vec<&SkillMetadata> = skills
         .iter()
@@ -1901,9 +1916,15 @@ fn skills_body(skills: &[SkillMetadata], source: &str, query: &str) -> impl Into
             div()
                 .text_xs()
                 .text_color(colors.text_tertiary)
-                .child(format!(
-                    "Reusable instructions Codex can load into a turn · {source}"
-                )),
+                .child(if mutations_available {
+                    format!(
+                        "Reusable instructions Codex can load into a turn · {source} · Select a status to enable or disable"
+                    )
+                } else {
+                    format!(
+                        "Reusable instructions Codex can load into a turn · {source} · Read-only on the active backend"
+                    )
+                }),
         )
         .children(if filtered.is_empty() {
             vec![div()
@@ -1925,7 +1946,10 @@ fn skills_body(skills: &[SkillMetadata], source: &str, query: &str) -> impl Into
             filtered
                 .into_iter()
                 .enumerate()
-                .map(|(i, s)| skill_card(i as u64, s).into_any_element())
+                .map(|(i, skill)| {
+                    skill_card(i as u64, skill, mutations_available, mutating_skill_id, cx)
+                        .into_any_element()
+                })
                 .collect()
         })
 }
@@ -1965,7 +1989,13 @@ fn mcp_matches_query(server: &McpServerStatus, query: &str) -> bool {
             .any(|name| name.to_ascii_lowercase().contains(query))
 }
 
-fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
+fn skill_card(
+    index: u64,
+    skill: &SkillMetadata,
+    mutations_available: bool,
+    mutating_skill_id: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let title = skill
         .short_description
@@ -1975,6 +2005,13 @@ fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
     let desc = skill.description.clone();
     let scope = skill.scope.clone();
     let enabled = skill.enabled;
+    let mutation_id = if skill.path.trim().is_empty() {
+        skill.name.as_str()
+    } else {
+        skill.path.as_str()
+    };
+    let busy = mutating_skill_id == Some(mutation_id);
+    let skill_for_action = skill.clone();
 
     div()
         .id(("skill-card", index))
@@ -2040,6 +2077,7 @@ fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
         )
         .child(
             div()
+                .id(("skill-toggle", index))
                 .px(px(10.0))
                 .py(px(4.0))
                 .rounded(px(999.0))
@@ -2052,7 +2090,21 @@ fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
                 } else {
                     colors.text_tertiary
                 })
-                .child(if enabled { "Enabled" } else { "Disabled" }),
+                .when(mutations_available && !busy, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.mutate_skill(skill_for_action.clone(), cx);
+                        }))
+                })
+                .when(busy, |this| this.opacity(0.55))
+                .child(if busy {
+                    "Updating…"
+                } else if enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }),
         )
 }
 

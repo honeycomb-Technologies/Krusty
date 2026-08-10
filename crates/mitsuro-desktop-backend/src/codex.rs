@@ -1050,6 +1050,14 @@ impl AgentBackend for CodexAppServerBackend {
         self.list_skills(params).await
     }
 
+    async fn skills_config_write(
+        &self,
+        params: crate::SkillsConfigWriteParams,
+    ) -> Result<crate::SkillsConfigWriteResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("skills/config/write", Some(value)).await
+    }
+
     async fn hooks_list(&self, params: crate::HooksListParams) -> Result<crate::HooksListResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("hooks/list", Some(value)).await
@@ -1944,6 +1952,57 @@ mod tests {
             details.apps[0].tool_summaries.as_ref().unwrap()[0].name,
             "list_events"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn skill_config_write_uses_current_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "skills/config/write");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({
+                    "path": "/workspace/.codex/skills/review/SKILL.md",
+                    "name": "review",
+                    "enabled": false
+                })
+            );
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": request["id"],
+                        "result": {"effectiveEnabled": false}
+                    })
+                    .to_string(),
+                )
+                .await;
+        });
+
+        let response = backend
+            .skills_config_write(crate::SkillsConfigWriteParams::for_skill(
+                "/workspace/.codex/skills/review/SKILL.md",
+                "review",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert!(!response.effective_enabled);
         server.await.unwrap();
     }
 

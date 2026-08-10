@@ -74,6 +74,7 @@ pub struct BackendCapabilities {
     pub mcp_config_write: bool,
     pub hooks: bool,
     pub apps: bool,
+    pub skill_config_write: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -107,6 +108,7 @@ impl BackendCapabilities {
             mcp_config_write: true,
             hooks: true,
             apps: true,
+            skill_config_write: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -143,6 +145,7 @@ impl BackendCapabilities {
             mcp_config_write: false,
             hooks: false,
             apps: false,
+            skill_config_write: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -441,6 +444,18 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn write_skill_config(
+        &self,
+        params: crate::SkillsConfigWriteParams,
+    ) -> Result<crate::SkillsConfigWriteResponse> {
+        match self {
+            Self::Codex(backend) => backend.skills_config_write(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex skill configuration writes".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -647,6 +662,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().hooks);
         assert!(BackendCapabilities::codex().apps);
         assert!(!BackendCapabilities::mitsuro().apps);
+        assert!(BackendCapabilities::codex().skill_config_write);
+        assert!(!BackendCapabilities::mitsuro().skill_config_write);
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ pub mod product;
 pub mod protocol;
 pub mod realtime;
 pub mod server_requests;
+pub mod skill_config;
 pub mod types;
 
 pub use account::{
@@ -181,6 +182,7 @@ pub use server_requests::{
     ATTESTATION_GENERATE, CHATGPT_AUTH_TOKENS_REFRESH, CURRENT_TIME_READ, DYNAMIC_TOOL_CALL,
     MCP_SERVER_ELICITATION_REQUEST, SERVER_REQUEST_METHODS, TOOL_REQUEST_USER_INPUT,
 };
+pub use skill_config::{SkillsConfigWriteParams, SkillsConfigWriteResponse};
 pub use types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
     DelegationGroupProjection, DelegationGroupStatus, DelegationKind,

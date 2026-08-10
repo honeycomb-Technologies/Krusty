@@ -194,6 +194,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "process/spawn",
     "process/writeStdin",
     "review/start",
+    "skills/config/write",
     "skills/list",
     "thread/archive",
     "thread/compact/start",
@@ -337,7 +338,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 63);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 64);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

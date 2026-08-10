@@ -43,12 +43,13 @@ use mitsuro_desktop_backend::{
     ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
     ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
     RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
-    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsConfigWriteParams,
+    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
+    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
+    FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -1020,6 +1021,8 @@ pub struct MitsuroApp {
     extensions_state: SurfaceDataState,
     /// Plugin id currently being installed or removed through Codex app-server.
     plugin_mutation_in_progress: Option<String>,
+    /// Skill path currently being enabled or disabled through Codex app-server.
+    skill_mutation_in_progress: Option<String>,
     /// Environments catalog (fixture demo; no protocol list method).
     environments: Vec<EnvironmentSummary>,
     environments_state: SurfaceDataState,
@@ -1380,6 +1383,7 @@ impl MitsuroApp {
             plugins: Vec::new(),
             extensions_state: SurfaceDataState::Loading,
             plugin_mutation_in_progress: None,
+            skill_mutation_in_progress: None,
             environments: Vec::new(),
             environments_state: SurfaceDataState::Loading,
             environment_id_input,
@@ -3844,6 +3848,101 @@ impl MitsuroApp {
 
     pub fn plugin_mutation_id(&self) -> Option<&str> {
         self.plugin_mutation_in_progress.as_deref()
+    }
+
+    pub fn skill_mutations_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().skill_config_write)
+    }
+
+    pub fn skill_mutation_id(&self) -> Option<&str> {
+        self.skill_mutation_in_progress.as_deref()
+    }
+
+    pub fn mutate_skill(&mut self, skill: SkillMetadata, cx: &mut Context<Self>) {
+        if self.skill_mutation_in_progress.is_some() {
+            self.status_line = "Skills · another change is still in progress".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Skills · changes require a connected Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().skill_config_write {
+            self.status_line =
+                "Skills · this backend exposes inventory but not configuration writes".into();
+            cx.notify();
+            return;
+        }
+
+        let generation = self.backend_generation;
+        let mutation_id = if skill.path.trim().is_empty() {
+            skill.name.clone()
+        } else {
+            skill.path.clone()
+        };
+        let name = skill.name.clone();
+        let requested_enabled = !skill.enabled;
+        let params = SkillsConfigWriteParams::for_skill(skill.path, skill.name, requested_enabled);
+        self.skill_mutation_in_progress = Some(mutation_id.clone());
+        self.status_line = format!(
+            "Skills · {} {name}…",
+            if requested_enabled {
+                "enabling"
+            } else {
+                "disabling"
+            }
+        )
+        .into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .write_skill_config(params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.skill_mutation_in_progress = None;
+                match result {
+                    Ok(response) => {
+                        if let Some(skill) = app.skills.iter_mut().find(|skill| {
+                            (!skill.path.is_empty() && skill.path == mutation_id)
+                                || (skill.path.is_empty() && skill.name == mutation_id)
+                        }) {
+                            skill.enabled = response.effective_enabled;
+                        }
+                        app.status_line = format!(
+                            "Skills · {name} {}",
+                            if response.effective_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        )
+                        .into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Skills · could not update {name} · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn mutate_plugin(&mut self, plugin: PluginSummary, cx: &mut Context<Self>) {
@@ -9548,6 +9647,7 @@ impl MitsuroApp {
         self.plugins.clear();
         self.extensions_state = SurfaceDataState::Loading;
         self.plugin_mutation_in_progress = None;
+        self.skill_mutation_in_progress = None;
         self.expanded_plugin_sections.clear();
         self.goals.clear();
         self.selected_goal = None;
