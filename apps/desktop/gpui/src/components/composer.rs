@@ -1,9 +1,9 @@
 //! Transport-neutral chat composer.
 //!
 //! Implemented controls are interactive: text entry, backend-scoped model and
-//! advertised reasoning-effort cycling, real image attachments, Send, and Stop.
-//! Voice, speed presets, and project selection remain absent until their backend
-//! contracts exist.
+//! advertised reasoning-effort cycling, real model-gated image and audio file
+//! attachments, Send, and Stop. Microphone recording, speed presets, and project
+//! selection remain absent until their backend contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -13,7 +13,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::MitsuroApp;
+use crate::app::{ComposerAttachmentKind, MitsuroApp};
 use crate::theme;
 
 pub fn composer(
@@ -119,6 +119,14 @@ fn codex_composer(
                                 |app, _, _, cx| app.select_composer_images(cx),
                             ))
                         })
+                        .when(app.can_attach_audio(), |this| {
+                            this.child(round_path_action(
+                                "composer-attach-audio",
+                                "icons/audio-lines.svg",
+                                cx,
+                                |app, _, _, cx| app.select_composer_audio(cx),
+                            ))
+                        })
                         .child(model_chip(&model, cx))
                         .when_some(reasoning, |this, label| {
                             this.child(reasoning_chip(&label, cx))
@@ -216,6 +224,14 @@ fn chat_slim_composer(
                 .when_some(reasoning, |this, label| {
                     this.child(reasoning_chip(&label, cx))
                 })
+                .when(app.can_attach_audio(), |this| {
+                    this.child(round_path_action(
+                        "chat-attach-audio",
+                        "icons/audio-lines.svg",
+                        cx,
+                        |app, _, _, cx| app.select_composer_audio(cx),
+                    ))
+                })
                 .child(if streaming {
                     streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
                         .into_any_element()
@@ -301,6 +317,14 @@ fn chat_thread_composer(
                                 |app, _, _, cx| app.select_composer_images(cx),
                             ))
                         })
+                        .when(app.can_attach_audio(), |this| {
+                            this.child(round_path_action(
+                                "chat-thread-attach-audio",
+                                "icons/audio-lines.svg",
+                                cx,
+                                |app, _, _, cx| app.select_composer_audio(cx),
+                            ))
+                        })
                         .when_some(reasoning, |this, label| {
                             this.child(reasoning_chip(&label, cx))
                         })
@@ -346,6 +370,10 @@ fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                 .iter()
                 .enumerate()
                 .map(|(index, attachment)| {
+                    let icon = match attachment.kind {
+                        ComposerAttachmentKind::Image => "icons/gallery-vertical-end.svg",
+                        ComposerAttachmentKind::Audio => "icons/audio-lines.svg",
+                    };
                     div()
                         .id(("composer-attachment", index))
                         .flex()
@@ -361,7 +389,7 @@ fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                         .border_color(colors.border)
                         .child(
                             Icon::empty()
-                                .path("icons/gallery-vertical-end.svg")
+                                .path(icon)
                                 .with_size(px(13.0))
                                 .text_color(colors.text_tertiary),
                         )
@@ -561,6 +589,34 @@ fn round_action(
         } else {
             colors.fg_button_primary
         }))
+}
+
+fn round_path_action(
+    id: &'static str,
+    icon_path: &'static str,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &gpui::ClickEvent, &mut gpui::Window, &mut Context<MitsuroApp>)
+        + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .w(px(32.0))
+        .h(px(32.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(colors.bg_button_primary)
+        .hover(|style| style.bg(colors.bg_button_primary_hover))
+        .on_click(cx.listener(on_click))
+        .child(
+            Icon::empty()
+                .path(icon_path)
+                .with_size(px(15.0))
+                .text_color(colors.fg_button_primary),
+        )
 }
 
 fn disabled_send(id: &'static str) -> impl IntoElement {

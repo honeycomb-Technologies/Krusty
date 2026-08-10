@@ -48,6 +48,7 @@ backend or are shown as unavailable.
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
+| Audio-file attachments | Unsupported, hidden and rejected before I/O | Live schema-exact `localAudio`, selected-model gated | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
 | Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
@@ -114,6 +115,13 @@ work, not as feature completion; the matrix test must change with each typed ada
   user message. Missing files, failed remote loads, invalid MIME types, oversized data,
   and decode failures use explicit visual fallbacks. Attachments are cleared on backend
   switch and never fall back to fixture data.
+- Codex models advertising the `audio` input modality expose a local audio-file picker
+  using the same limit of four combined attachments at 20 MiB per file. The product
+  adapter emits `localAudio`; persisted local-path, remote, and embedded audio inputs are
+  retained as truthful transcript attachment rows. Invalid or oversized embedded data
+  stays visible as unavailable metadata. Mitsuro's text/image `ContentBlock` contract
+  does not accept audio, so its UI action is hidden and both adapter layers reject it
+  before I/O. This is file attachment support, not microphone recording or playback.
 - Reasoning choices come only from the selected model's live capability metadata and
   persist per backend/model. The transport-neutral turn adapter maps the same selection
   to Codex `effort` and Mitsuro `thinking_enabled`; models with zero or one advertised

@@ -390,6 +390,8 @@ pub struct TranscriptMessage {
     pub activity: Option<ActivityFields>,
     /// Image inputs attached to a persisted user message.
     pub images: Vec<TranscriptImage>,
+    /// Audio inputs attached to a persisted user message.
+    pub audio: Vec<TranscriptAudio>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +401,18 @@ pub struct TranscriptImage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptImageSource {
+    LocalPath(String),
+    Url(String),
+    Embedded { media_type: String, data: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptAudio {
+    pub source: TranscriptAudioSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptAudioSource {
     LocalPath(String),
     Url(String),
     Embedded { media_type: String, data: String },
@@ -414,6 +428,7 @@ impl TranscriptMessage {
             file_change: None,
             activity: None,
             images: Vec::new(),
+            audio: Vec::new(),
         }
     }
 }
@@ -505,11 +520,13 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
             let content = item.get("content")?;
             let body = user_input_text(content);
             let images = user_input_images(content);
-            if body.is_empty() && images.is_empty() {
+            let audio = user_input_audio(content);
+            if body.is_empty() && images.is_empty() && audio.is_empty() {
                 return None;
             }
             let mut message = TranscriptMessage::plain(TranscriptRole::User, body, id);
             message.images = images;
+            message.audio = audio;
             Some(message)
         }
         "agentMessage" => {
@@ -580,6 +597,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 file_change: None,
                 activity: None,
                 images: Vec::new(),
+                audio: Vec::new(),
             })
         }
         "fileChange" => {
@@ -601,6 +619,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 file_change: Some(fields),
                 activity: None,
                 images: Vec::new(),
+                audio: Vec::new(),
             })
         }
         _ => {
@@ -613,6 +632,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 file_change: None,
                 activity: Some(activity),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
         }
     }
@@ -845,6 +865,46 @@ fn data_image_parts(url: &str) -> Option<(&str, &str)> {
     Some((media_type, data))
 }
 
+fn user_input_audio(content: &Value) -> Vec<TranscriptAudio> {
+    let Some(parts) = content.as_array() else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("localAudio") => {
+                part.get("path")
+                    .and_then(Value::as_str)
+                    .map(|path| TranscriptAudio {
+                        source: TranscriptAudioSource::LocalPath(path.to_owned()),
+                    })
+            }
+            Some("audio") => part
+                .get("url")
+                .and_then(Value::as_str)
+                .map(|url| TranscriptAudio {
+                    source: data_audio_parts(url)
+                        .map(|(media_type, data)| TranscriptAudioSource::Embedded {
+                            media_type: media_type.to_owned(),
+                            data: data.to_owned(),
+                        })
+                        .unwrap_or_else(|| TranscriptAudioSource::Url(url.to_owned())),
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn data_audio_parts(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    let media_type = metadata.strip_suffix(";base64")?;
+    if !media_type.starts_with("audio/") || data.is_empty() {
+        return None;
+    }
+    Some((media_type, data))
+}
+
 // ---------------------------------------------------------------------------
 // turn/start
 // ---------------------------------------------------------------------------
@@ -908,6 +968,13 @@ impl TurnStartParams {
             "type": "localImage",
             "path": path.into(),
             "detail": null
+        }));
+    }
+
+    pub fn push_local_audio(&mut self, path: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "localAudio",
+            "path": path.into()
         }));
     }
 }
@@ -1072,6 +1139,9 @@ pub struct ModelInfo {
     pub default_reasoning_effort: String,
     #[serde(default)]
     pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Canonical input modality tags advertised by the model.
+    #[serde(default = "default_model_input_modalities")]
+    pub input_modalities: Vec<String>,
     /// Optional upgrade target model id/slug.
     #[serde(default)]
     pub upgrade: Option<String>,
@@ -1112,6 +1182,17 @@ impl ModelInfo {
                     .collect()
             })
             .unwrap_or_default();
+        let input_modalities = value
+            .get("inputModalities")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_else(default_model_input_modalities);
         Self {
             id: value
                 .get("id")
@@ -1147,12 +1228,17 @@ impl ModelInfo {
                 .unwrap_or("")
                 .to_string(),
             supported_reasoning_efforts: efforts,
+            input_modalities,
             upgrade: value
                 .get("upgrade")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
         }
     }
+}
+
+fn default_model_input_modalities() -> Vec<String> {
+    vec!["text".to_owned()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1205,6 +1291,7 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                     description: "Deeper reasoning".into(),
                 },
             ],
+            input_modalities: vec!["text".into(), "image".into()],
             upgrade: None,
         },
         ModelInfo {
@@ -1219,6 +1306,7 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                 reasoning_effort: "high".into(),
                 description: "Deep reasoning".into(),
             }],
+            input_modalities: vec!["text".into(), "image".into()],
             upgrade: None,
         },
         ModelInfo {
@@ -1233,6 +1321,7 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                 reasoning_effort: "medium".into(),
                 description: "Default".into(),
             }],
+            input_modalities: vec!["text".into()],
             upgrade: None,
         },
     ]
@@ -2673,6 +2762,43 @@ mod event_tests {
     }
 
     #[test]
+    fn extract_transcript_preserves_local_remote_and_embedded_user_audio() {
+        let thread = serde_json::json!({
+            "turns": [{
+                "items": [{
+                    "id": "user-audio",
+                    "type": "userMessage",
+                    "content": [
+                        {"type": "localAudio", "path": "/tmp/local.wav"},
+                        {"type": "audio", "url": "https://example.com/remote.mp3"},
+                        {"type": "audio", "url": "data:audio/ogg;base64,b2dn"}
+                    ]
+                }]
+            }]
+        });
+        let messages = extract_transcript_from_thread(&thread);
+        assert_eq!(messages.len(), 1, "audio-only user messages remain visible");
+        assert!(messages[0].body.is_empty());
+        assert_eq!(
+            messages[0].audio,
+            vec![
+                TranscriptAudio {
+                    source: TranscriptAudioSource::LocalPath("/tmp/local.wav".to_owned())
+                },
+                TranscriptAudio {
+                    source: TranscriptAudioSource::Url("https://example.com/remote.mp3".to_owned())
+                },
+                TranscriptAudio {
+                    source: TranscriptAudioSource::Embedded {
+                        media_type: "audio/ogg".to_owned(),
+                        data: "b2dn".to_owned()
+                    }
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn every_current_thread_item_kind_is_typed_and_round_trips() {
         let inventory = include_str!("../fixtures/thread-item-types.txt");
         let kinds = inventory.lines().filter(|line| !line.is_empty());
@@ -2768,6 +2894,7 @@ mod model_list_tests {
         assert_eq!(resp.data.len(), 1);
         assert_eq!(resp.data[0].display_name, "GPT-5");
         assert!(resp.data[0].is_default);
+        assert_eq!(resp.data[0].input_modalities, ["text", "image"]);
         assert_eq!(resp.default_model().unwrap().id, "gpt-5");
     }
 
@@ -2785,6 +2912,7 @@ mod model_list_tests {
         });
         let m = ModelInfo::from_value(&v);
         assert_eq!(m.label(), "X");
+        assert_eq!(m.input_modalities, ["text"]);
         let demo = fixture_demo_models();
         assert!(demo
             .iter()
@@ -2833,6 +2961,15 @@ mod p9_protocol_shape_tests {
         assert_eq!(value["input"][1]["type"], "localImage");
         assert_eq!(value["input"][1]["path"], "/tmp/screenshot.png");
         assert!(value["input"][1]["detail"].is_null());
+    }
+
+    #[test]
+    fn turn_start_local_audio_matches_generated_user_input_contract() {
+        let mut params = TurnStartParams::text("thread-1", "transcribe this");
+        params.push_local_audio("/tmp/recording.wav");
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["input"][1]["type"], "localAudio");
+        assert_eq!(value["input"][1]["path"], "/tmp/recording.wav");
     }
 
     #[test]

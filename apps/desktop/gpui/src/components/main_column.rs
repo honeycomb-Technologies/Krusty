@@ -4,6 +4,8 @@
 //! Transcript blocks (Codex-like): user / assistant bubbles, muted reasoning,
 //! plan list surface, command `$ cmd` + output, file-change patch preview.
 
+use std::path::Path;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
@@ -18,7 +20,8 @@ use mitsuro_desktop_backend::{
 use crate::app::{MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer, markdown};
 use crate::demo::{
-    DemoImageAttachment, DemoImageSource, DemoMessage, DemoMessageKind, ThreadSurface,
+    DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
+    DemoMessageKind, ThreadSurface,
 };
 use crate::theme;
 
@@ -1025,11 +1028,16 @@ fn transcript_block(
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     match &msg.kind {
-        DemoMessageKind::User { body, images } => chat_bubble(
+        DemoMessageKind::User {
+            body,
+            images,
+            audio,
+        } => chat_bubble(
             index,
             "You",
             body,
             images,
+            audio,
             msg.streaming,
             true,
             simple_bubbles,
@@ -1042,6 +1050,7 @@ fn transcript_block(
             index,
             "Mitsuro",
             body,
+            &[],
             &[],
             msg.streaming,
             false,
@@ -1058,6 +1067,7 @@ fn transcript_block(
                     index,
                     "Thinking",
                     body,
+                    &[],
                     &[],
                     msg.streaming,
                     false,
@@ -1077,6 +1087,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     body,
+                    &[],
                     &[],
                     msg.streaming,
                     false,
@@ -1103,6 +1114,7 @@ fn transcript_block(
                     "Mitsuro",
                     command,
                     &[],
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1125,6 +1137,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     paths_summary,
+                    &[],
                     &[],
                     msg.streaming,
                     false,
@@ -1294,6 +1307,7 @@ fn chat_bubble(
     label: &str,
     body: &str,
     images: &[DemoImageAttachment],
+    audio: &[DemoAudioAttachment],
     streaming: bool,
     is_user: bool,
     _simple: bool,
@@ -1347,6 +1361,9 @@ fn chat_bubble(
                 .when(!images.is_empty(), |this| {
                     this.child(user_image_grid(index, images))
                 })
+                .when(!audio.is_empty(), |this| {
+                    this.child(user_audio_attachments(index, audio))
+                })
                 .when(!display.is_empty(), |this| {
                     this.child(if is_user {
                         div()
@@ -1379,6 +1396,73 @@ fn chat_bubble(
                     )
                 }),
         )
+}
+
+fn user_audio_attachments(index: u64, audio: &[DemoAudioAttachment]) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(("message-audio", index))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(audio.iter().enumerate().map(|(audio_index, attachment)| {
+            let detail = match &attachment.source {
+                DemoAudioSource::LocalPath(path) => Path::new(path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| format!("Local {extension} audio"))
+                    .unwrap_or_else(|| "Local audio".to_owned()),
+                DemoAudioSource::Url(url) => url
+                    .split_once("://")
+                    .map(|(scheme, _)| format!("Remote {scheme} audio"))
+                    .unwrap_or_else(|| "Remote audio".to_owned()),
+                DemoAudioSource::Embedded {
+                    media_type,
+                    byte_len,
+                } => format!("{media_type} · {} KiB", byte_len.div_ceil(1024)),
+                DemoAudioSource::Unavailable(reason) => reason.clone(),
+            };
+            div()
+                .id(("message-audio-item", index * 10 + audio_index as u64))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .max_w(px(320.0))
+                .px(px(10.0))
+                .py(px(7.0))
+                .rounded(px(9.0))
+                .bg(colors.bg_sidebar)
+                .border_1()
+                .border_color(colors.border_subtle)
+                .child(
+                    Icon::empty()
+                        .path("icons/audio-lines.svg")
+                        .with_size(px(15.0))
+                        .text_color(colors.text_tertiary),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_secondary)
+                                .overflow_hidden()
+                                .child(attachment.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child(detail),
+                        ),
+                )
+                .into_any_element()
+        }))
 }
 
 fn user_image_grid(index: u64, images: &[DemoImageAttachment]) -> impl IntoElement {

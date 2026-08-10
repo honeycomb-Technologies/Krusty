@@ -15,8 +15,8 @@ use crate::{
     LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
     ReviewTarget, SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams,
     ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptImageSource, TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams,
-    TurnSteerParams, TurnStreamEvent,
+    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptRole,
+    TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +51,18 @@ pub struct ConversationMessage {
     pub file_change: Option<FileChangeFields>,
     pub activity: Option<ActivityFields>,
     pub images: Vec<ConversationImage>,
+    pub audio: Vec<ConversationAudio>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationImage {
+    LocalPath(String),
+    Url(String),
+    Embedded { media_type: String, data: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationAudio {
     LocalPath(String),
     Url(String),
     Embedded { media_type: String, data: String },
@@ -87,6 +95,17 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
                 }
             })
             .collect(),
+        audio: message
+            .audio
+            .into_iter()
+            .map(|audio| match audio.source {
+                TranscriptAudioSource::LocalPath(path) => ConversationAudio::LocalPath(path),
+                TranscriptAudioSource::Url(url) => ConversationAudio::Url(url),
+                TranscriptAudioSource::Embedded { media_type, data } => {
+                    ConversationAudio::Embedded { media_type, data }
+                }
+            })
+            .collect(),
     }
 }
 
@@ -109,6 +128,7 @@ pub struct ProductModel {
     pub is_default: bool,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ProductReasoningEffort>,
+    pub input_modalities: Vec<String>,
     pub upgrade: Option<String>,
 }
 
@@ -137,6 +157,7 @@ pub struct ProductTurn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductAttachment {
     LocalImage { path: String },
+    LocalAudio { path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +375,17 @@ impl DesktopBackend {
         timeout: Duration,
     ) -> Result<LiveTurnOutcome> {
         self.ensure_session_origin(&request.session_id)?;
+        if request
+            .attachments
+            .iter()
+            .any(|attachment| matches!(attachment, ProductAttachment::LocalAudio { .. }))
+            && !self.capabilities().audio_attachments
+        {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not accept audio attachments",
+                self.kind().id()
+            )));
+        }
         let params = product_turn_params(request);
         self.run_turn_with_bridge_blocking(params, event_tx, bridge, timeout)
     }
@@ -402,6 +434,7 @@ fn product_turn_params(request: ProductTurn) -> TurnStartParams {
     for attachment in request.attachments {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
+            ProductAttachment::LocalAudio { path } => params.push_local_audio(path),
         }
     }
     params
@@ -555,6 +588,7 @@ impl ProductBackend for DesktopBackend {
                         description: effort.description,
                     })
                     .collect(),
+                input_modalities: model.input_modalities,
                 upgrade: model.upgrade,
             })
             .collect())
@@ -864,6 +898,47 @@ mod tests {
     }
 
     #[test]
+    fn product_turn_preserves_local_audio_for_codex_wire_input() {
+        let params = product_turn_params(ProductTurn {
+            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+            text: "transcribe".to_owned(),
+            model: Some("gpt-5".to_owned()),
+            reasoning_effort: None,
+            attachments: vec![ProductAttachment::LocalAudio {
+                path: "/tmp/recording.wav".to_owned(),
+            }],
+        });
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["input"][1]["type"], "localAudio");
+        assert_eq!(value["input"][1]["path"], "/tmp/recording.wav");
+    }
+
+    #[test]
+    fn mitsuro_rejects_product_audio_before_network_io() {
+        let backend = DesktopBackend::mitsuro_from_env().expect("default Mitsuro backend");
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let error = backend
+            .run_product_turn_with_bridge_blocking(
+                ProductTurn {
+                    session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                    text: "transcribe".to_owned(),
+                    model: None,
+                    reasoning_effort: None,
+                    attachments: vec![ProductAttachment::LocalAudio {
+                        path: "/tmp/recording.wav".to_owned(),
+                    }],
+                },
+                event_tx,
+                Arc::new(LiveApprovalBridge::new()),
+                Duration::from_secs(1),
+            )
+            .expect_err("Mitsuro audio must fail before network I/O");
+        assert!(error
+            .to_string()
+            .contains("does not accept audio attachments"));
+    }
+
+    #[test]
     fn product_turn_rejects_a_session_from_another_backend_before_io() {
         let backend = DesktopBackend::codex_stdio();
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
@@ -933,6 +1008,7 @@ mod tests {
             file_change: None,
             activity: None,
             images: Vec::new(),
+            audio: Vec::new(),
         });
 
         assert_eq!(message.role, MessageRole::CommandExecution);

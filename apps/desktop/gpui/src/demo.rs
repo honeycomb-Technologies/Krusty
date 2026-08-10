@@ -19,6 +19,20 @@ pub enum DemoImageSource {
     Unavailable(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct DemoAudioAttachment {
+    pub label: String,
+    pub source: DemoAudioSource,
+}
+
+#[derive(Clone, Debug)]
+pub enum DemoAudioSource {
+    LocalPath(String),
+    Url(String),
+    Embedded { media_type: String, byte_len: usize },
+    Unavailable(String),
+}
+
 /// One transcript block in the main column (user, assistant, tools, plan, …).
 #[derive(Clone, Debug)]
 pub struct DemoMessage {
@@ -34,6 +48,7 @@ pub enum DemoMessageKind {
     User {
         body: String,
         images: Vec<DemoImageAttachment>,
+        audio: Vec<DemoAudioAttachment>,
     },
     Assistant {
         body: String,
@@ -72,17 +87,23 @@ impl DemoMessage {
             kind: DemoMessageKind::User {
                 body: body.into(),
                 images: Vec::new(),
+                audio: Vec::new(),
             },
             item_id: None,
             streaming: false,
         }
     }
 
-    pub fn user_with_images(body: impl Into<String>, images: Vec<DemoImageAttachment>) -> Self {
+    pub fn user_with_attachments(
+        body: impl Into<String>,
+        images: Vec<DemoImageAttachment>,
+        audio: Vec<DemoAudioAttachment>,
+    ) -> Self {
         Self {
             kind: DemoMessageKind::User {
                 body: body.into(),
                 images,
+                audio,
             },
             item_id: None,
             streaming: false,

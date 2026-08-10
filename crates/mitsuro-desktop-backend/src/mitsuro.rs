@@ -610,6 +610,11 @@ async fn turn_input_content(input: &[Value]) -> Result<(String, Vec<ContentBlock
                     },
                 });
             }
+            Some("audio" | "localAudio") => {
+                return Err(AgentError::NotImplemented(
+                    "Mitsuro HTTP does not accept audio input".to_owned(),
+                ));
+            }
             _ => {}
         }
     }
@@ -892,6 +897,10 @@ impl AgentBackend for MitsuroServerBackend {
             .models
             .into_iter()
             .map(|model| {
+                let mut input_modalities = vec!["text".to_owned()];
+                if model.supports_vision {
+                    input_modalities.push("image".to_owned());
+                }
                 let default_reasoning_effort = model
                     .default_reasoning_level
                     .and_then(mitsuro_reasoning_effort_name)
@@ -916,6 +925,7 @@ impl AgentBackend for MitsuroServerBackend {
                     is_default: default.as_deref() == Some(model.id.as_str()),
                     default_reasoning_effort,
                     supported_reasoning_efforts,
+                    input_modalities,
                     upgrade: None,
                 }
             })
@@ -1519,6 +1529,19 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_audio_input_in_the_low_level_mitsuro_adapter() {
+        let error = turn_input_content(&[serde_json::json!({
+            "type": "localAudio",
+            "path": "/tmp/recording.wav"
+        })])
+        .await
+        .expect_err("Mitsuro content has no audio block");
+        assert!(error
+            .to_string()
+            .contains("Mitsuro HTTP does not accept audio input"));
     }
 
     #[test]

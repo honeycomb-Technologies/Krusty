@@ -59,16 +59,22 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Codex sign-in launches the real app-server OAuth URL and remains pending until the
   matching completion notification arrives. The user can reopen or cancel that exact
   login. Fixture device codes remain confined to explicit fixture mode.
-- The composer exposes only implemented behavior: text entry, real image attachments,
-  Send, Stop, backend-scoped model cycling, and model-advertised reasoning-effort
+- The composer exposes only implemented behavior: text entry, real model-gated image
+  and audio-file attachments, Send, Stop, backend-scoped model cycling, and
+  model-advertised reasoning-effort
   cycling. The selected effort is stored per backend/model; Codex receives the exact
   `turn/start.effort` value and Mitsuro receives the equivalent `thinking_enabled`
   value. GPUI's native path prompt supplies
   absolute image paths; Codex receives `localImage` input and Mitsuro receives encoded
   image content. Reopened threads restore local-path, remote, and embedded image inputs
   as real transcript thumbnails; missing or unsafe image data remains visible as an
-  unavailable attachment instead of disappearing. Voice, project, and access stubs are
-  not presented as controls.
+  unavailable attachment instead of disappearing. For a Codex model that advertises
+  the `audio` input modality, the same picker accepts local audio files and emits the
+  schema-exact `localAudio` input. Reopened local, remote, and embedded audio remains
+  visible as attachment metadata. Mitsuro's HTTP content contract has no audio block,
+  so the control is hidden and both product and low-level adapters reject audio before
+  network I/O. Microphone recording, project, and access stubs are not presented as
+  controls.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL
