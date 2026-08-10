@@ -10,7 +10,10 @@ use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, CommandExecParams,
     CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
     CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
-    CommandExecWriteResponse, ConfigRequirementsReadResponse, ExternalAgentConfigDetectParams,
+    CommandExecWriteResponse, ConfigBatchWriteParams, ConfigRequirementsReadResponse,
+    ConfigWriteResponse, ExperimentalFeatureEnablementSetParams,
+    ExperimentalFeatureEnablementSetResponse, ExperimentalFeatureListParams,
+    ExperimentalFeatureListResponse, ExternalAgentConfigDetectParams,
     ExternalAgentConfigDetectResponse, ExternalAgentConfigImportHistoriesReadResponse,
     ExternalAgentConfigImportHistoryRecordParams, ExternalAgentConfigImportHistoryRecordResponse,
     ExternalAgentConfigImportParams, ExternalAgentConfigImportResponse, FsCopyParams,
@@ -103,6 +106,7 @@ pub struct BackendCapabilities {
     pub config_requirements: bool,
     pub model_provider_capabilities: bool,
     pub external_agent_import: bool,
+    pub experimental_features: bool,
     pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
@@ -147,6 +151,7 @@ impl BackendCapabilities {
             config_requirements: true,
             model_provider_capabilities: true,
             external_agent_import: true,
+            experimental_features: true,
             remote_control: true,
             hive: false,
             schedules: false,
@@ -194,6 +199,7 @@ impl BackendCapabilities {
             config_requirements: false,
             model_provider_capabilities: false,
             external_agent_import: false,
+            experimental_features: false,
             remote_control: false,
             hive: true,
             schedules: true,
@@ -544,6 +550,42 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.model_provider_capabilities_read(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP exposes capabilities through its own model catalog".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_experimental_features(
+        &self,
+        params: ExperimentalFeatureListParams,
+    ) -> Result<ExperimentalFeatureListResponse> {
+        match self {
+            Self::Codex(backend) => backend.experimental_feature_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex experimental-feature catalog".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn set_experimental_feature_enablement(
+        &self,
+        params: ExperimentalFeatureEnablementSetParams,
+    ) -> Result<ExperimentalFeatureEnablementSetResponse> {
+        match self {
+            Self::Codex(backend) => backend.experimental_feature_enablement_set(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex runtime feature enablement".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn write_config_batch(
+        &self,
+        params: ConfigBatchWriteParams,
+    ) -> Result<ConfigWriteResponse> {
+        match self {
+            Self::Codex(backend) => backend.config_batch_write(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex configuration writes".to_owned(),
             )),
         }
     }
@@ -1039,6 +1081,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().model_provider_capabilities);
         assert!(BackendCapabilities::codex().external_agent_import);
         assert!(!BackendCapabilities::mitsuro().external_agent_import);
+        assert!(BackendCapabilities::codex().experimental_features);
+        assert!(!BackendCapabilities::mitsuro().experimental_features);
         assert!(BackendCapabilities::codex().file_mutations);
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);

@@ -64,6 +64,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   local app-server does not expose Claude Cowork as a distinct migration selector, so
   GPUI does not present a fake Cowork action. Mitsuro HTTP and explicit fixture mode
   show honest unsupported/fixture states.
+- General → Experimental features lists only user-facing beta rows returned by
+  `experimentalFeature/list`. Toggle changes use the same persistent
+  `features.<name>` configuration path as the reference app through typed atomic
+  `config/batchWrite`, then re-read effective state. The prior hard-coded Plugins and
+  Request user input toggles were local decoration and have been removed. Mitsuro HTTP
+  and fixture mode show explicit unsupported/fixture states.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.

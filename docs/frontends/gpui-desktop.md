@@ -72,6 +72,7 @@ backend or are shown as unavailable.
 | Remote Control | Unsupported; explicit capability boundary | Live status, enable/disable, pairing, authorized-device list/revoke, and status lifecycle | Explicit fixture state; no invented devices |
 | External-agent import | Unsupported; explicit capability boundary | Live Claude Code/Cursor detection, explicit review/confirmation, import lifecycle, and completed history | Explicit fixture state; no invented sources or history |
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Permission profiles, requirements, and provider capabilities are live reads; the Full access preference only controls composer visibility; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
+| Experimental features | Unsupported; explicit capability boundary | User-facing beta catalog from `experimentalFeature/list`; atomic persistent toggles through `config/batchWrite` and effective-state refresh | Explicit fixture state; no invented toggles |
 
 Unsupported operations must return `NotImplemented` or be disabled through
 `BackendCapabilities`. A method name appearing in the Codex inventory does not make it
@@ -87,8 +88,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 91 typed adapters
-and 42 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 94 typed adapters
+and 39 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -129,6 +130,11 @@ work, not as feature completion; the matrix test must change with each typed ada
   migration items, requires confirmation before mutation, follows typed progress and
   completion notifications, and refreshes server-owned history. Mitsuro and fixture
   modes cannot inherit or synthesize import sources or completed history.
+- General Settings reads the paginated typed `experimentalFeature/list` catalog and
+  renders only beta rows with server-supplied display copy. Changes persist to the
+  canonical `features.<name>` key through typed `config/batchWrite` with user-config
+  reload, then refresh effective enablement. Mitsuro and fixture modes never inherit
+  or synthesize Codex feature flags.
 - MCP servers advertising `notLoggedIn` expose a real Codex sign-in action. GPUI sends
   typed `mcpServer/oauth/login`, opens only the returned authorization URL, tracks the
   server name until `mcpServer/oauthLogin/completed`, and refreshes the live catalog.

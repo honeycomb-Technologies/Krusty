@@ -22,6 +22,26 @@ pub struct ConfigValueWriteParams {
     pub expected_version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEdit {
+    pub key_path: String,
+    pub value: Value,
+    pub merge_strategy: MergeStrategy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigBatchWriteParams {
+    pub edits: Vec<ConfigEdit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    #[serde(default)]
+    pub reload_user_config: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConfigWriteStatus {
@@ -123,5 +143,30 @@ mod tests {
         assert!(!valid_mcp_server_name(""));
         assert!(!valid_mcp_server_name("github.mcp"));
         assert!(!valid_mcp_server_name("github mcp"));
+    }
+
+    #[test]
+    fn batch_write_matches_generated_atomic_edit_shape() {
+        let params = ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "features.network_proxy".to_owned(),
+                value: Value::Bool(true),
+                merge_strategy: MergeStrategy::Upsert,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        };
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({
+                "edits": [{
+                    "keyPath": "features.network_proxy",
+                    "value": true,
+                    "mergeStrategy": "upsert"
+                }],
+                "reloadUserConfig": true
+            })
+        );
     }
 }

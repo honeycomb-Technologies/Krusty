@@ -26,11 +26,12 @@ use mitsuro_desktop_backend::{
     AppsListParams, BackendKind, BackendSelection, BackendSessionId, CancelLoginAccountParams,
     CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask,
     CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
-    CommandExecTerminateParams, CommandExecWriteParams, ConfigReadParams, ConfigRequirements,
-    ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
-    ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
-    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, ExternalAgentConfigDetectParams,
+    CommandExecTerminateParams, CommandExecWriteParams, ConfigBatchWriteParams, ConfigEdit,
+    ConfigReadParams, ConfigRequirements, ConfigWriteStatus, ConversationAudio, ConversationImage,
+    ConversationReference, ConversationReferenceKind, CreateSession, DesktopBackend,
+    EnvironmentAddParams, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, ExperimentalFeature,
+    ExperimentalFeatureListParams, ExternalAgentConfigDetectParams,
     ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistory,
     ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FixtureBackend,
     FsChangedNotification, FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry,
@@ -40,8 +41,8 @@ use mitsuro_desktop_backend::{
     HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
     LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpElicitationMode,
     McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
-    ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
+    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
+    MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
     ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
     PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
     PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
@@ -332,7 +333,6 @@ fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
     // General
     m.insert("full_access".into(), true);
     m.insert("bottom_panel".into(), true);
-    m.insert("prevent_sleep".into(), false);
     m.insert("suggested_prompts".into(), true);
     m.insert("show_context_usage".into(), false);
     m.insert("popout_standalone".into(), false);
@@ -1081,6 +1081,11 @@ pub struct MitsuroApp {
     external_agent_import_error: Option<String>,
     external_agent_import_in_progress: Option<String>,
     external_agent_import_confirmation: Option<String>,
+    /// Server-owned Codex feature catalog; only user-facing beta rows render.
+    experimental_features: Vec<ExperimentalFeature>,
+    experimental_features_state: SurfaceDataState,
+    experimental_features_error: Option<String>,
+    experimental_feature_mutation: Option<String>,
     /// Skills from `skills/list` (or fixture demo).
     skills: Vec<SkillMetadata>,
     /// Exact per-workspace catalog returned by Codex `hooks/list`.
@@ -1491,6 +1496,10 @@ impl MitsuroApp {
             external_agent_import_error: None,
             external_agent_import_in_progress: None,
             external_agent_import_confirmation: None,
+            experimental_features: Vec::new(),
+            experimental_features_state: SurfaceDataState::Loading,
+            experimental_features_error: None,
+            experimental_feature_mutation: None,
             skills: Vec::new(),
             hooks: Vec::new(),
             hooks_state: SurfaceDataState::Loading,
@@ -4586,6 +4595,101 @@ impl MitsuroApp {
 
     pub fn external_agent_import_confirmation(&self) -> Option<&str> {
         self.external_agent_import_confirmation.as_deref()
+    }
+
+    pub fn experimental_features(&self) -> &[ExperimentalFeature] {
+        &self.experimental_features
+    }
+
+    pub fn experimental_features_state(&self) -> SurfaceDataState {
+        self.experimental_features_state
+    }
+
+    pub fn experimental_features_error(&self) -> Option<&str> {
+        self.experimental_features_error.as_deref()
+    }
+
+    pub fn experimental_feature_mutation(&self) -> Option<&str> {
+        self.experimental_feature_mutation.as_deref()
+    }
+
+    pub fn set_experimental_feature(
+        &mut self,
+        feature_name: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.experimental_feature_mutation.is_some()
+            || !self
+                .experimental_features
+                .iter()
+                .any(|feature| feature.name == feature_name && feature.is_user_facing_beta())
+        {
+            return;
+        }
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().experimental_features)
+        else {
+            return;
+        };
+        self.experimental_feature_mutation = Some(feature_name.clone());
+        self.experimental_features_error = None;
+        self.status_line = format!("Experimental feature · updating {feature_name}").into();
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let feature_for_request = feature_name.clone();
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        let response = runner
+                            .write_config_batch(ConfigBatchWriteParams {
+                                edits: vec![ConfigEdit {
+                                    key_path: format!("features.{feature_for_request}"),
+                                    value: serde_json::Value::Bool(enabled),
+                                    merge_strategy: MergeStrategy::Upsert,
+                                }],
+                                file_path: None,
+                                expected_version: None,
+                                reload_user_config: true,
+                            })
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let features = list_all_experimental_features(runner.as_ref()).await?;
+                        Ok::<_, String>((response, features))
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.experimental_feature_mutation = None;
+                match result {
+                    Ok((response, features)) => {
+                        app.experimental_features = features;
+                        app.experimental_features_state = SurfaceDataState::Live;
+                        app.experimental_features_error = None;
+                        app.status_line = match response.status {
+                            ConfigWriteStatus::Ok => format!(
+                                "Experimental feature · {feature_name} {}",
+                                if enabled { "enabled" } else { "disabled" }
+                            )
+                            .into(),
+                            ConfigWriteStatus::OkOverridden => format!(
+                                "Experimental feature · {feature_name} saved but overridden by policy"
+                            )
+                            .into(),
+                        };
+                    }
+                    Err(error) => {
+                        app.experimental_features_state = SurfaceDataState::Error;
+                        app.experimental_features_error = Some(error.clone());
+                        app.status_line = format!("Experimental feature failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn request_external_agent_import(&mut self, provider_id: String, cx: &mut Context<Self>) {
@@ -11198,6 +11302,10 @@ impl MitsuroApp {
         self.external_agent_import_error = None;
         self.external_agent_import_in_progress = None;
         self.external_agent_import_confirmation = None;
+        self.experimental_features.clear();
+        self.experimental_features_state = SurfaceDataState::Fixture;
+        self.experimental_features_error = None;
+        self.experimental_feature_mutation = None;
 
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -11385,6 +11493,14 @@ impl MitsuroApp {
         self.external_agent_import_error = None;
         self.external_agent_import_in_progress = None;
         self.external_agent_import_confirmation = None;
+        self.experimental_features.clear();
+        self.experimental_features_state = match kind {
+            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
+            BackendKind::Fixture => SurfaceDataState::Fixture,
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
+        };
+        self.experimental_features_error = None;
+        self.experimental_feature_mutation = None;
         self.skills.clear();
         self.hooks.clear();
         self.hooks_state = SurfaceDataState::Loading;
@@ -11574,6 +11690,7 @@ impl MitsuroApp {
                             config_snip,
                             permissions,
                             external_agent_import,
+                            experimental_features,
                             skills,
                             hooks,
                             connector_apps,
@@ -11679,6 +11796,23 @@ impl MitsuroApp {
                                 app.external_agent_import_histories.clear();
                                 app.external_agent_import_state = SurfaceDataState::Error;
                                 app.external_agent_import_error = Some(error);
+                            }
+                        }
+                        match experimental_features {
+                            Ok(Some(features)) => {
+                                app.experimental_features = features;
+                                app.experimental_features_state = SurfaceDataState::Live;
+                                app.experimental_features_error = None;
+                            }
+                            Ok(None) => {
+                                app.experimental_features.clear();
+                                app.experimental_features_state = SurfaceDataState::Unsupported;
+                                app.experimental_features_error = None;
+                            }
+                            Err(error) => {
+                                app.experimental_features.clear();
+                                app.experimental_features_state = SurfaceDataState::Error;
+                                app.experimental_features_error = Some(error);
                             }
                         }
                         app.apply_skills(skills);
@@ -12988,6 +13122,7 @@ struct BackendBootstrap {
     config_snip: Option<String>,
     permissions: Result<Option<PermissionsSnapshot>, String>,
     external_agent_import: Result<Option<ExternalAgentImportSnapshot>, String>,
+    experimental_features: Result<Option<Vec<ExperimentalFeature>>, String>,
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
     connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
@@ -13082,6 +13217,11 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         } else {
             Ok(None)
         };
+        let experimental_features = if b.capabilities().experimental_features {
+            list_all_experimental_features(b.as_ref()).await.map(Some)
+        } else {
+            Ok(None)
+        };
         // skills/list best-effort.
         let skills = match b.list_product_skills().await {
             Ok(skills) => skills
@@ -13146,6 +13286,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             config_snip,
             permissions,
             external_agent_import,
+            experimental_features,
             skills,
             hooks,
             connector_apps,
@@ -13157,6 +13298,33 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             schedules,
         })
     })
+}
+
+async fn list_all_experimental_features(
+    backend: &DesktopBackend,
+) -> Result<Vec<ExperimentalFeature>, String> {
+    let mut features = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    loop {
+        let response = backend
+            .list_experimental_features(ExperimentalFeatureListParams {
+                cursor: cursor.clone(),
+                limit: Some(100),
+                thread_id: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        features.extend(response.data);
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("experimentalFeature/list repeated a pagination cursor".to_owned());
+        }
+        cursor = Some(next_cursor);
+    }
+    Ok(features)
 }
 
 async fn read_external_agent_import_snapshot(

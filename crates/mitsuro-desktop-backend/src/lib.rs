@@ -8,6 +8,7 @@ pub mod codex;
 pub mod command;
 pub mod desktop;
 pub mod environment;
+pub mod experimental_features;
 pub mod extensions;
 pub mod external_agent_config;
 pub mod fixture;
@@ -77,6 +78,11 @@ pub use environment::{
     EnvironmentKind, EnvironmentShellInfo, EnvironmentStatusKind, EnvironmentStatusParams,
     EnvironmentStatusResponse, EnvironmentSummary, ModeKind,
 };
+pub use experimental_features::{
+    ExperimentalFeature, ExperimentalFeatureEnablementSetParams,
+    ExperimentalFeatureEnablementSetResponse, ExperimentalFeatureListParams,
+    ExperimentalFeatureListResponse, ExperimentalFeatureStage,
+};
 pub use extensions::{
     fixture_demo_mcp_servers, fixture_demo_plugin_read, fixture_demo_plugins,
     fixture_demo_plugins_installed, fixture_mcp_tool_call, ListMcpServerStatusParams,
@@ -131,9 +137,9 @@ pub use mcp_auth::{
     McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerOauthLoginResponse,
 };
 pub use mcp_config::{
-    valid_mcp_server_name, ConfigMcpServerReloadResponse, ConfigValueWriteParams,
-    ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams, McpServerTransportConfig,
-    MergeStrategy,
+    valid_mcp_server_name, ConfigBatchWriteParams, ConfigEdit, ConfigMcpServerReloadResponse,
+    ConfigValueWriteParams, ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams,
+    McpServerTransportConfig, MergeStrategy,
 };
 pub use methods::{
     client_method_coverage, client_methods_txt_path, is_known_client_method,

@@ -1054,6 +1054,14 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("config/value/write", Some(value)).await
     }
 
+    async fn config_batch_write(
+        &self,
+        params: crate::ConfigBatchWriteParams,
+    ) -> Result<crate::ConfigWriteResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("config/batchWrite", Some(value)).await
+    }
+
     async fn config_mcp_server_reload(&self) -> Result<crate::ConfigMcpServerReloadResponse> {
         self.request_typed("config/mcpServer/reload", None).await
     }
@@ -1107,6 +1115,24 @@ impl AgentBackend for CodexAppServerBackend {
     ) -> Result<crate::ExternalAgentConfigImportHistoryRecordResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("externalAgentConfig/import/recordHistory", Some(value))
+            .await
+    }
+
+    async fn experimental_feature_list(
+        &self,
+        params: crate::ExperimentalFeatureListParams,
+    ) -> Result<crate::ExperimentalFeatureListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("experimentalFeature/list", Some(value))
+            .await
+    }
+
+    async fn experimental_feature_enablement_set(
+        &self,
+        params: crate::ExperimentalFeatureEnablementSetParams,
+    ) -> Result<crate::ExperimentalFeatureEnablementSetResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("experimentalFeature/enablement/set", Some(value))
             .await
     }
 
@@ -2225,6 +2251,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recorded.import_id, "import-2");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn experimental_feature_and_batch_write_methods_match_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "experimentalFeature/list",
+                "experimentalFeature/enablement/set",
+                "config/batchWrite",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "experimentalFeature/list" => {
+                        assert_eq!(request["params"], serde_json::json!({"limit": 100}));
+                        serde_json::json!({
+                            "data": [{
+                                "name": "network_proxy",
+                                "stage": "beta",
+                                "displayName": "Network proxy",
+                                "description": "Apply proxy restrictions.",
+                                "announcement": null,
+                                "enabled": false,
+                                "defaultEnabled": false
+                            }],
+                            "nextCursor": null
+                        })
+                    }
+                    "experimentalFeature/enablement/set" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"enablement": {"network_proxy": true}})
+                        );
+                        serde_json::json!({"enablement": {"network_proxy": true}})
+                    }
+                    "config/batchWrite" => {
+                        assert_eq!(
+                            request["params"]["edits"][0]["keyPath"],
+                            "features.network_proxy"
+                        );
+                        assert_eq!(request["params"]["reloadUserConfig"], true);
+                        serde_json::json!({
+                            "status": "ok",
+                            "version": "v2",
+                            "filePath": "/tmp/config.toml",
+                            "overriddenMetadata": null
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let features = backend
+            .experimental_feature_list(crate::ExperimentalFeatureListParams {
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(features.data[0].is_user_facing_beta());
+        let enabled = backend
+            .experimental_feature_enablement_set(crate::ExperimentalFeatureEnablementSetParams {
+                enablement: [("network_proxy".to_owned(), true)].into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(enabled.enablement.get("network_proxy"), Some(&true));
+        let write = backend
+            .config_batch_write(crate::ConfigBatchWriteParams {
+                edits: vec![crate::ConfigEdit {
+                    key_path: "features.network_proxy".to_owned(),
+                    value: serde_json::Value::Bool(true),
+                    merge_strategy: crate::MergeStrategy::Upsert,
+                }],
+                file_path: None,
+                expected_version: None,
+                reload_user_config: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(write.status, crate::ConfigWriteStatus::Ok);
         server.await.unwrap();
     }
 

@@ -12,7 +12,7 @@ use gpui::{
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{
-    AppInfo, BackendKind, HookMetadata, InstalledApp, RemoteControlClient,
+    AppInfo, BackendKind, ExperimentalFeature, HookMetadata, InstalledApp, RemoteControlClient,
     RemoteControlConnectionStatus,
 };
 
@@ -457,15 +457,6 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
                     cx,
                 ))
                 .child(card_divider())
-                .child(toggle_row(
-                    "Prevent sleep while running",
-                    "Keep your computer awake while Mitsuro is running a task",
-                    "prevent_sleep",
-                    false,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
                 .child(select_row(
                     "Speed",
                     "Choose how quickly Mitsuro runs across chats, subagents, and compaction",
@@ -578,26 +569,110 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
                 )),
         )
         .child(group_label("Experimental features (Beta)"))
+        .child(experimental_features_card(app, cx))
+}
+
+fn experimental_features_card(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let state = app.experimental_features_state();
+    let features = app
+        .experimental_features()
+        .iter()
+        .filter(|feature| feature.is_user_facing_beta())
+        .cloned()
+        .collect::<Vec<_>>();
+    let error = app.experimental_features_error().map(str::to_owned);
+    settings_card()
+        .children(features.iter().enumerate().flat_map(|(index, feature)| {
+            let mut rows = Vec::new();
+            if index > 0 {
+                rows.push(card_divider().into_any_element());
+            }
+            rows.push(experimental_feature_row(feature, app, cx).into_any_element());
+            rows
+        }))
+        .when(features.is_empty(), |this| {
+            let (title, detail) = match state {
+                SurfaceDataState::Loading => (
+                    "Loading experimental features",
+                    "Reading the current Codex feature catalog…",
+                ),
+                SurfaceDataState::Unsupported => (
+                    "Experimental features unavailable",
+                    "Mitsuro HTTP does not expose the Codex experimental-feature catalog.",
+                ),
+                SurfaceDataState::Fixture => (
+                    "No fixture features",
+                    "Offline fixture mode never invents experimental feature state.",
+                ),
+                SurfaceDataState::Error => (
+                    "Couldn’t load experimental features",
+                    error
+                        .as_deref()
+                        .unwrap_or("The app-server returned an unknown error."),
+                ),
+                SurfaceDataState::Live => (
+                    "No beta features available",
+                    "The active Codex app-server did not return any user-facing beta features.",
+                ),
+            };
+            this.child(empty_list_message(title, detail))
+        })
+}
+
+fn experimental_feature_row(
+    feature: &ExperimentalFeature,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let title = feature
+        .display_name
+        .clone()
+        .unwrap_or_else(|| feature.name.clone());
+    let subtitle = feature.description.clone().unwrap_or_default();
+    let name = feature.name.clone();
+    let enabled = feature.enabled;
+    let busy = app.experimental_feature_mutation().is_some();
+    let row_id = SharedId(format!("experimental-feature-{name}"));
+    div()
+        .id(row_id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .when(!busy, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.set_experimental_feature(name.clone(), !enabled, cx)
+                }))
+        })
+        .when(busy, |row| row.opacity(0.55))
         .child(
-            settings_card()
-                .child(toggle_row(
-                    "Plugins",
-                    "Enable the plugins experience in Mitsuro",
-                    "exp_plugins",
-                    true,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Request user input",
-                    "Allow Mitsuro to ask questions outside Plan mode. Changes apply only to new threads",
-                    "exp_request_user_input",
-                    false,
-                    app,
-                    cx,
-                )),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(subtitle),
+                ),
         )
+        .child(toggle_switch(enabled))
 }
 
 // ─── Linux desktop ──────────────────────────────────────────────────────────

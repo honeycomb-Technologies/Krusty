@@ -22,6 +22,10 @@ use crate::environment::{
     EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse,
     EnvironmentStatusParams, EnvironmentStatusResponse, EnvironmentSummary,
 };
+use crate::experimental_features::{
+    ExperimentalFeatureEnablementSetParams, ExperimentalFeatureEnablementSetResponse,
+    ExperimentalFeatureListParams, ExperimentalFeatureListResponse,
+};
 use crate::extensions::{
     ListMcpServerStatusParams, ListMcpServerStatusResponse, McpServerToolCallParams,
     McpServerToolCallResponse, PluginInstalledParams, PluginInstalledResponse, PluginListParams,
@@ -45,7 +49,8 @@ use crate::fs::{
 };
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::mcp_config::{
-    ConfigMcpServerReloadResponse, ConfigValueWriteParams, ConfigWriteResponse,
+    ConfigBatchWriteParams, ConfigMcpServerReloadResponse, ConfigValueWriteParams,
+    ConfigWriteResponse,
 };
 use crate::methods::is_known_client_method;
 use crate::permissions::{
@@ -143,6 +148,16 @@ pub trait AgentBackend: Send + Sync {
         ))
     }
 
+    /// Persist several configuration edits atomically through `config/batchWrite`.
+    async fn config_batch_write(
+        &self,
+        _params: ConfigBatchWriteParams,
+    ) -> Result<ConfigWriteResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "batch configuration writes are not implemented by this backend".to_owned(),
+        ))
+    }
+
     /// Reload configured MCP servers after a successful config write.
     async fn config_mcp_server_reload(&self) -> Result<ConfigMcpServerReloadResponse> {
         Err(crate::AgentError::NotImplemented(
@@ -213,6 +228,26 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<ExternalAgentConfigImportHistoryRecordResponse> {
         Err(crate::AgentError::NotImplemented(
             "external-agent import history recording is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// List the complete feature-flag catalog and effective enablement.
+    async fn experimental_feature_list(
+        &self,
+        _params: ExperimentalFeatureListParams,
+    ) -> Result<ExperimentalFeatureListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "experimental feature listing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Apply process-wide runtime feature enablement without inventing persistence.
+    async fn experimental_feature_enablement_set(
+        &self,
+        _params: ExperimentalFeatureEnablementSetParams,
+    ) -> Result<ExperimentalFeatureEnablementSetResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "experimental feature enablement is not implemented by this backend".to_owned(),
         ))
     }
 
