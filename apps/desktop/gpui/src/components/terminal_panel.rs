@@ -10,8 +10,9 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
+use mitsuro_desktop_backend::{BackendKind, ProductProcess, ThreadBackgroundTerminal};
 
-use crate::app::{MitsuroApp, TerminalSessionStatus};
+use crate::app::{MitsuroApp, SurfaceDataState, TerminalSessionStatus};
 use crate::theme;
 
 /// Full-height Terminal panel: command bar + scrollable output + stdin + kill.
@@ -42,9 +43,327 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
             app.terminal_interactive_available(),
             cx,
         ))
+        .child(background_processes_panel(app, cx))
         .child(output_scroll(session.output.as_ref(), handle.as_deref()))
         .child(stdin_bar(app, &stdin_input, running, cx))
         .child(status_footer(status, handle.as_deref(), session.exit_code))
+}
+
+fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> gpui::AnyElement {
+    let colors = theme::colors();
+    let kind = app.terminal_background_backend_kind();
+    let mutating = app.background_process_mutation_in_progress();
+    let codex_entries = app.thread_background_terminals();
+    let mitsuro_entries = app.tracked_background_processes();
+    let title = match kind {
+        Some(BackendKind::CodexStdio) => app
+            .terminal_background_thread_label()
+            .map(|thread| format!("Thread background terminals · {thread}"))
+            .unwrap_or_else(|| "Thread background terminals".to_owned()),
+        Some(BackendKind::MitsuroHttp) => "Mitsuro tracked processes".to_owned(),
+        _ => "Background processes".to_owned(),
+    };
+    let count = match kind {
+        Some(BackendKind::CodexStdio) => codex_entries.len(),
+        Some(BackendKind::MitsuroHttp) => mitsuro_entries.len(),
+        _ => 0,
+    };
+    let can_clean = kind == Some(BackendKind::CodexStdio)
+        && app.terminal_background_thread_label().is_some()
+        && mutating.is_none();
+
+    let mut list = div()
+        .id("terminal-background-list")
+        .flex()
+        .flex_col()
+        .max_h(px(190.0))
+        .overflow_y_scroll();
+    match kind {
+        Some(BackendKind::CodexStdio) => {
+            if app.thread_background_terminals_state() == SurfaceDataState::Loading {
+                list = list.child(background_empty("Loading thread processes…"));
+            } else if app.thread_background_terminals_state() == SurfaceDataState::Error {
+                list = list.child(background_empty(
+                    "The selected thread's process catalog could not be loaded.",
+                ));
+            } else if app.terminal_background_thread_label().is_none() {
+                list = list.child(background_empty(
+                    "Select a Codex thread, then return here to inspect its shell processes.",
+                ));
+            } else if codex_entries.is_empty() {
+                list = list.child(background_empty(
+                    "No background terminals are retained by this thread.",
+                ));
+            } else {
+                for (index, terminal) in codex_entries.iter().enumerate() {
+                    list = list.child(codex_background_row(index, terminal, mutating, cx));
+                }
+            }
+        }
+        Some(BackendKind::MitsuroHttp) => {
+            if app.tracked_background_processes_state() == SurfaceDataState::Loading {
+                list = list.child(background_empty("Loading Mitsuro tracked processes…"));
+            } else if app.tracked_background_processes_state() == SurfaceDataState::Error {
+                list = list.child(background_empty(
+                    "The Mitsuro process catalog could not be loaded.",
+                ));
+            } else if mitsuro_entries.is_empty() {
+                list = list.child(background_empty(
+                    "No processes are currently tracked by the Mitsuro server.",
+                ));
+            } else {
+                for (index, process) in mitsuro_entries.iter().enumerate() {
+                    list = list.child(mitsuro_background_row(index, process, mutating, cx));
+                }
+            }
+        }
+        _ => {
+            list = list.child(background_empty(
+                "Connect a live backend to inspect background processes.",
+            ));
+        }
+    }
+
+    div()
+        .id("terminal-background-processes")
+        .flex()
+        .flex_col()
+        .border_b_1()
+        .border_color(colors.border)
+        .bg(colors.bg_main)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(14.0))
+                .py(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.text_secondary)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child(count.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(kind == Some(BackendKind::CodexStdio), |this| {
+                            this.child(
+                                compact_action("terminal-background-clean", "Clean", can_clean)
+                                    .when(can_clean, |button| {
+                                        button.on_click(cx.listener(|app, _, _, cx| {
+                                            app.clean_thread_background_terminals(cx);
+                                        }))
+                                    }),
+                            )
+                        })
+                        .child(
+                            compact_action(
+                                "terminal-background-refresh",
+                                "Refresh",
+                                mutating.is_none(),
+                            )
+                            .when(mutating.is_none(), |button| {
+                                button.on_click(cx.listener(|app, _, _, cx| {
+                                    app.refresh_terminal_backgrounds(cx);
+                                }))
+                            }),
+                        ),
+                ),
+        )
+        .child(list)
+        .into_any_element()
+}
+
+fn background_empty(message: &'static str) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .px(px(14.0))
+        .py(px(10.0))
+        .text_xs()
+        .text_color(colors.text_tertiary)
+        .child(message)
+}
+
+fn compact_action(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_button_secondary)
+        .text_xs()
+        .text_color(if enabled {
+            colors.text_secondary
+        } else {
+            colors.text_tertiary
+        })
+        .child(label)
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+        })
+}
+
+fn codex_background_row(
+    index: usize,
+    terminal: &ThreadBackgroundTerminal,
+    mutating: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let process_id = terminal.process_id.clone();
+    let enabled = mutating.is_none();
+    let pid = terminal
+        .os_pid
+        .map(|pid| format!("pid {pid}"))
+        .unwrap_or_else(|| "pid unavailable".to_owned());
+    let cpu = terminal
+        .cpu_percent
+        .map(|value| format!("{value:.1}% CPU"))
+        .unwrap_or_else(|| "CPU unavailable".to_owned());
+    let memory = terminal
+        .rss_kb
+        .map(format_memory_kb)
+        .unwrap_or_else(|| "memory unavailable".to_owned());
+    background_row_shell(
+        ("terminal-background", index),
+        terminal.command.clone(),
+        format!("{} · {pid} · {cpu} · {memory}", terminal.cwd),
+        compact_action(
+            ("terminal-background-terminate", index),
+            if mutating == Some(terminal.process_id.as_str()) {
+                "Stopping…"
+            } else {
+                "Terminate"
+            },
+            enabled,
+        )
+        .when(enabled, |button| {
+            button.on_click(cx.listener(move |app, _, _, cx| {
+                app.terminate_background_process(process_id.clone(), cx);
+            }))
+        }),
+        colors,
+    )
+}
+
+fn mitsuro_background_row(
+    index: usize,
+    process: &ProductProcess,
+    mutating: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let process_id = process.id.clone();
+    let running =
+        matches!(process.status.as_str(), "running" | "suspended") && process.pid.is_some();
+    let enabled = running && mutating.is_none();
+    let pid = process
+        .pid
+        .map(|pid| format!("pid {pid}"))
+        .unwrap_or_else(|| "no pid".to_owned());
+    background_row_shell(
+        ("mitsuro-background", index),
+        process.command.clone(),
+        format!(
+            "{} · {} · {pid} · {}s",
+            process.working_dir, process.status, process.elapsed_secs
+        ),
+        compact_action(
+            ("mitsuro-background-terminate", index),
+            if mutating == Some(process.id.as_str()) {
+                "Stopping…"
+            } else if running {
+                "Kill"
+            } else {
+                "Finished"
+            },
+            enabled,
+        )
+        .when(enabled, |button| {
+            button.on_click(cx.listener(move |app, _, _, cx| {
+                app.terminate_background_process(process_id.clone(), cx);
+            }))
+        }),
+        colors,
+    )
+}
+
+fn background_row_shell(
+    id: impl Into<gpui::ElementId>,
+    command: String,
+    detail: String,
+    action: gpui::Stateful<gpui::Div>,
+    colors: theme::CodexColors,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(14.0))
+        .py(px(8.0))
+        .border_t_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(colors.text)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(command),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(detail),
+                ),
+        )
+        .child(action)
+}
+
+fn format_memory_kb(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.1} GiB", kb as f64 / (1024.0 * 1024.0))
+    } else if kb >= 1024 {
+        format!("{:.1} MiB", kb as f64 / 1024.0)
+    } else {
+        format!("{kb} KiB")
+    }
 }
 
 fn terminal_title_bar(status: &str, backend: &str) -> impl IntoElement {

@@ -43,6 +43,9 @@ use crate::plugin_mutations::{
 use crate::process::{
     ProcessKillParams, ProcessKillResponse, ProcessResizePtyParams, ProcessResizePtyResponse,
     ProcessSpawnParams, ProcessSpawnResponse, ProcessWriteStdinParams, ProcessWriteStdinResponse,
+    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
+    ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
+    ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
 };
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelListParams, ModelListResponse,
@@ -250,6 +253,36 @@ pub trait AgentBackend: Send + Sync {
 
     /// Terminate a running process by client-supplied handle.
     async fn process_kill(&self, params: ProcessKillParams) -> Result<ProcessKillResponse>;
+
+    /// List shell processes retained by one Codex thread.
+    async fn thread_background_terminals_list(
+        &self,
+        _params: ThreadBackgroundTerminalsListParams,
+    ) -> Result<ThreadBackgroundTerminalsListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread background-terminal listing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Remove completed background-terminal records for one Codex thread.
+    async fn thread_background_terminals_clean(
+        &self,
+        _params: ThreadBackgroundTerminalsCleanParams,
+    ) -> Result<ThreadBackgroundTerminalsCleanResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread background-terminal cleanup is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Terminate one thread-owned background terminal by process id.
+    async fn thread_background_terminals_terminate(
+        &self,
+        _params: ThreadBackgroundTerminalsTerminateParams,
+    ) -> Result<ThreadBackgroundTerminalsTerminateResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread background-terminal termination is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// List direct children of a directory via `fs/readDirectory`.
     async fn fs_read_directory(

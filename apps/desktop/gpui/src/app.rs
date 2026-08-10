@@ -45,9 +45,11 @@ use mitsuro_desktop_backend::{
     ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
     RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
     ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
-    SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
-    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
-    ThreadGoalStatus, ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
+    SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
+    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsListParams,
+    ThreadBackgroundTerminalsTerminateParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
     ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
     ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
     FIXTURE_PROJECT_ROOT,
@@ -1126,8 +1128,15 @@ pub struct MitsuroApp {
     terminal_stdin_input: Entity<InputState>,
     /// Monotonic handle counter for client-supplied processHandle.
     terminal_handle_seq: u64,
-    /// Mitsuro background-process catalog. Interactive process semantics remain disabled.
+    /// Mitsuro background-process catalog. Running entries can be killed; interactive
+    /// spawn/stdin/PTY remains unavailable on this transport.
     background_processes: Vec<ProductProcess>,
+    background_processes_state: SurfaceDataState,
+    /// Codex shell processes retained by the selected agent thread.
+    thread_background_terminals: Vec<ThreadBackgroundTerminal>,
+    thread_background_terminals_state: SurfaceDataState,
+    /// Process id currently being terminated through either backend contract.
+    background_process_mutation_in_progress: Option<String>,
     /// Files panel session (fs + fuzzy).
     files: FilesSession,
     /// Path bar input for `fs/readDirectory`.
@@ -1453,6 +1462,10 @@ impl MitsuroApp {
             terminal_stdin_input,
             terminal_handle_seq: 1,
             background_processes: Vec::new(),
+            background_processes_state: SurfaceDataState::Loading,
+            thread_background_terminals: Vec::new(),
+            thread_background_terminals_state: SurfaceDataState::Loading,
+            background_process_mutation_in_progress: None,
             files: FilesSession::new("loading"),
             files_path_input,
             files_search_input,
@@ -1700,7 +1713,7 @@ impl MitsuroApp {
                     .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp)
                 {
                     format!(
-                        "Processes · {} background process(es) · read-only",
+                        "Processes · {} tracked process(es)",
                         self.background_processes.len()
                     )
                     .into()
@@ -1773,6 +1786,9 @@ impl MitsuroApp {
             } else if self.is_explicit_fixture() && self.files.entries.is_empty() {
                 self.files_refresh_directory(window, cx);
             }
+        }
+        if matches!(mode, ProductMode::Terminal) {
+            self.refresh_terminal_backgrounds(cx);
         }
         if matches!(mode, ProductMode::Computer) {
             if self.environments.is_empty() {
@@ -2148,6 +2164,348 @@ impl MitsuroApp {
             .as_ref()
             .map(|backend| backend.capabilities().processes)
             .unwrap_or_else(|| self.is_explicit_fixture())
+    }
+
+    pub fn thread_background_terminals(&self) -> &[ThreadBackgroundTerminal] {
+        &self.thread_background_terminals
+    }
+
+    pub fn thread_background_terminals_state(&self) -> SurfaceDataState {
+        self.thread_background_terminals_state
+    }
+
+    pub fn tracked_background_processes(&self) -> &[ProductProcess] {
+        &self.background_processes
+    }
+
+    pub fn tracked_background_processes_state(&self) -> SurfaceDataState {
+        self.background_processes_state
+    }
+
+    pub fn background_process_mutation_in_progress(&self) -> Option<&str> {
+        self.background_process_mutation_in_progress.as_deref()
+    }
+
+    pub fn terminal_background_backend_kind(&self) -> Option<BackendKind> {
+        self.active_backend_kind()
+    }
+
+    pub fn terminal_background_thread_label(&self) -> Option<String> {
+        let session = self.terminal_background_session_id()?;
+        let label = self
+            .threads
+            .iter()
+            .find(|thread| thread.backend_session_id.as_ref() == Some(&session))
+            .and_then(|thread| {
+                thread
+                    .summary
+                    .name
+                    .clone()
+                    .or_else(|| thread.summary.preview.clone())
+            });
+        Some(label.unwrap_or(session.raw))
+    }
+
+    fn terminal_background_session_id(&self) -> Option<BackendSessionId> {
+        self.selected_thread
+            .as_deref()
+            .and_then(|id| self.live_session_id(id))
+            .or_else(|| {
+                self.selected_codex_thread
+                    .as_deref()
+                    .and_then(|id| self.live_session_id(id))
+            })
+    }
+
+    pub fn refresh_terminal_backgrounds(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.live_backend() else {
+            self.thread_background_terminals.clear();
+            self.background_processes.clear();
+            self.background_processes_state = if self.is_explicit_fixture() {
+                SurfaceDataState::Fixture
+            } else {
+                SurfaceDataState::Unsupported
+            };
+            self.thread_background_terminals_state = if self.is_explicit_fixture() {
+                SurfaceDataState::Fixture
+            } else {
+                SurfaceDataState::Unsupported
+            };
+            cx.notify();
+            return;
+        };
+        let generation = self.backend_generation;
+        match backend.kind() {
+            BackendKind::CodexStdio => {
+                self.background_processes.clear();
+                self.background_processes_state = SurfaceDataState::Unsupported;
+                let Some(session) = self.terminal_background_session_id() else {
+                    self.thread_background_terminals.clear();
+                    self.thread_background_terminals_state = SurfaceDataState::Live;
+                    self.status_line =
+                        "Terminal · select a Codex thread to inspect its background terminals"
+                            .into();
+                    cx.notify();
+                    return;
+                };
+                self.thread_background_terminals_state = SurfaceDataState::Loading;
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let runner = Arc::clone(&backend);
+                            backend.block_on(async move {
+                                let mut terminals = Vec::new();
+                                let mut cursor = None;
+                                let mut seen_cursors = std::collections::HashSet::new();
+                                for _ in 0..100 {
+                                    let mut params = ThreadBackgroundTerminalsListParams::new(
+                                        session.raw.clone(),
+                                    );
+                                    params.cursor = cursor;
+                                    params.limit = Some(100);
+                                    let response = runner
+                                        .list_thread_background_terminals(&session, params)
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                    terminals.extend(response.data);
+                                    let Some(next) = response.next_cursor else {
+                                        return Ok(terminals);
+                                    };
+                                    if !seen_cursors.insert(next.clone()) {
+                                        return Err(format!(
+                                            "app-server repeated background-terminal cursor {next}"
+                                        ));
+                                    }
+                                    cursor = Some(next);
+                                }
+                                Err("background-terminal pagination exceeded 100 pages".to_owned())
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        if app.backend_generation != generation {
+                            return;
+                        }
+                        match result {
+                            Ok(terminals) => {
+                                let count = terminals.len();
+                                app.thread_background_terminals = terminals;
+                                app.thread_background_terminals_state = SurfaceDataState::Live;
+                                app.status_line =
+                                    format!("Terminal · {count} thread background terminal(s)")
+                                        .into();
+                            }
+                            Err(error) => {
+                                app.thread_background_terminals.clear();
+                                app.thread_background_terminals_state = SurfaceDataState::Error;
+                                app.status_line =
+                                    format!("Terminal · background list failed: {error}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            BackendKind::MitsuroHttp => {
+                self.thread_background_terminals.clear();
+                self.thread_background_terminals_state = SurfaceDataState::Unsupported;
+                self.background_processes_state = SurfaceDataState::Loading;
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            let runner = Arc::clone(&backend);
+                            backend.block_on(async move {
+                                runner
+                                    .list_background_processes()
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            })
+                        })
+                        .await;
+                    let _ = this.update(cx, |app, cx| {
+                        if app.backend_generation != generation {
+                            return;
+                        }
+                        match result {
+                            Ok(processes) => {
+                                let count = processes.len();
+                                app.background_processes = processes;
+                                app.background_processes_state = SurfaceDataState::Live;
+                                app.status_line =
+                                    format!("Processes · {count} tracked process(es)").into();
+                            }
+                            Err(error) => {
+                                app.background_processes.clear();
+                                app.background_processes_state = SurfaceDataState::Error;
+                                app.status_line =
+                                    format!("Processes · refresh failed: {error}").into();
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            BackendKind::CodexWebSocket | BackendKind::Fixture => {
+                self.thread_background_terminals.clear();
+                self.background_processes.clear();
+                self.thread_background_terminals_state = SurfaceDataState::Unsupported;
+                self.background_processes_state = SurfaceDataState::Unsupported;
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn clean_thread_background_terminals(&mut self, cx: &mut Context<Self>) {
+        if self.background_process_mutation_in_progress.is_some() {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        let Some(session) = self.terminal_background_session_id() else {
+            self.status_line = "Terminal · select a Codex thread before cleaning".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().background_terminals {
+            self.status_line =
+                "Terminal · the selected backend does not expose thread-terminal cleanup".into();
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        let params = ThreadBackgroundTerminalsCleanParams::new(session.raw.clone());
+        self.background_process_mutation_in_progress = Some("__clean__".to_owned());
+        self.status_line = "Terminal · cleaning completed thread terminals…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .clean_thread_background_terminals(&session, params)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.background_process_mutation_in_progress = None;
+                match result {
+                    Ok(_) => {
+                        app.status_line = "Terminal · completed entries cleaned".into();
+                        app.refresh_terminal_backgrounds(cx);
+                    }
+                    Err(error) => {
+                        app.status_line = format!("Terminal · clean failed: {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn terminate_background_process(&mut self, process_id: String, cx: &mut Context<Self>) {
+        if self.background_process_mutation_in_progress.is_some() {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        let generation = self.backend_generation;
+        let kind = backend.kind();
+        let supported = match kind {
+            BackendKind::CodexStdio => backend.capabilities().background_terminals,
+            BackendKind::MitsuroHttp => backend.capabilities().tracked_process_kill,
+            BackendKind::CodexWebSocket | BackendKind::Fixture => false,
+        };
+        if !supported {
+            self.status_line =
+                "Terminal · the selected backend cannot terminate background processes".into();
+            cx.notify();
+            return;
+        }
+        self.background_process_mutation_in_progress = Some(process_id.clone());
+        self.status_line = format!("Terminal · terminating {process_id}…").into();
+        cx.notify();
+
+        let session = if kind == BackendKind::CodexStdio {
+            match self.terminal_background_session_id() {
+                Some(session) => Some(session),
+                None => {
+                    self.background_process_mutation_in_progress = None;
+                    self.status_line =
+                        "Terminal · select a Codex thread before terminating its process".into();
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            let request_id = process_id.clone();
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        match kind {
+                            BackendKind::CodexStdio => {
+                                let session = session.expect("Codex session checked before spawn");
+                                let params = ThreadBackgroundTerminalsTerminateParams::new(
+                                    session.raw.clone(),
+                                    process_id,
+                                );
+                                let response = runner
+                                    .terminate_thread_background_terminal(&session, params)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                if response.terminated {
+                                    Ok(())
+                                } else {
+                                    Err("app-server reported that the process was not terminated"
+                                        .to_owned())
+                                }
+                            }
+                            BackendKind::MitsuroHttp => runner
+                                .terminate_background_process(process_id)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            BackendKind::CodexWebSocket | BackendKind::Fixture => {
+                                Err("the selected backend cannot terminate background processes"
+                                    .to_owned())
+                            }
+                        }
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.background_process_mutation_in_progress = None;
+                match result {
+                    Ok(()) => {
+                        app.status_line = format!("Terminal · terminated {request_id}").into();
+                        app.refresh_terminal_backgrounds(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Terminal · terminate {request_id} failed: {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn terminal_cmd_input(&self) -> &Entity<InputState> {
@@ -6257,7 +6615,10 @@ impl MitsuroApp {
                 }
                 ThreadSurface::Codex => {
                     self.selected_codex_thread = Some(id.clone());
-                    if !matches!(self.active_mode, ProductMode::Codex | ProductMode::Chat) {
+                    if !matches!(
+                        self.active_mode,
+                        ProductMode::Codex | ProductMode::Chat | ProductMode::Terminal
+                    ) {
                         self.active_mode = ProductMode::Codex;
                     }
                 }
@@ -6288,6 +6649,9 @@ impl MitsuroApp {
                     self.load_thread_messages(backend, id, cx);
                 }
             }
+        }
+        if self.active_mode == ProductMode::Terminal {
+            self.refresh_terminal_backgrounds(cx);
         }
         self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
@@ -10018,6 +10382,18 @@ impl MitsuroApp {
         self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
         self.scheduled_tasks = None;
         self.background_processes.clear();
+        self.background_processes_state = if kind == BackendKind::MitsuroHttp {
+            SurfaceDataState::Loading
+        } else {
+            SurfaceDataState::Unsupported
+        };
+        self.thread_background_terminals.clear();
+        self.thread_background_terminals_state = if kind == BackendKind::CodexStdio {
+            SurfaceDataState::Loading
+        } else {
+            SurfaceDataState::Unsupported
+        };
+        self.background_process_mutation_in_progress = None;
         self.terminal = TerminalSession::idle(kind.id());
         self.files = FilesSession::new(kind.id());
         self.pending_approval = None;
@@ -10245,15 +10621,17 @@ impl MitsuroApp {
                             .as_ref()
                             .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp);
                         if is_mitsuro {
-                            app.terminal.backend_label = "mitsuro-http · read-only catalog".into();
+                            app.terminal.backend_label = "mitsuro-http · tracked processes".into();
                             match processes {
                                 Some(processes) => {
                                     app.terminal.output = process_catalog_text(&processes).into();
                                     app.background_processes = processes;
+                                    app.background_processes_state = SurfaceDataState::Live;
                                 }
                                 None => {
                                     app.terminal.output = "Mitsuro background-process catalog is unavailable.\nInteractive terminal spawning is not exposed by this backend.".into();
                                     app.background_processes.clear();
+                                    app.background_processes_state = SurfaceDataState::Error;
                                 }
                             }
                             app.goals_are_live_hive = true;
@@ -10275,6 +10653,7 @@ impl MitsuroApp {
                             app.scheduled_tasks = Some(schedules.unwrap_or_default());
                         } else {
                             app.background_processes.clear();
+                            app.background_processes_state = SurfaceDataState::Unsupported;
                             app.goals.clear();
                             app.selected_goal = None;
                             app.goals_are_live_hive = false;
@@ -10290,6 +10669,9 @@ impl MitsuroApp {
                             app.files.cwd = app.preferred_workspace_cwd().into();
                             app.files.backend_label = app.files_backend_label();
                             app.files_refresh_directory_data(cx);
+                        }
+                        if app.active_mode == ProductMode::Terminal {
+                            app.refresh_terminal_backgrounds(cx);
                         }
                         // Best-effort account snapshot from app-server (needs Window for public API —
                         // use internal spawn path via refresh_account with a no-op when possible).
@@ -10543,7 +10925,10 @@ impl MitsuroApp {
                             app.selected_thread = Some(tid.clone());
                             app.transcript_scroll_handle.scroll_to_bottom();
                             app.selected_codex_thread = Some(tid.clone());
-                            if !matches!(app.active_mode, ProductMode::Codex | ProductMode::Chat) {
+                            if !matches!(
+                                app.active_mode,
+                                ProductMode::Codex | ProductMode::Chat | ProductMode::Terminal
+                            ) {
                                 app.active_mode = ProductMode::Codex;
                             }
                             eprintln!(
@@ -10570,6 +10955,9 @@ impl MitsuroApp {
                     Err(e) => {
                         app.status_line = format!("thread/read failed · {e}").into();
                     }
+                }
+                if app.active_mode == ProductMode::Terminal {
+                    app.refresh_terminal_backgrounds(cx);
                 }
                 cx.notify();
             });
@@ -10788,7 +11176,7 @@ fn process_catalog_text(processes: &[ProductProcess]) -> String {
             .to_owned();
     }
     let mut output = String::from(
-        "Mitsuro background processes (read-only)\nInteractive terminal spawning is not exposed by this backend.\n\n",
+        "Mitsuro tracked processes\nRunning entries can be killed above; interactive terminal spawning is not exposed by this backend.\n\n",
     );
     for process in processes {
         output.push_str(&format!(

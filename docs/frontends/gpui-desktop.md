@@ -62,7 +62,7 @@ backend or are shown as unavailable.
 | Review changes | Unsupported, capability-gated | Live streamed `review/start` with approvals | Unsupported, hidden |
 | Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
-| Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
+| Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
 | Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
@@ -85,8 +85,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 70 typed adapters
-and 63 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 73 typed adapters
+and 60 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -99,6 +99,11 @@ work, not as feature completion; the matrix test must change with each typed ada
   and Mitsuro/fixture remain explicitly read-only. Watch events are coalesced before
   refreshing, and large directory layouts render a bounded 200-row window with an
   exact overflow disclosure and fuzzy search for the remainder.
+- Terminal keeps independent process contracts explicit: Codex `process/*` powers the
+  desktop-launched interactive session, Codex `thread/backgroundTerminals/*` lists,
+  cleans, and terminates processes retained by the selected thread, and Mitsuro uses
+  its real global `/processes` catalog and `/:id/kill` endpoint. Mitsuro does not
+  advertise interactive spawn/stdin/PTY because that contract is absent.
 - The Extensions marketplace renders only backend data. Codex plugin Install/Remove
   actions call typed `plugin/install` and `plugin/uninstall`, disable concurrent
   mutations, and refresh the live catalog after success. Mitsuro and explicit fixture

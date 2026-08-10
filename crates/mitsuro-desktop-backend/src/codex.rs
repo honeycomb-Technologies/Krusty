@@ -49,6 +49,9 @@ use crate::plugin_mutations::{
 use crate::process::{
     ProcessKillParams, ProcessKillResponse, ProcessResizePtyParams, ProcessResizePtyResponse,
     ProcessSpawnParams, ProcessSpawnResponse, ProcessWriteStdinParams, ProcessWriteStdinResponse,
+    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
+    ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
+    ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
 };
 use crate::protocol::{
     map_notification_to_event, ClientInfo, ConfigReadParams, ConfigReadResponse,
@@ -1136,6 +1139,33 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("process/kill", Some(value)).await
     }
 
+    async fn thread_background_terminals_list(
+        &self,
+        params: ThreadBackgroundTerminalsListParams,
+    ) -> Result<ThreadBackgroundTerminalsListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/backgroundTerminals/list", Some(value))
+            .await
+    }
+
+    async fn thread_background_terminals_clean(
+        &self,
+        params: ThreadBackgroundTerminalsCleanParams,
+    ) -> Result<ThreadBackgroundTerminalsCleanResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/backgroundTerminals/clean", Some(value))
+            .await
+    }
+
+    async fn thread_background_terminals_terminate(
+        &self,
+        params: ThreadBackgroundTerminalsTerminateParams,
+    ) -> Result<ThreadBackgroundTerminalsTerminateResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/backgroundTerminals/terminate", Some(value))
+            .await
+    }
+
     async fn fs_read_directory(
         &self,
         params: FsReadDirectoryParams,
@@ -2153,6 +2183,102 @@ mod tests {
             .fs_remove(FsRemoveParams::new("/tmp/fs-test"))
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thread_background_terminals_use_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "thread/backgroundTerminals/list",
+                "thread/backgroundTerminals/clean",
+                "thread/backgroundTerminals/terminate",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "thread/backgroundTerminals/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"threadId": "thread-1", "limit": 50})
+                        );
+                        serde_json::json!({
+                            "data": [{
+                                "itemId": "item-1",
+                                "processId": "process-1",
+                                "command": "sleep 30",
+                                "cwd": "/tmp",
+                                "osPid": 42,
+                                "cpuPercent": 0.25,
+                                "rssKb": 2048
+                            }],
+                            "nextCursor": null
+                        })
+                    }
+                    "thread/backgroundTerminals/clean" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"threadId": "thread-1"})
+                        );
+                        serde_json::json!({})
+                    }
+                    "thread/backgroundTerminals/terminate" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-1",
+                                "processId": "process-1"
+                            })
+                        );
+                        serde_json::json!({"terminated": true})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let listed = backend
+            .thread_background_terminals_list(ThreadBackgroundTerminalsListParams {
+                thread_id: "thread-1".to_owned(),
+                cursor: None,
+                limit: Some(50),
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.data[0].process_id, "process-1");
+        backend
+            .thread_background_terminals_clean(ThreadBackgroundTerminalsCleanParams::new(
+                "thread-1",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .thread_background_terminals_terminate(
+                    ThreadBackgroundTerminalsTerminateParams::new("thread-1", "process-1"),
+                )
+                .await
+                .unwrap()
+                .terminated
+        );
         server.await.unwrap();
     }
 

@@ -13,7 +13,10 @@ use crate::{
     FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome,
     McpServerConfigAddParams, McpServerOauthLoginParams, McpServerOauthLoginResponse,
     MitsuroServerBackend, PendingApproval, PluginInstallParams, PluginInstallResponse,
-    PluginUninstallParams, PluginUninstallResponse, Result, ThreadRealtimeAppendAudioParams,
+    PluginUninstallParams, PluginUninstallResponse, Result, ThreadBackgroundTerminalsCleanParams,
+    ThreadBackgroundTerminalsCleanResponse, ThreadBackgroundTerminalsListParams,
+    ThreadBackgroundTerminalsListResponse, ThreadBackgroundTerminalsTerminateParams,
+    ThreadBackgroundTerminalsTerminateResponse, ThreadRealtimeAppendAudioParams,
     ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
     ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
     ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
@@ -71,6 +74,8 @@ pub struct BackendCapabilities {
     pub file_mutations: bool,
     pub file_watches: bool,
     pub processes: bool,
+    pub background_terminals: bool,
+    pub tracked_process_kill: bool,
     pub extensions: bool,
     pub plugin_mutations: bool,
     pub environment_add: bool,
@@ -107,6 +112,8 @@ impl BackendCapabilities {
             file_mutations: true,
             file_watches: true,
             processes: true,
+            background_terminals: true,
+            tracked_process_kill: false,
             extensions: true,
             plugin_mutations: true,
             environment_add: true,
@@ -146,6 +153,8 @@ impl BackendCapabilities {
             // does not expose the interactive spawn/stdin/PTY contract used by
             // the native terminal panel.
             processes: false,
+            background_terminals: false,
+            tracked_process_kill: true,
             extensions: true,
             plugin_mutations: false,
             environment_add: false,
@@ -464,6 +473,52 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn list_thread_background_terminals(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadBackgroundTerminalsListParams,
+    ) -> Result<ThreadBackgroundTerminalsListResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_background_terminals_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes a global process registry, not Codex thread terminals"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    pub async fn clean_thread_background_terminals(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadBackgroundTerminalsCleanParams,
+    ) -> Result<ThreadBackgroundTerminalsCleanResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_background_terminals_clean(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex thread-terminal cleanup".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn terminate_thread_background_terminal(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadBackgroundTerminalsTerminateParams,
+    ) -> Result<ThreadBackgroundTerminalsTerminateResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_background_terminals_terminate(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex thread-terminal termination".to_owned(),
+            )),
+        }
+    }
+
     pub async fn write_file(&self, params: FsWriteFileParams) -> Result<FsWriteFileResponse> {
         match self {
             Self::Codex(backend) => backend.fs_write_file(params).await,
@@ -733,6 +788,10 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);
         assert!(!BackendCapabilities::mitsuro().file_watches);
+        assert!(BackendCapabilities::codex().background_terminals);
+        assert!(!BackendCapabilities::mitsuro().background_terminals);
+        assert!(!BackendCapabilities::codex().tracked_process_kill);
+        assert!(BackendCapabilities::mitsuro().tracked_process_kill);
     }
 
     #[tokio::test]
@@ -758,6 +817,20 @@ mod tests {
                 ThreadRealtimeStopParams {
                     thread_id: "ignored".to_owned(),
                 },
+            )
+            .await
+            .expect_err("cross-backend session must be rejected before transport");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn background_terminals_reject_cross_backend_sessions_before_io() {
+        let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
+        let mitsuro_session = BackendSessionId::new(BackendKind::MitsuroHttp, "mitsuro-thread");
+        let error = codex
+            .list_thread_background_terminals(
+                &mitsuro_session,
+                ThreadBackgroundTerminalsListParams::new("ignored"),
             )
             .await
             .expect_err("cross-backend session must be rejected before transport");

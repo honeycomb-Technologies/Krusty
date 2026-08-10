@@ -194,6 +194,94 @@ impl ProcessResizePtyParams {
 pub struct ProcessResizePtyResponse {}
 
 // ---------------------------------------------------------------------------
+// Thread-owned background terminals
+// ---------------------------------------------------------------------------
+
+/// One shell process retained by a Codex thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBackgroundTerminal {
+    pub item_id: String,
+    pub process_id: String,
+    pub command: String,
+    pub cwd: String,
+    pub os_pid: Option<u32>,
+    pub cpu_percent: Option<f64>,
+    pub rss_kb: Option<u64>,
+}
+
+/// Params for `thread/backgroundTerminals/list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBackgroundTerminalsListParams {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+impl ThreadBackgroundTerminalsListParams {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            cursor: None,
+            limit: None,
+        }
+    }
+}
+
+/// Response for `thread/backgroundTerminals/list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBackgroundTerminalsListResponse {
+    pub data: Vec<ThreadBackgroundTerminal>,
+    pub next_cursor: Option<String>,
+}
+
+/// Params for `thread/backgroundTerminals/clean`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBackgroundTerminalsCleanParams {
+    pub thread_id: String,
+}
+
+impl ThreadBackgroundTerminalsCleanParams {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+        }
+    }
+}
+
+/// Empty success for `thread/backgroundTerminals/clean`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadBackgroundTerminalsCleanResponse {}
+
+/// Params for `thread/backgroundTerminals/terminate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBackgroundTerminalsTerminateParams {
+    pub thread_id: String,
+    pub process_id: String,
+}
+
+impl ThreadBackgroundTerminalsTerminateParams {
+    pub fn new(thread_id: impl Into<String>, process_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            process_id: process_id.into(),
+        }
+    }
+}
+
+/// Response for `thread/backgroundTerminals/terminate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadBackgroundTerminalsTerminateResponse {
+    pub terminated: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Base64 (minimal, no extra dep — RFC 4648 standard alphabet)
 // ---------------------------------------------------------------------------
 
@@ -363,5 +451,53 @@ mod tests {
         assert_eq!(v["streamStdin"], true);
         assert_eq!(v["streamStdoutStderr"], true);
         assert!(v["command"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn background_terminal_contract_matches_generated_schema() {
+        let list = serde_json::to_value(ThreadBackgroundTerminalsListParams {
+            thread_id: "thread-1".to_owned(),
+            cursor: Some("next".to_owned()),
+            limit: Some(25),
+        })
+        .unwrap();
+        assert_eq!(
+            list,
+            serde_json::json!({
+                "threadId": "thread-1",
+                "cursor": "next",
+                "limit": 25
+            })
+        );
+
+        let terminate = serde_json::to_value(ThreadBackgroundTerminalsTerminateParams::new(
+            "thread-1",
+            "process-2",
+        ))
+        .unwrap();
+        assert_eq!(
+            terminate,
+            serde_json::json!({
+                "threadId": "thread-1",
+                "processId": "process-2"
+            })
+        );
+
+        let response: ThreadBackgroundTerminalsListResponse =
+            serde_json::from_value(serde_json::json!({
+                "data": [{
+                    "itemId": "item-3",
+                    "processId": "process-2",
+                    "command": "sleep 30",
+                    "cwd": "/tmp",
+                    "osPid": 42,
+                    "cpuPercent": 0.5,
+                    "rssKb": 1024
+                }],
+                "nextCursor": null
+            }))
+            .unwrap();
+        assert_eq!(response.data[0].process_id, "process-2");
+        assert_eq!(response.data[0].rss_kb, Some(1024));
     }
 }

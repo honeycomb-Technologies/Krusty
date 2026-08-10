@@ -219,6 +219,25 @@ impl MitsuroClient {
         self.get_json("/processes").await
     }
 
+    pub async fn kill_process(&self, process_id: &str) -> Result<()> {
+        let mut url = reqwest::Url::parse(&self.api_url("/processes"))
+            .context("building Mitsuro process kill URL")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("Mitsuro process endpoint cannot be a base URL"))?
+            .push(process_id)
+            .push("kill");
+        let url = url.to_string();
+        let response = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        ensure_success(response).await?;
+        Ok(())
+    }
+
     pub async fn hive_current(&self) -> Result<HiveCurrentResponse> {
         self.get_json("/hive/current").await
     }
@@ -487,6 +506,31 @@ mod tests {
             .await
             .expect("empty successful delete response");
         assert!(response.ok);
+        server.join().expect("test server join");
+    }
+
+    #[tokio::test]
+    async fn kill_process_posts_to_scoped_process_endpoint_and_accepts_no_content() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 2048];
+            let size = socket.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("POST /api/processes/process-1/kill "));
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("write response");
+        });
+
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        client
+            .kill_process("process-1")
+            .await
+            .expect("empty successful process kill response");
         server.join().expect("test server join");
     }
 

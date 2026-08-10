@@ -432,13 +432,15 @@ pub trait ProductBackend: Send + Sync {
 
     async fn list_background_processes(&self) -> Result<Vec<ProductProcess>>;
 
+    async fn terminate_background_process(&self, process_id: String) -> Result<()>;
+
     async fn hive_snapshot(&self) -> Result<ProductHiveSnapshot>;
 
     async fn list_schedules(&self) -> Result<Vec<ProductSchedule>>;
 }
 
 impl DesktopBackend {
-    fn ensure_session_origin(&self, id: &BackendSessionId) -> Result<()> {
+    pub(crate) fn ensure_session_origin(&self, id: &BackendSessionId) -> Result<()> {
         if id.backend == self.kind() {
             return Ok(());
         }
@@ -1201,6 +1203,19 @@ impl ProductBackend for DesktopBackend {
                 working_dir: process.working_dir,
             })
             .collect())
+    }
+
+    async fn terminate_background_process(&self, process_id: String) -> Result<()> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex thread terminals use the thread/backgroundTerminals contract".to_owned(),
+            ));
+        };
+        backend
+            .client()
+            .kill_process(&process_id)
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))
     }
 
     async fn hive_snapshot(&self) -> Result<ProductHiveSnapshot> {

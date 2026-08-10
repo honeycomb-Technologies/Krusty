@@ -134,6 +134,10 @@ pub use process::{
     parse_process_output_delta, ProcessKillParams, ProcessKillResponse, ProcessOutputStream,
     ProcessResizePtyParams, ProcessResizePtyResponse, ProcessSpawnParams, ProcessSpawnResponse,
     ProcessTerminalSize, ProcessWriteStdinParams, ProcessWriteStdinResponse,
+    ThreadBackgroundTerminal, ThreadBackgroundTerminalsCleanParams,
+    ThreadBackgroundTerminalsCleanResponse, ThreadBackgroundTerminalsListParams,
+    ThreadBackgroundTerminalsListResponse, ThreadBackgroundTerminalsTerminateParams,
+    ThreadBackgroundTerminalsTerminateResponse,
 };
 pub use product::{
     ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
