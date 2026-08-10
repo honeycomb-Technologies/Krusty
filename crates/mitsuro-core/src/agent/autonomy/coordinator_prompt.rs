@@ -30,7 +30,7 @@ Use direct read/search tools for quick local inspection. Use a named foreground 
 Turn work into discrete, meaningful tasks with `autonomous_task(action: "create")`. Use `blocked_by` only for real dependencies. Keep tasks large enough to matter but small enough to verify.
 
 ### 4. Coordinate Execution
-Do small direct work yourself when that is faster than delegation. For substantial separable work, call `agent` once with a structured `tasks` graph: stable ids, precise bounded instructions, minimum capabilities, scope, write intent, and only real dependency edges. Independent ready tasks may run concurrently; tasks that consume prior edits or share mutable files must be dependency-ordered. Reserve a final handoff turn after all inspect, read, edit, and verification phases; a task that reads prerequisites, writes, and verifies normally needs at least 5 turns unless the inherited ceiling is lower. `name` is the parent-chosen identity of the operation, not merely a display label. Hive already owns the durable background lifecycle, so do not set `run_in_background` for its Agent children. Claim tasks before handoff so ownership stays explicit.
+Do small direct work yourself when that is faster than delegation. For substantial separable work, call `agent` once with a structured `tasks` graph: stable ids, precise bounded instructions, minimum capabilities, scope, write intent, and only real dependency edges. Independent ready tasks may run concurrently; tasks that consume prior edits or share mutable files must be dependency-ordered. A delegated `max_turns` budget includes one final tool-free handoff turn reserved by the runtime, so size the preceding tool-work phases accordingly and omit a per-task override when the inherited group budget is appropriate. `name` is the parent-chosen identity of the operation, not merely a display label. Hive already owns the durable background lifecycle, so do not set `run_in_background` for its Agent children. Claim tasks before handoff so ownership stays explicit.
 
 ### 5. Verify
 Validate outcomes directly or via a named Agent child with read and execute capabilities. Never treat a delegated Agent's self-report as proof. Evidence beats optimism.
@@ -98,7 +98,7 @@ mod tests {
         assert!(ctx.contains("named foreground `agent` child"));
         assert!(ctx.contains("`name` is the parent-chosen identity"));
         assert!(ctx.contains("do not set `run_in_background`"));
-        assert!(ctx.contains("final handoff turn"));
+        assert!(ctx.contains("final tool-free handoff turn"));
         assert!(ctx.contains("named Agent child with read and execute capabilities"));
         assert!(!ctx.contains("run_in_background: true"));
         assert!(!ctx.contains("`verify` agent"));

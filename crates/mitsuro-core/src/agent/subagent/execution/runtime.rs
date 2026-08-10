@@ -36,6 +36,7 @@ const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
 const LOOP_GUARD_LANDING_FALLBACK: &str =
     "The delegated loop stopped after repeated work without enough new semantic progress.";
+const TURN_BUDGET_LANDING_INSTRUCTION: &str = "[TURN BUDGET LANDING]\nThis is the final provider turn reserved inside the delegated turn budget. No tools are available. Using only canonical evidence already gathered, give the parent a concise, truthful handoff now. State completed work, verification actually performed, and any unresolved gap. Do not request or describe another tool call, and do not claim unverified work succeeded.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvidenceCompletionDecision {
@@ -74,6 +75,19 @@ fn max_tokens_landing_decision(
     } else {
         MaxTokensLandingDecision::TerminalIncomplete
     }
+}
+
+fn turn_budget_landing_due(
+    completed_turns: usize,
+    max_turns: Option<usize>,
+    has_canonical_evidence: bool,
+    another_landing_active: bool,
+) -> bool {
+    !another_landing_active
+        && has_canonical_evidence
+        && max_turns.is_some_and(|max_turns| {
+            max_turns > 1 && completed_turns.saturating_add(1) == max_turns
+        })
 }
 
 fn evidence_completion_decision(
@@ -136,8 +150,9 @@ fn tool_surface_for_turn(
     tools: &[AiTool],
     loop_guard_landing: bool,
     max_tokens_landing: bool,
+    turn_budget_landing: bool,
 ) -> &[AiTool] {
-    if loop_guard_landing || max_tokens_landing {
+    if loop_guard_landing || max_tokens_landing || turn_budget_landing {
         &[]
     } else {
         tools
@@ -439,6 +454,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut canonical_evidence_correction_requested = false;
     let mut max_tokens_landing_retry_attempted = false;
     let mut max_tokens_landing_pending = false;
+    let mut turn_budget_landing_pending = false;
     let mut loop_guard = LoopGuard::new();
     let mut loop_guard_landing: Option<String> = None;
     let mut overflow_compact_retry_attempted = false;
@@ -607,6 +623,29 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 }
             }
         }
+
+        if turn_budget_landing_due(
+            turns,
+            max_turns_budget,
+            evidence.has_canonical_evidence(),
+            loop_guard_landing.is_some() || max_tokens_landing_pending,
+        ) {
+            messages.push(ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: TURN_BUDGET_LANDING_INSTRUCTION.to_string(),
+                }],
+            });
+            turn_budget_landing_pending = true;
+            send_progress(
+                AgentProgressStatus::Running,
+                "preparing final handoff",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+        }
         turns += 1;
 
         if let Some(context) = config
@@ -629,6 +668,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &ai_tools,
             loop_guard_landing.is_some(),
             max_tokens_landing_pending,
+            turn_budget_landing_pending,
         );
         let prompt_cache_scope = delegated_prompt_cache_scope(
             task,
@@ -1034,6 +1074,40 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                             .to_string(),
                     ),
                     termination: SubAgentTermination::ProviderMaxTokens,
+                    policy_violations,
+                    evidence: evidence.clone(),
+                    background_processes: background_processes.clone(),
+                };
+            }
+        }
+
+        if turn_budget_landing_pending {
+            turn_budget_landing_pending = false;
+            if !tool_calls.is_empty() {
+                preserve_terminal_mailbox!();
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "invalid tool call during final handoff",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(
+                        "Provider emitted a tool call during the reserved tool-free final handoff"
+                            .to_string(),
+                    ),
+                    termination: SubAgentTermination::Failed,
                     policy_violations,
                     evidence: evidence.clone(),
                     background_processes: background_processes.clone(),
@@ -1724,9 +1798,20 @@ mod tests {
     fn every_bounded_landing_removes_the_tool_surface() {
         let tools = cache_scope_tools();
 
-        assert_eq!(tool_surface_for_turn(&tools, false, false).len(), 1);
-        assert!(tool_surface_for_turn(&tools, true, false).is_empty());
-        assert!(tool_surface_for_turn(&tools, false, true).is_empty());
+        assert_eq!(tool_surface_for_turn(&tools, false, false, false).len(), 1);
+        assert!(tool_surface_for_turn(&tools, true, false, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, true, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, false, true).is_empty());
+    }
+
+    #[test]
+    fn bounded_delegation_reserves_its_last_turn_only_after_real_evidence() {
+        assert!(!turn_budget_landing_due(0, Some(1), true, false));
+        assert!(!turn_budget_landing_due(4, Some(6), false, false));
+        assert!(turn_budget_landing_due(5, Some(6), true, false));
+        assert!(!turn_budget_landing_due(5, Some(6), true, true));
+        assert!(!turn_budget_landing_due(6, Some(6), true, false));
+        assert!(!turn_budget_landing_due(99, None, true, false));
     }
 
     #[test]

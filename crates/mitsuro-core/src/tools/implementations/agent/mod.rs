@@ -225,7 +225,7 @@ impl Tool for AgentTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. Reserve a final handoff turn after inspect/read/edit/verify; tasks that read prerequisites, write, and verify usually need at least 5 turns. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
+            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. max_turns includes one runtime-reserved tool-free final handoff, so budget preceding tool work accordingly. Use tasks or legacy components, never both. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
         )
     }
 
@@ -295,7 +295,7 @@ impl Tool for AgentTool {
                 "components": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional parallel write components (one child per component)"
+                    "description": "Legacy alternative to tasks (one child per component); omit or leave empty when tasks is provided"
                 },
                 "tasks": {
                     "type": "array",
@@ -327,7 +327,7 @@ impl Tool for AgentTool {
                             "max_turns": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "description": "Reserve a final handoff turn; prerequisite-reading writers that verify usually need at least 5 turns"
+                                "description": "Includes one runtime-reserved tool-free final handoff after canonical evidence exists"
                             }
                         },
                         "additionalProperties": false

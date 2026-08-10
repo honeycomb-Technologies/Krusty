@@ -195,6 +195,11 @@ mod tests {
                 .as_str()
                 .is_some_and(|description| description.contains("final handoff"))
         );
+        assert!(
+            agent.input_schema["properties"]["components"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("when tasks is provided"))
+        );
 
         let provider_tools =
             get_format_handler(ApiFormat::OpenAIResponses).convert_tools(&wire_tools);
