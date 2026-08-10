@@ -610,9 +610,9 @@ async fn turn_input_content(input: &[Value]) -> Result<(String, Vec<ContentBlock
                     },
                 });
             }
-            Some("audio" | "localAudio") => {
+            Some("audio" | "localAudio" | "skill" | "mention") => {
                 return Err(AgentError::NotImplemented(
-                    "Mitsuro HTTP does not accept audio input".to_owned(),
+                    "Mitsuro HTTP does not accept this Codex-only input type".to_owned(),
                 ));
             }
             _ => {}
@@ -1532,16 +1532,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_audio_input_in_the_low_level_mitsuro_adapter() {
-        let error = turn_input_content(&[serde_json::json!({
-            "type": "localAudio",
-            "path": "/tmp/recording.wav"
-        })])
-        .await
-        .expect_err("Mitsuro content has no audio block");
-        assert!(error
-            .to_string()
-            .contains("Mitsuro HTTP does not accept audio input"));
+    async fn rejects_codex_only_input_in_the_low_level_mitsuro_adapter() {
+        for input in [
+            serde_json::json!({"type": "localAudio", "path": "/tmp/recording.wav"}),
+            serde_json::json!({
+                "type": "skill",
+                "name": "release",
+                "path": "/skills/release/SKILL.md"
+            }),
+            serde_json::json!({
+                "type": "mention",
+                "name": "Cargo.toml",
+                "path": "/workspace/Cargo.toml"
+            }),
+        ] {
+            let error = turn_input_content(&[input])
+                .await
+                .expect_err("Mitsuro content has no matching input block");
+            assert!(error
+                .to_string()
+                .contains("Mitsuro HTTP does not accept this Codex-only input type"));
+        }
     }
 
     #[test]

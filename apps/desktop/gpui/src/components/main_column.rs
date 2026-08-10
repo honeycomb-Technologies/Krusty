@@ -21,7 +21,7 @@ use crate::app::{MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer, markdown};
 use crate::demo::{
     DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
-    DemoMessageKind, ThreadSurface,
+    DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind, ThreadSurface,
 };
 use crate::theme;
 
@@ -1032,12 +1032,14 @@ fn transcript_block(
             body,
             images,
             audio,
+            references,
         } => chat_bubble(
             index,
             "You",
             body,
             images,
             audio,
+            references,
             msg.streaming,
             true,
             simple_bubbles,
@@ -1050,6 +1052,7 @@ fn transcript_block(
             index,
             "Mitsuro",
             body,
+            &[],
             &[],
             &[],
             msg.streaming,
@@ -1067,6 +1070,7 @@ fn transcript_block(
                     index,
                     "Thinking",
                     body,
+                    &[],
                     &[],
                     &[],
                     msg.streaming,
@@ -1087,6 +1091,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     body,
+                    &[],
                     &[],
                     &[],
                     msg.streaming,
@@ -1115,6 +1120,7 @@ fn transcript_block(
                     command,
                     &[],
                     &[],
+                    &[],
                     msg.streaming,
                     false,
                     true,
@@ -1137,6 +1143,7 @@ fn transcript_block(
                     index,
                     "Mitsuro",
                     paths_summary,
+                    &[],
                     &[],
                     &[],
                     msg.streaming,
@@ -1308,6 +1315,7 @@ fn chat_bubble(
     body: &str,
     images: &[DemoImageAttachment],
     audio: &[DemoAudioAttachment],
+    references: &[DemoReferenceAttachment],
     streaming: bool,
     is_user: bool,
     _simple: bool,
@@ -1364,6 +1372,9 @@ fn chat_bubble(
                 .when(!audio.is_empty(), |this| {
                     this.child(user_audio_attachments(index, audio))
                 })
+                .when(!references.is_empty(), |this| {
+                    this.child(user_reference_attachments(index, references))
+                })
                 .when(!display.is_empty(), |this| {
                     this.child(if is_user {
                         div()
@@ -1394,6 +1405,78 @@ fn chat_bubble(
                                 "Show full response"
                             }),
                     )
+                }),
+        )
+}
+
+fn user_reference_attachments(
+    index: u64,
+    references: &[DemoReferenceAttachment],
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(("message-references", index))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(6.0))
+        .children(
+            references
+                .iter()
+                .enumerate()
+                .map(|(reference_index, reference)| {
+                    let (icon, label) = match reference.kind {
+                        DemoReferenceKind::Skill => ("icons/puzzle.svg", "Skill"),
+                        DemoReferenceKind::Mention => ("icons/file.svg", "Mention"),
+                    };
+                    let detail = Path::new(&reference.path)
+                        .parent()
+                        .and_then(Path::to_str)
+                        .unwrap_or(label)
+                        .to_owned();
+                    div()
+                        .id((
+                            "message-reference-item",
+                            index * 10 + reference_index as u64,
+                        ))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(7.0))
+                        .max_w(px(300.0))
+                        .px(px(9.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_sidebar)
+                        .border_1()
+                        .border_color(colors.border_subtle)
+                        .child(
+                            Icon::empty()
+                                .path(icon)
+                                .with_size(px(14.0))
+                                .text_color(colors.text_tertiary),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_secondary)
+                                        .child(reference.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_tertiary)
+                                        .overflow_hidden()
+                                        .child(detail),
+                                ),
+                        )
+                        .into_any_element()
                 }),
         )
 }

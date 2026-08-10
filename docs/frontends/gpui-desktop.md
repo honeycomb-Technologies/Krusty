@@ -49,6 +49,8 @@ backend or are shown as unavailable.
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
 | Audio-file attachments | Unsupported, hidden and rejected before I/O | Live schema-exact `localAudio`, selected-model gated | Unsupported, hidden |
+| Skill references | Unsupported, hidden and rejected before I/O | Live schema-exact `skill { name, path }` from enabled server skills | Unsupported, hidden |
+| File mentions | Unsupported, hidden and rejected before I/O | Live schema-exact `mention { name, path }` from native file picker | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
 | Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
@@ -122,6 +124,12 @@ work, not as feature completion; the matrix test must change with each typed ada
   stays visible as unavailable metadata. Mitsuro's text/image `ContentBlock` contract
   does not accept audio, so its UI action is hidden and both adapter layers reject it
   before I/O. This is file attachment support, not microphone recording or playback.
+- Codex's composer add menu uses the live enabled-skill catalog and a native regular-file
+  picker to emit exact `skill { name, path }` and `mention { name, path }` inputs. Up to
+  eight combined references are retained as structured user-message attachments when a
+  thread is reopened. Mitsuro and fixture modes hide these actions and both product and
+  low-level Mitsuro adapters reject the Codex-only records; they are never flattened into
+  prompt text or synthesized from fixture data.
 - Reasoning choices come only from the selected model's live capability metadata and
   persist per backend/model. The transport-neutral turn adapter maps the same selection
   to Codex `effort` and Mitsuro `thinking_enabled`; models with zero or one advertised

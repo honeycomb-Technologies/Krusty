@@ -15,8 +15,8 @@ use crate::{
     LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
     ReviewTarget, SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams,
     ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptRole,
-    TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
+    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind,
+    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +52,7 @@ pub struct ConversationMessage {
     pub activity: Option<ActivityFields>,
     pub images: Vec<ConversationImage>,
     pub audio: Vec<ConversationAudio>,
+    pub references: Vec<ConversationReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +67,19 @@ pub enum ConversationAudio {
     LocalPath(String),
     Url(String),
     Embedded { media_type: String, data: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationReference {
+    pub kind: ConversationReferenceKind,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationReferenceKind {
+    Skill,
+    Mention,
 }
 
 fn conversation_message_from_transcript(message: TranscriptMessage) -> ConversationMessage {
@@ -104,6 +118,18 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
                 TranscriptAudioSource::Embedded { media_type, data } => {
                     ConversationAudio::Embedded { media_type, data }
                 }
+            })
+            .collect(),
+        references: message
+            .references
+            .into_iter()
+            .map(|reference| ConversationReference {
+                kind: match reference.kind {
+                    TranscriptReferenceKind::Skill => ConversationReferenceKind::Skill,
+                    TranscriptReferenceKind::Mention => ConversationReferenceKind::Mention,
+                },
+                name: reference.name,
+                path: reference.path,
             })
             .collect(),
     }
@@ -158,6 +184,8 @@ pub struct ProductTurn {
 pub enum ProductAttachment {
     LocalImage { path: String },
     LocalAudio { path: String },
+    Skill { name: String, path: String },
+    Mention { name: String, path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +414,28 @@ impl DesktopBackend {
                 self.kind().id()
             )));
         }
+        if request
+            .attachments
+            .iter()
+            .any(|attachment| matches!(attachment, ProductAttachment::Skill { .. }))
+            && !self.capabilities().skill_inputs
+        {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not accept Codex skill inputs",
+                self.kind().id()
+            )));
+        }
+        if request
+            .attachments
+            .iter()
+            .any(|attachment| matches!(attachment, ProductAttachment::Mention { .. }))
+            && !self.capabilities().mention_inputs
+        {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not accept Codex mention inputs",
+                self.kind().id()
+            )));
+        }
         let params = product_turn_params(request);
         self.run_turn_with_bridge_blocking(params, event_tx, bridge, timeout)
     }
@@ -435,6 +485,8 @@ fn product_turn_params(request: ProductTurn) -> TurnStartParams {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
             ProductAttachment::LocalAudio { path } => params.push_local_audio(path),
+            ProductAttachment::Skill { name, path } => params.push_skill(name, path),
+            ProductAttachment::Mention { name, path } => params.push_mention(name, path),
         }
     }
     params
@@ -914,6 +966,43 @@ mod tests {
     }
 
     #[test]
+    fn product_turn_preserves_skill_and_mention_for_codex_wire_input() {
+        let params = product_turn_params(ProductTurn {
+            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+            text: "use these".to_owned(),
+            model: Some("gpt-5".to_owned()),
+            reasoning_effort: None,
+            attachments: vec![
+                ProductAttachment::Skill {
+                    name: "release".to_owned(),
+                    path: "/skills/release/SKILL.md".to_owned(),
+                },
+                ProductAttachment::Mention {
+                    name: "Cargo.toml".to_owned(),
+                    path: "/workspace/Cargo.toml".to_owned(),
+                },
+            ],
+        });
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(
+            value["input"][1],
+            serde_json::json!({
+                "type": "skill",
+                "name": "release",
+                "path": "/skills/release/SKILL.md"
+            })
+        );
+        assert_eq!(
+            value["input"][2],
+            serde_json::json!({
+                "type": "mention",
+                "name": "Cargo.toml",
+                "path": "/workspace/Cargo.toml"
+            })
+        );
+    }
+
+    #[test]
     fn mitsuro_rejects_product_audio_before_network_io() {
         let backend = DesktopBackend::mitsuro_from_env().expect("default Mitsuro backend");
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
@@ -936,6 +1025,44 @@ mod tests {
         assert!(error
             .to_string()
             .contains("does not accept audio attachments"));
+    }
+
+    #[test]
+    fn mitsuro_rejects_product_skill_and_mention_before_network_io() {
+        for (attachment, expected) in [
+            (
+                ProductAttachment::Skill {
+                    name: "release".to_owned(),
+                    path: "/skills/release/SKILL.md".to_owned(),
+                },
+                "does not accept Codex skill inputs",
+            ),
+            (
+                ProductAttachment::Mention {
+                    name: "Cargo.toml".to_owned(),
+                    path: "/workspace/Cargo.toml".to_owned(),
+                },
+                "does not accept Codex mention inputs",
+            ),
+        ] {
+            let backend = DesktopBackend::mitsuro_from_env().expect("default Mitsuro backend");
+            let (event_tx, _event_rx) = std::sync::mpsc::channel();
+            let error = backend
+                .run_product_turn_with_bridge_blocking(
+                    ProductTurn {
+                        session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                        text: "use this".to_owned(),
+                        model: None,
+                        reasoning_effort: None,
+                        attachments: vec![attachment],
+                    },
+                    event_tx,
+                    Arc::new(LiveApprovalBridge::new()),
+                    Duration::from_secs(1),
+                )
+                .expect_err("Mitsuro references must fail before network I/O");
+            assert!(error.to_string().contains(expected));
+        }
     }
 
     #[test]
@@ -1009,6 +1136,7 @@ mod tests {
             activity: None,
             images: Vec::new(),
             audio: Vec::new(),
+            references: Vec::new(),
         });
 
         assert_eq!(message.role, MessageRole::CommandExecution);

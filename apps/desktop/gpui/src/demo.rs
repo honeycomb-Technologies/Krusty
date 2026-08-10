@@ -33,6 +33,19 @@ pub enum DemoAudioSource {
     Unavailable(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct DemoReferenceAttachment {
+    pub kind: DemoReferenceKind,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DemoReferenceKind {
+    Skill,
+    Mention,
+}
+
 /// One transcript block in the main column (user, assistant, tools, plan, …).
 #[derive(Clone, Debug)]
 pub struct DemoMessage {
@@ -49,6 +62,7 @@ pub enum DemoMessageKind {
         body: String,
         images: Vec<DemoImageAttachment>,
         audio: Vec<DemoAudioAttachment>,
+        references: Vec<DemoReferenceAttachment>,
     },
     Assistant {
         body: String,
@@ -88,6 +102,7 @@ impl DemoMessage {
                 body: body.into(),
                 images: Vec::new(),
                 audio: Vec::new(),
+                references: Vec::new(),
             },
             item_id: None,
             streaming: false,
@@ -98,12 +113,14 @@ impl DemoMessage {
         body: impl Into<String>,
         images: Vec<DemoImageAttachment>,
         audio: Vec<DemoAudioAttachment>,
+        references: Vec<DemoReferenceAttachment>,
     ) -> Self {
         Self {
             kind: DemoMessageKind::User {
                 body: body.into(),
                 images,
                 audio,
+                references,
             },
             item_id: None,
             streaming: false,

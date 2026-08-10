@@ -2,8 +2,9 @@
 //!
 //! Implemented controls are interactive: text entry, backend-scoped model and
 //! advertised reasoning-effort cycling, real model-gated image and audio file
-//! attachments, Send, and Stop. Microphone recording, speed presets, and project
-//! selection remain absent until their backend contracts exist.
+//! attachments, Codex skill and file-mention inputs, Send, and Stop. Microphone
+//! recording, speed presets, and project selection remain absent until their
+//! backend contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -86,6 +87,9 @@ fn codex_composer(
                 .pt(px(12.0))
                 .pb(px(10.0))
                 .gap(px(10.0))
+                .when(app.composer_add_menu_open(), |this| {
+                    this.child(composer_add_menu(app, cx))
+                })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
                 })
@@ -110,13 +114,13 @@ fn codex_composer(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .when(app.can_attach_images(), |this| {
+                        .when(app.can_open_composer_add_menu(), |this| {
                             this.child(round_action(
-                                "composer-attach-image",
+                                "composer-add-input",
                                 IconName::Plus,
                                 false,
                                 cx,
-                                |app, _, _, cx| app.select_composer_images(cx),
+                                |app, _, _, cx| app.toggle_composer_add_menu(cx),
                             ))
                         })
                         .when(app.can_attach_audio(), |this| {
@@ -190,6 +194,9 @@ fn chat_slim_composer(
         .when(!app.composer_attachments().is_empty(), |this| {
             this.child(attachment_chips(app, cx))
         })
+        .when(app.composer_add_menu_open(), |this| {
+            this.child(composer_add_menu(app, cx))
+        })
         .child(
             div()
                 .w_full()
@@ -203,13 +210,13 @@ fn chat_slim_composer(
                 .bg(theme::hex_alpha(0x1a1a1a, 0.85))
                 .border_1()
                 .border_color(colors.border_subtle)
-                .when(app.can_attach_images(), |this| {
+                .when(app.can_open_composer_add_menu(), |this| {
                     this.child(round_action(
-                        "chat-attach-image",
+                        "chat-add-input",
                         IconName::Plus,
                         false,
                         cx,
-                        |app, _, _, cx| app.select_composer_images(cx),
+                        |app, _, _, cx| app.toggle_composer_add_menu(cx),
                     ))
                 })
                 .child(
@@ -290,6 +297,9 @@ fn chat_thread_composer(
                 .pt(px(10.0))
                 .pb(px(8.0))
                 .gap(px(8.0))
+                .when(app.composer_add_menu_open(), |this| {
+                    this.child(composer_add_menu(app, cx))
+                })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
                 })
@@ -308,13 +318,13 @@ fn chat_thread_composer(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .when(app.can_attach_images(), |this| {
+                        .when(app.can_open_composer_add_menu(), |this| {
                             this.child(round_action(
-                                "chat-thread-attach-image",
+                                "chat-thread-add-input",
                                 IconName::Plus,
                                 false,
                                 cx,
-                                |app, _, _, cx| app.select_composer_images(cx),
+                                |app, _, _, cx| app.toggle_composer_add_menu(cx),
                             ))
                         })
                         .when(app.can_attach_audio(), |this| {
@@ -373,6 +383,8 @@ fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                     let icon = match attachment.kind {
                         ComposerAttachmentKind::Image => "icons/gallery-vertical-end.svg",
                         ComposerAttachmentKind::Audio => "icons/audio-lines.svg",
+                        ComposerAttachmentKind::Skill => "icons/puzzle.svg",
+                        ComposerAttachmentKind::Mention => "icons/file.svg",
                     };
                     div()
                         .id(("composer-attachment", index))
@@ -399,6 +411,7 @@ fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                                 .flex_1()
                                 .text_xs()
                                 .text_color(colors.text_secondary)
+                                .whitespace_nowrap()
                                 .overflow_hidden()
                                 .child(attachment.name.clone()),
                         )
@@ -418,6 +431,168 @@ fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                         .into_any_element()
                 })
                 .collect::<Vec<_>>(),
+        )
+}
+
+fn composer_add_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let skills = app
+        .enabled_composer_skills()
+        .take(8)
+        .map(|skill| {
+            (
+                skill.name.clone(),
+                skill
+                    .short_description
+                    .clone()
+                    .unwrap_or_else(|| skill.description.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    div()
+        .id("composer-add-menu")
+        .w_full()
+        .max_h(px(280.0))
+        .overflow_y_scroll()
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .when(app.can_attach_images(), |this| {
+            this.child(composer_add_action(
+                "composer-add-image",
+                "icons/gallery-vertical-end.svg",
+                "Attach images",
+                "PNG, JPEG, WebP, or GIF",
+                cx,
+                |app, _, _, cx| app.select_composer_images(cx),
+            ))
+        })
+        .when(app.can_mention_files(), |this| {
+            this.child(composer_add_action(
+                "composer-add-mention",
+                "icons/file.svg",
+                "Mention files",
+                "Add exact local file references",
+                cx,
+                |app, _, _, cx| app.select_composer_mention(cx),
+            ))
+        })
+        .when(!skills.is_empty(), |this| {
+            this.child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(7.0))
+                    .pb(px(3.0))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(colors.text_tertiary)
+                    .child("Skills"),
+            )
+        })
+        .children(
+            skills
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, detail))| {
+                    let selected_name = name.clone();
+                    div()
+                        .id(("composer-add-skill", index))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(9.0))
+                        .px(px(8.0))
+                        .py(px(7.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.add_composer_skill(selected_name.clone(), cx);
+                        }))
+                        .child(
+                            Icon::empty()
+                                .path("icons/puzzle.svg")
+                                .with_size(px(14.0))
+                                .text_color(colors.text_tertiary),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_secondary)
+                                        .child(name),
+                                )
+                                .when(!detail.trim().is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.text_tertiary)
+                                            .overflow_hidden()
+                                            .child(detail),
+                                    )
+                                }),
+                        )
+                        .into_any_element()
+                }),
+        )
+}
+
+fn composer_add_action(
+    id: &'static str,
+    icon: &'static str,
+    title: &'static str,
+    detail: &'static str,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &gpui::ClickEvent, &mut gpui::Window, &mut Context<MitsuroApp>)
+        + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(9.0))
+        .px(px(8.0))
+        .py(px(7.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(on_click))
+        .child(
+            Icon::empty()
+                .path(icon)
+                .with_size(px(14.0))
+                .text_color(colors.text_tertiary),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(detail),
+                ),
         )
 }
 

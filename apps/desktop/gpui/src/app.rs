@@ -22,8 +22,9 @@ use mitsuro_desktop_backend::{
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, ActivityFields,
     AgentBackend, ApprovalChoice, BackendKind, BackendSelection, BackendSessionId,
     CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
-    CollaborationModeMask, ConfigReadParams, ConversationAudio, ConversationImage, CreateSession,
-    DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    CollaborationModeMask, ConfigReadParams, ConversationAudio, ConversationImage,
+    ConversationReference, ConversationReferenceKind, CreateSession, DesktopBackend,
+    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
     EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
@@ -49,7 +50,8 @@ use crate::browser::{create_default_host, BrowserHost, DesktopBrowserHost};
 use crate::components;
 use crate::demo::{
     self, DemoAudioAttachment, DemoAudioSource, DemoGoal, DemoGoalStatus, DemoImageAttachment,
-    DemoImageSource, DemoMessage, DemoMessageKind, DemoPlanItem, DemoThread, ThreadSurface,
+    DemoImageSource, DemoMessage, DemoMessageKind, DemoPlanItem, DemoReferenceAttachment,
+    DemoReferenceKind, DemoThread, ThreadSurface,
 };
 use crate::preferences::DesktopPreferences;
 use crate::theme;
@@ -771,6 +773,8 @@ pub struct ComposerAttachment {
 pub enum ComposerAttachmentKind {
     Image,
     Audio,
+    Skill,
+    Mention,
 }
 
 impl AccountSession {
@@ -960,6 +964,7 @@ pub struct MitsuroApp {
     account_state: SurfaceDataState,
     composer_input: Entity<InputState>,
     composer_attachments: Vec<ComposerAttachment>,
+    composer_add_menu_open: bool,
     search_input: Entity<InputState>,
     search_query: String,
     backend: Option<Arc<DesktopBackend>>,
@@ -1241,6 +1246,7 @@ impl MitsuroApp {
             account_state: SurfaceDataState::Loading,
             composer_input,
             composer_attachments: Vec::new(),
+            composer_add_menu_open: false,
             search_input,
             search_query: String::new(),
             backend: None,
@@ -4908,6 +4914,24 @@ impl MitsuroApp {
         &self.composer_attachments
     }
 
+    pub fn composer_add_menu_open(&self) -> bool {
+        self.composer_add_menu_open
+    }
+
+    pub fn can_open_composer_add_menu(&self) -> bool {
+        self.can_attach_images() || self.can_mention_files() || self.can_add_skills()
+    }
+
+    pub fn toggle_composer_add_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.can_open_composer_add_menu() {
+            self.status_line = "No addable inputs are available for this backend and model.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_add_menu_open = !self.composer_add_menu_open;
+        cx.notify();
+    }
+
     pub fn can_attach_images(&self) -> bool {
         !self.turn_in_progress
             && self.selected_model_supports("image")
@@ -4922,6 +4946,49 @@ impl MitsuroApp {
             && self
                 .live_backend()
                 .is_some_and(|backend| backend.capabilities().audio_attachments)
+    }
+
+    pub fn can_mention_files(&self) -> bool {
+        !self.turn_in_progress
+            && self
+                .live_backend()
+                .is_some_and(|backend| backend.capabilities().mention_inputs)
+    }
+
+    pub fn can_add_skills(&self) -> bool {
+        !self.turn_in_progress
+            && self.skills.iter().any(|skill| skill.enabled)
+            && self
+                .live_backend()
+                .is_some_and(|backend| backend.capabilities().skill_inputs)
+    }
+
+    pub fn enabled_composer_skills(&self) -> impl Iterator<Item = &SkillMetadata> {
+        self.skills.iter().filter(|skill| skill.enabled)
+    }
+
+    fn binary_attachment_count(&self) -> usize {
+        self.composer_attachments
+            .iter()
+            .filter(|attachment| {
+                matches!(
+                    attachment.kind,
+                    ComposerAttachmentKind::Image | ComposerAttachmentKind::Audio
+                )
+            })
+            .count()
+    }
+
+    fn reference_attachment_count(&self) -> usize {
+        self.composer_attachments
+            .iter()
+            .filter(|attachment| {
+                matches!(
+                    attachment.kind,
+                    ComposerAttachmentKind::Skill | ComposerAttachmentKind::Mention
+                )
+            })
+            .count()
     }
 
     fn selected_model_supports(&self, modality: &str) -> bool {
@@ -4940,6 +5007,7 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        self.composer_add_menu_open = false;
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -4953,7 +5021,7 @@ impl MitsuroApp {
                     Ok(Ok(Some(paths))) => {
                         let mut rejected = 0usize;
                         for path in paths {
-                            if app.composer_attachments.len() >= 4 {
+                            if app.binary_attachment_count() >= 4 {
                                 rejected += 1;
                                 continue;
                             }
@@ -5029,6 +5097,7 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        self.composer_add_menu_open = false;
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -5042,7 +5111,7 @@ impl MitsuroApp {
                     Ok(Ok(Some(paths))) => {
                         let mut rejected = 0usize;
                         for path in paths {
-                            if app.composer_attachments.len() >= 4 {
+                            if app.binary_attachment_count() >= 4 {
                                 rejected += 1;
                                 continue;
                             }
@@ -5107,6 +5176,108 @@ impl MitsuroApp {
             });
         })
         .detach();
+    }
+
+    pub fn select_composer_mention(&mut self, cx: &mut Context<Self>) {
+        if !self.can_mention_files() {
+            self.status_line = "File mentions are unavailable for this backend.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_add_menu_open = false;
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Mention files".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let selected = receiver.await;
+            let _ = this.update(cx, |app, cx| {
+                match selected {
+                    Ok(Ok(Some(paths))) => {
+                        let mut rejected = 0usize;
+                        for path in paths {
+                            if app.reference_attachment_count() >= 8 {
+                                rejected += 1;
+                                continue;
+                            }
+                            let Some(raw_path) = path.to_str() else {
+                                rejected += 1;
+                                continue;
+                            };
+                            let valid = path.is_absolute()
+                                && std::fs::metadata(&path)
+                                    .is_ok_and(|metadata| metadata.is_file());
+                            if !valid {
+                                rejected += 1;
+                                continue;
+                            }
+                            if app
+                                .composer_attachments
+                                .iter()
+                                .any(|attachment| attachment.path == raw_path)
+                            {
+                                continue;
+                            }
+                            let name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("file")
+                                .to_owned();
+                            app.composer_attachments.push(ComposerAttachment {
+                                path: raw_path.to_owned(),
+                                name,
+                                kind: ComposerAttachmentKind::Mention,
+                            });
+                        }
+                        app.status_line = if rejected == 0 {
+                            "File mention(s) added.".into()
+                        } else {
+                            format!("File mentions added · rejected {rejected} invalid or excess file(s).")
+                                .into()
+                        };
+                    }
+                    Ok(Ok(None)) | Err(_) => {
+                        app.status_line = "File mention canceled.".into();
+                    }
+                    Ok(Err(error)) => {
+                        app.status_line = format!("File mention picker failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn add_composer_skill(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.can_add_skills() || self.reference_attachment_count() >= 8 {
+            self.status_line = "No additional skill references are available.".into();
+            cx.notify();
+            return;
+        }
+        let Some(skill) = self
+            .skills
+            .iter()
+            .find(|skill| skill.enabled && skill.name == name)
+        else {
+            self.status_line = "The selected skill is no longer available.".into();
+            cx.notify();
+            return;
+        };
+        if !self.composer_attachments.iter().any(|attachment| {
+            attachment.kind == ComposerAttachmentKind::Skill && attachment.path == skill.path
+        }) {
+            self.composer_attachments.push(ComposerAttachment {
+                path: skill.path.clone(),
+                name: skill.name.clone(),
+                kind: ComposerAttachmentKind::Skill,
+            });
+        }
+        self.composer_add_menu_open = false;
+        self.status_line = format!("Skill added · {}", skill.name).into();
+        cx.notify();
     }
 
     pub fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -5849,6 +6020,14 @@ impl MitsuroApp {
                 ComposerAttachmentKind::Audio => ProductAttachment::LocalAudio {
                     path: attachment.path.clone(),
                 },
+                ComposerAttachmentKind::Skill => ProductAttachment::Skill {
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                },
+                ComposerAttachmentKind::Mention => ProductAttachment::Mention {
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                },
             })
             .collect::<Vec<_>>();
         let attachment_names = self
@@ -5874,6 +6053,22 @@ impl MitsuroApp {
                 source: DemoAudioSource::LocalPath(attachment.path.clone()),
             })
             .collect::<Vec<_>>();
+        let demo_references = self
+            .composer_attachments
+            .iter()
+            .filter_map(|attachment| {
+                let kind = match attachment.kind {
+                    ComposerAttachmentKind::Skill => DemoReferenceKind::Skill,
+                    ComposerAttachmentKind::Mention => DemoReferenceKind::Mention,
+                    ComposerAttachmentKind::Image | ComposerAttachmentKind::Audio => return None,
+                };
+                Some(DemoReferenceAttachment {
+                    kind,
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
         let visible_user_text = if attachment_names.is_empty() {
             trimmed.to_owned()
         } else if trimmed.is_empty() {
@@ -5889,6 +6084,7 @@ impl MitsuroApp {
                 trimmed,
                 demo_images,
                 demo_audio,
+                demo_references,
             ));
             thread.summary.preview = Some(visible_user_text.chars().take(64).collect());
             let is_default_name = thread
@@ -5913,6 +6109,7 @@ impl MitsuroApp {
             state.set_value("", window, cx);
         });
         self.composer_attachments.clear();
+        self.composer_add_menu_open = false;
 
         let model_slug = self.selected_model_slug();
         let reasoning_effort = self.selected_reasoning_effort.clone();
@@ -7630,6 +7827,7 @@ impl MitsuroApp {
         self.active_turn_id = None;
         self.turn_in_progress = false;
         self.composer_attachments.clear();
+        self.composer_add_menu_open = false;
         self.account = AccountSession::empty(kind.id());
         self.account_state = SurfaceDataState::Loading;
     }
@@ -7983,6 +8181,7 @@ impl MitsuroApp {
                                                     m.body,
                                                     demo_image_attachments(m.images),
                                                     demo_audio_attachments(m.audio),
+                                                    demo_reference_attachments(m.references),
                                                 )
                                             }
                                             MessageRole::Assistant => {
@@ -8752,6 +8951,22 @@ fn demo_audio_attachments(audio: Vec<ConversationAudio>) -> Vec<DemoAudioAttachm
                     source,
                 }
             }
+        })
+        .collect()
+}
+
+fn demo_reference_attachments(
+    references: Vec<ConversationReference>,
+) -> Vec<DemoReferenceAttachment> {
+    references
+        .into_iter()
+        .map(|reference| DemoReferenceAttachment {
+            kind: match reference.kind {
+                ConversationReferenceKind::Skill => DemoReferenceKind::Skill,
+                ConversationReferenceKind::Mention => DemoReferenceKind::Mention,
+            },
+            name: reference.name,
+            path: reference.path,
         })
         .collect()
 }

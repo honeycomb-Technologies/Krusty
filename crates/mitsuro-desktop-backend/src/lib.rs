@@ -105,12 +105,12 @@ pub use process::{
     ProcessTerminalSize, ProcessWriteStdinParams, ProcessWriteStdinResponse,
 };
 pub use product::{
-    ConversationAudio, ConversationImage, ConversationMessage, CreateSession, MessageRole,
-    ProductAttachment, ProductBackend, ProductDirectoryEntry, ProductExtension, ProductFile,
-    ProductFileMatch, ProductHiveRun, ProductHiveSnapshot, ProductHiveStatus, ProductMcpServer,
-    ProductModel, ProductProcess, ProductReasoningEffort, ProductReview, ProductReviewStart,
-    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSteer, ProductTurn,
-    SessionConversation, SessionSummary,
+    ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
+    ConversationReferenceKind, CreateSession, MessageRole, ProductAttachment, ProductBackend,
+    ProductDirectoryEntry, ProductExtension, ProductFile, ProductFileMatch, ProductHiveRun,
+    ProductHiveSnapshot, ProductHiveStatus, ProductMcpServer, ProductModel, ProductProcess,
+    ProductReasoningEffort, ProductReview, ProductReviewStart, ProductReviewTarget,
+    ProductSchedule, ProductSkill, ProductSteer, ProductTurn, SessionConversation, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,
@@ -131,8 +131,8 @@ pub use protocol::{
     ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse,
     ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse, TranscriptAudio,
     TranscriptAudioSource, TranscriptImage, TranscriptImageSource, TranscriptMessage,
-    TranscriptRole, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnSteerParams, TurnSteerResponse,
+    TranscriptReference, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 pub use server_requests::{
     automatic_server_response, is_known_server_request, parse_mcp_elicitation_request,

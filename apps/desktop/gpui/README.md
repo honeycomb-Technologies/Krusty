@@ -60,7 +60,8 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   matching completion notification arrives. The user can reopen or cancel that exact
   login. Fixture device codes remain confined to explicit fixture mode.
 - The composer exposes only implemented behavior: text entry, real model-gated image
-  and audio-file attachments, Send, Stop, backend-scoped model cycling, and
+  and audio-file attachments, Codex skill references and local-file mentions, Send,
+  Stop, backend-scoped model cycling, and
   model-advertised reasoning-effort
   cycling. The selected effort is stored per backend/model; Codex receives the exact
   `turn/start.effort` value and Mitsuro receives the equivalent `thinking_enabled`
@@ -73,8 +74,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   schema-exact `localAudio` input. Reopened local, remote, and embedded audio remains
   visible as attachment metadata. Mitsuro's HTTP content contract has no audio block,
   so the control is hidden and both product and low-level adapters reject audio before
-  network I/O. Microphone recording, project, and access stubs are not presented as
-  controls.
+  network I/O. Codex's add menu lists only enabled skills returned by the live backend
+  and emits schema-exact `skill { name, path }` inputs; its native file picker emits
+  schema-exact `mention { name, path }` inputs. Reopened threads retain both reference
+  types. Mitsuro's content contract has no equivalent block, so these controls are
+  hidden and both adapter layers reject them rather than converting them into prompt
+  text. Microphone recording, project, and access stubs are not presented as controls.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

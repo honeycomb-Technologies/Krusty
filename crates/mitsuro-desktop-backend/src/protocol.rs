@@ -392,6 +392,8 @@ pub struct TranscriptMessage {
     pub images: Vec<TranscriptImage>,
     /// Audio inputs attached to a persisted user message.
     pub audio: Vec<TranscriptAudio>,
+    /// Skill and file-mention references attached to a persisted user message.
+    pub references: Vec<TranscriptReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,6 +420,19 @@ pub enum TranscriptAudioSource {
     Embedded { media_type: String, data: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptReference {
+    pub kind: TranscriptReferenceKind,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptReferenceKind {
+    Skill,
+    Mention,
+}
+
 impl TranscriptMessage {
     fn plain(role: TranscriptRole, body: String, item_id: Option<String>) -> Self {
         Self {
@@ -429,6 +444,7 @@ impl TranscriptMessage {
             activity: None,
             images: Vec::new(),
             audio: Vec::new(),
+            references: Vec::new(),
         }
     }
 }
@@ -521,12 +537,14 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
             let body = user_input_text(content);
             let images = user_input_images(content);
             let audio = user_input_audio(content);
-            if body.is_empty() && images.is_empty() && audio.is_empty() {
+            let references = user_input_references(content);
+            if body.is_empty() && images.is_empty() && audio.is_empty() && references.is_empty() {
                 return None;
             }
             let mut message = TranscriptMessage::plain(TranscriptRole::User, body, id);
             message.images = images;
             message.audio = audio;
+            message.references = references;
             Some(message)
         }
         "agentMessage" => {
@@ -598,6 +616,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 activity: None,
                 images: Vec::new(),
                 audio: Vec::new(),
+                references: Vec::new(),
             })
         }
         "fileChange" => {
@@ -620,6 +639,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 activity: None,
                 images: Vec::new(),
                 audio: Vec::new(),
+                references: Vec::new(),
             })
         }
         _ => {
@@ -633,6 +653,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 activity: Some(activity),
                 images: Vec::new(),
                 audio: Vec::new(),
+                references: Vec::new(),
             })
         }
     }
@@ -905,6 +926,27 @@ fn data_audio_parts(url: &str) -> Option<(&str, &str)> {
     Some((media_type, data))
 }
 
+fn user_input_references(content: &Value) -> Vec<TranscriptReference> {
+    let Some(parts) = content.as_array() else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            let kind = match part.get("type").and_then(Value::as_str) {
+                Some("skill") => TranscriptReferenceKind::Skill,
+                Some("mention") => TranscriptReferenceKind::Mention,
+                _ => return None,
+            };
+            Some(TranscriptReference {
+                kind,
+                name: part.get("name")?.as_str()?.to_owned(),
+                path: part.get("path")?.as_str()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // turn/start
 // ---------------------------------------------------------------------------
@@ -974,6 +1016,22 @@ impl TurnStartParams {
     pub fn push_local_audio(&mut self, path: impl Into<String>) {
         self.input.push(serde_json::json!({
             "type": "localAudio",
+            "path": path.into()
+        }));
+    }
+
+    pub fn push_skill(&mut self, name: impl Into<String>, path: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "skill",
+            "name": name.into(),
+            "path": path.into()
+        }));
+    }
+
+    pub fn push_mention(&mut self, name: impl Into<String>, path: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "mention",
+            "name": name.into(),
             "path": path.into()
         }));
     }
@@ -2799,6 +2857,44 @@ mod event_tests {
     }
 
     #[test]
+    fn extract_transcript_preserves_skill_and_mention_user_inputs() {
+        let thread = serde_json::json!({
+            "turns": [{
+                "items": [{
+                    "id": "user-references",
+                    "type": "userMessage",
+                    "content": [
+                        {"type": "skill", "name": "release", "path": "/skills/release/SKILL.md"},
+                        {"type": "mention", "name": "Cargo.toml", "path": "/workspace/Cargo.toml"}
+                    ]
+                }]
+            }]
+        });
+        let messages = extract_transcript_from_thread(&thread);
+        assert_eq!(
+            messages.len(),
+            1,
+            "reference-only user messages remain visible"
+        );
+        assert!(messages[0].body.is_empty());
+        assert_eq!(
+            messages[0].references,
+            vec![
+                TranscriptReference {
+                    kind: TranscriptReferenceKind::Skill,
+                    name: "release".to_owned(),
+                    path: "/skills/release/SKILL.md".to_owned(),
+                },
+                TranscriptReference {
+                    kind: TranscriptReferenceKind::Mention,
+                    name: "Cargo.toml".to_owned(),
+                    path: "/workspace/Cargo.toml".to_owned(),
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn every_current_thread_item_kind_is_typed_and_round_trips() {
         let inventory = include_str!("../fixtures/thread-item-types.txt");
         let kinds = inventory.lines().filter(|line| !line.is_empty());
@@ -2970,6 +3066,30 @@ mod p9_protocol_shape_tests {
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["input"][1]["type"], "localAudio");
         assert_eq!(value["input"][1]["path"], "/tmp/recording.wav");
+    }
+
+    #[test]
+    fn turn_start_skill_and_mention_match_generated_user_input_contract() {
+        let mut params = TurnStartParams::text("thread-1", "use these");
+        params.push_skill("release", "/skills/release/SKILL.md");
+        params.push_mention("Cargo.toml", "/workspace/Cargo.toml");
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(
+            value["input"][1],
+            serde_json::json!({
+                "type": "skill",
+                "name": "release",
+                "path": "/skills/release/SKILL.md"
+            })
+        );
+        assert_eq!(
+            value["input"][2],
+            serde_json::json!({
+                "type": "mention",
+                "name": "Cargo.toml",
+                "path": "/workspace/Cargo.toml"
+            })
+        );
     }
 
     #[test]
