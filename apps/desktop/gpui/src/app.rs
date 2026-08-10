@@ -26,29 +26,31 @@ use mitsuro_desktop_backend::{
     AppsListParams, BackendKind, BackendSelection, BackendSessionId, CancelLoginAccountParams,
     CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask,
     CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
-    CommandExecTerminateParams, CommandExecWriteParams, ConfigReadParams, ConfigWriteStatus,
-    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
-    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
-    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
-    EnvironmentSummary, FixtureBackend, FsChangedNotification, FsCopyParams,
-    FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams,
-    FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams, FuzzyFileSearchParams,
-    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    CommandExecTerminateParams, CommandExecWriteParams, ConfigReadParams, ConfigRequirements,
+    ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
+    ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
+    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsChangedNotification,
+    FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams,
+    FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams,
+    FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
     GetAccountTokenUsageResponse, HookMetadata, HooksListEntry, HooksListParams, InstalledApp,
     LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
     McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
     McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
-    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams, ModelServiceTier,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginInstallParams,
-    PluginInterface, PluginListParams, PluginSource, PluginSummary, PluginUninstallParams,
-    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode,
-    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
-    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
-    ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
-    RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
-    ReasoningEffortOption, RemoteControlClient, RemoteControlClientsListParams,
-    RemoteControlClientsRevokeParams, RemoteControlConnectionStatus, RemoteControlDisableParams,
-    RemoteControlEnableParams, RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
+    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams,
+    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse, ModelServiceTier,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PermissionProfileListParams,
+    PermissionProfileSummary, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
+    RemoteControlClient, RemoteControlClientsListParams, RemoteControlClientsRevokeParams,
+    RemoteControlConnectionStatus, RemoteControlDisableParams, RemoteControlEnableParams,
+    RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
     RemoteControlPairingStatusParams, RemoteControlStatusChangedNotification,
     RemoteControlStatusReadResponse, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
@@ -58,7 +60,7 @@ use mitsuro_desktop_backend::{
     ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
     ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
     ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT,
+    FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -325,7 +327,6 @@ const SETTINGS_SECTIONS: [SettingsSection; 21] = [
 fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
     let mut m = std::collections::HashMap::new();
     // General
-    m.insert("default_permissions".into(), true);
     m.insert("full_access".into(), true);
     m.insert("bottom_panel".into(), true);
     m.insert("prevent_sleep".into(), false);
@@ -1037,6 +1038,17 @@ pub struct MitsuroApp {
     selected_fast_mode: bool,
     /// Short config snippet from `config/read` (Settings).
     config_snippet: SharedString,
+    /// Effective Codex permission profiles from `permissionProfile/list`.
+    permission_profiles: Vec<PermissionProfileSummary>,
+    permission_profiles_state: SurfaceDataState,
+    /// Managed policy requirements from `configRequirements/read`.
+    config_requirements: Option<ConfigRequirements>,
+    /// Active provider tool gates from `modelProvider/capabilities/read`.
+    model_provider_capabilities: Option<ModelProviderCapabilitiesReadResponse>,
+    /// Effective named profile from `config.default_permissions`, when present.
+    config_default_permissions: Option<String>,
+    /// Confirmation required before exposing the dangerous profile in Composer.
+    full_access_confirmation_open: bool,
     /// Skills from `skills/list` (or fixture demo).
     skills: Vec<SkillMetadata>,
     /// Exact per-workspace catalog returned by Codex `hooks/list`.
@@ -1435,6 +1447,12 @@ impl MitsuroApp {
             realtime_voice_generation: 0,
             selected_fast_mode: false,
             config_snippet: SharedString::from(""),
+            permission_profiles: Vec::new(),
+            permission_profiles_state: SurfaceDataState::Loading,
+            config_requirements: None,
+            model_provider_capabilities: None,
+            config_default_permissions: None,
+            full_access_confirmation_open: false,
             skills: Vec::new(),
             hooks: Vec::new(),
             hooks_state: SurfaceDataState::Loading,
@@ -3862,6 +3880,51 @@ impl MitsuroApp {
         )
         .into();
         cx.notify();
+    }
+
+    pub fn full_access_confirmation_open(&self) -> bool {
+        self.full_access_confirmation_open
+    }
+
+    pub fn request_full_access_availability(&mut self, cx: &mut Context<Self>) {
+        if self.settings_toggle("full_access", true) {
+            self.set_full_access_available(false);
+            self.full_access_confirmation_open = false;
+            self.status_line = "Full access hidden from the composer.".into();
+        } else {
+            self.full_access_confirmation_open = true;
+        }
+        cx.notify();
+    }
+
+    pub fn confirm_full_access_availability(&mut self, cx: &mut Context<Self>) {
+        self.set_full_access_available(true);
+        self.full_access_confirmation_open = false;
+        self.status_line =
+            "Full access is now available in the composer; it is not selected.".into();
+        cx.notify();
+    }
+
+    pub fn cancel_full_access_availability(&mut self, cx: &mut Context<Self>) {
+        self.full_access_confirmation_open = false;
+        cx.notify();
+    }
+
+    fn set_full_access_available(&mut self, available: bool) {
+        self.settings_toggles
+            .insert("full_access".to_owned(), available);
+        self.preferences
+            .settings_toggles
+            .insert("full_access".to_owned(), available);
+        if !available {
+            if self.composer_default_access_mode == Some(ProductAccessMode::CodexFullAccess) {
+                self.composer_default_access_mode = None;
+            }
+            self.composer_access_modes
+                .retain(|_, mode| *mode != ProductAccessMode::CodexFullAccess);
+            self.composer_access_menu_open = false;
+        }
+        self.save_preferences_best_effort();
     }
 
     pub fn settings_choice(&self, key: &str, default: &str) -> String {
@@ -7779,6 +7842,7 @@ impl MitsuroApp {
     pub fn show_composer_access_control(&self) -> bool {
         self.live_backend()
             .is_some_and(|backend| backend.capabilities().access_modes)
+            && !self.composer_access_choices().is_empty()
     }
 
     pub fn composer_access_menu_open(&self) -> bool {
@@ -7799,7 +7863,12 @@ impl MitsuroApp {
             Some(ProductAccessMode::CodexFullAccess) => "Full access",
             Some(ProductAccessMode::MitsuroSupervised) => "Supervised",
             Some(ProductAccessMode::MitsuroAutonomous) => "Autonomous",
-            None => "Default access",
+            None => match self.config_default_permissions.as_deref() {
+                Some(READ_ONLY_PROFILE_ID) => "Read-only",
+                Some(WORKSPACE_PROFILE_ID) => "Auto",
+                Some(FULL_ACCESS_PROFILE_ID) => "Full access",
+                _ => "Default access",
+            },
         }
     }
 
@@ -7809,23 +7878,36 @@ impl MitsuroApp {
 
     pub fn composer_access_choices(&self) -> Vec<(ProductAccessMode, &'static str, &'static str)> {
         match self.active_backend_kind() {
-            Some(BackendKind::CodexStdio | BackendKind::CodexWebSocket) => vec![
-                (
-                    ProductAccessMode::CodexReadOnly,
-                    "Read-only",
-                    "Ask before actions; do not write files",
-                ),
-                (
-                    ProductAccessMode::CodexAuto,
-                    "Auto",
-                    "Write in the workspace; ask when needed",
-                ),
-                (
-                    ProductAccessMode::CodexFullAccess,
-                    "Full access",
-                    "Run without sandbox or approval prompts",
-                ),
-            ],
+            Some(BackendKind::CodexStdio | BackendKind::CodexWebSocket) => {
+                if self.permission_profiles_state != SurfaceDataState::Live {
+                    return Vec::new();
+                }
+                let mut choices = Vec::new();
+                if self.codex_permission_profile_allowed(READ_ONLY_PROFILE_ID) {
+                    choices.push((
+                        ProductAccessMode::CodexReadOnly,
+                        "Read-only",
+                        "Ask before actions; do not write files",
+                    ));
+                }
+                if self.codex_permission_profile_allowed(WORKSPACE_PROFILE_ID) {
+                    choices.push((
+                        ProductAccessMode::CodexAuto,
+                        "Auto",
+                        "Write in the workspace; ask when needed",
+                    ));
+                }
+                if self.settings_toggle("full_access", true)
+                    && self.codex_permission_profile_allowed(FULL_ACCESS_PROFILE_ID)
+                {
+                    choices.push((
+                        ProductAccessMode::CodexFullAccess,
+                        "Full access",
+                        "Run without sandbox or approval prompts",
+                    ));
+                }
+                choices
+            }
             Some(BackendKind::MitsuroHttp) => vec![
                 (
                     ProductAccessMode::MitsuroSupervised,
@@ -7840,6 +7922,16 @@ impl MitsuroApp {
             ],
             _ => Vec::new(),
         }
+    }
+
+    fn codex_permission_profile_allowed(&self, id: &str) -> bool {
+        self.permission_profiles
+            .iter()
+            .any(|profile| profile.id == id && profile.allowed)
+            && self
+                .config_requirements
+                .as_ref()
+                .is_none_or(|requirements| requirements.allows_profile(id))
     }
 
     pub fn toggle_composer_access_menu(&mut self, cx: &mut Context<Self>) {
@@ -10875,6 +10967,12 @@ impl MitsuroApp {
         self.remote_control_error = None;
         self.remote_control_mutation_in_progress = None;
         self.remote_control_revoke_confirmation = None;
+        self.permission_profiles.clear();
+        self.permission_profiles_state = SurfaceDataState::Fixture;
+        self.config_requirements = None;
+        self.model_provider_capabilities = None;
+        self.config_default_permissions = None;
+        self.full_access_confirmation_open = false;
 
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -11042,6 +11140,16 @@ impl MitsuroApp {
         self.selected_reasoning_effort = None;
         self.selected_fast_mode = false;
         self.config_snippet = SharedString::from("");
+        self.permission_profiles.clear();
+        self.permission_profiles_state = match kind {
+            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
+            BackendKind::Fixture => SurfaceDataState::Fixture,
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
+        };
+        self.config_requirements = None;
+        self.model_provider_capabilities = None;
+        self.config_default_permissions = None;
+        self.full_access_confirmation_open = false;
         self.skills.clear();
         self.hooks.clear();
         self.hooks_state = SurfaceDataState::Loading;
@@ -11229,6 +11337,7 @@ impl MitsuroApp {
                             collaboration_modes,
                             realtime_voices,
                             config_snip,
+                            permissions,
                             skills,
                             hooks,
                             connector_apps,
@@ -11291,6 +11400,30 @@ impl MitsuroApp {
                         }
                         if let Some(snip) = config_snip {
                             app.apply_config_snippet(snip);
+                        }
+                        match permissions {
+                            Ok(Some(snapshot)) => {
+                                app.permission_profiles = snapshot.profiles;
+                                app.config_requirements = snapshot.requirements;
+                                app.model_provider_capabilities =
+                                    Some(snapshot.provider_capabilities);
+                                app.config_default_permissions = snapshot.default_permissions;
+                                app.permission_profiles_state = SurfaceDataState::Live;
+                            }
+                            Ok(None) => {
+                                app.permission_profiles.clear();
+                                app.config_requirements = None;
+                                app.model_provider_capabilities = None;
+                                app.config_default_permissions = None;
+                                app.permission_profiles_state = SurfaceDataState::Unsupported;
+                            }
+                            Err(_) => {
+                                app.permission_profiles.clear();
+                                app.config_requirements = None;
+                                app.model_provider_capabilities = None;
+                                app.config_default_permissions = None;
+                                app.permission_profiles_state = SurfaceDataState::Error;
+                            }
                         }
                         app.apply_skills(skills);
                         match hooks {
@@ -11448,6 +11581,11 @@ impl MitsuroApp {
                         app.remote_control_clients.clear();
                         app.remote_control_error = Some(message.clone());
                         app.remote_control_state = SurfaceDataState::Error;
+                        app.permission_profiles.clear();
+                        app.config_requirements = None;
+                        app.model_provider_capabilities = None;
+                        app.config_default_permissions = None;
+                        app.permission_profiles_state = SurfaceDataState::Error;
                         app.environments_state = SurfaceDataState::Error;
                         app.status_line = format!("Backend unavailable · {message}").into();
                     }
@@ -12592,6 +12730,7 @@ struct BackendBootstrap {
     collaboration_modes: Vec<CollaborationModeMask>,
     realtime_voices: Result<Option<RealtimeVoicesList>, String>,
     config_snip: Option<String>,
+    permissions: Result<Option<PermissionsSnapshot>, String>,
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
     connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
@@ -12607,6 +12746,13 @@ struct RemoteControlSnapshot {
     status: RemoteControlStatusReadResponse,
     clients: Vec<RemoteControlClient>,
     clients_error: Option<String>,
+}
+
+struct PermissionsSnapshot {
+    profiles: Vec<PermissionProfileSummary>,
+    requirements: Option<ConfigRequirements>,
+    provider_capabilities: ModelProviderCapabilitiesReadResponse,
+    default_permissions: Option<String>,
 }
 
 fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendBootstrap, String> {
@@ -12635,16 +12781,33 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         } else {
             Ok(None)
         };
-        // config/read best-effort for Settings snippet.
-        let config_snip = match b
+        // config/read is shared by the Configuration display and the effective
+        // named permission-profile default.
+        let effective_cwd = std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string());
+        let config = b
             .config_read(ConfigReadParams {
+                cwd: effective_cwd.clone(),
                 include_layers: Some(false),
-                ..Default::default()
             })
             .await
+            .ok();
+        let config_snip = config.as_ref().map(|response| response.settings_snippet());
+        let config_default_permissions = config
+            .as_ref()
+            .and_then(|response| response.config.get("default_permissions"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let permissions = if b.capabilities().permission_profiles
+            && b.capabilities().config_requirements
+            && b.capabilities().model_provider_capabilities
         {
-            Ok(resp) => Some(resp.settings_snippet()),
-            Err(_) => None,
+            read_permissions_snapshot(b.as_ref(), effective_cwd, config_default_permissions)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
         };
         // skills/list best-effort.
         let skills = match b.list_product_skills().await {
@@ -12708,6 +12871,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             collaboration_modes,
             realtime_voices,
             config_snip,
+            permissions,
             skills,
             hooks,
             connector_apps,
@@ -12718,6 +12882,61 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             hive,
             schedules,
         })
+    })
+}
+
+async fn read_permissions_snapshot(
+    backend: &DesktopBackend,
+    cwd: Option<String>,
+    config_default_permissions: Option<String>,
+) -> Result<PermissionsSnapshot, String> {
+    let mut profiles = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut pagination_complete = false;
+    for _ in 0..100 {
+        let response = backend
+            .list_permission_profiles(PermissionProfileListParams {
+                cursor: cursor.clone(),
+                cwd: cwd.clone(),
+                limit: Some(100),
+            })
+            .await
+            .map_err(|error| format!("permissionProfile/list: {error}"))?;
+        profiles.extend(response.data);
+        let Some(next_cursor) = response.next_cursor else {
+            pagination_complete = true;
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("permissionProfile/list repeated its pagination cursor".to_owned());
+        }
+        cursor = Some(next_cursor);
+    }
+    if !pagination_complete {
+        return Err("permissionProfile/list exceeded 100 pages".to_owned());
+    }
+
+    let requirements = backend
+        .read_config_requirements()
+        .await
+        .map_err(|error| format!("configRequirements/read: {error}"))?
+        .requirements;
+    let provider_capabilities = backend
+        .read_model_provider_capabilities(ModelProviderCapabilitiesReadParams::default())
+        .await
+        .map_err(|error| format!("modelProvider/capabilities/read: {error}"))?;
+    let default_permissions = config_default_permissions.or_else(|| {
+        requirements
+            .as_ref()
+            .and_then(|requirements| requirements.default_permissions.clone())
+    });
+
+    Ok(PermissionsSnapshot {
+        profiles,
+        requirements,
+        provider_capabilities,
+        default_permissions,
     })
 }
 

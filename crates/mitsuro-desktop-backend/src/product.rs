@@ -13,11 +13,11 @@ use crate::{
     CollaborationModeSettings, CommandExecutionFields, DesktopBackend, FileChangeFields,
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, ListMcpServerStatusParams,
     LiveApprovalBridge, LiveReviewOutcome, LiveTurnOutcome, ModelListParams, PluginListParams,
-    Result, ReviewDelivery, ReviewStartParams, ReviewTarget, SandboxPolicy,
-    SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams, ThreadDeleteParams,
-    ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind,
-    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
+    Result, ReviewDelivery, ReviewStartParams, ReviewTarget, SessionDelegationProjection,
+    SkillsListParams, ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams,
+    ThreadReadParams, ThreadSetNameParams, ThreadStartParams, TranscriptAudioSource,
+    TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind, TranscriptRole,
+    TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,34 +727,21 @@ fn apply_access_to_turn_params(
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexReadOnly),
         ) => {
-            params.approval_policy = Some("on-request".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox_policy = Some(SandboxPolicy::ReadOnly {
-                network_access: false,
-            });
+            params.permissions = Some(crate::READ_ONLY_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexAuto),
         ) => {
-            params.approval_policy = Some("on-request".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox_policy = Some(SandboxPolicy::WorkspaceWrite {
-                writable_roots: roots.clone().unwrap_or_default(),
-                network_access: false,
-                exclude_slash_tmp: false,
-                exclude_tmpdir_env_var: false,
-            });
+            params.permissions = Some(crate::WORKSPACE_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexFullAccess),
         ) => {
-            params.approval_policy = Some("never".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox_policy = Some(SandboxPolicy::DangerFullAccess);
+            params.permissions = Some(crate::FULL_ACCESS_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroSupervised)) => {
@@ -778,27 +765,21 @@ fn apply_access_to_thread_params(
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexReadOnly),
         ) => {
-            params.approval_policy = Some("on-request".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox = Some("read-only".to_owned());
+            params.permissions = Some(crate::READ_ONLY_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexAuto),
         ) => {
-            params.approval_policy = Some("on-request".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox = Some("workspace-write".to_owned());
+            params.permissions = Some(crate::WORKSPACE_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (
             BackendKind::CodexStdio | BackendKind::CodexWebSocket,
             Some(ProductAccessMode::CodexFullAccess),
         ) => {
-            params.approval_policy = Some("never".to_owned());
-            params.approvals_reviewer = Some("user".to_owned());
-            params.sandbox = Some("danger-full-access".to_owned());
+            params.permissions = Some(crate::FULL_ACCESS_PROFILE_ID.to_owned());
             params.runtime_workspace_roots = roots;
         }
         (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroSupervised)) => {
@@ -1407,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_auto_access_serializes_schema_exact_turn_fields() {
+    fn codex_auto_access_serializes_schema_exact_named_profile() {
         let params = product_turn_params(
             ProductTurn {
                 session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
@@ -1425,38 +1406,28 @@ mod tests {
 
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["cwd"], "/workspace/project");
-        assert_eq!(value["approvalPolicy"], "on-request");
-        assert_eq!(value["approvalsReviewer"], "user");
+        assert_eq!(value["permissions"], crate::WORKSPACE_PROFILE_ID);
+        assert!(value.get("approvalPolicy").is_none());
+        assert!(value.get("approvalsReviewer").is_none());
         assert_eq!(
             value["runtimeWorkspaceRoots"],
             serde_json::json!(["/workspace/project"])
         );
-        assert_eq!(
-            value["sandboxPolicy"],
-            serde_json::json!({
-                "type": "workspaceWrite",
-                "writableRoots": ["/workspace/project"],
-                "networkAccess": false,
-                "excludeSlashTmp": false,
-                "excludeTmpdirEnvVar": false
-            })
-        );
+        assert!(value.get("sandboxPolicy").is_none());
         assert!(value.get("mitsuroPermissionMode").is_none());
     }
 
     #[test]
-    fn codex_thread_access_presets_keep_exact_sandbox_modes() {
-        for (mode, approval, sandbox) in [
-            (ProductAccessMode::CodexReadOnly, "on-request", "read-only"),
+    fn codex_thread_access_presets_keep_exact_named_profiles() {
+        for (mode, profile) in [
             (
-                ProductAccessMode::CodexAuto,
-                "on-request",
-                "workspace-write",
+                ProductAccessMode::CodexReadOnly,
+                crate::READ_ONLY_PROFILE_ID,
             ),
+            (ProductAccessMode::CodexAuto, crate::WORKSPACE_PROFILE_ID),
             (
                 ProductAccessMode::CodexFullAccess,
-                "never",
-                "danger-full-access",
+                crate::FULL_ACCESS_PROFILE_ID,
             ),
         ] {
             let mut params = ThreadStartParams {
@@ -1465,9 +1436,10 @@ mod tests {
             };
             apply_access_to_thread_params(&mut params, BackendKind::CodexStdio, Some(mode));
             let value = serde_json::to_value(params).unwrap();
-            assert_eq!(value["approvalPolicy"], approval);
-            assert_eq!(value["approvalsReviewer"], "user");
-            assert_eq!(value["sandbox"], sandbox);
+            assert_eq!(value["permissions"], profile);
+            assert!(value.get("approvalPolicy").is_none());
+            assert!(value.get("approvalsReviewer").is_none());
+            assert!(value.get("sandbox").is_none());
             assert_eq!(
                 value["runtimeWorkspaceRoots"],
                 serde_json::json!(["/workspace/project"])

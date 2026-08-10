@@ -172,6 +172,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "config/mcpServer/reload",
     "config/read",
     "config/value/write",
+    "configRequirements/read",
     "environment/add",
     "environment/info",
     "environment/status",
@@ -194,6 +195,8 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "mcpServer/tool/call",
     "mcpServerStatus/list",
     "model/list",
+    "modelProvider/capabilities/read",
+    "permissionProfile/list",
     "plugin/install",
     "plugin/installed",
     "plugin/list",
@@ -358,7 +361,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 84);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 87);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

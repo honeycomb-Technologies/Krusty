@@ -48,6 +48,11 @@ use crate::fs::{
     FuzzyFileSearchSessionUpdateResponse,
 };
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
+use crate::permissions::{
+    ConfigRequirementsReadResponse, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, PermissionProfileListParams,
+    PermissionProfileListResponse,
+};
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
 };
@@ -449,6 +454,32 @@ impl CodexAppServerBackend {
     pub async fn read_config(&self, params: ConfigReadParams) -> Result<ConfigReadResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("config/read", Some(value)).await
+    }
+
+    /// Permission profiles available for the effective project config.
+    pub async fn list_permission_profiles(
+        &self,
+        params: PermissionProfileListParams,
+    ) -> Result<PermissionProfileListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("permissionProfile/list", Some(value))
+            .await
+    }
+
+    /// Enterprise/managed requirements that narrow effective config choices.
+    pub async fn read_config_requirements(&self) -> Result<ConfigRequirementsReadResponse> {
+        self.request_typed("configRequirements/read", Some(serde_json::json!({})))
+            .await
+    }
+
+    /// Tool capabilities exposed by the active model provider.
+    pub async fn read_model_provider_capabilities(
+        &self,
+        params: ModelProviderCapabilitiesReadParams,
+    ) -> Result<ModelProviderCapabilitiesReadResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("modelProvider/capabilities/read", Some(value))
+            .await
     }
 
     /// Full-text / substring thread search via `thread/search`.
@@ -1025,6 +1056,24 @@ impl AgentBackend for CodexAppServerBackend {
 
     async fn config_mcp_server_reload(&self) -> Result<crate::ConfigMcpServerReloadResponse> {
         self.request_typed("config/mcpServer/reload", None).await
+    }
+
+    async fn permission_profile_list(
+        &self,
+        params: PermissionProfileListParams,
+    ) -> Result<PermissionProfileListResponse> {
+        self.list_permission_profiles(params).await
+    }
+
+    async fn config_requirements_read(&self) -> Result<ConfigRequirementsReadResponse> {
+        self.read_config_requirements().await
+    }
+
+    async fn model_provider_capabilities_read(
+        &self,
+        params: ModelProviderCapabilitiesReadParams,
+    ) -> Result<ModelProviderCapabilitiesReadResponse> {
+        self.read_model_provider_capabilities(params).await
     }
 
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
@@ -1952,6 +2001,96 @@ mod tests {
             })
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn permission_profile_family_matches_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "permissionProfile/list",
+                "configRequirements/read",
+                "modelProvider/capabilities/read",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "permissionProfile/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "cwd": "/workspace/project",
+                                "limit": 100
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [
+                                {"id": ":read-only", "description": null, "allowed": true},
+                                {"id": ":workspace", "description": null, "allowed": true},
+                                {"id": ":danger-full-access", "description": null, "allowed": false}
+                            ],
+                            "nextCursor": null
+                        })
+                    }
+                    "configRequirements/read" => {
+                        assert_eq!(request["params"], serde_json::json!({}));
+                        serde_json::json!({"requirements": null})
+                    }
+                    "modelProvider/capabilities/read" => {
+                        assert_eq!(request["params"], serde_json::json!({}));
+                        serde_json::json!({
+                            "imageGeneration": true,
+                            "namespaceTools": true,
+                            "webSearch": true
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let profiles = backend
+            .list_permission_profiles(PermissionProfileListParams {
+                cwd: Some("/workspace/project".into()),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(profiles.data.len(), 3);
+        assert!(!profiles.data[2].allowed);
+        assert!(backend
+            .read_config_requirements()
+            .await
+            .unwrap()
+            .requirements
+            .is_none());
+        let capabilities = backend
+            .read_model_provider_capabilities(ModelProviderCapabilitiesReadParams::default())
+            .await
+            .unwrap();
+        assert!(capabilities.namespace_tools);
+        assert!(capabilities.image_generation);
+        assert!(capabilities.web_search);
         server.await.unwrap();
     }
 
@@ -3078,6 +3217,41 @@ mod integration_tests {
             .expect("remoteControl/status/read");
         assert!(!status.server_name.is_empty());
         assert!(!status.installation_id.is_empty());
+        backend.disconnect().await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn real_app_server_permission_profiles_and_requirements_read() {
+        if !should_run_integration() {
+            eprintln!("skip: codex binary not available");
+            return;
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        let profiles = backend
+            .list_permission_profiles(PermissionProfileListParams {
+                cwd: Some("/tmp".into()),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .expect("permissionProfile/list");
+        for builtin in [
+            crate::READ_ONLY_PROFILE_ID,
+            crate::WORKSPACE_PROFILE_ID,
+            crate::FULL_ACCESS_PROFILE_ID,
+        ] {
+            assert!(profiles.data.iter().any(|profile| profile.id == builtin));
+        }
+        let _ = backend
+            .read_config_requirements()
+            .await
+            .expect("configRequirements/read");
+        let _capabilities = backend
+            .read_model_provider_capabilities(ModelProviderCapabilitiesReadParams::default())
+            .await
+            .expect("modelProvider/capabilities/read");
         backend.disconnect().await.expect("disconnect");
     }
 

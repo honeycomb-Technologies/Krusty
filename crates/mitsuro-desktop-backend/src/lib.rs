@@ -18,6 +18,7 @@ pub mod mcp_config;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
+pub mod permissions;
 pub mod plugin_mutations;
 pub mod process;
 pub mod product;
@@ -132,6 +133,12 @@ pub use mitsuro::MitsuroServerBackend;
 pub use notifications::{
     is_known_server_notification, known_notification_event, server_notification_methods,
     LifecycleNotification, NotificationFamily, NotificationSeverity, SERVER_NOTIFICATIONS_TEXT,
+};
+pub use permissions::{
+    ApprovalsReviewer, ConfigRequirements, ConfigRequirementsReadResponse,
+    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse,
+    PermissionProfileListParams, PermissionProfileListResponse, PermissionProfileSummary,
+    SandboxMode, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
 };
 pub use plugin_mutations::{
     PluginAppSummary, PluginInstallParams, PluginInstallResponse, PluginUninstallParams,

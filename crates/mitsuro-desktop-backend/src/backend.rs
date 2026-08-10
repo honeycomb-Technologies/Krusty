@@ -42,6 +42,11 @@ use crate::mcp_config::{
     ConfigMcpServerReloadResponse, ConfigValueWriteParams, ConfigWriteResponse,
 };
 use crate::methods::is_known_client_method;
+use crate::permissions::{
+    ConfigRequirementsReadResponse, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, PermissionProfileListParams,
+    PermissionProfileListResponse,
+};
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
 };
@@ -136,6 +141,33 @@ pub trait AgentBackend: Send + Sync {
     async fn config_mcp_server_reload(&self) -> Result<ConfigMcpServerReloadResponse> {
         Err(crate::AgentError::NotImplemented(
             "MCP configuration reload is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// List permission profiles available for the effective project config.
+    async fn permission_profile_list(
+        &self,
+        _params: PermissionProfileListParams,
+    ) -> Result<PermissionProfileListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "permission profile listing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read enterprise/managed requirements that narrow effective config choices.
+    async fn config_requirements_read(&self) -> Result<ConfigRequirementsReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "configuration requirements are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read provider-level tool capabilities for the active model provider.
+    async fn model_provider_capabilities_read(
+        &self,
+        _params: ModelProviderCapabilitiesReadParams,
+    ) -> Result<ModelProviderCapabilitiesReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "model provider capabilities are not implemented by this backend".to_owned(),
         ))
     }
 

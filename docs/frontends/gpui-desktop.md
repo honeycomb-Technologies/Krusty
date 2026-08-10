@@ -54,7 +54,7 @@ backend or are shown as unavailable.
 | Models | Live | Live | Typed fixture catalog |
 | Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
 | Project/workspace | Native folder picker; selected path becomes `working_dir` on real session creation | Native folder picker; absolute `cwd` and runtime workspace root on real session creation | Hidden |
-| Access mode | Live typed `permission_mode`: Supervised or Autonomous | Live schema-exact Read-only, Auto, or Full access approval/sandbox preset | Hidden |
+| Access mode | Live typed `permission_mode`: Supervised or Autonomous | Live allowed Read-only, Auto, or Full access named profile from `permissionProfile/list` plus managed requirements | Hidden |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
@@ -70,7 +70,7 @@ backend or are shown as unavailable.
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
 | Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
 | Remote Control | Unsupported; explicit capability boundary | Live status, enable/disable, pairing, authorized-device list/revoke, and status lifecycle | Explicit fixture state; no invented devices |
-| Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
+| Settings writes | Desktop preferences persist locally; server config writes unsupported | Permission profiles, requirements, and provider capabilities are live reads; the Full access preference only controls composer visibility; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
 `BackendCapabilities`. A method name appearing in the Codex inventory does not make it
@@ -191,10 +191,12 @@ work, not as feature completion; the matrix test must change with each typed ada
 - Project and access controls are real product adapters rather than prompt decoration.
   A new conversation is an optimistic local draft until first Send, when the selected
   absolute project path and backend-specific access preset are used for the real session
-  and first turn. Codex Read-only/Auto/Full access maps to exact approval, reviewer,
-  sandbox, and runtime-root fields. Mitsuro Supervised/Autonomous maps to its typed
-  permission contract. Transport-only Mitsuro metadata is skipped from Codex JSON, and
-  cross-backend access variants are rejected before I/O.
+  and first turn. Codex Read-only/Auto/Full access comes from its live allowed permission
+  profiles and maps to the exact named profile plus runtime-root fields. Managed
+  requirements can remove a profile, and enabling Full access in Settings only exposes
+  the choice after confirmation; it does not select it. Mitsuro Supervised/Autonomous
+  maps to its typed permission contract. Transport-only Mitsuro metadata is skipped from
+  Codex JSON, and cross-backend access variants are rejected before I/O.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

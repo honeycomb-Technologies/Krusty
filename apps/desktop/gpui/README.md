@@ -117,9 +117,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   calls with PipeWire capture and playback; Mitsuro hides that control because its HTTP
   contract has no realtime session API. New conversations remain local optimistic drafts until first Send so the
   selected project and access preset are present on the real session creation request;
-  no synthetic server session is inserted into Recents. Codex maps Read-only, Auto,
-  and Full access to the schema-exact approval/sandbox fields on `thread/start` and
-  `turn/start`. Mitsuro maps Supervised and Autonomous to its typed `permission_mode`.
+  no synthetic server session is inserted into Recents. Codex derives the available
+  built-in choices from live `permissionProfile/list`, `configRequirements/read`, and
+  `modelProvider/capabilities/read` responses, then sends the schema-exact named
+  permission profile on `thread/start` and `turn/start`. Full access appears only when
+  the server permits it and the user has confirmed that it should be shown. Mitsuro
+  maps Supervised and Autonomous to its typed `permission_mode`.
   Existing server threads show their persisted workspace read-only and require a new
   thread to change it.
 - Codex server requests cannot disappear into the notification stream. Command, file,

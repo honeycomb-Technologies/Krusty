@@ -10,16 +10,18 @@ use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, CommandExecParams,
     CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
     CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
-    CommandExecWriteResponse, FsCopyParams, FsCopyResponse, FsCreateDirectoryParams,
-    FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse, FsUnwatchParams,
-    FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams, FsWriteFileResponse,
-    LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams,
-    McpServerOauthLoginParams, McpServerOauthLoginResponse, MitsuroServerBackend, PendingApproval,
-    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
-    RemoteControlClientsListParams, RemoteControlClientsListResponse,
-    RemoteControlClientsRevokeParams, RemoteControlClientsRevokeResponse,
-    RemoteControlDisableParams, RemoteControlDisableResponse, RemoteControlEnableParams,
-    RemoteControlEnableResponse, RemoteControlPairingStartParams,
+    CommandExecWriteResponse, ConfigRequirementsReadResponse, FsCopyParams, FsCopyResponse,
+    FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse,
+    FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams,
+    FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome,
+    McpServerConfigAddParams, McpServerOauthLoginParams, McpServerOauthLoginResponse,
+    MitsuroServerBackend, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, PendingApproval, PermissionProfileListParams,
+    PermissionProfileListResponse, PluginInstallParams, PluginInstallResponse,
+    PluginUninstallParams, PluginUninstallResponse, RemoteControlClientsListParams,
+    RemoteControlClientsListResponse, RemoteControlClientsRevokeParams,
+    RemoteControlClientsRevokeResponse, RemoteControlDisableParams, RemoteControlDisableResponse,
+    RemoteControlEnableParams, RemoteControlEnableResponse, RemoteControlPairingStartParams,
     RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
     RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse, Result,
     ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
@@ -94,6 +96,9 @@ pub struct BackendCapabilities {
     pub hooks: bool,
     pub apps: bool,
     pub skill_config_write: bool,
+    pub permission_profiles: bool,
+    pub config_requirements: bool,
+    pub model_provider_capabilities: bool,
     pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
@@ -134,6 +139,9 @@ impl BackendCapabilities {
             hooks: true,
             apps: true,
             skill_config_write: true,
+            permission_profiles: true,
+            config_requirements: true,
+            model_provider_capabilities: true,
             remote_control: true,
             hive: false,
             schedules: false,
@@ -177,6 +185,9 @@ impl BackendCapabilities {
             hooks: false,
             apps: false,
             skill_config_write: false,
+            permission_profiles: false,
+            config_requirements: false,
+            model_provider_capabilities: false,
             remote_control: false,
             hive: true,
             schedules: true,
@@ -493,6 +504,40 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.remote_control_status_read().await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose Codex Remote Control".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_permission_profiles(
+        &self,
+        params: PermissionProfileListParams,
+    ) -> Result<PermissionProfileListResponse> {
+        match self {
+            Self::Codex(backend) => backend.permission_profile_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP uses supervised/autonomous modes, not Codex permission profiles"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_config_requirements(&self) -> Result<ConfigRequirementsReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.config_requirements_read().await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex managed configuration requirements".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_model_provider_capabilities(
+        &self,
+        params: ModelProviderCapabilitiesReadParams,
+    ) -> Result<ModelProviderCapabilitiesReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.model_provider_capabilities_read(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes capabilities through its own model catalog".to_owned(),
             )),
         }
     }
@@ -929,6 +974,12 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().skill_config_write);
         assert!(BackendCapabilities::codex().remote_control);
         assert!(!BackendCapabilities::mitsuro().remote_control);
+        assert!(BackendCapabilities::codex().permission_profiles);
+        assert!(!BackendCapabilities::mitsuro().permission_profiles);
+        assert!(BackendCapabilities::codex().config_requirements);
+        assert!(!BackendCapabilities::mitsuro().config_requirements);
+        assert!(BackendCapabilities::codex().model_provider_capabilities);
+        assert!(!BackendCapabilities::mitsuro().model_provider_capabilities);
         assert!(BackendCapabilities::codex().file_mutations);
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);

@@ -34,6 +34,7 @@ pub fn settings_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
 
     div()
         .id("settings-panel")
+        .relative()
         .flex()
         .flex_row()
         .flex_1()
@@ -42,6 +43,9 @@ pub fn settings_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
         .bg(colors.bg_main)
         .child(settings_nav(app, &search_input, &query, section, cx))
         .child(settings_content(app, section, cx))
+        .when(app.full_access_confirmation_open(), |this| {
+            this.child(full_access_confirmation_modal(cx))
+        })
 }
 
 // ─── Left nav ───────────────────────────────────────────────────────────────
@@ -338,6 +342,9 @@ fn settings_scope_notice(section: SettingsSection) -> impl IntoElement {
         SettingsSection::RemoteControl => {
             "Status, pairing, and authorized devices come directly from Codex app-server. Mitsuro HTTP is explicitly unsupported."
         }
+        SettingsSection::General => {
+            "Codex permission choices come from the connected app-server. The Full access preference only controls whether its live profile is offered in the composer; it never selects that profile."
+        }
         SettingsSection::Account | SettingsSection::UsageBilling => {
             "Account and usage data come from the connected backend. Unsupported account actions are labeled before use."
         }
@@ -400,13 +407,10 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
         .child(group_label("Permissions"))
         .child(
             settings_card()
-                .child(toggle_row(
+                .child(disabled_toggle_row(
                     "Default permissions",
-                    "Saved locally for desktop parity; the connected backend remains the authority for actual tool permissions",
-                    "default_permissions",
+                    "By default, ChatGPT can read and edit files in its workspace. It can ask for additional access when needed",
                     true,
-                    app,
-                    cx,
                 ))
                 .child(card_divider())
                 .child(full_access_row(app, cx)),
@@ -3597,6 +3601,42 @@ fn card_divider() -> impl IntoElement {
     div().h(px(1.0)).w_full().bg(colors.border)
 }
 
+fn disabled_toggle_row(title: &str, subtitle: &str, on: bool) -> impl IntoElement {
+    let colors = theme::colors();
+    let title = title.to_owned();
+    let subtitle = subtitle.to_owned();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(subtitle),
+                ),
+        )
+        .child(div().opacity(0.55).child(toggle_switch(on)))
+}
+
 fn toggle_row(
     title: &str,
     subtitle: &str,
@@ -3949,7 +3989,7 @@ fn full_access_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
     let colors = theme::colors();
     let on = app.settings_toggle("full_access", true);
     // Single flowing paragraph; only "Learn more" is accent-colored.
-    const BODY: &str = "Saved locally only. The GPUI client does not currently change backend sandbox or approval policy from this control. Full access can permit file, command, and network mutations when a backend explicitly supports it. Learn more about elevated risks.";
+    const BODY: &str = "When ChatGPT runs with full access, it can edit any file on your computer and run commands with network, without your approval. This significantly increases the risk of data loss, leaks, or unexpected behavior. Learn more about elevated risks.";
     const LINK: &str = "Learn more";
     let link_start = BODY.find(LINK).expect("Learn more in full-access body");
     let link_end = link_start + LINK.len();
@@ -3966,7 +4006,7 @@ fn full_access_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         .cursor_pointer()
         .hover(|s| s.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, _, cx| {
-            app.flip_settings_toggle("full_access", true, cx);
+            app.request_full_access_availability(cx);
         }))
         .child(
             div()
@@ -3980,7 +4020,7 @@ fn full_access_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
                         .text_sm()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(colors.text)
-                        .child("Full access".to_string()),
+                        .child("Show Full access in the composer".to_string()),
                 )
                 .child(
                     // whitespace_normal + min_w_0 + w_full: definite wrap width inside flex_1 column.
@@ -4000,6 +4040,93 @@ fn full_access_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
                 ),
         )
         .child(toggle_switch(on))
+}
+
+fn full_access_confirmation_modal(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("full-access-confirmation-overlay")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme::hex_alpha(0x000000, 0.66))
+        .child(
+            div()
+                .id("full-access-confirmation")
+                .w(px(440.0))
+                .max_w_full()
+                .mx(px(24.0))
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(colors.border_heavy)
+                .bg(colors.bg_elevated)
+                .p(px(20.0))
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.text)
+                        .child("Make Full Access available?"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(gpui::relative(1.45))
+                        .text_color(colors.text_secondary)
+                        .child("This adds Full access to the composer permission menu. It does not select Full access or change the permissions of any current task."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .pt(px(4.0))
+                        .child(
+                            div()
+                                .id("full-access-cancel")
+                                .px(px(14.0))
+                                .py(px(8.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(colors.border)
+                                .bg(colors.bg_button_secondary)
+                                .text_sm()
+                                .text_color(colors.text)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.cancel_full_access_availability(cx);
+                                }))
+                                .child("Cancel"),
+                        )
+                        .child(
+                            div()
+                                .id("full-access-confirm")
+                                .px(px(14.0))
+                                .py(px(8.0))
+                                .rounded(px(8.0))
+                                .bg(colors.status_error)
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text)
+                                .cursor_pointer()
+                                .hover(|style| style.opacity(0.9))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.confirm_full_access_availability(cx);
+                                }))
+                                .child("Make available"),
+                        ),
+                ),
+        )
 }
 
 /// Hotkey capture row matching bar Popout chrome: bare "Off" + pen icon (not a heavy button).
