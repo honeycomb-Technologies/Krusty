@@ -33,12 +33,12 @@ use mitsuro_desktop_backend::{
     LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
     McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModeKind,
     ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
-    PendingUserInput, PlanType, PluginAuthPolicy, PluginAvailability, PluginInstallPolicy,
-    PluginInterface, PluginListParams, PluginSource, PluginSummary, ProcessKillParams,
-    ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
-    ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
-    ProductModel, ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule,
-    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
     RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
     SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
     ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
@@ -981,6 +981,8 @@ pub struct MitsuroApp {
     /// Plugins from `plugin/list` (flattened marketplace entries).
     plugins: Vec<PluginSummary>,
     extensions_state: SurfaceDataState,
+    /// Plugin id currently being installed or removed through Codex app-server.
+    plugin_mutation_in_progress: Option<String>,
     /// Environments catalog (fixture demo; no protocol list method).
     environments: Vec<EnvironmentSummary>,
     environments_state: SurfaceDataState,
@@ -1301,6 +1303,7 @@ impl MitsuroApp {
             mcp_servers: Vec::new(),
             plugins: Vec::new(),
             extensions_state: SurfaceDataState::Loading,
+            plugin_mutation_in_progress: None,
             environments: Vec::new(),
             environments_state: SurfaceDataState::Loading,
             selected_environment_id: None,
@@ -3460,6 +3463,130 @@ impl MitsuroApp {
     /// Flattened plugins for the Extensions panel.
     pub fn plugins(&self) -> &[PluginSummary] {
         &self.plugins
+    }
+
+    pub fn plugin_mutations_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().plugin_mutations)
+    }
+
+    pub fn plugin_mutation_id(&self) -> Option<&str> {
+        self.plugin_mutation_in_progress.as_deref()
+    }
+
+    pub fn mutate_plugin(&mut self, plugin: PluginSummary, cx: &mut Context<Self>) {
+        if self.plugin_mutation_in_progress.is_some() {
+            self.status_line = "Plugins · another change is still in progress".into();
+            cx.notify();
+            return;
+        }
+        if plugin.availability != mitsuro_desktop_backend::PluginAvailability::Available
+            || plugin.install_policy != mitsuro_desktop_backend::PluginInstallPolicy::Available
+        {
+            self.status_line = "Plugins · this plugin is managed by its marketplace policy".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line =
+                "Plugins · install and removal require a connected Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().plugin_mutations {
+            self.status_line =
+                "Plugins · this backend exposes inventory but not install or removal".into();
+            cx.notify();
+            return;
+        }
+
+        let generation = self.backend_generation;
+        let plugin_id = plugin.id.clone();
+        let plugin_name = plugin.name.clone();
+        let marketplace_path = plugin
+            .extra
+            .get("marketplacePath")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let remote_marketplace_name = plugin
+            .extra
+            .get("remoteMarketplaceName")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let display_name = plugin.display_name().to_owned();
+        let uninstalling = plugin.installed;
+        self.plugin_mutation_in_progress = Some(plugin_id.clone());
+        self.status_line = format!(
+            "Plugins · {} {display_name}…",
+            if uninstalling {
+                "removing"
+            } else {
+                "installing"
+            }
+        )
+        .into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if uninstalling {
+                        backend
+                            .uninstall_plugin(PluginUninstallParams { plugin_id })
+                            .await
+                            .map(|_| None)
+                    } else {
+                        backend
+                            .install_plugin(PluginInstallParams {
+                                plugin_name,
+                                marketplace_path,
+                                remote_marketplace_name,
+                            })
+                            .await
+                            .map(Some)
+                    }
+                    .map_err(|error| error.to_string())
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.plugin_mutation_in_progress = None;
+                match result {
+                    Ok(Some(response)) => {
+                        let auth_note = if response.apps_needing_auth.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " · {} app(s) require authentication",
+                                response.apps_needing_auth.len()
+                            )
+                        };
+                        app.status_line =
+                            format!("Plugins · installed {display_name}{auth_note}").into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Ok(None) => {
+                        app.status_line = format!("Plugins · removed {display_name}").into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line = format!(
+                            "Plugins · could not {} {display_name} · {error}",
+                            if uninstalling { "remove" } else { "install" }
+                        )
+                        .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Environments for the Computer panel.
@@ -8805,6 +8932,7 @@ impl MitsuroApp {
         self.mcp_servers.clear();
         self.plugins.clear();
         self.extensions_state = SurfaceDataState::Loading;
+        self.plugin_mutation_in_progress = None;
         self.goals.clear();
         self.selected_goal = None;
         self.goals_are_live_hive = false;
@@ -9500,15 +9628,22 @@ fn mcp_status_from_product(server: ProductMcpServer) -> McpServerStatus {
 }
 
 fn plugin_summary_from_product(extension: ProductExtension) -> PluginSummary {
+    let mut extra = serde_json::Map::new();
+    if let Some(path) = extension.marketplace_path {
+        extra.insert("marketplacePath".to_owned(), path.into());
+    }
+    if let Some(name) = extension.remote_marketplace_name {
+        extra.insert("remoteMarketplaceName".to_owned(), name.into());
+    }
     PluginSummary {
         id: extension.id,
         name: extension.name,
         source: PluginSource::Remote,
         installed: extension.installed,
         enabled: extension.enabled,
-        install_policy: PluginInstallPolicy::Available,
-        auth_policy: PluginAuthPolicy::OnUse,
-        availability: PluginAvailability::Available,
+        install_policy: extension.install_policy,
+        auth_policy: extension.auth_policy,
+        availability: extension.availability,
         version: extension.version,
         local_version: None,
         remote_plugin_id: None,
@@ -9521,7 +9656,7 @@ fn plugin_summary_from_product(extension: ProductExtension) -> PluginSummary {
             capabilities: extension.capabilities,
         }),
         keywords: Vec::new(),
-        extra: Default::default(),
+        extra,
     }
 }
 
@@ -10581,5 +10716,39 @@ mod tests {
         assert!(model_matches_query(&models[2], "codex-shaped"));
         assert!(!model_matches_query(&models[0], "definitely absent"));
         assert!(model_matches_query(&models[0], ""));
+    }
+
+    #[test]
+    fn plugin_projection_preserves_exact_marketplace_and_policy() {
+        let plugin = plugin_summary_from_product(ProductExtension {
+            id: "documents@openai".to_owned(),
+            name: "documents".to_owned(),
+            display_name: "Documents".to_owned(),
+            description: Some("Create documents".to_owned()),
+            category: Some("productivity".to_owned()),
+            installed: false,
+            enabled: false,
+            install_policy: mitsuro_desktop_backend::PluginInstallPolicy::Available,
+            auth_policy: mitsuro_desktop_backend::PluginAuthPolicy::OnInstall,
+            availability: mitsuro_desktop_backend::PluginAvailability::Available,
+            version: Some("1.0.0".to_owned()),
+            capabilities: vec!["documents".to_owned()],
+            source: "remote".to_owned(),
+            marketplace_path: None,
+            remote_marketplace_name: Some("openai-curated-remote".to_owned()),
+        });
+
+        assert_eq!(
+            plugin.extra.get("remoteMarketplaceName"),
+            Some(&serde_json::json!("openai-curated-remote"))
+        );
+        assert_eq!(
+            plugin.install_policy,
+            mitsuro_desktop_backend::PluginInstallPolicy::Available
+        );
+        assert_eq!(
+            plugin.auth_policy,
+            mitsuro_desktop_backend::PluginAuthPolicy::OnInstall
+        );
     }
 }

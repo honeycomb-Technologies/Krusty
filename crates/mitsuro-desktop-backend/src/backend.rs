@@ -26,6 +26,9 @@ use crate::fs::{
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
 use crate::methods::is_known_client_method;
+use crate::plugin_mutations::{
+    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
+};
 use crate::process::{
     ProcessKillParams, ProcessKillResponse, ProcessResizePtyParams, ProcessResizePtyResponse,
     ProcessSpawnParams, ProcessSpawnResponse, ProcessWriteStdinParams, ProcessWriteStdinResponse,
@@ -238,6 +241,23 @@ pub trait AgentBackend: Send + Sync {
         &self,
         params: PluginInstalledParams,
     ) -> Result<PluginInstalledResponse>;
+
+    /// Install a plugin via `plugin/install`.
+    async fn plugin_install(&self, _params: PluginInstallParams) -> Result<PluginInstallResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin installation is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Uninstall a plugin via `plugin/uninstall`.
+    async fn plugin_uninstall(
+        &self,
+        _params: PluginUninstallParams,
+    ) -> Result<PluginUninstallResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin removal is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Read environment shell/cwd via `environment/info`.
     async fn environment_info(

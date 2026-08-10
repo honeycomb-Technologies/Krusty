@@ -13,6 +13,7 @@ pub mod live_turn;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
+pub mod plugin_mutations;
 pub mod process;
 pub mod product;
 pub mod protocol;
@@ -98,6 +99,10 @@ pub use mitsuro::MitsuroServerBackend;
 pub use notifications::{
     is_known_server_notification, known_notification_event, server_notification_methods,
     LifecycleNotification, NotificationFamily, NotificationSeverity, SERVER_NOTIFICATIONS_TEXT,
+};
+pub use plugin_mutations::{
+    PluginAppSummary, PluginInstallParams, PluginInstallResponse, PluginUninstallParams,
+    PluginUninstallResponse,
 };
 pub use process::{
     decode_base64, decode_base64_lossy, encode_base64, parse_process_exited,

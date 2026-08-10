@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
-    LiveApprovalBridge, LiveTurnOutcome, MitsuroServerBackend, PendingApproval, Result,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
+    LiveApprovalBridge, LiveTurnOutcome, MitsuroServerBackend, PendingApproval,
+    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
+    Result, ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
     ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
     ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
     ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
@@ -66,6 +67,7 @@ pub struct BackendCapabilities {
     pub files: bool,
     pub processes: bool,
     pub extensions: bool,
+    pub plugin_mutations: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -93,6 +95,7 @@ impl BackendCapabilities {
             files: true,
             processes: true,
             extensions: true,
+            plugin_mutations: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -123,6 +126,7 @@ impl BackendCapabilities {
             // the native terminal panel.
             processes: false,
             extensions: true,
+            plugin_mutations: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -331,6 +335,30 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn install_plugin(
+        &self,
+        params: PluginInstallParams,
+    ) -> Result<PluginInstallResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_install(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes extension inventory but not plugin installation".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn uninstall_plugin(
+        &self,
+        params: PluginUninstallParams,
+    ) -> Result<PluginUninstallResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_uninstall(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes extension inventory but not plugin removal".to_owned(),
+            )),
+        }
+    }
+
     pub async fn realtime_start(
         &self,
         session: &BackendSessionId,
@@ -513,6 +541,8 @@ mod tests {
         assert!(BackendCapabilities::codex().review);
         assert!(BackendCapabilities::codex().realtime_voice);
         assert!(!BackendCapabilities::mitsuro().realtime_voice);
+        assert!(BackendCapabilities::codex().plugin_mutations);
+        assert!(!BackendCapabilities::mitsuro().plugin_mutations);
     }
 
     #[tokio::test]

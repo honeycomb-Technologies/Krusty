@@ -39,6 +39,9 @@ use crate::fs::{
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
+use crate::plugin_mutations::{
+    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
+};
 use crate::process::{
     ProcessKillParams, ProcessKillResponse, ProcessResizePtyParams, ProcessResizePtyResponse,
     ProcessSpawnParams, ProcessSpawnResponse, ProcessWriteStdinParams, ProcessWriteStdinResponse,
@@ -1174,6 +1177,19 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("plugin/installed", Some(value)).await
     }
 
+    async fn plugin_install(&self, params: PluginInstallParams) -> Result<PluginInstallResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/install", Some(value)).await
+    }
+
+    async fn plugin_uninstall(
+        &self,
+        params: PluginUninstallParams,
+    ) -> Result<PluginUninstallResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/uninstall", Some(value)).await
+    }
+
     async fn environment_info(
         &self,
         params: EnvironmentInfoParams,
@@ -1502,6 +1518,75 @@ mod tests {
         backend
             .realtime_stop(ThreadRealtimeStopParams {
                 thread_id: "thread-live".to_owned(),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn plugin_mutations_use_the_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in ["plugin/install", "plugin/uninstall"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "plugin/install" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "pluginName": "documents",
+                                "remoteMarketplaceName": "openai-curated-remote"
+                            })
+                        );
+                        serde_json::json!({
+                            "appsNeedingAuth": [{"id": "drive", "name": "Drive"}],
+                            "authPolicy": "ON_USE"
+                        })
+                    }
+                    _ => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"pluginId": "documents@openai"})
+                        );
+                        serde_json::json!({})
+                    }
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let installed = backend
+            .plugin_install(PluginInstallParams {
+                plugin_name: "documents".to_owned(),
+                marketplace_path: None,
+                remote_marketplace_name: Some("openai-curated-remote".to_owned()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(installed.auth_policy, crate::PluginAuthPolicy::OnUse);
+        assert_eq!(installed.apps_needing_auth[0].name, "Drive");
+        backend
+            .plugin_uninstall(PluginUninstallParams {
+                plugin_id: "documents@openai".to_owned(),
             })
             .await
             .unwrap();

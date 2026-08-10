@@ -316,9 +316,14 @@ pub struct ProductExtension {
     pub category: Option<String>,
     pub installed: bool,
     pub enabled: bool,
+    pub install_policy: crate::PluginInstallPolicy,
+    pub auth_policy: crate::PluginAuthPolicy,
+    pub availability: crate::PluginAvailability,
     pub version: Option<String>,
     pub capabilities: Vec<String>,
     pub source: String,
+    pub marketplace_path: Option<String>,
+    pub remote_marketplace_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1133,8 +1138,19 @@ impl ProductBackend for DesktopBackend {
         Ok(response
             .marketplaces
             .into_iter()
-            .flat_map(|marketplace| marketplace.plugins)
-            .map(|plugin| {
+            .flat_map(|marketplace| {
+                let marketplace_path = marketplace.path;
+                let remote_marketplace_name =
+                    marketplace_path.is_none().then_some(marketplace.name);
+                marketplace.plugins.into_iter().map(move |plugin| {
+                    (
+                        plugin,
+                        marketplace_path.clone(),
+                        remote_marketplace_name.clone(),
+                    )
+                })
+            })
+            .map(|(plugin, marketplace_path, remote_marketplace_name)| {
                 let interface = plugin.interface.as_ref();
                 let display_name = plugin.display_name().to_owned();
                 ProductExtension {
@@ -1145,11 +1161,16 @@ impl ProductBackend for DesktopBackend {
                     category: interface.and_then(|item| item.category.clone()),
                     installed: plugin.installed,
                     enabled: plugin.enabled,
+                    install_policy: plugin.install_policy,
+                    auth_policy: plugin.auth_policy,
+                    availability: plugin.availability,
                     version: plugin.version.or(plugin.local_version),
                     capabilities: interface
                         .map(|item| item.capabilities.clone())
                         .unwrap_or_default(),
                     source: plugin.source.label(),
+                    marketplace_path,
+                    remote_marketplace_name,
                 }
             })
             .collect())

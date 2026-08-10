@@ -63,7 +63,7 @@ backend or are shown as unavailable.
 | Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
-| Extensions/MCP/skills | Live installed extensions, MCP status, and skills | Partially live | Typed fixture |
+| Extensions/MCP/skills | Live read-only installed extensions, MCP status, and skills; plugin mutations unsupported | Live catalog plus typed plugin install/uninstall; MCP status and skills are live | Typed read-only fixture |
 | Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
@@ -85,14 +85,19 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 48 typed adapters
-and 85 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 56 typed adapters
+and 77 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
 
 - GPUI and GPUI Component resolve from crates.io; there is no machine-specific
   `/home/.../vendor/gpui` patch.
+- The Extensions marketplace renders only backend data. Codex plugin Install/Remove
+  actions call typed `plugin/install` and `plugin/uninstall`, disable concurrent
+  mutations, and refresh the live catalog after success. Mitsuro and explicit fixture
+  catalogs are visibly read-only because neither backend exposes a production mutation
+  contract.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,

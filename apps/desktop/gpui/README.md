@@ -35,6 +35,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 - Sessions, models, turns, files, skills, MCP servers, and extensions use the
   transport-neutral `ProductBackend` contract.
+- Codex plugin installation and removal use typed app-server methods and refresh the
+  live marketplace afterward. Mitsuro and fixture extension inventories are read-only;
+  the desktop never simulates a successful mutation.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.
@@ -85,13 +88,15 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   schema-exact `mention { name, path }` inputs. Reopened threads retain both reference
   types. Mitsuro's content contract has no equivalent block, so these controls are
   hidden and both adapter layers reject them rather than converting them into prompt
-  text. New conversations remain local optimistic drafts until first Send so the
+  text. Codex realtime voice uses the live voice catalog plus typed start/append/stop
+  calls with PipeWire capture and playback; Mitsuro hides that control because its HTTP
+  contract has no realtime session API. New conversations remain local optimistic drafts until first Send so the
   selected project and access preset are present on the real session creation request;
   no synthetic server session is inserted into Recents. Codex maps Read-only, Auto,
   and Full access to the schema-exact approval/sandbox fields on `thread/start` and
   `turn/start`. Mitsuro maps Supervised and Autonomous to its typed `permission_mode`.
   Existing server threads show their persisted workspace read-only and require a new
-  thread to change it. Microphone recording is not presented as a control.
+  thread to change it.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

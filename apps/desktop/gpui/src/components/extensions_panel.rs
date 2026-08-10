@@ -33,6 +33,8 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let chip = app.connection().chip_label();
     let data_state = app.extensions_state();
     let source = data_state.label();
+    let mutations_available = app.plugin_mutations_available();
+    let mutating_plugin_id = app.plugin_mutation_id().map(ToOwned::to_owned);
 
     let installed: Vec<PluginSummary> = plugins.iter().filter(|p| p.installed).cloned().collect();
 
@@ -67,10 +69,17 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                 .pb(px(32.0))
                 .gap(px(18.0))
                 .child(match tab {
-                    PluginsSurfaceTab::Plugins => {
-                        plugins_body(&plugins, &installed, &mcp, filter, data_state, cx)
-                            .into_any_element()
-                    }
+                    PluginsSurfaceTab::Plugins => plugins_body(
+                        &plugins,
+                        &installed,
+                        &mcp,
+                        filter,
+                        data_state,
+                        mutations_available,
+                        mutating_plugin_id.as_deref(),
+                        cx,
+                    )
+                    .into_any_element(),
                     PluginsSurfaceTab::Skills => skills_body(&skills, source).into_any_element(),
                 }),
         )
@@ -278,6 +287,8 @@ fn plugins_body(
     mcp: &[McpServerStatus],
     filter: PluginsFilter,
     data_state: SurfaceDataState,
+    mutations_available: bool,
+    mutating_plugin_id: Option<&str>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     // Marketplace chrome: hide internal `tools` fixtures (still available via plugin/read).
@@ -346,7 +357,13 @@ fn plugins_body(
         } else if filter == PluginsFilter::Personal {
             // Personal: brand installed only (no fixture chrome).
             let personal: Vec<PluginSummary> = strip.to_vec();
-            personal_catalog(&personal, cx).into_any_element()
+            personal_catalog(
+                &personal,
+                mutations_available,
+                mutating_plugin_id,
+                cx,
+            )
+            .into_any_element()
         } else {
             // Public marketplace: Featured + categories
             div()
@@ -354,16 +371,40 @@ fn plugins_body(
                 .flex_col()
                 .gap(px(22.0))
                 .when(!featured.is_empty(), |this| {
-                    this.child(category_section("Featured", &featured, cx))
+                    this.child(category_section(
+                        "Featured",
+                        &featured,
+                        mutations_available,
+                        mutating_plugin_id,
+                        cx,
+                    ))
                 })
                 .when(!productivity.is_empty(), |this| {
-                    this.child(category_section("Productivity", &productivity, cx))
+                    this.child(category_section(
+                        "Productivity",
+                        &productivity,
+                        mutations_available,
+                        mutating_plugin_id,
+                        cx,
+                    ))
                 })
                 .when(!creativity.is_empty(), |this| {
-                    this.child(category_section("Creativity", &creativity, cx))
+                    this.child(category_section(
+                        "Creativity",
+                        &creativity,
+                        mutations_available,
+                        mutating_plugin_id,
+                        cx,
+                    ))
                 })
                 .when(!other.is_empty(), |this| {
-                    this.child(category_section("More", &other, cx))
+                    this.child(category_section(
+                        "More",
+                        &other,
+                        mutations_available,
+                        mutating_plugin_id,
+                        cx,
+                    ))
                 })
                 .into_any_element()
         })
@@ -545,7 +586,12 @@ fn scope_chip(
         )
 }
 
-fn personal_catalog(installed: &[PluginSummary], cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn personal_catalog(
+    installed: &[PluginSummary],
+    mutations_available: bool,
+    mutating_plugin_id: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let refs: Vec<&PluginSummary> = installed.iter().collect();
     div()
@@ -567,7 +613,7 @@ fn personal_catalog(installed: &[PluginSummary], cx: &mut Context<MitsuroApp>) -
                 .child("Install plugins from Public to see them here.")
                 .into_any_element()
         } else {
-            card_grid(&refs, 0, cx).into_any_element()
+            card_grid(&refs, 0, mutations_available, mutating_plugin_id, cx).into_any_element()
         })
 }
 
@@ -577,6 +623,8 @@ const SECTION_VISIBLE_CAP: usize = 6;
 fn category_section(
     title: &str,
     plugins: &[&PluginSummary],
+    mutations_available: bool,
+    mutating_plugin_id: Option<&str>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let (section_id, base): (&'static str, u64) = match title {
@@ -593,7 +641,13 @@ fn category_section(
         .flex_col()
         .gap(px(8.0))
         .child(section_heading(title))
-        .child(card_grid(&visible, base, cx))
+        .child(card_grid(
+            &visible,
+            base,
+            mutations_available,
+            mutating_plugin_id,
+            cx,
+        ))
         .when(!overflow.is_empty(), |this| {
             this.child(see_more_row(title, base, &overflow))
         })
@@ -675,6 +729,8 @@ fn section_heading(title: &str) -> impl IntoElement {
 fn card_grid(
     plugins: &[&PluginSummary],
     index_base: u64,
+    mutations_available: bool,
+    mutating_plugin_id: Option<&str>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let rows: Vec<Vec<&PluginSummary>> = plugins.chunks(2).map(|c| c.to_vec()).collect();
@@ -693,12 +749,24 @@ fn card_grid(
                 .flex_row()
                 .gap(px(12.0))
                 .w_full()
-                .child(div().flex_1().min_w_0().child(plugin_card(li, left, cx)))
+                .child(div().flex_1().min_w_0().child(plugin_card(
+                    li,
+                    left,
+                    mutations_available,
+                    mutating_plugin_id,
+                    cx,
+                )))
                 .child(if let Some(p) = right {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(plugin_card(ri_idx, p, cx))
+                        .child(plugin_card(
+                            ri_idx,
+                            p,
+                            mutations_available,
+                            mutating_plugin_id,
+                            cx,
+                        ))
                         .into_any_element()
                 } else {
                     div().flex_1().min_w_0().into_any_element()
@@ -706,33 +774,43 @@ fn card_grid(
         }))
 }
 
-/// Marketplace row CTA. Bar shows Install for nearly every catalog row (even
-/// when the app also appears in the Installed strip); Spreadsheets/Presentations
-/// use an overflow ··· control instead of an Installed pill.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CatalogCta {
-    Install,
-    Menu,
-}
-
-fn catalog_cta(plugin: &PluginSummary) -> CatalogCta {
-    match plugin.name.as_str() {
-        "spreadsheets" | "presentations" => CatalogCta::Menu,
-        _ => CatalogCta::Install,
-    }
-}
-
 fn plugin_card(
     index: u64,
     plugin: &PluginSummary,
+    mutations_available: bool,
+    mutating_plugin_id: Option<&str>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let title = plugin.display_name().to_string();
     let desc = plugin.short_description().unwrap_or("").to_string();
     let installed = plugin.installed;
-    let cta = catalog_cta(plugin);
-    let title_for_status = title.clone();
+    let plugin_mutable = plugin.availability
+        == mitsuro_desktop_backend::PluginAvailability::Available
+        && plugin.install_policy == mitsuro_desktop_backend::PluginInstallPolicy::Available;
+    let busy = mutating_plugin_id.is_some();
+    let this_mutating = mutating_plugin_id == Some(plugin.id.as_str());
+    let plugin_for_action = plugin.clone();
+    let action_label = if this_mutating {
+        if installed {
+            "Removing…"
+        } else {
+            "Installing…"
+        }
+    } else if !mutations_available {
+        "Read-only"
+    } else if !plugin_mutable {
+        if installed {
+            "Managed"
+        } else {
+            "Unavailable"
+        }
+    } else if installed {
+        "Remove"
+    } else {
+        "Install"
+    };
+    let enabled = mutations_available && plugin_mutable && !busy;
 
     // Flat list-row (bar): geometric brand chip · name/desc · Install — no elevated card chrome.
     div()
@@ -785,32 +863,9 @@ fn plugin_card(
                         }),
                 ),
         )
-        .child(match cta {
-            CatalogCta::Menu => div()
-                .id(("plugin-menu", index))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(28.0))
-                .w(px(32.0))
-                .rounded(px(8.0))
-                .flex_shrink_0()
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.set_status_line(format!("Plugins · manage “{title_for_status}”"), cx);
-                }))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_tertiary)
-                        .child("···"),
-                )
-                .into_any_element(),
-            CatalogCta::Install => div()
-                .id(("plugin-install", index))
+        .child(
+            div()
+                .id(("plugin-mutation", index))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -822,27 +877,22 @@ fn plugin_card(
                 .bg(colors.bg_button_secondary)
                 .border_1()
                 .border_color(colors.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    if installed {
-                        app.set_status_line(
-                            format!("Plugins · {title_for_status} already installed"),
-                            cx,
-                        );
-                    } else {
-                        app.set_status_line(format!("Plugins · install “{title_for_status}”"), cx);
-                    }
-                }))
+                .when(enabled, |this| {
+                    this.cursor_pointer()
+                        .hover(|s| s.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.mutate_plugin(plugin_for_action.clone(), cx);
+                        }))
+                })
+                .when(!enabled, |this| this.opacity(0.55))
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(colors.text)
-                        .child("Install"),
-                )
-                .into_any_element(),
-        })
+                        .child(action_label),
+                ),
+        )
 }
 
 /// Geometric multi-color brand *language* for a plugin.
