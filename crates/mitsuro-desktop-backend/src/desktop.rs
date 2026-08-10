@@ -72,6 +72,7 @@ pub struct BackendCapabilities {
     pub environment_add: bool,
     pub mcp_oauth: bool,
     pub mcp_config_write: bool,
+    pub hooks: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -103,6 +104,7 @@ impl BackendCapabilities {
             environment_add: true,
             mcp_oauth: true,
             mcp_config_write: true,
+            hooks: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -137,6 +139,7 @@ impl BackendCapabilities {
             environment_add: false,
             mcp_oauth: false,
             mcp_config_write: false,
+            hooks: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -387,6 +390,18 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn list_hooks(
+        &self,
+        params: crate::HooksListParams,
+    ) -> Result<crate::HooksListResponse> {
+        match self {
+            Self::Codex(backend) => backend.hooks_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose a lifecycle hook catalog".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -589,6 +604,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().mcp_oauth);
         assert!(BackendCapabilities::codex().mcp_config_write);
         assert!(!BackendCapabilities::mitsuro().mcp_config_write);
+        assert!(BackendCapabilities::codex().hooks);
+        assert!(!BackendCapabilities::mitsuro().hooks);
     }
 
     #[tokio::test]

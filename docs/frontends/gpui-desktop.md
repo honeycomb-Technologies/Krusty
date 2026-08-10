@@ -63,7 +63,7 @@ backend or are shown as unavailable.
 | Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
-| Extensions/MCP/skills | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, and OAuth unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, and skills | Typed read-only fixture |
+| Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
 | Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
@@ -85,8 +85,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 59 typed adapters
-and 74 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 60 typed adapters
+and 73 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -112,6 +112,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   supports streamable HTTP URLs and stdio command plus JSON string-array arguments,
   validates all fields before I/O, serializes one mutation at a time, and refreshes the
   live catalog after success. Mitsuro renders this mutation as unsupported.
+- Settings Hooks renders only typed `hooks/list` entries scoped to the active workspace.
+  It preserves hook event, handler, source path/source, enabled/managed state, trust,
+  warnings, and errors. The previous local toggle and hard-coded Mitsuro paths were
+  removed because they were not connected to either backend.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,

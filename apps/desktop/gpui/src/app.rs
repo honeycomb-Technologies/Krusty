@@ -30,24 +30,25 @@ use mitsuro_desktop_backend::{
     EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
     EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
     FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, LifecycleNotification,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
-    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
-    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
-    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
-    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata, HooksListEntry,
+    HooksListParams, LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge,
+    LoginAccountParams, McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
+    McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
+    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams, ModelServiceTier,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginInstallParams,
+    PluginInterface, PluginListParams, PluginSource, PluginSummary, PluginUninstallParams,
+    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode,
+    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
+    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
+    ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
+    RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
+    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
+    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
+    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
+    FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -998,6 +999,9 @@ pub struct MitsuroApp {
     config_snippet: SharedString,
     /// Skills from `skills/list` (or fixture demo).
     skills: Vec<SkillMetadata>,
+    /// Exact per-workspace catalog returned by Codex `hooks/list`.
+    hooks: Vec<HooksListEntry>,
+    hooks_state: SurfaceDataState,
     /// MCP servers from `mcpServerStatus/list` (or fixture demo).
     mcp_servers: Vec<McpServerStatus>,
     pending_mcp_oauth: std::collections::HashSet<String>,
@@ -1356,6 +1360,8 @@ impl MitsuroApp {
             selected_fast_mode: false,
             config_snippet: SharedString::from(""),
             skills: Vec::new(),
+            hooks: Vec::new(),
+            hooks_state: SurfaceDataState::Loading,
             mcp_servers: Vec::new(),
             pending_mcp_oauth: std::collections::HashSet::new(),
             mcp_add_transport: McpAddTransport::Http,
@@ -3491,6 +3497,21 @@ impl MitsuroApp {
         &self.skills
     }
 
+    pub fn hooks(&self) -> &[HooksListEntry] {
+        &self.hooks
+    }
+
+    pub fn hooks_state(&self) -> SurfaceDataState {
+        self.hooks_state
+    }
+
+    pub fn flattened_hooks(&self) -> Vec<&HookMetadata> {
+        self.hooks
+            .iter()
+            .flat_map(|entry| entry.hooks.iter())
+            .collect()
+    }
+
     #[allow(dead_code)]
     pub fn skills_enabled_count(&self) -> usize {
         self.skills.iter().filter(|s| s.enabled).count()
@@ -4288,6 +4309,10 @@ impl MitsuroApp {
         let use_live = backend.is_some();
         let use_fixture = self.is_explicit_fixture();
         let was_live = use_live;
+        let hook_cwds = self
+            .composer_workspace_dir()
+            .map(|cwd| vec![cwd.to_owned()])
+            .unwrap_or_default();
         if announce {
             self.status_line = "Extensions · refreshing…".into();
             cx.notify();
@@ -4328,7 +4353,29 @@ impl MitsuroApp {
                                     Vec::new()
                                 }
                             };
-                            return Ok::<_, String>((mcp, plugins, skills, "app-server", errors));
+                            let (hooks, hooks_state) = if backend.capabilities().hooks {
+                                match backend
+                                    .list_hooks(HooksListParams { cwds: hook_cwds })
+                                    .await
+                                {
+                                    Ok(response) => (response.data, SurfaceDataState::Live),
+                                    Err(error) => {
+                                        errors.push(format!("hooks: {error}"));
+                                        (Vec::new(), SurfaceDataState::Error)
+                                    }
+                                }
+                            } else {
+                                (Vec::new(), SurfaceDataState::Unsupported)
+                            };
+                            return Ok::<_, String>((
+                                mcp,
+                                plugins,
+                                skills,
+                                hooks,
+                                hooks_state,
+                                "app-server",
+                                errors,
+                            ));
                         }
                     }
                     if !use_fixture {
@@ -4361,18 +4408,28 @@ impl MitsuroApp {
                         .into_iter()
                         .flat_map(|e| e.skills)
                         .collect::<Vec<_>>();
-                    Ok((mcp, plugins, skills, "fixture", Vec::new()))
+                    Ok((
+                        mcp,
+                        plugins,
+                        skills,
+                        Vec::new(),
+                        SurfaceDataState::Fixture,
+                        "fixture",
+                        Vec::new(),
+                    ))
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((mcp, plugins, skills, label, errors)) => {
+                    Ok((mcp, plugins, skills, hooks, hooks_state, label, errors)) => {
                         let mcp_empty = mcp.is_empty();
                         let plugins_empty = plugins.is_empty();
                         app.apply_mcp_servers(mcp);
                         app.apply_plugins(plugins);
                         app.apply_skills(skills);
+                        app.hooks = hooks;
+                        app.hooks_state = hooks_state;
                         app.extensions_state = if label == "fixture" {
                             SurfaceDataState::Fixture
                         } else if errors.is_empty() {
@@ -4401,6 +4458,12 @@ impl MitsuroApp {
                         app.apply_mcp_servers(Vec::new());
                         app.apply_plugins(Vec::new());
                         app.apply_skills(Vec::new());
+                        app.hooks.clear();
+                        app.hooks_state = if was_live {
+                            SurfaceDataState::Error
+                        } else {
+                            SurfaceDataState::Fixture
+                        };
                         app.extensions_state = if was_live {
                             SurfaceDataState::Error
                         } else {
@@ -9292,6 +9355,8 @@ impl MitsuroApp {
                     app.apply_skills(skills);
                     app.apply_mcp_servers(mcp);
                     app.apply_plugins(plugins);
+                    app.hooks.clear();
+                    app.hooks_state = SurfaceDataState::Fixture;
                     app.apply_account_snapshot(account, usage, rate_limits, "fixture", None);
                     app.extensions_state = SurfaceDataState::Fixture;
                     app.account_state = SurfaceDataState::Fixture;
@@ -9314,6 +9379,8 @@ impl MitsuroApp {
                             .flat_map(|m| m.plugins)
                             .collect(),
                     );
+                    app.hooks.clear();
+                    app.hooks_state = SurfaceDataState::Fixture;
                     app.account = AccountSession::fixture_demo();
                     app.extensions_state = SurfaceDataState::Fixture;
                     app.account_state = SurfaceDataState::Fixture;
@@ -9356,6 +9423,8 @@ impl MitsuroApp {
         self.selected_fast_mode = false;
         self.config_snippet = SharedString::from("");
         self.skills.clear();
+        self.hooks.clear();
+        self.hooks_state = SurfaceDataState::Loading;
         self.mcp_servers.clear();
         self.pending_mcp_oauth.clear();
         self.mcp_add_in_progress = false;
@@ -9508,6 +9577,7 @@ impl MitsuroApp {
                             realtime_voices,
                             config_snip,
                             skills,
+                            hooks,
                             mcp,
                             plugins,
                             processes,
@@ -9568,6 +9638,20 @@ impl MitsuroApp {
                             app.apply_config_snippet(snip);
                         }
                         app.apply_skills(skills);
+                        match hooks {
+                            Ok(Some(hooks)) => {
+                                app.hooks = hooks;
+                                app.hooks_state = SurfaceDataState::Live;
+                            }
+                            Ok(None) => {
+                                app.hooks.clear();
+                                app.hooks_state = SurfaceDataState::Unsupported;
+                            }
+                            Err(_) => {
+                                app.hooks.clear();
+                                app.hooks_state = SurfaceDataState::Error;
+                            }
+                        }
                         app.apply_mcp_servers(mcp);
                         app.apply_plugins(plugins);
                         app.extensions_state = SurfaceDataState::Live;
@@ -9653,6 +9737,8 @@ impl MitsuroApp {
                         app.account = AccountSession::empty("unavailable");
                         app.account_state = SurfaceDataState::Error;
                         app.extensions_state = SurfaceDataState::Error;
+                        app.hooks.clear();
+                        app.hooks_state = SurfaceDataState::Error;
                         app.environments_state = SurfaceDataState::Error;
                         app.status_line = format!("Backend unavailable · {message}").into();
                     }
@@ -10785,6 +10871,7 @@ struct BackendBootstrap {
     realtime_voices: Result<Option<RealtimeVoicesList>, String>,
     config_snip: Option<String>,
     skills: Vec<SkillMetadata>,
+    hooks: Result<Option<Vec<HooksListEntry>>, String>,
     mcp: Vec<McpServerStatus>,
     plugins: Vec<PluginSummary>,
     processes: Option<Vec<ProductProcess>>,
@@ -10837,6 +10924,14 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
                 .collect(),
             Err(_) => Vec::new(),
         };
+        let hooks = if b.capabilities().hooks {
+            b.list_hooks(HooksListParams::default())
+                .await
+                .map(|response| Some(response.data))
+                .map_err(|error| error.to_string())
+        } else {
+            Ok(None)
+        };
         // Product catalogs are best-effort for the Extensions panel.
         let mcp = match b.list_product_mcp_servers().await {
             Ok(servers) => servers.into_iter().map(mcp_status_from_product).collect(),
@@ -10861,6 +10956,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             realtime_voices,
             config_snip,
             skills,
+            hooks,
             mcp,
             plugins,
             processes,

@@ -51,6 +51,7 @@ use crate::protocol::{
     TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{ConnectionStatus, Result};
+use crate::{HooksListParams, HooksListResponse};
 
 /// Abstraction over Codex app-server, offline fixtures, and a future Mitsuro server.
 ///
@@ -169,6 +170,13 @@ pub trait AgentBackend: Send + Sync {
 
     /// List skills via `skills/list` (best-effort; fixture returns demo skills).
     async fn skills_list(&self, params: SkillsListParams) -> Result<SkillsListResponse>;
+
+    /// List discovered lifecycle hooks via `hooks/list`.
+    async fn hooks_list(&self, _params: HooksListParams) -> Result<HooksListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "hook catalog is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Start a model turn. Live backends may incur paid usage — prefer fixtures offline.
     /// Callers should pass selected model in [`TurnStartParams::model`] when known.

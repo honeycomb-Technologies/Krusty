@@ -9,6 +9,7 @@ pub mod environment;
 pub mod extensions;
 pub mod fixture;
 pub mod fs;
+pub mod hooks;
 pub mod live_turn;
 pub mod mcp_auth;
 pub mod mcp_config;
@@ -80,6 +81,10 @@ pub use fs::{
     FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse, FIXTURE_PROJECT_ROOT,
+};
+pub use hooks::{
+    HookErrorInfo, HookEventName, HookHandlerType, HookMetadata, HookSource, HookTrustStatus,
+    HooksListEntry, HooksListParams, HooksListResponse,
 };
 pub use live_turn::{
     run_live_review_with_bridge, run_live_turn_progressive, run_live_turn_progressive_with_model,

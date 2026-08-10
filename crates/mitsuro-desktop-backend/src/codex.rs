@@ -1050,6 +1050,11 @@ impl AgentBackend for CodexAppServerBackend {
         self.list_skills(params).await
     }
 
+    async fn hooks_list(&self, params: crate::HooksListParams) -> Result<crate::HooksListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("hooks/list", Some(value)).await
+    }
+
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         // Live model turn — callers must opt in; default UI path uses fixtures.
         // `params.model` is serialized as camelCase `model` when set (UI selected model).
@@ -1711,6 +1716,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status, crate::ConfigWriteStatus::Ok);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hooks_list_uses_current_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "hooks/list");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"cwds": ["/workspace"]})
+            );
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "data": [{
+                                "cwd": "/workspace",
+                                "hooks": [{
+                                    "key": "project:preToolUse:0",
+                                    "eventName": "preToolUse",
+                                    "handlerType": "command",
+                                    "matcher": null,
+                                    "command": "scripts/check.sh",
+                                    "timeoutSec": 10,
+                                    "statusMessage": null,
+                                    "additionalContextLimit": null,
+                                    "sourcePath": "/workspace/.codex/hooks.json",
+                                    "source": "project",
+                                    "pluginId": null,
+                                    "displayOrder": 0,
+                                    "enabled": true,
+                                    "isManaged": false,
+                                    "currentHash": "sha256:test",
+                                    "trustStatus": "trusted"
+                                }],
+                                "warnings": [],
+                                "errors": []
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+        });
+        let response = backend
+            .hooks_list(crate::HooksListParams {
+                cwds: vec!["/workspace".to_owned()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            response.data[0].hooks[0].event_name,
+            crate::HookEventName::PreToolUse
+        );
         server.await.unwrap();
     }
 

@@ -47,6 +47,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   `config/value/write` followed by `config/mcpServer/reload`. The form validates names,
   URLs, executable-only command fields, and JSON string-array arguments before I/O.
   Mitsuro does not expose the mutation, so the form is replaced by an unsupported note.
+- Settings → Hooks reads the exact Codex `hooks/list` catalog for the active workspace,
+  including handler/event/source/path, trust, managed, warning, and error state. Mitsuro
+  and explicit fixture mode show an empty unsupported/fixture state, never sample hooks.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.

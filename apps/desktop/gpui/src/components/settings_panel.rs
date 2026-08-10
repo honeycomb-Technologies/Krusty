@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
-use mitsuro_desktop_backend::BackendKind;
+use mitsuro_desktop_backend::{BackendKind, HookMetadata};
 
 use crate::app::{
     AccountSession, McpAddTransport, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection,
@@ -1953,7 +1953,19 @@ fn computer_use_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
         )
 }
 
-fn hooks_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn hooks_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let state = app.hooks_state();
+    let hooks = app.flattened_hooks();
+    let workspace_count = app.hooks().len();
+    let warning_count: usize = app.hooks().iter().map(|entry| entry.warnings.len()).sum();
+    let error_count: usize = app.hooks().iter().map(|entry| entry.errors.len()).sum();
+    let status = match state {
+        SurfaceDataState::Live => "Live Codex catalog",
+        SurfaceDataState::Fixture => "Explicit fixture · no hook catalog",
+        SurfaceDataState::Loading => "Loading",
+        SurfaceDataState::Unsupported => "Unsupported by active backend",
+        SurfaceDataState::Error => "Hook catalog error",
+    };
     div()
         .id("settings-hooks")
         .flex()
@@ -1963,40 +1975,112 @@ fn hooks_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
         .child(group_label("Hooks"))
         .child(
             settings_card()
-                .child(toggle_row(
-                    "Enable hooks",
-                    "Run project hooks on tool and session events",
-                    "hooks_enabled",
-                    false,
-                    app,
-                    cx,
-                ))
+                .child(info_row("Source", "hooks/list"))
                 .child(card_divider())
-                .child(info_row("Hooks directory", "~/.config/mitsuro/hooks"))
+                .child(info_row("Status", status))
                 .child(card_divider())
-                .child(info_row("Project file", ".mitsuro/hooks.toml"))
+                .child(info_row("Workspace results", &workspace_count.to_string()))
                 .child(card_divider())
-                .child(action_row(
-                    "Open hooks directory",
-                    "Browse and edit hook scripts",
-                    "Open",
-                    "open-hooks-dir",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Open config file",
-                    "Edit hooks configuration",
-                    "Open",
-                    "open-hooks-config",
-                    cx,
+                .child(info_row(
+                    "Diagnostics",
+                    &format!("{warning_count} warning(s) · {error_count} error(s)"),
                 )),
         )
         .child(group_label("Configured hooks"))
-        .child(settings_card().child(empty_list_message(
-            "No hooks found",
-            "Configured hooks will appear here (PreToolUse, PostToolUse, SessionEnd…)",
-        )))
+        .child(
+            settings_card()
+                .children(hooks.iter().enumerate().flat_map(|(index, hook)| {
+                    let mut rows = Vec::new();
+                    if index > 0 {
+                        rows.push(card_divider().into_any_element());
+                    }
+                    rows.push(hook_row(hook).into_any_element());
+                    rows
+                }))
+                .when(hooks.is_empty(), |this| {
+                    this.child(match state {
+                        SurfaceDataState::Unsupported => empty_list_message(
+                            "Hooks unavailable",
+                            "The active backend does not expose a lifecycle hook catalog.",
+                        ),
+                        SurfaceDataState::Error => empty_list_message(
+                            "Could not load hooks",
+                            "The Codex hook catalog request failed; reconnect to retry.",
+                        ),
+                        SurfaceDataState::Loading => {
+                            empty_list_message("Loading hooks", "Reading the active workspace…")
+                        }
+                        _ => empty_list_message(
+                            "No hooks found",
+                            "The backend returned an empty catalog for this workspace.",
+                        ),
+                    })
+                }),
+        )
+}
+
+fn hook_row(hook: &HookMetadata) -> impl IntoElement {
+    let colors = theme::colors();
+    let state = if hook.enabled {
+        if hook.is_managed {
+            format!("{} · managed", hook.trust_status.label())
+        } else {
+            hook.trust_status.label().to_owned()
+        }
+    } else {
+        "disabled".to_owned()
+    };
+    let detail = format!(
+        "{} · {} · {} · {}",
+        hook.event_name.label(),
+        hook.handler_type.label(),
+        hook.source.label(),
+        hook.source_path
+    );
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(hook.key.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .overflow_hidden()
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .px(px(9.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(colors.bg_button_secondary)
+                .text_xs()
+                .text_color(if hook.enabled {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                })
+                .child(state),
+        )
 }
 
 fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
