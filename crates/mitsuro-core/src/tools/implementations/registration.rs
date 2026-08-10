@@ -189,6 +189,12 @@ mod tests {
         assert!(agent.input_schema["properties"]["task_ids"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("corresponding to components")));
+        assert!(
+            agent.input_schema["properties"]["tasks"]["items"]["properties"]["max_turns"]
+                ["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("final handoff"))
+        );
 
         let provider_tools =
             get_format_handler(ApiFormat::OpenAIResponses).convert_tools(&wire_tools);

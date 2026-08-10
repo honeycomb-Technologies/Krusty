@@ -1539,7 +1539,9 @@ mod tests {
     #[tokio::test]
     async fn expired_owner_is_recovered_with_the_same_logical_task() {
         let (coordinator, _temp_dir) = coordinator();
-        let coordinator = coordinator.with_task_lease_ttl_ms(200);
+        // Keep acquisition independent from full-suite scheduler load, then
+        // model the crashed owner deterministically below.
+        let coordinator = coordinator.with_task_lease_ttl_ms(5_000);
         coordinator
             .create_group(&group_input())
             .expect("create group");
@@ -1553,7 +1555,16 @@ mod tests {
         let first_task_id = first.task().specification.delegation_task_id.clone();
         drop(first);
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        Database::new(&coordinator.db_path)
+            .expect("crash simulation database")
+            .conn()
+            .execute(
+                "UPDATE delegation_tasks
+                    SET lease_owner_id = 'simulated-crashed-owner', lease_expires_at_ms = 0
+                  WHERE delegation_task_id = ?1",
+                params![first_task_id],
+            )
+            .expect("expire simulated crashed owner");
         let recovered = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(permit) = coordinator
