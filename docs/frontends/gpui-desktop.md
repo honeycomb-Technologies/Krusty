@@ -22,8 +22,9 @@ are not canonical product evidence.
 - `codex-ws`: reserved and rejected honestly until the WebSocket transport is
   implemented.
 
-Provider-backed turns require `MITSURO_ALLOW_LIVE_TURN=1`. Merely connecting and
-discovering auth never authorizes a paid turn.
+A Ready, authenticated product backend sends a provider-backed turn by default.
+Use `MITSURO_NO_LIVE_TURN=1` for read-only UI review or an explicit fixture backend for
+deterministic replay. Merely connecting and discovering auth does not itself send a turn.
 
 ## Truth matrix
 
@@ -40,11 +41,11 @@ discovering auth never authorizes a paid turn.
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
 | Extensions/MCP/skills | Live installed extensions, MCP status, and skills | Partially live | Typed fixture |
-| Hive/schedules | Server contract exists; GPUI wiring incomplete | Unsupported | Static/demo UI |
-| Pull requests | No product adapter | No product adapter | Static catalog |
-| Sites | No product adapter | No product adapter | Static catalog |
-| Browser/computer use | No production embed | No production embed | Mock host/catalog |
-| Settings writes | Incomplete | Incomplete | Mostly local UI state |
+| Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
+| Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
+| Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
+| Browser/computer use | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Explicit fixture catalog |
+| Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
 `BackendCapabilities`. A method name appearing in the 127-method Codex inventory
@@ -68,24 +69,15 @@ success payloads.
   list must use `BackendSessionId::qualified()` as its row/selection key instead of
   the raw server ID.
 
-## Resume here
+## Remaining release work
 
-The next implementation slice should be backend-capability completion, not more
-visual polish:
-
-1. Move the now-live file, MCP, skill, and extension adapters from legacy
-   `AgentBackend` method shapes into explicit product-domain contracts.
-2. Add durable GPUI preference storage for the selected qualified session and
-   selected backend; live thread state already retains origin in memory.
-3. Design the terminal boundary: either add a server-side interactive process
-   spawn/stdin/PTY API or present the existing Mitsuro process catalog as read-only.
-4. Wire Hive and schedules using the existing Mitsuro server contracts.
-5. Add an authenticated Codex WebSocket adapter only if using the already-running
-   app-server is a required deployment mode; managed stdio is working now.
-6. Replace or remove PR, Sites, browser/computer, and settings demonstrations one
-   surface at a time, with contract and GPUI interaction tests.
-7. Split `app.rs` into state/controllers and bounded GPUI views after backend state
-   stops moving.
+1. Keep Codex WebSocket explicitly unsupported unless attaching to an already-running
+   app-server becomes a required deployment mode; managed stdio is the supported path.
+2. Run the full workspace and dual-provider acceptance gauntlet, produce the GPUI
+   release build, and verify source, built artifact, installed binary, and live process
+   provenance independently.
+3. Split `app.rs` into state/controllers and bounded views as a post-release
+   maintainability slice; this must not change the backend capability boundary.
 
 ## Validation
 

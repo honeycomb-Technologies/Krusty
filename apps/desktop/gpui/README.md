@@ -17,7 +17,8 @@ The desktop must support two explicit transports through normalized product conc
 Fixture mode is for deterministic development and tests. A generic fixture success is
 not evidence that a product feature works.
 
-The selected transport and selected backend-qualified session are persisted in
+The selected transport, backend-qualified session, backend-scoped model, and
+privacy-safe desktop preferences are persisted in
 `~/.mitsuro/gpui-desktop-state.json` (override with `MITSURO_GPUI_STATE_PATH`). An
 explicit `MITSURO_BACKEND` always takes precedence. No server token or provider
 credential is written to this file.
@@ -46,25 +47,27 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Secondary Settings actions without an implementation are non-interactive and labeled
   `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
   separate live implementations.
-- The composer exposes only implemented behavior: text entry, Send, Stop, and a
-  read-only model label. Attachment, voice, project, access, and model-picker stubs are
-  not presented as controls.
+- The composer exposes only implemented behavior: text entry, Send, Stop, and
+  backend-scoped model cycling. Attachment, voice, project, and access stubs are not
+  presented as controls.
 - Long transcripts start with a 16-message tail and reveal earlier history in bounded
-  pages. Normal replies preserve line breaks up to a defensive per-block layout limit,
-  while the composer remains pinned outside the transcript scroll region.
+  pages. Reopened threads preserve structured reasoning, plans, commands, and file
+  changes. Assistant Markdown, fenced code, visible errors, and bounded full-response
+  expansion render while the composer remains pinned outside the transcript scroll.
 
 ## Parity status
 
-The home shell and Connections settings have been compared in a live 940×1054 GPUI
-window against the reversed ChatGPT desktop reference. This is not yet feature-complete
-UI parity. Pull requests and Sites retain their navigation destinations but now render
+The home shell, open transcript, Settings, and every product destination have been
+reviewed in a live 940×1054 GPUI window against the reversed ChatGPT desktop reference.
+Pull requests and Sites
+retain their navigation destinations but render
 explicit capability states: neither backend exposes a typed API for those products, so
 the native client does not show sample repositories, sample deployments, or inactive
 create/review controls. Atlas/browser, the composer, live-turn failure handling, and
-secondary Settings actions now follow the same honest capability treatment. Remaining
-parity work is concentrated in richer markdown/tool transcript presentation plus
-persistence or backend wiring for local-only Settings choices; the native client should
-not be called finalized until those are complete.
+secondary Settings actions follow the same honest capability treatment. Desktop-only
+Settings values are durable and explicitly distinguished from live server configuration.
+Finalization still requires the release/runtime provenance checks described in the
+repository validation plan.
 
 ## Build
 
