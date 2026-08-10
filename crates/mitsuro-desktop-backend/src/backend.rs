@@ -40,6 +40,7 @@ use crate::protocol::{
     ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse,
     ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{ConnectionStatus, Result};
 
@@ -66,8 +67,8 @@ pub trait AgentBackend: Send + Sync {
     /// Universal JSON-RPC: invoke any client method with raw JSON params.
     ///
     /// - **Codex**: forwards over the live stdio request path for *any* method string.
-    /// - **Fixture**: returns offline success payloads for every known method (typed
-    ///   helpers preferred when params match).
+    /// - **Fixture**: executes only its typed offline implementations and returns
+    ///   `NotImplemented` for known methods without a truthful fixture behavior.
     /// - **Mitsuro stub**: [`crate::types::AgentError::NotImplemented`].
     async fn call_raw(&self, method: &str, params: Value) -> Result<Value>;
 
@@ -130,6 +131,13 @@ pub trait AgentBackend: Send + Sync {
     /// Start a model turn. Live backends may incur paid usage — prefer fixtures offline.
     /// Callers should pass selected model in [`TurnStartParams::model`] when known.
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse>;
+
+    /// Inject user input into the active turn without starting a second turn.
+    async fn turn_steer(&self, _params: TurnSteerParams) -> Result<TurnSteerResponse> {
+        Err(crate::types::AgentError::NotImplemented(
+            "turn/steer is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Interrupt an in-progress turn via `turn/interrupt`.
     async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse>;

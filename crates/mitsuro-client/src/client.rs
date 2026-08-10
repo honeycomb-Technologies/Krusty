@@ -14,8 +14,8 @@ use crate::{
     ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse, OAuthStartRequest,
     OAuthStartResponse, OAuthStatusResponse, ProviderStatus, ServerAccessResponse,
     ServerStatusResponse, SessionInfo, SessionStateOptions, SessionStateResponse,
-    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, ToolApprovalRequest,
-    UpdateServerAccessRequest, UpdateSessionRequest,
+    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, SteerRequest,
+    SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest, UpdateSessionRequest,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -308,6 +308,11 @@ impl MitsuroClient {
         Ok(chat_stream_from_response(response))
     }
 
+    /// Inject user input into the active run for an existing session.
+    pub async fn steer(&self, request: SteerRequest) -> Result<SteerResponse> {
+        self.post_json("/chat/steer", &request).await
+    }
+
     async fn get_json<T>(&self, path: &str) -> Result<T>
     where
         T: DeserializeOwned,
@@ -482,6 +487,46 @@ mod tests {
             .await
             .expect("empty successful delete response");
         assert!(response.ok);
+        server.join().expect("test server join");
+    }
+
+    #[tokio::test]
+    async fn steer_posts_to_the_durable_chat_endpoint() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 4096];
+            let size = socket.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("POST /api/chat/steer "));
+            assert!(request.contains("\"session_id\":\"session-1\""));
+            assert!(request.contains("\"message\":\"focus on tests\""));
+            let body = r#"{"status":"accepted","pending_id":"pending-1"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write response");
+        });
+
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        let response = client
+            .steer(SteerRequest {
+                session_id: "session-1".to_owned(),
+                message: "focus on tests".to_owned(),
+                content: Vec::new(),
+            })
+            .await
+            .expect("steer response");
+        assert_eq!(response.status, "accepted");
+        assert_eq!(response.pending_id, "pending-1");
         server.join().expect("test server join");
     }
 

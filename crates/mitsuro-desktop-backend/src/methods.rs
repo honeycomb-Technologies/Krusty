@@ -149,6 +149,82 @@ pub const CLIENT_METHODS: &[&str] = &[
 /// Number of registered client methods (convenience for tests / UI).
 pub const CLIENT_METHOD_COUNT: usize = CLIENT_METHODS.len();
 
+/// Codex methods currently represented by a typed backend adapter.
+///
+/// Everything else in [`CLIENT_METHODS`] is still reachable through Codex's raw
+/// JSON-RPC transport, but is not yet a complete product capability. Keeping this
+/// list explicit prevents protocol reachability from being mistaken for UI parity.
+pub const TYPED_CLIENT_METHODS: &[&str] = &[
+    "account/login/cancel",
+    "account/login/start",
+    "account/logout",
+    "account/rateLimits/read",
+    "account/read",
+    "account/usage/read",
+    "collaborationMode/list",
+    "config/read",
+    "environment/add",
+    "environment/info",
+    "environment/status",
+    "fs/getMetadata",
+    "fs/readDirectory",
+    "fs/readFile",
+    "fuzzyFileSearch",
+    "fuzzyFileSearch/sessionStart",
+    "fuzzyFileSearch/sessionStop",
+    "fuzzyFileSearch/sessionUpdate",
+    "initialize",
+    "mcpServer/tool/call",
+    "mcpServerStatus/list",
+    "model/list",
+    "plugin/installed",
+    "plugin/list",
+    "plugin/read",
+    "process/kill",
+    "process/resizePty",
+    "process/spawn",
+    "process/writeStdin",
+    "skills/list",
+    "thread/archive",
+    "thread/delete",
+    "thread/fork",
+    "thread/goal/clear",
+    "thread/goal/get",
+    "thread/goal/set",
+    "thread/list",
+    "thread/name/set",
+    "thread/read",
+    "thread/resume",
+    "thread/search",
+    "thread/start",
+    "thread/unarchive",
+    "turn/interrupt",
+    "turn/start",
+    "turn/steer",
+];
+
+pub const TYPED_CLIENT_METHOD_COUNT: usize = TYPED_CLIENT_METHODS.len();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientMethodCoverage {
+    /// A typed adapter is available to product code.
+    Typed,
+    /// The Codex transport can invoke it, but no typed product adapter exists yet.
+    RawOnly,
+    /// Not present in the generated protocol inventory.
+    Unknown,
+}
+
+pub fn client_method_coverage(method: &str) -> ClientMethodCoverage {
+    if TYPED_CLIENT_METHODS.contains(&method) {
+        ClientMethodCoverage::Typed
+    } else if is_known_client_method(method) {
+        ClientMethodCoverage::RawOnly
+    } else {
+        ClientMethodCoverage::Unknown
+    }
+}
+
 /// Current methods available without `initialize.capabilities.experimentalApi`.
 pub const STABLE_CLIENT_METHODS_TEXT: &str = include_str!("../fixtures/stable-client-methods.txt");
 
@@ -240,6 +316,27 @@ mod tests {
         assert!(is_known_client_method("initialize"));
         assert!(is_known_client_method("thread/list"));
         assert!(is_known_client_method("process/spawn"));
+    }
+
+    #[test]
+    fn every_method_has_honest_typed_or_raw_only_coverage() {
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 46);
+        for method in TYPED_CLIENT_METHODS {
+            assert!(
+                is_known_client_method(method),
+                "typed method is unknown: {method}"
+            );
+            assert_eq!(client_method_coverage(method), ClientMethodCoverage::Typed);
+        }
+        let raw_only = CLIENT_METHODS
+            .iter()
+            .filter(|method| client_method_coverage(method) == ClientMethodCoverage::RawOnly)
+            .count();
+        assert_eq!(raw_only, CLIENT_METHOD_COUNT - TYPED_CLIENT_METHOD_COUNT);
+        assert_eq!(
+            client_method_coverage("future/not-yet-generated"),
+            ClientMethodCoverage::Unknown
+        );
     }
 
     #[test]

@@ -119,6 +119,9 @@ requests must have an approval, interaction, or automatic transport disposition.
 The GPUI shell keeps a backend-generation-scoped lifecycle subscription alive outside
 active turns, refreshing account, extension, thread-list, and file state without
 duplicating turn transcript events.
+Active-turn steering is a transport-neutral product action: Codex uses `turn/steer`
+with the exact active-turn precondition, while Mitsuro uses its durable `/chat/steer`
+endpoint. A non-empty draft therefore shows Send beside Stop during a live turn.
 
 ```bash
 scripts/gpui-codex-protocol-check.sh

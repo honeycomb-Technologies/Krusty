@@ -1110,6 +1110,20 @@ pub struct ChatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SteerRequest {
+    pub session_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SteerResponse {
+    pub status: String,
+    pub pending_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolApprovalRequest {
     pub session_id: String,
     pub tool_call_id: String,
@@ -1545,12 +1559,27 @@ fn u64_field(value: &Value, field: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatStreamEvent, DelegatedProgressStatus, DelegatedRunRole, DelegationEventKind,
-        DelegationExecutionMode, DelegationParentContinuationState, FastMode, HiveCurrentResponse,
-        HiveScheduleSummary, ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse,
-        SessionType, ThinkingLevel,
+        ChatStreamEvent, ContentBlock, DelegatedProgressStatus, DelegatedRunRole,
+        DelegationEventKind, DelegationExecutionMode, DelegationParentContinuationState, FastMode,
+        HiveCurrentResponse, HiveScheduleSummary, ModelInfo, ReasoningControl, ReasoningEffort,
+        SessionStateResponse, SessionType, SteerRequest, ThinkingLevel,
     };
     use serde_json::json;
+
+    #[test]
+    fn steer_request_uses_the_chat_steering_contract() {
+        let request = SteerRequest {
+            session_id: "session-1".to_owned(),
+            message: "focus on the failing test".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "extra context".to_owned(),
+            }],
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["message"], "focus on the failing test");
+        assert_eq!(value["content"][0]["type"], "text");
+    }
 
     #[test]
     fn hive_read_models_accept_the_server_control_plane_shape() {

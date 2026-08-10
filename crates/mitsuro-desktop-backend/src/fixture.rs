@@ -324,8 +324,8 @@ impl FixtureBackend {
 
     /// Route `call_raw` for methods that already have typed offline implementations.
     ///
-    /// Returns `None` when the method should use the generic fixture success payload
-    /// (missing/invalid params for strict typed paths).
+    /// Returns `None` when the method or parameters have no truthful typed fixture
+    /// behavior; `call_raw` then reports `NotImplemented`.
     async fn call_raw_typed(&self, method: &str, params: Value) -> Result<Option<Value>> {
         match method {
             "initialize" => {

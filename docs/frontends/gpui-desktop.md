@@ -46,7 +46,7 @@ backend or are shown as unavailable.
 |---|---|---|---|
 | Health/connect | Live | Live | Explicit fixture |
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
-| Streaming chat | Live SSE | Live JSON-RPC notifications | Sample replay |
+| Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Models | Live | Live | Typed fixture catalog |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
@@ -75,6 +75,10 @@ result, or an honest JSON-RPC error for unadvertised token/attestation capabilit
 The desktop negotiates experimental APIs because its process, environment, realtime,
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
+
+The executable client-method coverage matrix currently identifies 46 typed adapters
+and 87 raw-transport-only methods. Raw reachability is treated as remaining product
+work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
 

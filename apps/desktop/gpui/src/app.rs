@@ -29,7 +29,7 @@ use mitsuro_desktop_backend::{
     PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
     PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
     ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
-    ProductModel, ProductProcess, ProductSchedule, ProductSkill, ProductTurn,
+    ProductModel, ProductProcess, ProductSchedule, ProductSkill, ProductSteer, ProductTurn,
     ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
@@ -4654,6 +4654,16 @@ impl MitsuroApp {
         self.turn_in_progress
     }
 
+    pub fn can_steer_active_turn(&self) -> bool {
+        self.turn_in_progress
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().steering)
+            && self.active_turn_thread_id.is_some()
+            && self.active_turn_id.is_some()
+    }
+
     /// Visible threads for the sidebar (surface + search + archived filter).
     pub fn visible_threads(&self) -> Vec<DemoThread> {
         let surface = self.active_thread_surface();
@@ -5198,17 +5208,16 @@ impl MitsuroApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.turn_in_progress {
-            self.status_line = "Turn already in progress…".into();
-            cx.notify();
-            return;
-        }
-
         let text = input.read(cx).value().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() {
             self.status_line = "Composer is empty.".into();
             cx.notify();
+            return;
+        }
+
+        if self.turn_in_progress {
+            self.submit_live_steer(input, trimmed.to_owned(), window, cx);
             return;
         }
 
@@ -5308,6 +5317,88 @@ impl MitsuroApp {
             }
             SendMode::Unavailable => unreachable!("unavailable sends return before mutation"),
         }
+        cx.notify();
+    }
+
+    fn submit_live_steer(
+        &mut self,
+        input: &Entity<InputState>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Steer unavailable · backend is not ready.".into();
+            cx.notify();
+            return;
+        };
+        let Some(thread_id) = self.active_turn_thread_id.clone() else {
+            self.status_line = "Steer unavailable · active thread is unknown.".into();
+            cx.notify();
+            return;
+        };
+        let Some(expected_turn_id) = self.active_turn_id.clone() else {
+            self.status_line = "Steer unavailable · active turn is not initialized yet.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.status_line = "Steer unavailable · active session identity is missing.".into();
+            cx.notify();
+            return;
+        };
+
+        if let Some(thread) = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.summary.id == thread_id)
+        {
+            thread.messages.push(DemoMessage::user(&text));
+            thread.summary.preview = Some(text.chars().take(64).collect());
+        }
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.status_line = "Steering active turn…".into();
+        let backend_generation = self.backend_generation;
+        let turn_generation = self.turn_generation;
+        let request = ProductSteer {
+            session_id,
+            expected_turn_id,
+            text,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .steer_session(request)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.turn_generation != turn_generation
+                {
+                    return;
+                }
+                app.status_line = match result {
+                    Ok(turn_id) => format!("Steered active turn · {turn_id}").into(),
+                    Err(error) => {
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == thread_id)
+                        {
+                            thread.messages.push(DemoMessage::error(format!(
+                                "Steering was not accepted: {error}"
+                            )));
+                        }
+                        format!("Steer failed · {error}").into()
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 

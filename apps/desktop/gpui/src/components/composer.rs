@@ -43,6 +43,7 @@ fn codex_composer(
     let model = app.model_label().to_string();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
+    let steerable = app.can_steer_active_turn();
     let calm = app.is_calm_stage();
     let show_usage = app.usage_card_visible();
     let draft_empty = input.read(cx).value().trim().is_empty();
@@ -103,12 +104,13 @@ fn codex_composer(
                         .child(model_chip(&model, cx))
                         .child(div().flex_1())
                         .child(if streaming {
-                            round_action(
+                            streaming_actions(
                                 "composer-stop",
-                                IconName::CircleX,
-                                true,
+                                "composer-steer",
+                                input,
+                                draft_empty,
+                                steerable,
                                 cx,
-                                |app, _, _, cx| app.interrupt_turn(cx),
                             )
                             .into_any_element()
                         } else if !draft_empty {
@@ -138,6 +140,7 @@ fn chat_slim_composer(
     let colors = theme::colors();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
+    let steerable = app.can_steer_active_turn();
     let draft_empty = input.read(cx).value().trim().is_empty();
 
     div()
@@ -173,10 +176,8 @@ fn chat_slim_composer(
                         .child(Input::new(input).appearance(false).h(px(30.0))),
                 )
                 .child(if streaming {
-                    round_action("chat-stop", IconName::CircleX, true, cx, |app, _, _, cx| {
-                        app.interrupt_turn(cx)
-                    })
-                    .into_any_element()
+                    streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
+                        .into_any_element()
                 } else if !draft_empty {
                     round_action(
                         "chat-send",
@@ -203,6 +204,7 @@ fn chat_thread_composer(
     let colors = theme::colors();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
+    let steerable = app.can_steer_active_turn();
     let draft_empty = input.read(cx).value().trim().is_empty();
 
     div()
@@ -243,12 +245,13 @@ fn chat_thread_composer(
                         .gap(px(6.0))
                         .child(div().flex_1())
                         .child(if streaming {
-                            round_action(
+                            streaming_actions(
                                 "chat-thread-stop",
-                                IconName::CircleX,
-                                true,
+                                "chat-thread-steer",
+                                input,
+                                draft_empty,
+                                steerable,
                                 cx,
-                                |app, _, _, cx| app.interrupt_turn(cx),
                             )
                             .into_any_element()
                         } else if !draft_empty {
@@ -267,6 +270,40 @@ fn chat_thread_composer(
                         }),
                 ),
         )
+}
+
+fn streaming_actions(
+    stop_id: &'static str,
+    steer_id: &'static str,
+    input: &Entity<InputState>,
+    draft_empty: bool,
+    steerable: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let steer_input = input.clone();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .when(steerable && !draft_empty, |this| {
+            this.child(round_action(
+                steer_id,
+                IconName::ArrowUp,
+                false,
+                cx,
+                move |app, _, window, cx| {
+                    app.submit_composer(&steer_input, window, cx);
+                },
+            ))
+        })
+        .child(round_action(
+            stop_id,
+            IconName::CircleX,
+            true,
+            cx,
+            |app, _, _, cx| app.interrupt_turn(cx),
+        ))
 }
 
 fn usage_card(_cx: &mut Context<MitsuroApp>) -> impl IntoElement {

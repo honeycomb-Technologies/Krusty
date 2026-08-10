@@ -46,6 +46,7 @@ impl BackendKind {
 pub struct BackendCapabilities {
     pub sessions: bool,
     pub streaming_chat: bool,
+    pub steering: bool,
     pub approvals: bool,
     pub models: bool,
     pub files: bool,
@@ -63,6 +64,7 @@ impl BackendCapabilities {
         Self {
             sessions: true,
             streaming_chat: true,
+            steering: true,
             approvals: true,
             models: true,
             files: true,
@@ -80,6 +82,7 @@ impl BackendCapabilities {
         Self {
             sessions: true,
             streaming_chat: true,
+            steering: true,
             approvals: true,
             models: true,
             files: true,
@@ -368,5 +371,7 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().processes);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
+        assert!(BackendCapabilities::mitsuro().steering);
+        assert!(BackendCapabilities::codex().steering);
     }
 }

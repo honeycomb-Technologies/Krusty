@@ -14,7 +14,8 @@ use crate::{
     FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome,
     ModelListParams, PluginListParams, Result, SessionDelegationProjection, SkillsListParams,
     ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
+    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams,
+    TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +110,13 @@ pub struct ProductTurn {
     pub session_id: BackendSessionId,
     pub text: String,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductSteer {
+    pub session_id: BackendSessionId,
+    pub expected_turn_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +255,8 @@ pub trait ProductBackend: Send + Sync {
     async fn list_product_models(&self, limit: usize) -> Result<Vec<ProductModel>>;
 
     async fn interrupt_session(&self, id: &BackendSessionId, turn_id: String) -> Result<()>;
+
+    async fn steer_session(&self, request: ProductSteer) -> Result<String>;
 
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>>;
 
@@ -441,6 +451,18 @@ impl ProductBackend for DesktopBackend {
         self.turn_interrupt(TurnInterruptParams::new(id.raw.clone(), turn_id))
             .await?;
         Ok(())
+    }
+
+    async fn steer_session(&self, request: ProductSteer) -> Result<String> {
+        self.ensure_session_origin(&request.session_id)?;
+        let response = self
+            .turn_steer(TurnSteerParams::text(
+                request.session_id.raw,
+                request.expected_turn_id,
+                request.text,
+            ))
+            .await?;
+        Ok(response.turn_id)
     }
 
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>> {
@@ -687,6 +709,20 @@ mod tests {
                 Arc::new(LiveApprovalBridge::new()),
                 Duration::from_secs(1),
             )
+            .expect_err("mismatched origin must fail");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn product_steer_rejects_a_session_from_another_backend_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let error = backend
+            .steer_session(ProductSteer {
+                session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                expected_turn_id: "turn-1".to_owned(),
+                text: "change direction".to_owned(),
+            })
+            .await
             .expect_err("mismatched origin must fail");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
     }

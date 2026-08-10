@@ -854,6 +854,44 @@ impl TurnStartResponse {
     }
 }
 
+/// Inject input into the currently active turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSteerParams {
+    pub thread_id: String,
+    pub input: Vec<Value>,
+    pub expected_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_user_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<std::collections::BTreeMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responsesapi_client_metadata: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl TurnSteerParams {
+    pub fn text(
+        thread_id: impl Into<String>,
+        expected_turn_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            input: vec![user_input_text_value(text)],
+            expected_turn_id: expected_turn_id.into(),
+            client_user_message_id: None,
+            additional_context: None,
+            responsesapi_client_metadata: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSteerResponse {
+    pub turn_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // model/list
 // ---------------------------------------------------------------------------
@@ -2605,6 +2643,22 @@ mod p9_protocol_shape_tests {
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("model").is_none());
         assert_eq!(v["threadId"], "t");
+    }
+
+    #[test]
+    fn turn_steer_matches_generated_camel_case_contract() {
+        let p = TurnSteerParams::text("thread-1", "turn-9", "change direction");
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["threadId"], "thread-1");
+        assert_eq!(v["expectedTurnId"], "turn-9");
+        assert_eq!(v["input"][0]["type"], "text");
+        assert_eq!(v["input"][0]["text"], "change direction");
+        assert!(v.get("thread_id").is_none());
+        assert!(v.get("additionalContext").is_none());
+
+        let response: TurnSteerResponse =
+            serde_json::from_value(serde_json::json!({"turnId": "turn-9"})).unwrap();
+        assert_eq!(response.turn_id, "turn-9");
     }
 
     #[test]

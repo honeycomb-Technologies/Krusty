@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use mitsuro_client::{
-    ChatRequest, ChatStreamEvent, CreateSessionRequest, MitsuroClient, SessionType,
+    ChatRequest, ChatStreamEvent, CreateSessionRequest, MitsuroClient, SessionType, SteerRequest,
     UpdateSessionRequest,
 };
 use serde_json::Value;
@@ -53,7 +53,7 @@ use crate::protocol::{
     ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
     ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
     ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
@@ -643,6 +643,7 @@ impl AgentBackend for MitsuroServerBackend {
                 | "thread/name/set"
                 | "thread/delete"
                 | "turn/start"
+                | "turn/steer"
                 | "turn/interrupt"
                 | "model/list"
                 | "skills/list"
@@ -898,6 +899,21 @@ impl AgentBackend for MitsuroServerBackend {
         Err(AgentError::NotImplemented(
             "MitsuroServerBackend::turn_start — not implemented".into(),
         ))
+    }
+
+    async fn turn_steer(&self, params: TurnSteerParams) -> Result<TurnSteerResponse> {
+        let message = turn_input_text(&params.input);
+        self.client
+            .steer(SteerRequest {
+                session_id: params.thread_id,
+                message,
+                content: Vec::new(),
+            })
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(TurnSteerResponse {
+            turn_id: params.expected_turn_id,
+        })
     }
 
     async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse> {
