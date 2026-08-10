@@ -1,7 +1,7 @@
 //! Transport-neutral chat composer.
 //!
 //! Implemented controls are interactive: text entry, backend-scoped model and
-//! advertised reasoning-effort cycling, real model-gated image and audio file
+//! explicit model and reasoning-effort pickers, real model-gated image and audio file
 //! attachments, Codex skill and file-mention inputs, native project selection,
 //! backend-specific access and response-speed controls, Send, and Stop.
 //! Microphone recording remains absent until its backend contract exists.
@@ -92,6 +92,12 @@ fn codex_composer(
                 })
                 .when(app.composer_access_menu_open(), |this| {
                     this.child(composer_access_menu(app, cx))
+                })
+                .when(app.composer_model_menu_open(), |this| {
+                    this.child(composer_model_menu(app, cx))
+                })
+                .when(app.composer_reasoning_menu_open(), |this| {
+                    this.child(composer_reasoning_menu(app, cx))
                 })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
@@ -216,6 +222,9 @@ fn chat_slim_composer(
         .when(app.composer_add_menu_open(), |this| {
             this.child(composer_add_menu(app, cx))
         })
+        .when(app.composer_reasoning_menu_open(), |this| {
+            this.child(composer_reasoning_menu(app, cx))
+        })
         .child(
             div()
                 .w_full()
@@ -328,6 +337,9 @@ fn chat_thread_composer(
                 .gap(px(8.0))
                 .when(app.composer_add_menu_open(), |this| {
                     this.child(composer_add_menu(app, cx))
+                })
+                .when(app.composer_reasoning_menu_open(), |this| {
+                    this.child(composer_reasoning_menu(app, cx))
                 })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
@@ -850,6 +862,233 @@ fn composer_access_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
         )
 }
 
+fn composer_model_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let search = app.composer_model_search_input().clone();
+    let query = search.read(cx).value().to_string();
+    let selected_id = app.selected_model_id().map(str::to_owned);
+    let mut models = app
+        .visible_composer_models(&query)
+        .into_iter()
+        .map(|model| {
+            (
+                model.id.clone(),
+                model.label().to_owned(),
+                model.description.clone(),
+                model.is_default,
+            )
+        })
+        .collect::<Vec<_>>();
+    let match_count = models.len();
+    models.truncate(60);
+    let visible_count = models.len();
+
+    div()
+        .id("composer-model-menu")
+        .w_full()
+        .max_h(px(360.0))
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .h(px(34.0))
+                .px(px(8.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(Input::new(&search).appearance(false).h(px(32.0))),
+                ),
+        )
+        .child(
+            div()
+                .id("composer-model-results")
+                .min_h_0()
+                .max_h(px(300.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .when(models.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .px(px(9.0))
+                            .py(px(12.0))
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .child("No models match this search."),
+                    )
+                })
+                .children(models.into_iter().enumerate().map(
+                    |(index, (id, label, description, is_default))| {
+                        let selected = selected_id.as_deref() == Some(id.as_str());
+                        let selected_model_id = id;
+                        div()
+                            .id(("composer-model-choice", index))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(9.0))
+                            .px(px(8.0))
+                            .py(px(7.0))
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .when(selected, |this| this.bg(colors.bg_hover))
+                            .hover(|style| style.bg(colors.bg_hover))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.select_model(selected_model_id.clone(), cx);
+                            }))
+                            .child(
+                                div()
+                                    .w(px(14.0))
+                                    .text_xs()
+                                    .text_color(colors.text_secondary)
+                                    .child(if selected { "✓" } else { "" }),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .text_xs()
+                                            .text_color(colors.text_secondary)
+                                            .child(label)
+                                            .when(is_default, |this| {
+                                                this.child(
+                                                    div()
+                                                        .text_color(colors.text_tertiary)
+                                                        .child("Default"),
+                                                )
+                                            }),
+                                    )
+                                    .when(!description.trim().is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.text_tertiary)
+                                                .overflow_hidden()
+                                                .child(description),
+                                        )
+                                    }),
+                            )
+                            .into_any_element()
+                    },
+                ))
+                .when(match_count > visible_count, |this| {
+                    this.child(
+                        div()
+                            .px(px(9.0))
+                            .py(px(8.0))
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .child(format!(
+                                "Showing {visible_count} of {match_count} matches · refine search",
+                            )),
+                    )
+                }),
+        )
+}
+
+fn composer_reasoning_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let choices = app.composer_reasoning_choices();
+    div()
+        .id("composer-reasoning-menu")
+        .w_full()
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .pt(px(5.0))
+                .pb(px(4.0))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.text_tertiary)
+                .child("Reasoning effort"),
+        )
+        .children(
+            choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (effort, description))| {
+                    let selected = app.selected_reasoning_effort_is(&effort);
+                    let selected_effort = effort.clone();
+                    let label = crate::app::reasoning_effort_display_name(&effort);
+                    div()
+                        .id(("composer-reasoning-choice", index))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(9.0))
+                        .px(px(8.0))
+                        .py(px(7.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .when(selected, |this| this.bg(colors.bg_hover))
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.select_reasoning_effort(selected_effort.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(14.0))
+                                .text_xs()
+                                .text_color(colors.text_secondary)
+                                .child(if selected { "✓" } else { "" }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_secondary)
+                                        .child(label),
+                                )
+                                .when(!description.trim().is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.text_tertiary)
+                                            .child(description),
+                                    )
+                                }),
+                        )
+                        .into_any_element()
+                }),
+        )
+}
+
 fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
@@ -864,7 +1103,9 @@ fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(colors.bg_hover))
-        .on_click(cx.listener(|app, _, _, cx| app.cycle_model(cx)))
+        .on_click(cx.listener(|app, _, window, cx| {
+            app.toggle_composer_model_menu(window, cx);
+        }))
         .child(div().text_xs().text_color(colors.text_tertiary).child("✧"))
         .child(
             div()
@@ -893,7 +1134,9 @@ fn reasoning_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(colors.bg_hover))
-        .on_click(cx.listener(|app, _, _, cx| app.cycle_reasoning_effort(cx)))
+        .on_click(cx.listener(|app, _, _, cx| {
+            app.toggle_composer_reasoning_menu(cx);
+        }))
         .child(
             div()
                 .text_xs()

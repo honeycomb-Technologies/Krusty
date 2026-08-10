@@ -970,6 +970,11 @@ pub struct MitsuroApp {
     composer_input: Entity<InputState>,
     composer_attachments: Vec<ComposerAttachment>,
     composer_add_menu_open: bool,
+    /// Search field and visibility for the real model catalog picker.
+    composer_model_search_input: Entity<InputState>,
+    composer_model_menu_open: bool,
+    /// Explicit reasoning-effort picker; never cycles a hidden choice on click.
+    composer_reasoning_menu_open: bool,
     /// Workspace picked for the next optimistic draft before it has a thread id.
     composer_default_workspace_dir: Option<String>,
     /// Backend-specific access preset picked before an optimistic draft exists.
@@ -1089,6 +1094,19 @@ impl MitsuroApp {
         )
         .detach();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let composer_model_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search models…"));
+        cx.subscribe_in(
+            &composer_model_search_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let _ = app;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let browser_host = create_default_host();
         let initial_url = browser_host.url().to_string();
         let browser_url_input = cx.new(|cx| {
@@ -1261,6 +1279,9 @@ impl MitsuroApp {
             composer_input,
             composer_attachments: Vec::new(),
             composer_add_menu_open: false,
+            composer_model_search_input,
+            composer_model_menu_open: false,
+            composer_reasoning_menu_open: false,
             composer_default_workspace_dir: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
@@ -2975,25 +2996,6 @@ impl MitsuroApp {
         self.preferences
             .remember_reasoning(backend, model_id, effort);
         self.save_preferences_best_effort();
-    }
-
-    pub fn cycle_reasoning_effort(&mut self, cx: &mut Context<Self>) {
-        let options = self.reasoning_options_for_selected_model();
-        if options.len() <= 1 {
-            self.status_line =
-                "The selected model does not advertise multiple reasoning levels.".into();
-            cx.notify();
-            return;
-        }
-        let current = self.selected_reasoning_effort.as_deref();
-        let index = current
-            .and_then(|effort| options.iter().position(|option| option == effort))
-            .unwrap_or(0);
-        let next = options[(index + 1) % options.len()].clone();
-        self.selected_reasoning_effort = Some(next.clone());
-        self.remember_selected_reasoning();
-        self.status_line = format!("Reasoning: {}", reasoning_effort_display_name(&next)).into();
-        cx.notify();
     }
 
     /// Config snippet from `config/read` for Settings.
@@ -5051,6 +5053,92 @@ impl MitsuroApp {
         self.composer_add_menu_open
     }
 
+    pub fn composer_model_menu_open(&self) -> bool {
+        self.composer_model_menu_open
+    }
+
+    pub fn composer_reasoning_menu_open(&self) -> bool {
+        self.composer_reasoning_menu_open
+    }
+
+    pub fn composer_model_search_input(&self) -> &Entity<InputState> {
+        &self.composer_model_search_input
+    }
+
+    pub fn visible_composer_models(&self, query: &str) -> Vec<&ModelInfo> {
+        self.models
+            .iter()
+            .filter(|model| !model.hidden && model_matches_query(model, query))
+            .collect()
+    }
+
+    pub fn composer_reasoning_choices(&self) -> Vec<(String, String)> {
+        let Some(model) = self.selected_model() else {
+            return Vec::new();
+        };
+        model
+            .supported_reasoning_efforts
+            .iter()
+            .filter_map(|option| {
+                let effort = option.reasoning_effort.trim();
+                (!effort.is_empty()).then(|| (effort.to_owned(), option.description.clone()))
+            })
+            .collect()
+    }
+
+    pub fn selected_reasoning_effort_is(&self, effort: &str) -> bool {
+        self.selected_reasoning_effort() == Some(effort)
+    }
+
+    pub fn toggle_composer_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.models.iter().all(|model| model.hidden) {
+            self.status_line = "No selectable models are available.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_model_menu_open = !self.composer_model_menu_open;
+        self.composer_reasoning_menu_open = false;
+        self.composer_add_menu_open = false;
+        self.composer_access_menu_open = false;
+        if self.composer_model_menu_open {
+            self.composer_model_search_input
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_composer_reasoning_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.has_reasoning_effort_control() {
+            self.status_line =
+                "The selected model does not advertise multiple reasoning levels.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_reasoning_menu_open = !self.composer_reasoning_menu_open;
+        self.composer_model_menu_open = false;
+        self.composer_add_menu_open = false;
+        self.composer_access_menu_open = false;
+        cx.notify();
+    }
+
+    pub fn select_reasoning_effort(&mut self, effort: String, cx: &mut Context<Self>) {
+        if !self
+            .reasoning_options_for_selected_model()
+            .iter()
+            .any(|option| option == &effort)
+        {
+            self.status_line =
+                "That reasoning level is not supported by the selected model.".into();
+            cx.notify();
+            return;
+        }
+        self.selected_reasoning_effort = Some(effort.clone());
+        self.composer_reasoning_menu_open = false;
+        self.remember_selected_reasoning();
+        self.status_line = format!("Reasoning: {}", reasoning_effort_display_name(&effort)).into();
+        cx.notify();
+    }
+
     pub fn can_open_composer_add_menu(&self) -> bool {
         self.can_attach_images() || self.can_mention_files() || self.can_add_skills()
     }
@@ -5064,6 +5152,8 @@ impl MitsuroApp {
         self.composer_add_menu_open = !self.composer_add_menu_open;
         if self.composer_add_menu_open {
             self.composer_access_menu_open = false;
+            self.composer_model_menu_open = false;
+            self.composer_reasoning_menu_open = false;
         }
         cx.notify();
     }
@@ -5116,6 +5206,8 @@ impl MitsuroApp {
             return;
         }
         self.composer_access_menu_open = false;
+        self.composer_model_menu_open = false;
+        self.composer_reasoning_menu_open = false;
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -5238,6 +5330,8 @@ impl MitsuroApp {
         self.composer_access_menu_open = !self.composer_access_menu_open;
         if self.composer_access_menu_open {
             self.composer_add_menu_open = false;
+            self.composer_model_menu_open = false;
+            self.composer_reasoning_menu_open = false;
         }
         cx.notify();
     }
@@ -6236,6 +6330,7 @@ impl MitsuroApp {
     pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
         if self.models.iter().any(|m| m.id == id) {
             self.selected_model_id = Some(id);
+            self.composer_model_menu_open = false;
             self.restore_reasoning_for_selected_model();
             self.restore_speed_for_selected_model();
             self.remember_selected_model();
@@ -6243,29 +6338,6 @@ impl MitsuroApp {
             self.status_line = format!("Model: {label}").into();
             cx.notify();
         }
-    }
-
-    /// Cycle through catalog models (kept for keyboard / alternate pickers).
-    #[allow(dead_code)]
-    pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
-        if self.models.is_empty() {
-            self.status_line = "No models loaded.".into();
-            cx.notify();
-            return;
-        }
-        let idx = self
-            .selected_model_id
-            .as_ref()
-            .and_then(|id| self.models.iter().position(|m| &m.id == id))
-            .unwrap_or(0);
-        let next = (idx + 1) % self.models.len();
-        self.selected_model_id = Some(self.models[next].id.clone());
-        self.restore_reasoning_for_selected_model();
-        self.restore_speed_for_selected_model();
-        self.remember_selected_model();
-        let label = self.model_label();
-        self.status_line = format!("Model: {label}").into();
-        cx.notify();
     }
 
     /// Fill the composer with a suggestion chip prompt (empty-state affordance).
@@ -6443,6 +6515,8 @@ impl MitsuroApp {
         self.composer_attachments.clear();
         self.composer_add_menu_open = false;
         self.composer_access_menu_open = false;
+        self.composer_model_menu_open = false;
+        self.composer_reasoning_menu_open = false;
 
         let model_slug = self.selected_model_slug();
         let reasoning_effort = self.selected_reasoning_effort.clone();
@@ -8202,6 +8276,8 @@ impl MitsuroApp {
         self.turn_in_progress = false;
         self.composer_attachments.clear();
         self.composer_add_menu_open = false;
+        self.composer_model_menu_open = false;
+        self.composer_reasoning_menu_open = false;
         self.composer_default_workspace_dir = std::env::current_dir()
             .ok()
             .map(|path| path.display().to_string());
@@ -8769,7 +8845,7 @@ fn model_info_from_product(model: ProductModel) -> ModelInfo {
     }
 }
 
-fn reasoning_effort_display_name(effort: &str) -> String {
+pub(crate) fn reasoning_effort_display_name(effort: &str) -> String {
     match effort.trim().to_ascii_lowercase().as_str() {
         "none" | "off" => "Off".to_owned(),
         "xhigh" | "x-high" => "XHigh".to_owned(),
@@ -8783,6 +8859,15 @@ fn reasoning_effort_display_name(effort: &str) -> String {
                 .unwrap_or_else(|| "Default".to_owned())
         }
     }
+}
+
+fn model_matches_query(model: &ModelInfo, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    query.is_empty()
+        || model.label().to_ascii_lowercase().contains(&query)
+        || model.id.to_ascii_lowercase().contains(&query)
+        || model.model.to_ascii_lowercase().contains(&query)
+        || model.description.to_ascii_lowercase().contains(&query)
 }
 
 fn file_match_from_product(file: ProductFileMatch) -> FuzzyFileSearchResult {
@@ -9780,5 +9865,15 @@ mod tests {
         assert_eq!(reasoning_effort_display_name("xhigh"), "XHigh");
         assert_eq!(reasoning_effort_display_name("ultra"), "Ultra");
         assert_eq!(reasoning_effort_display_name("medium"), "Medium");
+    }
+
+    #[test]
+    fn model_picker_searches_live_catalog_fields_case_insensitively() {
+        let models = fixture_demo_models();
+        assert!(model_matches_query(&models[0], "SOL ULTRA"));
+        assert!(model_matches_query(&models[1], "o3-demo"));
+        assert!(model_matches_query(&models[2], "codex-shaped"));
+        assert!(!model_matches_query(&models[0], "definitely absent"));
+        assert!(model_matches_query(&models[0], ""));
     }
 }

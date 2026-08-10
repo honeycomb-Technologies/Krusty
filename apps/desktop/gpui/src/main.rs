@@ -80,9 +80,11 @@ fn main() {
             gpui_component::init(cx);
 
             // Prefer dark component theme to match Codex tokens.
+            // `Theme::change` applies the matching component palette; assigning
+            // `mode` alone leaves input foregrounds on the light-theme colors.
+            gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
             {
                 let theme = gpui_component::Theme::global_mut(cx);
-                theme.mode = gpui_component::ThemeMode::Dark;
                 theme.radius = px(10.0);
                 theme.radius_lg = px(16.0);
                 theme.shadow = false;

@@ -61,9 +61,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   login. Fixture device codes remain confined to explicit fixture mode.
 - The composer exposes only implemented behavior: text entry, real model-gated image
   and audio-file attachments, Codex skill references and local-file mentions, Send,
-  Stop, native project selection, backend-specific access presets, backend-scoped model
-  cycling, model-advertised reasoning-effort cycling, model-advertised Fast mode, and
-  backend-native Default/Build and Plan modes. The selected effort is stored per
+  Stop, native project selection, backend-specific access presets, a searchable live
+  model-catalog picker, explicit advertised reasoning-effort choices, model-advertised
+  Fast mode, and backend-native Default/Build and Plan modes. The selected effort is stored per
   backend/model; Codex receives the exact
   `turn/start.effort` value and Mitsuro receives the equivalent `thinking_enabled`
   value. Codex Fast sends the advertised `serviceTier` id (`priority` in the current
