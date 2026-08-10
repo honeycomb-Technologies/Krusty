@@ -9,11 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    AgentError, BackendKind, BackendSessionId, DesktopBackend, FsReadDirectoryParams,
-    FsReadFileParams, FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge,
-    LiveTurnOutcome, ModelListParams, PluginListParams, Result, SessionDelegationProjection,
-    SkillsListParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams,
-    ThreadStartParams, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
+    AgentError, BackendKind, BackendSessionId, CommandExecutionFields, DesktopBackend,
+    FileChangeFields, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
+    ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome, ModelListParams,
+    PluginListParams, Result, SessionDelegationProjection, SkillsListParams, ThreadDeleteParams,
+    ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams, TranscriptMessage,
+    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,10 @@ pub struct SessionSummary {
 pub enum MessageRole {
     User,
     Assistant,
+    Reasoning,
+    Plan,
+    CommandExecution,
+    FileChange,
     Activity,
 }
 
@@ -40,6 +45,26 @@ pub struct ConversationMessage {
     pub role: MessageRole,
     pub body: String,
     pub item_id: Option<String>,
+    pub command: Option<CommandExecutionFields>,
+    pub file_change: Option<FileChangeFields>,
+}
+
+fn conversation_message_from_transcript(message: TranscriptMessage) -> ConversationMessage {
+    ConversationMessage {
+        role: match message.role {
+            TranscriptRole::User => MessageRole::User,
+            TranscriptRole::Assistant => MessageRole::Assistant,
+            TranscriptRole::Reasoning => MessageRole::Reasoning,
+            TranscriptRole::Plan => MessageRole::Plan,
+            TranscriptRole::CommandExecution => MessageRole::CommandExecution,
+            TranscriptRole::FileChange => MessageRole::FileChange,
+            TranscriptRole::System => MessageRole::Activity,
+        },
+        body: message.body,
+        item_id: message.item_id,
+        command: message.command,
+        file_change: message.file_change,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,15 +373,7 @@ impl ProductBackend for DesktopBackend {
         let messages = response
             .transcript_messages()
             .into_iter()
-            .map(|message| ConversationMessage {
-                role: match message.role {
-                    TranscriptRole::User => MessageRole::User,
-                    TranscriptRole::Assistant => MessageRole::Assistant,
-                    _ => MessageRole::Activity,
-                },
-                body: message.body,
-                item_id: message.item_id,
-            })
+            .map(conversation_message_from_transcript)
             .collect();
         let delegation = match self {
             DesktopBackend::Mitsuro(backend) => {
@@ -670,5 +687,26 @@ mod tests {
             )
             .expect_err("mismatched origin must fail");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[test]
+    fn hydrated_transcript_preserves_structured_activity_kinds() {
+        let command = CommandExecutionFields {
+            command: "cargo test".to_owned(),
+            cwd: "/workspace".to_owned(),
+            status: "completed".to_owned(),
+            output: "ok".to_owned(),
+        };
+        let message = conversation_message_from_transcript(TranscriptMessage {
+            role: TranscriptRole::CommandExecution,
+            body: "$ cargo test (completed)\nok".to_owned(),
+            item_id: Some("item-7".to_owned()),
+            command: Some(command.clone()),
+            file_change: None,
+        });
+
+        assert_eq!(message.role, MessageRole::CommandExecution);
+        assert_eq!(message.command, Some(command));
+        assert_eq!(message.item_id.as_deref(), Some("item-7"));
     }
 }

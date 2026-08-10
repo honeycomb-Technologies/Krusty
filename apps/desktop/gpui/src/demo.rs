@@ -38,6 +38,9 @@ pub enum DemoMessageKind {
         patch_preview: String,
         status: String,
     },
+    Error {
+        body: String,
+    },
 }
 
 impl DemoMessage {
@@ -119,6 +122,14 @@ impl DemoMessage {
         }
     }
 
+    pub fn error(body: impl Into<String>) -> Self {
+        Self {
+            kind: DemoMessageKind::Error { body: body.into() },
+            item_id: None,
+            streaming: false,
+        }
+    }
+
     /// Mutable primary text buffer for streaming deltas (body / output / patch).
     pub fn text_mut(&mut self) -> &mut String {
         match &mut self.kind {
@@ -128,6 +139,7 @@ impl DemoMessage {
             | DemoMessageKind::Plan { body } => body,
             DemoMessageKind::CommandExecution { output, .. } => output,
             DemoMessageKind::FileChange { patch_preview, .. } => patch_preview,
+            DemoMessageKind::Error { body } => body,
         }
     }
 
@@ -156,6 +168,7 @@ impl DemoMessage {
             DemoMessageKind::Plan { .. } => DemoRole::Plan,
             DemoMessageKind::CommandExecution { .. } => DemoRole::CommandExecution,
             DemoMessageKind::FileChange { .. } => DemoRole::FileChange,
+            DemoMessageKind::Error { .. } => DemoRole::Error,
         }
     }
 }
@@ -170,6 +183,7 @@ pub enum DemoRole {
     Plan,
     CommandExecution,
     FileChange,
+    Error,
 }
 
 /// Which product surface a demo/local thread belongs to (Chat vs Codex agent).
@@ -279,7 +293,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
                     Some("plan-demo-1".into()),
                 ),
                 DemoMessage::assistant(
-                    "Layout plan:\n• Thin activity rail (Chat / Work / Codex / Atlas / Terminal / Settings)\n• ~270px thread sidebar with search + New thread\n• Main transcript column\n• Rounded composer with model chip + send\n• Connection pill in the status bar\n\nUsing Codex CSS tokens for surfaces (#171717 / #212121) and white-alpha borders.",
+                    "## Layout plan\n\n- Thin activity rail (Chat / Work / Codex / Atlas / Terminal / Settings)\n- ~270px thread sidebar with search + New thread\n- Main transcript column\n- Rounded composer with model chip + send\n- Connection status in the title bar\n\nUse restrained surface tokens such as `#171717` and `#212121`, with low-contrast borders.",
                 ),
                 DemoMessage::command_execution(
                     "cargo build -p mitsuro-desktop",
@@ -298,7 +312,7 @@ pub fn demo_threads() -> Vec<DemoThread> {
                     "Add static demo threads so we can UI-review without app-server.",
                 ),
                 DemoMessage::assistant(
-                    "Demo data is wired. Selecting a thread shows a short transcript; New thread opens the empty-state prompt. Send replays the fixture turn stream.",
+                    "Demo data is wired. Selecting a thread shows a short transcript; New thread opens the empty-state prompt. Send replays the fixture turn stream.\n\n```rust\npub fn transcript_ready() -> bool { true }\n```",
                 ),
             ],
         },

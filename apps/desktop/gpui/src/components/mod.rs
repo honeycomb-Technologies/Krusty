@@ -9,6 +9,7 @@ mod computer_panel;
 mod extensions_panel;
 mod files_panel;
 mod main_column;
+mod markdown;
 mod pull_requests_panel;
 mod scheduled_panel;
 mod settings_panel;

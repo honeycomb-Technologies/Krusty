@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
@@ -810,6 +810,10 @@ pub struct MitsuroApp {
     /// Per-thread transcript window. History is revealed deliberately so long
     /// sessions never force GPUI to lay out the entire conversation at once.
     transcript_visible_limits: std::collections::HashMap<String, usize>,
+    /// Explicit user expansion for long transcript messages. Keys include the
+    /// backend-qualified UI thread id and stable item id (or message index).
+    expanded_transcript_messages: std::collections::HashSet<String>,
+    transcript_scroll_handle: ScrollHandle,
     selected_thread: Option<String>,
     status_line: SharedString,
     /// Active product shell mode (rail selection).
@@ -1101,6 +1105,8 @@ impl MitsuroApp {
             threads: demo_seed,
             delegations: std::collections::HashMap::new(),
             transcript_visible_limits: std::collections::HashMap::new(),
+            expanded_transcript_messages: std::collections::HashSet::new(),
+            transcript_scroll_handle: ScrollHandle::new(),
             selected_thread: None,
             selected_chat_thread: None,
             selected_codex_thread: None,
@@ -3256,6 +3262,21 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    pub fn transcript_message_is_expanded(&self, key: &str) -> bool {
+        self.expanded_transcript_messages.contains(key)
+    }
+
+    pub fn transcript_scroll_handle(&self) -> &ScrollHandle {
+        &self.transcript_scroll_handle
+    }
+
+    pub fn toggle_transcript_message_expanded(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.expanded_transcript_messages.remove(&key) {
+            self.expanded_transcript_messages.insert(key);
+        }
+        cx.notify();
+    }
+
     pub fn search_query(&self) -> &str {
         &self.search_query
     }
@@ -3824,6 +3845,7 @@ impl MitsuroApp {
                 }
             }
         }
+        self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
     }
 
@@ -4855,6 +4877,15 @@ impl MitsuroApp {
                     if app.turn_generation != turn_generation {
                         return;
                     }
+                    if let Some(thread) = app
+                        .threads
+                        .iter_mut()
+                        .find(|thread| thread.summary.id == local_id)
+                    {
+                        thread.messages.push(DemoMessage::error(format!(
+                            "Could not create a server session: {e}"
+                        )));
+                    }
                     app.turn_in_progress = false;
                     app.turn_cancel = None;
                     app.active_turn_thread_id = None;
@@ -4986,6 +5017,15 @@ impl MitsuroApp {
                         }
                         app.turn_in_progress = false;
                         app.turn_cancel = None;
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == thread_id)
+                        {
+                            thread.messages.push(DemoMessage::error(format!(
+                                "Could not load the fixture turn: {e}"
+                            )));
+                        }
                         app.active_turn_thread_id = None;
                         app.active_turn_id = None;
                         app.status_line = format!("Fixture load error: {e}").into();
@@ -5179,6 +5219,15 @@ impl MitsuroApp {
                         }
                     }
                     Err(e) => {
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|candidate| candidate.summary.id == thread_id)
+                        {
+                            thread
+                                .messages
+                                .push(DemoMessage::error(format!("Live turn failed: {e}")));
+                        }
                         app.turn_in_progress = false;
                         app.active_turn_thread_id = None;
                         app.active_turn_id = None;
@@ -5549,6 +5598,12 @@ impl MitsuroApp {
                         m.streaming = false;
                     }
                     let label = status.unwrap_or_else(|| "completed".into());
+                    let normalized = label.to_ascii_lowercase();
+                    if normalized.contains("fail") || normalized.contains("error") {
+                        thread.messages.push(DemoMessage::error(format!(
+                            "The turn ended with status: {label}"
+                        )));
+                    }
                     status_update = Some(format!("Turn {label}."));
                 }
                 TurnStreamEvent::ApprovalRequested(pending) => {
@@ -5604,6 +5659,9 @@ impl MitsuroApp {
 
         if let Some(line) = status_update {
             self.status_line = line.into();
+        }
+        if self.selected_thread.as_deref() == Some(thread_id) {
+            self.transcript_scroll_handle.scroll_to_bottom();
         }
     }
 
@@ -5743,6 +5801,7 @@ impl MitsuroApp {
         }
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.threads.clear();
+        self.expanded_transcript_messages.clear();
         self.selected_thread = None;
         self.selected_chat_thread = None;
         self.selected_codex_thread = None;
@@ -6134,10 +6193,34 @@ impl MitsuroApp {
                                     .map(|m| {
                                         let mut msg = match m.role {
                                             MessageRole::User => DemoMessage::user(m.body),
-                                            MessageRole::Assistant => {
+                                            MessageRole::Assistant | MessageRole::Activity => {
                                                 DemoMessage::assistant(m.body)
                                             }
-                                            _ => DemoMessage::assistant(m.body),
+                                            MessageRole::Reasoning => {
+                                                DemoMessage::reasoning(m.body, m.item_id.clone())
+                                            }
+                                            MessageRole::Plan => {
+                                                DemoMessage::plan(m.body, m.item_id.clone())
+                                            }
+                                            MessageRole::CommandExecution => {
+                                                let fields = m.command.unwrap_or_default();
+                                                DemoMessage::command_execution(
+                                                    fields.command,
+                                                    fields.cwd,
+                                                    fields.status,
+                                                    fields.output,
+                                                    m.item_id.clone(),
+                                                )
+                                            }
+                                            MessageRole::FileChange => {
+                                                let fields = m.file_change.unwrap_or_default();
+                                                DemoMessage::file_change(
+                                                    fields.paths_summary,
+                                                    fields.patch_preview,
+                                                    fields.status,
+                                                    m.item_id.clone(),
+                                                )
+                                            }
                                         };
                                         if msg.item_id.is_none() {
                                             msg.item_id = m.item_id;
@@ -6178,6 +6261,7 @@ impl MitsuroApp {
                             thread.messages = ui_msgs;
                             app.delegations.insert(tid.clone(), delegation);
                             app.selected_thread = Some(tid.clone());
+                            app.transcript_scroll_handle.scroll_to_bottom();
                             app.selected_codex_thread = Some(tid.clone());
                             if !matches!(app.active_mode, ProductMode::Codex | ProductMode::Chat) {
                                 app.active_mode = ProductMode::Codex;

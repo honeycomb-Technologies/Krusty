@@ -16,7 +16,7 @@ use mitsuro_desktop_backend::{
 };
 
 use crate::app::{MitsuroApp, ProductMode};
-use crate::components::{approval_bar, composer};
+use crate::components::{approval_bar, composer, markdown};
 use crate::demo::{DemoMessage, DemoMessageKind, ThreadSurface};
 use crate::theme;
 
@@ -149,6 +149,10 @@ fn thread_main(
     let surface = app.active_thread_surface();
     let chat_mode = app.active_mode() == ProductMode::Chat;
     let thread = app.selected_thread();
+    let transcript_thread_id = thread
+        .as_ref()
+        .map(|thread| thread.summary.id.as_str())
+        .unwrap_or("unselected");
     let default_title = match surface {
         ThreadSurface::Chat => "New chat",
         ThreadSurface::Codex => "New thread",
@@ -214,8 +218,16 @@ fn thread_main(
                             empty_state(surface, chat_mode, calm, composer_input, cx)
                                 .into_any_element()
                         } else {
-                            transcript(messages, surface, delegation, transcript_visible_limit, cx)
-                                .into_any_element()
+                            transcript(
+                                messages,
+                                surface,
+                                delegation,
+                                transcript_visible_limit,
+                                transcript_thread_id,
+                                app,
+                                cx,
+                            )
+                            .into_any_element()
                         })
                         .when_some(app.pending_approval().cloned(), |this, pending| {
                             this.child(approval_bar::approval_bar(&pending, cx))
@@ -777,6 +789,8 @@ fn transcript(
     surface: ThreadSurface,
     delegation: Option<&SessionDelegationProjection>,
     visible_limit: usize,
+    thread_id: &str,
+    app: &MitsuroApp,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     // Chat mode uses a simpler bubble layout (no tool/reasoning chrome emphasis).
@@ -798,11 +812,27 @@ fn transcript(
         // Codex open-thread: slightly airier between blocks; chat stays denser.
         .gap(if simple_bubbles { px(12.0) } else { px(14.0) })
         .overflow_y_scroll()
+        .track_scroll(app.transcript_scroll_handle())
         .when(hidden_count > 0, |this| {
             this.child(show_earlier_button(hidden_count, messages.len(), cx))
         })
         .children(visible.iter().enumerate().map(|(i, msg)| {
-            transcript_block((first_visible_index + i) as u64, msg, simple_bubbles)
+            let absolute_index = first_visible_index + i;
+            let message_identity = msg
+                .item_id
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| absolute_index.to_string());
+            let message_key = format!("{thread_id}:{message_identity}");
+            let expanded = app.transcript_message_is_expanded(&message_key);
+            transcript_block(
+                absolute_index as u64,
+                msg,
+                simple_bubbles,
+                message_key,
+                expanded,
+                cx,
+            )
         }))
         .when_some(delegation, |this, projection| {
             this.child(delegation_block(projection))
@@ -977,26 +1007,72 @@ fn delegation_task_status_color(status: DelegationTaskStatus) -> gpui::Hsla {
     }
 }
 
-fn transcript_block(index: u64, msg: &DemoMessage, simple_bubbles: bool) -> gpui::AnyElement {
+fn transcript_block(
+    index: u64,
+    msg: &DemoMessage,
+    simple_bubbles: bool,
+    message_key: String,
+    expanded: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> gpui::AnyElement {
     match &msg.kind {
-        DemoMessageKind::User { body } => {
-            chat_bubble(index, "You", body, msg.streaming, true, simple_bubbles).into_any_element()
-        }
-        DemoMessageKind::Assistant { body } => {
-            chat_bubble(index, "Mitsuro", body, msg.streaming, false, simple_bubbles)
-                .into_any_element()
-        }
+        DemoMessageKind::User { body } => chat_bubble(
+            index,
+            "You",
+            body,
+            msg.streaming,
+            true,
+            simple_bubbles,
+            message_key,
+            expanded,
+            cx,
+        )
+        .into_any_element(),
+        DemoMessageKind::Assistant { body } => chat_bubble(
+            index,
+            "Mitsuro",
+            body,
+            msg.streaming,
+            false,
+            simple_bubbles,
+            message_key,
+            expanded,
+            cx,
+        )
+        .into_any_element(),
         DemoMessageKind::Reasoning { body } => {
             if simple_bubbles {
                 // Chat mode: fold reasoning into a muted one-liner instead of agent chrome.
-                chat_bubble(index, "Thinking", body, msg.streaming, false, true).into_any_element()
+                chat_bubble(
+                    index,
+                    "Thinking",
+                    body,
+                    msg.streaming,
+                    false,
+                    true,
+                    message_key,
+                    expanded,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 reasoning_block(index, body, msg.streaming).into_any_element()
             }
         }
         DemoMessageKind::Plan { body } => {
             if simple_bubbles {
-                chat_bubble(index, "Mitsuro", body, msg.streaming, false, true).into_any_element()
+                chat_bubble(
+                    index,
+                    "Mitsuro",
+                    body,
+                    msg.streaming,
+                    false,
+                    true,
+                    message_key,
+                    expanded,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 plan_block(index, body, msg.streaming).into_any_element()
             }
@@ -1009,8 +1085,18 @@ fn transcript_block(index: u64, msg: &DemoMessage, simple_bubbles: bool) -> gpui
         } => {
             if simple_bubbles {
                 // One-liner only — avoid format! of full output every frame.
-                chat_bubble(index, "Mitsuro", command, msg.streaming, false, true)
-                    .into_any_element()
+                chat_bubble(
+                    index,
+                    "Mitsuro",
+                    command,
+                    msg.streaming,
+                    false,
+                    true,
+                    message_key,
+                    expanded,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 command_block(index, command, cwd, status, output, msg.streaming).into_any_element()
             }
@@ -1021,14 +1107,56 @@ fn transcript_block(index: u64, msg: &DemoMessage, simple_bubbles: bool) -> gpui
             status,
         } => {
             if simple_bubbles {
-                chat_bubble(index, "Mitsuro", paths_summary, msg.streaming, false, true)
-                    .into_any_element()
+                chat_bubble(
+                    index,
+                    "Mitsuro",
+                    paths_summary,
+                    msg.streaming,
+                    false,
+                    true,
+                    message_key,
+                    expanded,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 file_change_block(index, paths_summary, patch_preview, status, msg.streaming)
                     .into_any_element()
             }
         }
+        DemoMessageKind::Error { body } => error_block(index, body).into_any_element(),
     }
+}
+
+fn error_block(index: u64, body: &str) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(("msg-error", index))
+        .flex()
+        .items_start()
+        .gap(px(9.0))
+        .w_full()
+        .py(px(7.0))
+        .px(px(10.0))
+        .rounded(px(9.0))
+        .border_1()
+        .border_color(theme::hex_alpha(0xef4444, 0.34))
+        .bg(theme::hex_alpha(0xef4444, 0.07))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.status_error)
+                .child("Error"),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_sm()
+                .text_color(colors.text_secondary)
+                .child(body.to_owned()),
+        )
 }
 
 /// Standard user / assistant text bubble.
@@ -1041,6 +1169,9 @@ fn chat_bubble(
     streaming: bool,
     is_user: bool,
     _simple: bool,
+    message_key: String,
+    expanded: bool,
+    cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let label_color = colors.text_tertiary;
@@ -1049,7 +1180,7 @@ fn chat_bubble(
     } else {
         theme::transparent()
     };
-    let display = display_body_light(body, streaming);
+    let (display, truncated) = display_body_light(body, streaming, expanded);
 
     div()
         .id(("msg", index))
@@ -1085,7 +1216,35 @@ fn chat_bubble(
                             .child(label.to_string()),
                     )
                 })
-                .child(div().text_sm().text_color(colors.text).child(display)),
+                .child(if is_user {
+                    div()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(display)
+                        .into_any_element()
+                } else {
+                    markdown::markdown_body(index, &display).into_any_element()
+                })
+                .when(truncated || expanded, |this| {
+                    let key = message_key.clone();
+                    this.child(
+                        div()
+                            .id(("message-expand", index))
+                            .mt(px(3.0))
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(colors.text_secondary))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.toggle_transcript_message_expanded(key.clone(), cx);
+                            }))
+                            .child(if expanded {
+                                "Show less"
+                            } else {
+                                "Show full response"
+                            }),
+                    )
+                }),
         )
 }
 
@@ -1132,6 +1291,7 @@ fn reasoning_block(index: u64, body: &str, streaming: bool) -> impl IntoElement 
                 .border_color(colors.border_subtle)
                 .text_xs()
                 .text_color(colors.text_tertiary)
+                .whitespace_normal()
                 .child(shown),
         )
 }
@@ -1431,13 +1591,20 @@ fn stream_body(body: &str, streaming: bool) -> String {
 }
 
 /// Preserve message formatting while bounding pathological payloads.
-fn display_body_light(body: &str, streaming: bool) -> String {
+fn display_body_light(body: &str, streaming: bool, expanded: bool) -> (String, bool) {
     if streaming && body.is_empty() {
-        return "…".into();
+        return ("…".into(), false);
     }
-    let mut out = String::with_capacity(body.len().min(DISPLAY_BODY_CAP + 4));
+    const EXPANDED_BODY_CAP: usize = 32_000;
+    let cap = if expanded {
+        EXPANDED_BODY_CAP
+    } else {
+        DISPLAY_BODY_CAP
+    };
+    let body_chars = body.chars().count();
+    let mut out = String::with_capacity(body.len().min(cap + 4));
     for (n, c) in body.chars().enumerate() {
-        if n >= DISPLAY_BODY_CAP {
+        if n >= cap {
             out.push('…');
             break;
         }
@@ -1446,7 +1613,10 @@ fn display_body_light(body: &str, streaming: bool) -> String {
     if streaming {
         out.push('▍');
     }
-    out
+    (
+        out,
+        body_chars > cap || (!expanded && body_chars > DISPLAY_BODY_CAP),
+    )
 }
 
 #[cfg(test)]
@@ -1463,6 +1633,18 @@ mod tests {
     fn transcript_expansion_never_exceeds_available_history() {
         assert_eq!(transcript_tail_range(35, 32), 3..35);
         assert_eq!(transcript_tail_range(20, usize::MAX), 0..20);
+    }
+
+    #[test]
+    fn long_message_preview_expands_without_unbounded_layout() {
+        let body = "a".repeat(DISPLAY_BODY_CAP + 64);
+        let (preview, truncated) = display_body_light(&body, false, false);
+        assert!(truncated);
+        assert_eq!(preview.chars().count(), DISPLAY_BODY_CAP + 1);
+
+        let (expanded, still_truncated) = display_body_light(&body, false, true);
+        assert!(!still_truncated);
+        assert_eq!(expanded, body);
     }
 }
 
