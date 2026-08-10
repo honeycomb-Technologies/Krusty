@@ -46,7 +46,11 @@ use mitsuro_desktop_backend::{
     ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
     ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
     RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
-    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
+    ReasoningEffortOption, RemoteControlClient, RemoteControlClientsListParams,
+    RemoteControlClientsRevokeParams, RemoteControlConnectionStatus, RemoteControlDisableParams,
+    RemoteControlEnableParams, RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
+    RemoteControlPairingStatusParams, RemoteControlStatusChangedNotification,
+    RemoteControlStatusReadResponse, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
     ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsListParams,
     ThreadBackgroundTerminalsTerminateParams, ThreadDeleteParams, ThreadForkParams,
@@ -138,7 +142,7 @@ pub enum SettingsSection {
     Account,
     Plugins,
     Browser,
-    ComputerUse,
+    RemoteControl,
     Hooks,
     Connections,
     Git,
@@ -164,7 +168,7 @@ impl SettingsSection {
             Self::Account => "Account",
             Self::Plugins => "Plugins",
             Self::Browser => "Browser",
-            Self::ComputerUse => "Computer use",
+            Self::RemoteControl => "Remote control",
             Self::Hooks => "Hooks",
             Self::Connections => "Connections",
             Self::Git => "Git",
@@ -188,7 +192,7 @@ impl SettingsSection {
             | Self::KeyboardShortcuts
             | Self::UsageBilling
             | Self::Account => SettingsNavGroup::Personal,
-            Self::Plugins | Self::Browser | Self::ComputerUse => SettingsNavGroup::Integrations,
+            Self::Plugins | Self::Browser | Self::RemoteControl => SettingsNavGroup::Integrations,
             Self::Hooks | Self::Connections | Self::Git | Self::Environments | Self::Worktrees => {
                 SettingsNavGroup::Coding
             }
@@ -309,7 +313,7 @@ const SETTINGS_SECTIONS: [SettingsSection; 21] = [
     SettingsSection::Account,
     SettingsSection::Plugins,
     SettingsSection::Browser,
-    SettingsSection::ComputerUse,
+    SettingsSection::RemoteControl,
     SettingsSection::Hooks,
     SettingsSection::Connections,
     SettingsSection::Git,
@@ -350,12 +354,9 @@ fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
     m.insert("enable_local_memories".into(), true);
     m.insert("memory_from_tools".into(), false);
     m.insert("import_archived".into(), false);
-    // Plugins / browser / computer / hooks / git / worktrees
+    // Plugins / browser / hooks / git / worktrees
     m.insert("plugins_auto_update".into(), true);
     m.insert("browser_persist_cookies".into(), true);
-    m.insert("computer_use_enabled".into(), true);
-    m.insert("computer_confirm_actions".into(), true);
-    m.insert("computer_network".into(), false);
     m.insert("hooks_enabled".into(), false);
     m.insert("auto_reconnect".into(), true);
     m.insert("git_auto_stage".into(), false);
@@ -404,7 +405,6 @@ fn default_settings_choices() -> std::collections::HashMap<String, String> {
     m.insert("browser_engine".into(), "System".into());
     m.insert("default_browser".into(), "System default".into());
     m.insert("browser_approval".into(), "Always ask".into());
-    m.insert("computer_env".into(), "Local".into());
     m.insert("git_default_branch".into(), "main".into());
     m.insert("git_pr_merge".into(), "Squash".into());
     m.insert("worktree_strategy".into(), "Git worktree".into());
@@ -456,7 +456,9 @@ fn parse_settings_section() -> Option<SettingsSection> {
         "account" => SettingsSection::Account,
         "plugins" => SettingsSection::Plugins,
         "browser" => SettingsSection::Browser,
-        "computer" | "computer-use" => SettingsSection::ComputerUse,
+        "remote" | "remote-control" | "remote-connections" | "computer" | "computer-use" => {
+            SettingsSection::RemoteControl
+        }
         "hooks" => SettingsSection::Hooks,
         "connections" | "mcp" => SettingsSection::Connections,
         "git" => SettingsSection::Git,
@@ -941,6 +943,18 @@ fn account_login_completion(event: &LifecycleNotification) -> Option<AccountLogi
     })
 }
 
+fn remote_control_status_changed(
+    event: &LifecycleNotification,
+) -> Option<RemoteControlStatusChangedNotification> {
+    if event.method != "remoteControl/status/changed" {
+        return None;
+    }
+    event
+        .params
+        .clone()
+        .and_then(|params| serde_json::from_value(params).ok())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RealtimeVoicePhase {
     Starting,
@@ -1033,6 +1047,16 @@ pub struct MitsuroApp {
     /// Installed runtime snapshot returned by `app/installed`.
     installed_apps: Vec<InstalledApp>,
     connector_apps_state: SurfaceDataState,
+    /// Live Codex Remote Control host status (`remoteControl/status/read`).
+    remote_control_status: Option<RemoteControlStatusReadResponse>,
+    /// Authorized clients for the status environment (`remoteControl/client/list`).
+    remote_control_clients: Vec<RemoteControlClient>,
+    remote_control_pairing: Option<RemoteControlPairingStartResponse>,
+    remote_control_pairing_claimed: Option<bool>,
+    remote_control_state: SurfaceDataState,
+    remote_control_error: Option<String>,
+    remote_control_mutation_in_progress: Option<String>,
+    remote_control_revoke_confirmation: Option<String>,
     /// MCP servers from `mcpServerStatus/list` (or fixture demo).
     mcp_servers: Vec<McpServerStatus>,
     pending_mcp_oauth: std::collections::HashSet<String>,
@@ -1417,6 +1441,14 @@ impl MitsuroApp {
             connector_apps: Vec::new(),
             installed_apps: Vec::new(),
             connector_apps_state: SurfaceDataState::Loading,
+            remote_control_status: None,
+            remote_control_clients: Vec::new(),
+            remote_control_pairing: None,
+            remote_control_pairing_claimed: None,
+            remote_control_state: SurfaceDataState::Loading,
+            remote_control_error: None,
+            remote_control_mutation_in_progress: None,
+            remote_control_revoke_confirmation: None,
             mcp_servers: Vec::new(),
             pending_mcp_oauth: std::collections::HashSet::new(),
             mcp_add_transport: McpAddTransport::Http,
@@ -4429,6 +4461,398 @@ impl MitsuroApp {
 
     pub fn connector_apps_state(&self) -> SurfaceDataState {
         self.connector_apps_state
+    }
+
+    pub fn remote_control_status(&self) -> Option<&RemoteControlStatusReadResponse> {
+        self.remote_control_status.as_ref()
+    }
+
+    pub fn remote_control_clients(&self) -> &[RemoteControlClient] {
+        &self.remote_control_clients
+    }
+
+    pub fn remote_control_pairing(&self) -> Option<&RemoteControlPairingStartResponse> {
+        self.remote_control_pairing.as_ref()
+    }
+
+    pub fn remote_control_pairing_claimed(&self) -> Option<bool> {
+        self.remote_control_pairing_claimed
+    }
+
+    pub fn remote_control_state(&self) -> SurfaceDataState {
+        self.remote_control_state
+    }
+
+    pub fn remote_control_error(&self) -> Option<&str> {
+        self.remote_control_error.as_deref()
+    }
+
+    pub fn remote_control_mutation(&self) -> Option<&str> {
+        self.remote_control_mutation_in_progress.as_deref()
+    }
+
+    pub fn remote_control_revoke_confirmation(&self) -> Option<&str> {
+        self.remote_control_revoke_confirmation.as_deref()
+    }
+
+    pub fn refresh_remote_control(&mut self, cx: &mut Context<Self>) {
+        self.refresh_remote_control_data(true, cx);
+    }
+
+    fn kick_remote_control_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_remote_control_data(false, cx);
+    }
+
+    fn refresh_remote_control_data(&mut self, announce: bool, cx: &mut Context<Self>) {
+        if self.is_explicit_fixture() {
+            self.remote_control_status = None;
+            self.remote_control_clients.clear();
+            self.remote_control_pairing = None;
+            self.remote_control_pairing_claimed = None;
+            self.remote_control_state = SurfaceDataState::Fixture;
+            self.remote_control_error = None;
+            if announce {
+                self.status_line = "Remote control · explicit fixture has no devices".into();
+            }
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.remote_control_state = if matches!(self.connection, UiConnection::Connecting) {
+                SurfaceDataState::Loading
+            } else {
+                SurfaceDataState::Error
+            };
+            self.remote_control_error = Some("The active backend is not ready".to_owned());
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().remote_control {
+            self.remote_control_status = None;
+            self.remote_control_clients.clear();
+            self.remote_control_pairing = None;
+            self.remote_control_pairing_claimed = None;
+            self.remote_control_state = SurfaceDataState::Unsupported;
+            self.remote_control_error = None;
+            if announce {
+                self.status_line = "Remote control · unsupported by Mitsuro HTTP".into();
+            }
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        self.remote_control_state = SurfaceDataState::Loading;
+        self.remote_control_error = None;
+        if announce {
+            self.status_line = "Remote control · refreshing…".into();
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { read_remote_control_snapshot(&backend).await })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        let status = snapshot.status.status;
+                        let client_count = snapshot.clients.len();
+                        app.remote_control_status = Some(snapshot.status);
+                        app.remote_control_clients = snapshot.clients;
+                        app.remote_control_error = snapshot.clients_error;
+                        app.remote_control_state = if app.remote_control_error.is_some() {
+                            SurfaceDataState::Error
+                        } else {
+                            SurfaceDataState::Live
+                        };
+                        if announce {
+                            app.status_line = format!(
+                                "Remote control · {} · {client_count} device(s)",
+                                status.label()
+                            )
+                            .into();
+                        }
+                    }
+                    Err(error) => {
+                        app.remote_control_status = None;
+                        app.remote_control_clients.clear();
+                        app.remote_control_error = Some(error.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
+                        if announce {
+                            app.status_line = format!("Remote control · {error}").into();
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn set_remote_control_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.remote_control_mutation_in_progress.is_some() {
+            return;
+        }
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().remote_control)
+        else {
+            self.status_line = "Remote control is unavailable on the active backend".into();
+            cx.notify();
+            return;
+        };
+        let generation = self.backend_generation;
+        let operation = if enabled { "enable" } else { "disable" };
+        self.remote_control_mutation_in_progress = Some(operation.to_owned());
+        self.remote_control_error = None;
+        self.status_line = format!("Remote control · {operation} in progress…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let status = if enabled {
+                        backend
+                            .enable_remote_control(RemoteControlEnableParams::default())
+                            .await
+                    } else {
+                        backend
+                            .disable_remote_control(RemoteControlDisableParams::default())
+                            .await
+                    }
+                    .map_err(|error| format!("remoteControl/{operation}: {error}"))?;
+                    remote_control_snapshot_from_status(&backend, status).await
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.remote_control_mutation_in_progress = None;
+                match result {
+                    Ok(snapshot) => {
+                        let status = snapshot.status.status;
+                        app.remote_control_status = Some(snapshot.status);
+                        app.remote_control_clients = snapshot.clients;
+                        app.remote_control_error = snapshot.clients_error;
+                        app.remote_control_state = if app.remote_control_error.is_some() {
+                            SurfaceDataState::Error
+                        } else {
+                            SurfaceDataState::Live
+                        };
+                        if !enabled {
+                            app.remote_control_pairing = None;
+                            app.remote_control_pairing_claimed = None;
+                        }
+                        app.status_line = format!("Remote control · {}", status.label()).into();
+                    }
+                    Err(error) => {
+                        app.remote_control_error = Some(error.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
+                        app.status_line = format!("Remote control · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn start_remote_control_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.remote_control_mutation_in_progress.is_some() {
+            return;
+        }
+        let connected = self.remote_control_status.as_ref().is_some_and(|status| {
+            status.status == RemoteControlConnectionStatus::Connected
+                && status.environment_id.is_some()
+        });
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().remote_control && connected)
+        else {
+            self.status_line = "Enable Remote Control before adding a device".into();
+            cx.notify();
+            return;
+        };
+        let generation = self.backend_generation;
+        self.remote_control_mutation_in_progress = Some("pairing-start".to_owned());
+        self.remote_control_error = None;
+        self.status_line = "Remote control · creating pairing code…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .start_remote_control_pairing(RemoteControlPairingStartParams {
+                            manual_code: Some(true),
+                        })
+                        .await
+                        .map_err(|error| format!("remoteControl/pairing/start: {error}"))
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.remote_control_mutation_in_progress = None;
+                match result {
+                    Ok(pairing) => {
+                        app.remote_control_pairing = Some(pairing);
+                        app.remote_control_pairing_claimed = Some(false);
+                        app.remote_control_error = None;
+                        app.remote_control_state = SurfaceDataState::Live;
+                        app.status_line = "Remote control · waiting for device".into();
+                    }
+                    Err(error) => {
+                        app.remote_control_error = Some(error.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
+                        app.status_line = format!("Remote control · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn check_remote_control_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.remote_control_mutation_in_progress.is_some() {
+            return;
+        }
+        let (Some(backend), Some(pairing)) =
+            (self.live_backend(), self.remote_control_pairing.clone())
+        else {
+            return;
+        };
+        let generation = self.backend_generation;
+        self.remote_control_mutation_in_progress = Some("pairing-status".to_owned());
+        self.remote_control_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let status = backend
+                        .remote_control_pairing_status(
+                            RemoteControlPairingStatusParams::from_pairing(&pairing),
+                        )
+                        .await
+                        .map_err(|error| format!("remoteControl/pairing/status: {error}"))?;
+                    let snapshot = if status.claimed {
+                        Some(read_remote_control_snapshot(&backend).await?)
+                    } else {
+                        None
+                    };
+                    Ok::<_, String>((status, snapshot))
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.remote_control_mutation_in_progress = None;
+                match result {
+                    Ok((status, snapshot)) => {
+                        app.remote_control_pairing_claimed = Some(status.claimed);
+                        if let Some(snapshot) = snapshot {
+                            app.remote_control_status = Some(snapshot.status);
+                            app.remote_control_clients = snapshot.clients;
+                            app.remote_control_error = snapshot.clients_error;
+                            app.remote_control_pairing = None;
+                            app.remote_control_state = if app.remote_control_error.is_some() {
+                                SurfaceDataState::Error
+                            } else {
+                                SurfaceDataState::Live
+                            };
+                            app.status_line = "Remote control · device added".into();
+                        } else {
+                            app.status_line = "Remote control · waiting for device".into();
+                        }
+                    }
+                    Err(error) => {
+                        app.remote_control_error = Some(error.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
+                        app.status_line = format!("Remote control · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn request_remote_control_client_revoke(
+        &mut self,
+        client_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_control_mutation_in_progress.is_some() {
+            return;
+        }
+        if self.remote_control_revoke_confirmation.as_deref() != Some(client_id.as_str()) {
+            self.remote_control_revoke_confirmation = Some(client_id);
+            self.status_line = "Remote control · confirm device revocation".into();
+            cx.notify();
+            return;
+        }
+        let environment_id = self
+            .remote_control_status
+            .as_ref()
+            .and_then(|status| status.environment_id.clone());
+        let (Some(backend), Some(environment_id)) = (self.live_backend(), environment_id) else {
+            self.remote_control_error = Some("Remote Control environment is unavailable".into());
+            self.remote_control_state = SurfaceDataState::Error;
+            cx.notify();
+            return;
+        };
+        let generation = self.backend_generation;
+        let revoke_id = client_id.clone();
+        self.remote_control_mutation_in_progress = Some(format!("revoke:{client_id}"));
+        self.remote_control_error = None;
+        self.status_line = "Remote control · revoking device…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .revoke_remote_control_client(RemoteControlClientsRevokeParams {
+                            environment_id,
+                            client_id,
+                        })
+                        .await
+                        .map_err(|error| format!("remoteControl/client/revoke: {error}"))
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.remote_control_mutation_in_progress = None;
+                match result {
+                    Ok(_) => {
+                        app.remote_control_clients
+                            .retain(|client| client.client_id != revoke_id);
+                        app.remote_control_revoke_confirmation = None;
+                        app.remote_control_error = None;
+                        app.remote_control_state = SurfaceDataState::Live;
+                        app.status_line = "Remote control · device access revoked".into();
+                    }
+                    Err(error) => {
+                        app.remote_control_error = Some(error.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
+                        app.status_line = format!("Remote control · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn cancel_remote_control_client_revoke(&mut self, cx: &mut Context<Self>) {
+        self.remote_control_revoke_confirmation = None;
+        self.status_line = "Remote control · revocation canceled".into();
+        cx.notify();
     }
 
     pub fn open_connector_install(&mut self, app: AppInfo, cx: &mut Context<Self>) {
@@ -10045,6 +10469,37 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        if event.method == "remoteControl/status/changed" {
+            match remote_control_status_changed(&event) {
+                Some(status) => {
+                    let connected = status.status == RemoteControlConnectionStatus::Connected;
+                    let environment_changed = self
+                        .remote_control_status
+                        .as_ref()
+                        .and_then(|current| current.environment_id.as_deref())
+                        != status.environment_id.as_deref();
+                    if !status.status.is_enabled() {
+                        self.remote_control_clients.clear();
+                        self.remote_control_pairing = None;
+                        self.remote_control_pairing_claimed = None;
+                    }
+                    self.remote_control_status = Some(status);
+                    self.remote_control_error = None;
+                    self.remote_control_state = SurfaceDataState::Live;
+                    if connected
+                        && matches!(self.connection, UiConnection::Ready { .. })
+                        && (environment_changed || self.remote_control_clients.is_empty())
+                    {
+                        self.kick_remote_control_refresh(cx);
+                    }
+                }
+                None => {
+                    self.remote_control_error =
+                        Some("Malformed remoteControl/status/changed notification".to_owned());
+                    self.remote_control_state = SurfaceDataState::Error;
+                }
+            }
+        }
         if let Some(realtime) = RealtimeEvent::from_lifecycle(&event) {
             self.apply_realtime_event(realtime);
             cx.notify();
@@ -10412,8 +10867,14 @@ impl MitsuroApp {
         self.status_line = SharedString::from("");
         self.realtime_voices = None;
         self.realtime_voices_state = SurfaceDataState::Unsupported;
-        self.realtime_voices = None;
-        self.realtime_voices_state = SurfaceDataState::Unsupported;
+        self.remote_control_status = None;
+        self.remote_control_clients.clear();
+        self.remote_control_pairing = None;
+        self.remote_control_pairing_claimed = None;
+        self.remote_control_state = SurfaceDataState::Fixture;
+        self.remote_control_error = None;
+        self.remote_control_mutation_in_progress = None;
+        self.remote_control_revoke_confirmation = None;
 
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -10591,6 +11052,18 @@ impl MitsuroApp {
         } else {
             SurfaceDataState::Loading
         };
+        self.remote_control_status = None;
+        self.remote_control_clients.clear();
+        self.remote_control_pairing = None;
+        self.remote_control_pairing_claimed = None;
+        self.remote_control_state = if kind == BackendKind::MitsuroHttp {
+            SurfaceDataState::Unsupported
+        } else {
+            SurfaceDataState::Loading
+        };
+        self.remote_control_error = None;
+        self.remote_control_mutation_in_progress = None;
+        self.remote_control_revoke_confirmation = None;
         self.mcp_servers.clear();
         self.pending_mcp_oauth.clear();
         self.mcp_add_in_progress = false;
@@ -10759,6 +11232,7 @@ impl MitsuroApp {
                             skills,
                             hooks,
                             connector_apps,
+                            remote_control,
                             mcp,
                             plugins,
                             processes,
@@ -10848,6 +11322,30 @@ impl MitsuroApp {
                                 app.connector_apps.clear();
                                 app.installed_apps.clear();
                                 app.connector_apps_state = SurfaceDataState::Error;
+                            }
+                        }
+                        match remote_control {
+                            Ok(Some(snapshot)) => {
+                                app.remote_control_status = Some(snapshot.status);
+                                app.remote_control_clients = snapshot.clients;
+                                app.remote_control_error = snapshot.clients_error;
+                                app.remote_control_state = if app.remote_control_error.is_some() {
+                                    SurfaceDataState::Error
+                                } else {
+                                    SurfaceDataState::Live
+                                };
+                            }
+                            Ok(None) => {
+                                app.remote_control_status = None;
+                                app.remote_control_clients.clear();
+                                app.remote_control_error = None;
+                                app.remote_control_state = SurfaceDataState::Unsupported;
+                            }
+                            Err(error) => {
+                                app.remote_control_status = None;
+                                app.remote_control_clients.clear();
+                                app.remote_control_error = Some(error);
+                                app.remote_control_state = SurfaceDataState::Error;
                             }
                         }
                         app.apply_mcp_servers(mcp);
@@ -10946,6 +11444,10 @@ impl MitsuroApp {
                         app.connector_apps.clear();
                         app.installed_apps.clear();
                         app.connector_apps_state = SurfaceDataState::Error;
+                        app.remote_control_status = None;
+                        app.remote_control_clients.clear();
+                        app.remote_control_error = Some(message.clone());
+                        app.remote_control_state = SurfaceDataState::Error;
                         app.environments_state = SurfaceDataState::Error;
                         app.status_line = format!("Backend unavailable · {message}").into();
                     }
@@ -12093,11 +12595,18 @@ struct BackendBootstrap {
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
     connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
+    remote_control: Result<Option<RemoteControlSnapshot>, String>,
     mcp: Vec<McpServerStatus>,
     plugins: Vec<PluginSummary>,
     processes: Option<Vec<ProductProcess>>,
     hive: Option<ProductHiveSnapshot>,
     schedules: Option<Vec<ProductSchedule>>,
+}
+
+struct RemoteControlSnapshot {
+    status: RemoteControlStatusReadResponse,
+    clients: Vec<RemoteControlClient>,
+    clients_error: Option<String>,
 }
 
 fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendBootstrap, String> {
@@ -12171,6 +12680,11 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         } else {
             Ok(None)
         };
+        let remote_control = if b.capabilities().remote_control {
+            read_remote_control_snapshot(b.as_ref()).await.map(Some)
+        } else {
+            Ok(None)
+        };
         // Product catalogs are best-effort for the Extensions panel.
         let mcp = match b.list_product_mcp_servers().await {
             Ok(servers) => servers.into_iter().map(mcp_status_from_product).collect(),
@@ -12197,6 +12711,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             skills,
             hooks,
             connector_apps,
+            remote_control,
             mcp,
             plugins,
             processes,
@@ -12204,6 +12719,65 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             schedules,
         })
     })
+}
+
+async fn read_remote_control_snapshot(
+    backend: &DesktopBackend,
+) -> Result<RemoteControlSnapshot, String> {
+    let status = backend
+        .remote_control_status()
+        .await
+        .map_err(|error| format!("remoteControl/status/read: {error}"))?;
+    remote_control_snapshot_from_status(backend, status).await
+}
+
+async fn remote_control_snapshot_from_status(
+    backend: &DesktopBackend,
+    status: RemoteControlStatusReadResponse,
+) -> Result<RemoteControlSnapshot, String> {
+    let (clients, clients_error) = match status.environment_id.as_deref() {
+        Some(environment_id) => {
+            match list_all_remote_control_clients(backend, environment_id).await {
+                Ok(clients) => (clients, None),
+                Err(error) => (Vec::new(), Some(error)),
+            }
+        }
+        None => (Vec::new(), None),
+    };
+    Ok(RemoteControlSnapshot {
+        status,
+        clients,
+        clients_error,
+    })
+}
+
+async fn list_all_remote_control_clients(
+    backend: &DesktopBackend,
+    environment_id: &str,
+) -> Result<Vec<RemoteControlClient>, String> {
+    const MAX_PAGES: usize = 100;
+    let mut clients = Vec::new();
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_PAGES {
+        let mut params = RemoteControlClientsListParams::newest_first(environment_id);
+        params.cursor.clone_from(&cursor);
+        let response = backend
+            .list_remote_control_clients(params)
+            .await
+            .map_err(|error| format!("remoteControl/client/list: {error}"))?;
+        clients.extend(response.data);
+        let Some(next) = response.next_cursor else {
+            return Ok(clients);
+        };
+        if !seen.insert(next.clone()) {
+            return Err("remoteControl/client/list returned a repeated cursor".to_owned());
+        }
+        cursor = Some(next);
+    }
+    Err(format!(
+        "remoteControl/client/list exceeded the {MAX_PAGES}-page safety bound"
+    ))
 }
 
 impl Focusable for MitsuroApp {
@@ -12423,6 +12997,31 @@ mod tests {
                 error: Some("authorization declined".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn remote_control_lifecycle_requires_the_generated_identity_shape() {
+        let event = LifecycleNotification::from_known(
+            "remoteControl/status/changed",
+            Some(&serde_json::json!({
+                "status": "connected",
+                "serverName": "honey",
+                "installationId": "install-1",
+                "environmentId": "environment-1"
+            })),
+        )
+        .expect("known remote-control lifecycle event");
+        let status = remote_control_status_changed(&event).expect("typed status");
+        assert_eq!(status.status, RemoteControlConnectionStatus::Connected);
+        assert_eq!(status.server_name, "honey");
+        assert_eq!(status.environment_id.as_deref(), Some("environment-1"));
+
+        let malformed = LifecycleNotification::from_known(
+            "remoteControl/status/changed",
+            Some(&serde_json::json!({"status": "connected"})),
+        )
+        .expect("known lifecycle family");
+        assert!(remote_control_status_changed(&malformed).is_none());
     }
 
     #[test]

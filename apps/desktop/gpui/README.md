@@ -50,6 +50,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Settings → Hooks reads the exact Codex `hooks/list` catalog for the active workspace,
   including handler/event/source/path, trust, managed, warning, and error state. Mitsuro
   and explicit fixture mode show an empty unsupported/fixture state, never sample hooks.
+- Settings → Remote control reads the real Codex host identity and connection state,
+  tracks `remoteControl/status/changed`, creates and checks real pairing codes, paginates
+  the authorized-device catalog, and revokes access only after a second confirmation.
+  Mitsuro HTTP and explicit fixture mode show honest unsupported/fixture states. The
+  removed local “Computer use” toggles never changed either backend and are no longer
+  presented as operational controls.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.
@@ -169,7 +175,7 @@ authenticated backend sends a provider-backed turn when the user presses Send. K
 `MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
 
 The Codex adapter negotiates experimental APIs because the desktop exposes process,
-environment, realtime, and background-terminal protocol families. The reviewed
+environment, realtime, Remote Control, and background-terminal protocol families. The reviewed
 `codex-cli 0.147.0` contract is checked with generated inventories: all 70
 notifications must map to a typed transcript/lifecycle event, and all 11 server
 requests must have an approval, interaction, or automatic transport disposition.

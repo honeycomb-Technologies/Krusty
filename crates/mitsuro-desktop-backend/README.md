@@ -64,6 +64,13 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `turn/start` (live; fixture replay requires explicit fixture mode)
 - `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
 - `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
+- `remoteControl/status/read` · `remoteControl/enable` · `remoteControl/disable`
+- `remoteControl/pairing/start` · `remoteControl/pairing/status`
+- `remoteControl/client/list` · `remoteControl/client/revoke`
+
+Remote Control is a Codex-only capability in the current transport matrix. Its typed
+status, pairing, client-list, revocation, and lifecycle contracts never fall back to
+fixture records; Mitsuro HTTP returns `NotImplemented` through the desktop boundary.
 
 The generated protocol inventories are committed in `fixtures/`: 95 stable client
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable

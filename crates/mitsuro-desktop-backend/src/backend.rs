@@ -65,6 +65,14 @@ use crate::protocol::{
     ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
+use crate::remote_control::{
+    RemoteControlClientsListParams, RemoteControlClientsListResponse,
+    RemoteControlClientsRevokeParams, RemoteControlClientsRevokeResponse,
+    RemoteControlDisableParams, RemoteControlDisableResponse, RemoteControlEnableParams,
+    RemoteControlEnableResponse, RemoteControlPairingStartParams,
+    RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
+    RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse,
+};
 use crate::types::{ConnectionStatus, Result};
 use crate::{
     HooksListParams, HooksListResponse, SkillsConfigWriteParams, SkillsConfigWriteResponse,
@@ -223,6 +231,73 @@ pub trait AgentBackend: Send + Sync {
     async fn apps_read(&self, _params: AppsReadParams) -> Result<AppsReadResponse> {
         Err(crate::AgentError::NotImplemented(
             "app metadata is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read whether this app-server installation accepts Remote Control clients.
+    async fn remote_control_status_read(&self) -> Result<RemoteControlStatusReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control status is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Allow authorized clients to discover and control this Codex installation.
+    async fn remote_control_enable(
+        &self,
+        _params: RemoteControlEnableParams,
+    ) -> Result<RemoteControlEnableResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control enablement is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Stop accepting Remote Control connections for this Codex installation.
+    async fn remote_control_disable(
+        &self,
+        _params: RemoteControlDisableParams,
+    ) -> Result<RemoteControlDisableResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control disablement is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Create a short-lived device-pairing code.
+    async fn remote_control_pairing_start(
+        &self,
+        _params: RemoteControlPairingStartParams,
+    ) -> Result<RemoteControlPairingStartResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control pairing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Check whether a pairing code has been claimed.
+    async fn remote_control_pairing_status(
+        &self,
+        _params: RemoteControlPairingStatusParams,
+    ) -> Result<RemoteControlPairingStatusResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control pairing status is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// List devices authorized for one Remote Control environment.
+    async fn remote_control_clients_list(
+        &self,
+        _params: RemoteControlClientsListParams,
+    ) -> Result<RemoteControlClientsListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control client listing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Revoke one authorized Remote Control client.
+    async fn remote_control_clients_revoke(
+        &self,
+        _params: RemoteControlClientsRevokeParams,
+    ) -> Result<RemoteControlClientsRevokeResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "remote control client revocation is not implemented by this backend".to_owned(),
         ))
     }
 

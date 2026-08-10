@@ -69,6 +69,7 @@ backend or are shown as unavailable.
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
 | Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
+| Remote Control | Unsupported; explicit capability boundary | Live status, enable/disable, pairing, authorized-device list/revoke, and status lifecycle | Explicit fixture state; no invented devices |
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
@@ -85,8 +86,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 77 typed adapters
-and 56 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 84 typed adapters
+and 49 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -118,6 +119,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   has no list method, GPUI retains only successful submissions for the current app
   session and immediately probes `environment/status` and `environment/info`. Mitsuro
   renders the mutation as unsupported.
+- Codex Remote Control uses all seven generated `remoteControl/*` request contracts,
+  application-lifetime status notifications, bounded cursor pagination, and confirmed
+  client revocation. Its Settings page renders only live server state; Mitsuro and
+  fixture modes cannot inherit or synthesize Codex devices.
 - MCP servers advertising `notLoggedIn` expose a real Codex sign-in action. GPUI sends
   typed `mcpServer/oauth/login`, opens only the returned authorization URL, tracks the
   server name until `mcpServer/oauthLogin/completed`, and refreshes the live catalog.

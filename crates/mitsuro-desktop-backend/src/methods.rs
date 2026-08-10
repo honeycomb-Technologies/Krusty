@@ -203,6 +203,13 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "process/resizePty",
     "process/spawn",
     "process/writeStdin",
+    "remoteControl/client/list",
+    "remoteControl/client/revoke",
+    "remoteControl/disable",
+    "remoteControl/enable",
+    "remoteControl/pairing/start",
+    "remoteControl/pairing/status",
+    "remoteControl/status/read",
     "review/start",
     "skills/config/write",
     "skills/list",
@@ -351,7 +358,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 77);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 84);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

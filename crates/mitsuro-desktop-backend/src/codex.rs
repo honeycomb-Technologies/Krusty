@@ -78,6 +78,14 @@ use crate::realtime::{
     ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
     ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
 };
+use crate::remote_control::{
+    RemoteControlClientsListParams, RemoteControlClientsListResponse,
+    RemoteControlClientsRevokeParams, RemoteControlClientsRevokeResponse,
+    RemoteControlDisableParams, RemoteControlDisableResponse, RemoteControlEnableParams,
+    RemoteControlEnableResponse, RemoteControlPairingStartParams,
+    RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
+    RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse,
+};
 use crate::server_requests::{automatic_server_response, AutomaticServerResponse};
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
@@ -1120,6 +1128,64 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("app/read", Some(value)).await
     }
 
+    async fn remote_control_status_read(&self) -> Result<RemoteControlStatusReadResponse> {
+        self.request_typed("remoteControl/status/read", None).await
+    }
+
+    async fn remote_control_enable(
+        &self,
+        params: RemoteControlEnableParams,
+    ) -> Result<RemoteControlEnableResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/enable", Some(value))
+            .await
+    }
+
+    async fn remote_control_disable(
+        &self,
+        params: RemoteControlDisableParams,
+    ) -> Result<RemoteControlDisableResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/disable", Some(value))
+            .await
+    }
+
+    async fn remote_control_pairing_start(
+        &self,
+        params: RemoteControlPairingStartParams,
+    ) -> Result<RemoteControlPairingStartResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/pairing/start", Some(value))
+            .await
+    }
+
+    async fn remote_control_pairing_status(
+        &self,
+        params: RemoteControlPairingStatusParams,
+    ) -> Result<RemoteControlPairingStatusResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/pairing/status", Some(value))
+            .await
+    }
+
+    async fn remote_control_clients_list(
+        &self,
+        params: RemoteControlClientsListParams,
+    ) -> Result<RemoteControlClientsListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/client/list", Some(value))
+            .await
+    }
+
+    async fn remote_control_clients_revoke(
+        &self,
+        params: RemoteControlClientsRevokeParams,
+    ) -> Result<RemoteControlClientsRevokeResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("remoteControl/client/revoke", Some(value))
+            .await
+    }
+
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         // Live model turn — callers must opt in; default UI path uses fixtures.
         // `params.model` is serialized as camelCase `model` when set (UI selected model).
@@ -1614,8 +1680,10 @@ mod tests {
     #[tokio::test]
     async fn command_exec_family_matches_contract_and_exec_has_no_generic_timeout() {
         let (client_writer, mut server_reader) = duplex(64 * 1024);
-        let mut config = CodexAppServerConfig::default();
-        config.request_timeout = Duration::from_millis(20);
+        let config = CodexAppServerConfig {
+            request_timeout: Duration::from_millis(20),
+            ..Default::default()
+        };
         let backend = Arc::new(CodexAppServerBackend::new(config));
         backend.connect_with_mock_writer(client_writer).await;
         backend.mark_ready_for_test(InitializeResponse {
@@ -1724,6 +1792,166 @@ mod tests {
         let response = command.await.unwrap().unwrap();
         assert_eq!(response.exit_code, 0);
         assert_eq!(response.stdout, "typed");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_control_family_matches_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "remoteControl/status/read",
+                "remoteControl/enable",
+                "remoteControl/disable",
+                "remoteControl/pairing/start",
+                "remoteControl/pairing/status",
+                "remoteControl/client/list",
+                "remoteControl/client/revoke",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "remoteControl/status/read" => {
+                        assert!(request.get("params").is_none());
+                        serde_json::json!({
+                            "status": "disabled",
+                            "serverName": "test-host",
+                            "installationId": "install-1",
+                            "environmentId": null
+                        })
+                    }
+                    "remoteControl/enable" => {
+                        assert_eq!(request["params"], serde_json::json!({}));
+                        serde_json::json!({
+                            "status": "connected",
+                            "serverName": "test-host",
+                            "installationId": "install-1",
+                            "environmentId": "env-1"
+                        })
+                    }
+                    "remoteControl/disable" => {
+                        assert_eq!(request["params"], serde_json::json!({"ephemeral": false}));
+                        serde_json::json!({
+                            "status": "disabled",
+                            "serverName": "test-host",
+                            "installationId": "install-1",
+                            "environmentId": null
+                        })
+                    }
+                    "remoteControl/pairing/start" => {
+                        assert_eq!(request["params"], serde_json::json!({"manualCode": true}));
+                        serde_json::json!({
+                            "pairingCode": "pair-1",
+                            "manualPairingCode": "ABCD-EFGH",
+                            "environmentId": "env-1",
+                            "expiresAt": 1786320300
+                        })
+                    }
+                    "remoteControl/pairing/status" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "pairingCode": "pair-1",
+                                "manualPairingCode": "ABCD-EFGH"
+                            })
+                        );
+                        serde_json::json!({"claimed": false})
+                    }
+                    "remoteControl/client/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "environmentId": "env-1",
+                                "limit": 100,
+                                "order": "desc"
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [{
+                                "clientId": "phone-1",
+                                "displayName": "Jacob's phone",
+                                "deviceType": "phone",
+                                "platform": "ios",
+                                "osVersion": "26.0",
+                                "deviceModel": "iPhone",
+                                "appVersion": "1.0",
+                                "lastSeenAt": 1786320000
+                            }],
+                            "nextCursor": null
+                        })
+                    }
+                    "remoteControl/client/revoke" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "environmentId": "env-1",
+                                "clientId": "phone-1"
+                            })
+                        );
+                        serde_json::json!({})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let status = backend.remote_control_status_read().await.unwrap();
+        assert_eq!(
+            status.status,
+            crate::RemoteControlConnectionStatus::Disabled
+        );
+        let enabled = backend
+            .remote_control_enable(RemoteControlEnableParams::default())
+            .await
+            .unwrap();
+        assert_eq!(enabled.environment_id.as_deref(), Some("env-1"));
+        backend
+            .remote_control_disable(RemoteControlDisableParams {
+                ephemeral: Some(false),
+            })
+            .await
+            .unwrap();
+        let pairing = backend
+            .remote_control_pairing_start(RemoteControlPairingStartParams {
+                manual_code: Some(true),
+            })
+            .await
+            .unwrap();
+        let pairing_status = backend
+            .remote_control_pairing_status(RemoteControlPairingStatusParams::from_pairing(&pairing))
+            .await
+            .unwrap();
+        assert!(!pairing_status.claimed);
+        let clients = backend
+            .remote_control_clients_list(RemoteControlClientsListParams::newest_first("env-1"))
+            .await
+            .unwrap();
+        assert_eq!(clients.data[0].display_label(), "Jacob's phone");
+        backend
+            .remote_control_clients_revoke(RemoteControlClientsRevokeParams {
+                environment_id: "env-1".into(),
+                client_id: "phone-1".into(),
+            })
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 
@@ -2833,6 +3061,24 @@ mod integration_tests {
 
         backend.disconnect().await.expect("disconnect");
         assert!(matches!(backend.status(), ConnectionStatus::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn real_app_server_remote_control_status_read() {
+        if !should_run_integration() {
+            eprintln!("skip: codex binary not available");
+            return;
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        let status = backend
+            .remote_control_status_read()
+            .await
+            .expect("remoteControl/status/read");
+        assert!(!status.server_name.is_empty());
+        assert!(!status.installation_id.is_empty());
+        backend.disconnect().await.expect("disconnect");
     }
 
     #[tokio::test]

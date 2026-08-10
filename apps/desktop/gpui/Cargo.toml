@@ -17,6 +17,7 @@ browser-external = []
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
+chrono = "0.4"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 mitsuro-desktop-backend = { path = "../../../crates/mitsuro-desktop-backend" }

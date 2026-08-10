@@ -11,7 +11,10 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
-use mitsuro_desktop_backend::{AppInfo, BackendKind, HookMetadata, InstalledApp};
+use mitsuro_desktop_backend::{
+    AppInfo, BackendKind, HookMetadata, InstalledApp, RemoteControlClient,
+    RemoteControlConnectionStatus,
+};
 
 use crate::app::{
     AccountSession, McpAddTransport, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection,
@@ -274,7 +277,7 @@ fn section_icon_path(section: SettingsSection) -> &'static str {
         SettingsSection::Account => "icons/circle-user.svg",
         SettingsSection::Plugins => "icons/puzzle.svg",
         SettingsSection::Browser => "icons/app-window.svg",
-        SettingsSection::ComputerUse => "icons/sparkles.svg",
+        SettingsSection::RemoteControl => "icons/monitor.svg",
         SettingsSection::Hooks => "icons/anchor.svg",
         SettingsSection::Connections => "icons/network.svg",
         SettingsSection::Git => "icons/git-branch.svg",
@@ -332,6 +335,9 @@ fn settings_scope_notice(section: SettingsSection) -> impl IntoElement {
         SettingsSection::Connections => {
             "Backend selection and reconnect are live. Unavailable connection mutations are labeled on their rows."
         }
+        SettingsSection::RemoteControl => {
+            "Status, pairing, and authorized devices come directly from Codex app-server. Mitsuro HTTP is explicitly unsupported."
+        }
         SettingsSection::Account | SettingsSection::UsageBilling => {
             "Account and usage data come from the connected backend. Unsupported account actions are labeled before use."
         }
@@ -372,7 +378,7 @@ fn section_body(
         SettingsSection::Account => account_body(app, cx).into_any_element(),
         SettingsSection::Plugins => plugins_body(app, cx).into_any_element(),
         SettingsSection::Browser => browser_body(app, cx).into_any_element(),
-        SettingsSection::ComputerUse => computer_use_body(app, cx).into_any_element(),
+        SettingsSection::RemoteControl => remote_control_body(app, cx).into_any_element(),
         SettingsSection::Hooks => hooks_body(app, cx).into_any_element(),
         SettingsSection::Connections => connections_body(app, cx).into_any_element(),
         SettingsSection::Git => git_body(app, cx).into_any_element(),
@@ -1888,69 +1894,589 @@ fn browser_body(_app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoEl
         )
 }
 
-fn computer_use_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn remote_control_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let state = app.remote_control_state();
+    let status = app.remote_control_status().cloned();
+    let clients = app.remote_control_clients().to_vec();
+    let pairing = app.remote_control_pairing().cloned();
+    let mutation = app.remote_control_mutation().map(str::to_owned);
+    let error = app.remote_control_error().map(str::to_owned);
+    let status_label = match (&status, state) {
+        (Some(status), _) => status.status.label(),
+        (None, SurfaceDataState::Loading) => "Loading",
+        (None, SurfaceDataState::Fixture) => "Explicit fixture",
+        (None, SurfaceDataState::Unsupported) => "Unsupported by active backend",
+        (None, SurfaceDataState::Error) => "Unavailable",
+        (None, SurfaceDataState::Live) => "Unavailable",
+    };
+    let host = status
+        .as_ref()
+        .map(|status| status.server_name.as_str())
+        .unwrap_or("Not reported");
+    let installation = status
+        .as_ref()
+        .map(|status| status.installation_id.as_str())
+        .unwrap_or("Not reported");
+    let environment = status
+        .as_ref()
+        .and_then(|status| status.environment_id.as_deref())
+        .unwrap_or("Not connected");
+    let connected = status.as_ref().is_some_and(|status| {
+        status.status == RemoteControlConnectionStatus::Connected && status.environment_id.is_some()
+    });
+
     div()
-        .id("settings-computer-use")
+        .id("settings-remote-control")
         .flex()
         .flex_col()
         .gap(px(22.0))
         .max_w(px(720.0))
-        .child(group_label("Computer use"))
+        .child(group_label("Control this PC"))
         .child(
             settings_card()
-                .child(toggle_row(
-                    "Allow computer use",
-                    "Let Mitsuro control apps and the desktop when you approve a session",
-                    "computer_use_enabled",
-                    true,
-                    app,
-                    cx,
-                ))
+                .child(info_row("Source", "remoteControl/status/read"))
                 .child(card_divider())
-                .child(toggle_row(
-                    "Confirm destructive actions",
-                    "Ask before file deletes or system-level commands",
-                    "computer_confirm_actions",
-                    true,
-                    app,
-                    cx,
-                ))
+                .child(info_row("Status", status_label))
                 .child(card_divider())
-                .child(toggle_row(
-                    "Allow network tools",
-                    "Permit tools that reach the network without re-prompt",
-                    "computer_network",
-                    false,
-                    app,
-                    cx,
-                ))
+                .child(info_row("Host", host))
                 .child(card_divider())
-                .child(select_row(
-                    "Default environment",
-                    "Environment used for computer-use sessions",
-                    "computer_env",
-                    &["Local", "Remote sandbox"],
-                    "Local",
-                    app,
-                    cx,
-                )),
+                .child(info_row("Installation", installation))
+                .child(card_divider())
+                .child(info_row("Environment", environment))
+                .child(card_divider())
+                .child(remote_control_host_row(app, cx))
+                .child(card_divider())
+                .child(remote_control_refresh_row(app, cx)),
         )
-        .child(group_label("Always-allowed apps"))
+        .when_some(error, |this, error| {
+            this.child(group_label("Remote Control error")).child(
+                settings_card().child(empty_list_message("Couldn’t update Remote Control", &error)),
+            )
+        })
+        .child(group_label("Add device"))
         .child(
             settings_card()
-                .child(empty_list_message(
-                    "None yet",
-                    "Apps you always allow for computer use will appear here.",
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Manage allowed apps",
-                    "Review apps that skip the permission prompt",
-                    "Manage",
-                    "computer-allowed-apps",
-                    cx,
-                )),
+                .when(matches!(state, SurfaceDataState::Unsupported), |this| {
+                    this.child(empty_list_message(
+                        "Remote Control unavailable",
+                        "Mitsuro HTTP does not expose the Codex Remote Control protocol.",
+                    ))
+                })
+                .when(matches!(state, SurfaceDataState::Fixture), |this| {
+                    this.child(empty_list_message(
+                        "No fixture devices",
+                        "Offline fixture mode never invents Remote Control state.",
+                    ))
+                })
+                .when(matches!(state, SurfaceDataState::Loading), |this| {
+                    this.child(empty_list_message(
+                        "Loading Remote Control",
+                        "Reading the active Codex app-server installation…",
+                    ))
+                })
+                .when(
+                    !connected
+                        && !matches!(
+                            state,
+                            SurfaceDataState::Unsupported
+                                | SurfaceDataState::Fixture
+                                | SurfaceDataState::Loading
+                        ),
+                    |this| {
+                        this.child(empty_list_message(
+                            "Remote Control is off",
+                            "Turn on Remote Control before adding an authorized device.",
+                        ))
+                    },
+                )
+                .when(connected, |this| {
+                    this.child(remote_control_pairing_start_row(app, cx))
+                })
+                .when_some(pairing, |this, pairing| {
+                    this.child(card_divider())
+                        .child(info_row(
+                            "Pairing code",
+                            pairing
+                                .manual_pairing_code
+                                .as_deref()
+                                .unwrap_or(pairing.pairing_code.as_str()),
+                        ))
+                        .child(card_divider())
+                        .child(info_row(
+                            "Expires",
+                            &format_remote_control_timestamp(pairing.expires_at),
+                        ))
+                        .child(card_divider())
+                        .child(remote_control_pairing_status_row(app, cx))
+                }),
         )
+        .child(group_label("Authorized devices"))
+        .child(
+            settings_card()
+                .children(clients.iter().enumerate().flat_map(|(index, client)| {
+                    let mut rows = Vec::new();
+                    if index > 0 {
+                        rows.push(card_divider().into_any_element());
+                    }
+                    rows.push(remote_control_client_row(client, app, cx).into_any_element());
+                    rows
+                }))
+                .when(clients.is_empty(), |this| {
+                    let (title, detail) = if connected {
+                        (
+                            "No devices added yet",
+                            "Add a device to control this PC remotely.",
+                        )
+                    } else if matches!(state, SurfaceDataState::Unsupported) {
+                        (
+                            "Device list unavailable",
+                            "The active backend has no Remote Control client catalog.",
+                        )
+                    } else {
+                        (
+                            "No authorized devices",
+                            "Devices appear here only when returned by Codex app-server.",
+                        )
+                    };
+                    this.child(empty_list_message(title, detail))
+                })
+                .when(mutation.is_some(), |this| {
+                    this.child(card_divider()).child(info_row(
+                        "Operation",
+                        mutation.as_deref().unwrap_or("In progress"),
+                    ))
+                }),
+        )
+}
+
+fn remote_control_host_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let enabled = app
+        .remote_control_status()
+        .is_some_and(|status| status.status.is_enabled());
+    let available = matches!(
+        app.remote_control_state(),
+        SurfaceDataState::Live | SurfaceDataState::Error
+    ) && app.remote_control_status().is_some()
+        && app.remote_control_mutation().is_none();
+    let button = match app.remote_control_mutation() {
+        Some("enable") => "Turning on…",
+        Some("disable") => "Turning off…",
+        _ if !available => "Unavailable",
+        _ if enabled => "Turn off",
+        _ => "Turn on",
+    };
+    div()
+        .id("remote-control-host-toggle")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Allow connections"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(
+                            "Authorized devices on your ChatGPT account can discover and control this device",
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id("remote-control-host-toggle-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .when(available, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.set_remote_control_enabled(!enabled, cx)
+                        }))
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if available {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                })
+                .child(button),
+        )
+}
+
+fn remote_control_refresh_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = app.active_backend_kind() == Some(BackendKind::CodexStdio)
+        && app.remote_control_mutation().is_none();
+    div()
+        .id("remote-control-refresh")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Refresh"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Reload host status and authorized devices"),
+                ),
+        )
+        .child(
+            div()
+                .id("remote-control-refresh-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .when(available, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(|app, _, _, cx| app.refresh_remote_control(cx)))
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if available {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                })
+                .child(if available { "Refresh" } else { "Unavailable" }),
+        )
+}
+
+fn remote_control_pairing_start_row(
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = app.remote_control_mutation().is_none();
+    div()
+        .id("remote-control-add-device")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Control this PC from your phone or other device"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Create a short-lived code for an authorized device"),
+                ),
+        )
+        .child(
+            div()
+                .id("remote-control-add-device-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .when(available, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(|app, _, _, cx| app.start_remote_control_pairing(cx)))
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if available {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                })
+                .child(if available {
+                    "Add device"
+                } else {
+                    "Creating…"
+                }),
+        )
+}
+
+fn remote_control_pairing_status_row(
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = app.remote_control_mutation().is_none();
+    let claimed = app.remote_control_pairing_claimed().unwrap_or(false);
+    div()
+        .id("remote-control-pairing-status")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(if claimed {
+                            "Device connected"
+                        } else {
+                            "Waiting for device"
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Approve the pairing in ChatGPT, then check again"),
+                ),
+        )
+        .child(
+            div()
+                .id("remote-control-pairing-status-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .when(available, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(|app, _, _, cx| app.check_remote_control_pairing(cx)))
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if available {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                })
+                .child(if available { "Check" } else { "Checking…" }),
+        )
+}
+
+fn remote_control_client_row(
+    client: &RemoteControlClient,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let id = client.client_id.clone();
+    let confirming = app.remote_control_revoke_confirmation() == Some(id.as_str());
+    let mut details = [
+        client.device_model.as_deref(),
+        client.platform.as_deref(),
+        client.os_version.as_deref(),
+        client.app_version.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| !value.is_empty())
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if let Some(last_seen) = client.last_seen_at {
+        details.push(format!(
+            "Last connected {}",
+            format_remote_control_timestamp(last_seen)
+        ));
+    }
+    let detail = if details.is_empty() {
+        "Authorized device".to_owned()
+    } else {
+        details.join(" · ")
+    };
+    let busy = app.remote_control_mutation().is_some();
+    let label = client.display_label().to_owned();
+    let revoke_id = id.clone();
+    let cancel_id = id.clone();
+    div()
+        .id(SharedId(format!("remote-control-client-{id}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .when(confirming, |this| {
+                    this.child(
+                        div()
+                            .id(SharedId(format!(
+                                "remote-control-revoke-cancel-{cancel_id}"
+                            )))
+                            .h(px(28.0))
+                            .px(px(10.0))
+                            .rounded(px(8.0))
+                            .bg(colors.bg_button_secondary)
+                            .border_1()
+                            .border_color(colors.border)
+                            .when(!busy, |this| {
+                                this.cursor_pointer()
+                                    .hover(|style| style.bg(colors.bg_hover))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.cancel_remote_control_client_revoke(cx)
+                                    }))
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(colors.text_secondary)
+                            .child("Cancel"),
+                    )
+                })
+                .child(
+                    div()
+                        .id(SharedId(format!("remote-control-revoke-{id}")))
+                        .h(px(28.0))
+                        .px(px(10.0))
+                        .rounded(px(8.0))
+                        .bg(if confirming {
+                            theme::hex_alpha(0xef4444, 0.16)
+                        } else {
+                            colors.bg_button_secondary
+                        })
+                        .border_1()
+                        .border_color(if confirming {
+                            theme::hex_alpha(0xef4444, 0.42)
+                        } else {
+                            colors.border
+                        })
+                        .when(!busy, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.request_remote_control_client_revoke(revoke_id.clone(), cx)
+                                }))
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if confirming {
+                            colors.status_error
+                        } else {
+                            colors.text_secondary
+                        })
+                        .child(if busy {
+                            "Revoking…"
+                        } else if confirming {
+                            "Confirm revoke"
+                        } else {
+                            "Revoke access"
+                        }),
+                ),
+        )
+}
+
+fn format_remote_control_timestamp(value: i64) -> String {
+    let seconds = if value.unsigned_abs() >= 100_000_000_000 {
+        value / 1_000
+    } else {
+        value
+    };
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%b %-d, %Y %-I:%M %p")
+                .to_string()
+        })
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn hooks_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {

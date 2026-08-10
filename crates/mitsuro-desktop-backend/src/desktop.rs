@@ -16,7 +16,13 @@ use crate::{
     LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams,
     McpServerOauthLoginParams, McpServerOauthLoginResponse, MitsuroServerBackend, PendingApproval,
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
-    Result, ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
+    RemoteControlClientsListParams, RemoteControlClientsListResponse,
+    RemoteControlClientsRevokeParams, RemoteControlClientsRevokeResponse,
+    RemoteControlDisableParams, RemoteControlDisableResponse, RemoteControlEnableParams,
+    RemoteControlEnableResponse, RemoteControlPairingStartParams,
+    RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
+    RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse, Result,
+    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
     ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
     ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
     ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
@@ -88,6 +94,7 @@ pub struct BackendCapabilities {
     pub hooks: bool,
     pub apps: bool,
     pub skill_config_write: bool,
+    pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -127,6 +134,7 @@ impl BackendCapabilities {
             hooks: true,
             apps: true,
             skill_config_write: true,
+            remote_control: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -169,6 +177,7 @@ impl BackendCapabilities {
             hooks: false,
             apps: false,
             skill_config_write: false,
+            remote_control: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -475,6 +484,87 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.skills_config_write(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose Codex skill configuration writes".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn remote_control_status(&self) -> Result<RemoteControlStatusReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_status_read().await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn enable_remote_control(
+        &self,
+        params: RemoteControlEnableParams,
+    ) -> Result<RemoteControlEnableResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_enable(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn disable_remote_control(
+        &self,
+        params: RemoteControlDisableParams,
+    ) -> Result<RemoteControlDisableResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_disable(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn start_remote_control_pairing(
+        &self,
+        params: RemoteControlPairingStartParams,
+    ) -> Result<RemoteControlPairingStartResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_pairing_start(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control pairing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn remote_control_pairing_status(
+        &self,
+        params: RemoteControlPairingStatusParams,
+    ) -> Result<RemoteControlPairingStatusResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_pairing_status(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control pairing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_remote_control_clients(
+        &self,
+        params: RemoteControlClientsListParams,
+    ) -> Result<RemoteControlClientsListResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_clients_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control clients".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn revoke_remote_control_client(
+        &self,
+        params: RemoteControlClientsRevokeParams,
+    ) -> Result<RemoteControlClientsRevokeResponse> {
+        match self {
+            Self::Codex(backend) => backend.remote_control_clients_revoke(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Remote Control clients".to_owned(),
             )),
         }
     }
@@ -837,6 +927,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().apps);
         assert!(BackendCapabilities::codex().skill_config_write);
         assert!(!BackendCapabilities::mitsuro().skill_config_write);
+        assert!(BackendCapabilities::codex().remote_control);
+        assert!(!BackendCapabilities::mitsuro().remote_control);
         assert!(BackendCapabilities::codex().file_mutations);
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);

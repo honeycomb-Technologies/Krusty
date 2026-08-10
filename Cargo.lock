@@ -5934,6 +5934,7 @@ version = "0.9.21"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "gpui",
  "gpui-component",
  "mitsuro-desktop-backend",

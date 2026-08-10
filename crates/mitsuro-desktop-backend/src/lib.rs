@@ -23,6 +23,7 @@ pub mod process;
 pub mod product;
 pub mod protocol;
 pub mod realtime;
+pub mod remote_control;
 pub mod server_requests;
 pub mod skill_config;
 pub mod types;
@@ -188,6 +189,15 @@ pub use realtime::{
     ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
     ThreadRealtimeStartResponse, ThreadRealtimeStartTransport, ThreadRealtimeStopParams,
     ThreadRealtimeStopResponse,
+};
+pub use remote_control::{
+    RemoteControlClient, RemoteControlClientsListOrder, RemoteControlClientsListParams,
+    RemoteControlClientsListResponse, RemoteControlClientsRevokeParams,
+    RemoteControlClientsRevokeResponse, RemoteControlConnectionStatus, RemoteControlDisableParams,
+    RemoteControlDisableResponse, RemoteControlEnableParams, RemoteControlEnableResponse,
+    RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
+    RemoteControlPairingStatusParams, RemoteControlPairingStatusResponse,
+    RemoteControlStatusChangedNotification, RemoteControlStatusReadResponse,
 };
 pub use server_requests::{
     automatic_server_response, is_known_server_request, parse_mcp_elicitation_request,
