@@ -52,6 +52,7 @@ backend or are shown as unavailable.
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
 | Fork | Unsupported, capability-gated | Live | Typed fixture |
+| Review changes | Unsupported, capability-gated | Live streamed `review/start` with approvals | Unsupported, hidden |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
 | Extensions/MCP/skills | Live installed extensions, MCP status, and skills | Partially live | Typed fixture |
@@ -76,8 +77,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 47 typed adapters
-and 86 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 48 typed adapters
+and 85 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -95,6 +96,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   can pause a turn until the client answers. The native interaction strip supports
   request-user-input options/freeform/secrets, standard MCP forms and URL elicitations,
   plus command/file/permission approvals without synthetic response data.
+- Codex review turns subscribe before `review/start`, follow the response's review
+  thread identity, and reuse the progressive transcript and approval pipeline. The
+  selected-thread action requests an inline review of real uncommitted changes; it is
+  hidden for Mitsuro until the HTTP API exposes an equivalent contract.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

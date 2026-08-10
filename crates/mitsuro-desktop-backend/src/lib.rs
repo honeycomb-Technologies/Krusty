@@ -78,11 +78,12 @@ pub use fs::{
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse, FIXTURE_PROJECT_ROOT,
 };
 pub use live_turn::{
-    run_live_turn_progressive, run_live_turn_progressive_with_model, run_live_turn_with_bridge,
-    run_live_turn_with_bridge_and_model, run_live_turn_with_bridge_blocking,
-    run_live_turn_with_bridge_blocking_and_model, run_live_turn_with_policy,
-    run_live_turn_with_policy_and_model, run_live_turn_with_policy_blocking, LiveApprovalBridge,
-    LiveApprovalPolicy, LiveTurnOutcome, DEFAULT_LIVE_TURN_TIMEOUT,
+    run_live_review_with_bridge, run_live_turn_progressive, run_live_turn_progressive_with_model,
+    run_live_turn_with_bridge, run_live_turn_with_bridge_and_model,
+    run_live_turn_with_bridge_blocking, run_live_turn_with_bridge_blocking_and_model,
+    run_live_turn_with_policy, run_live_turn_with_policy_and_model,
+    run_live_turn_with_policy_blocking, LiveApprovalBridge, LiveApprovalPolicy, LiveReviewOutcome,
+    LiveTurnOutcome, DEFAULT_LIVE_TURN_TIMEOUT,
 };
 pub use methods::{
     client_method_coverage, client_methods_txt_path, is_known_client_method,
@@ -107,7 +108,8 @@ pub use product::{
     ConversationMessage, CreateSession, MessageRole, ProductBackend, ProductDirectoryEntry,
     ProductExtension, ProductFile, ProductFileMatch, ProductHiveRun, ProductHiveSnapshot,
     ProductHiveStatus, ProductMcpServer, ProductModel, ProductProcess, ProductReasoningEffort,
-    ProductSchedule, ProductSkill, ProductSteer, ProductTurn, SessionConversation, SessionSummary,
+    ProductReview, ProductReviewStart, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSteer, ProductTurn, SessionConversation, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,
@@ -117,17 +119,18 @@ pub use protocol::{
     ActivityFields, ClientInfo, CommandExecutionFields, ConfigReadParams, ConfigReadResponse,
     FileChangeFields, InitializeCapabilities, InitializeParams, InitializeResponse, JsonRpcError,
     JsonRpcId, JsonRpcMessage, ModelInfo, ModelListParams, ModelListResponse, Notification,
-    ReasoningEffortOption, SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse,
-    ThreadArchiveParams, ThreadArchiveResponse, ThreadCompactStartParams,
-    ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse,
-    ThreadSearchResult, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse,
-    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ReasoningEffortOption, ReviewDelivery, ReviewStartParams, ReviewStartResponse, ReviewTarget,
+    SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse, ThreadArchiveParams,
+    ThreadArchiveResponse, ThreadCompactStartParams, ThreadCompactStartResponse,
+    ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadListParams,
+    ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSearchResult,
+    ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse,
+    ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse, TranscriptMessage,
+    TranscriptRole, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnSteerParams, TurnSteerResponse,
 };
 pub use server_requests::{
     automatic_server_response, is_known_server_request, parse_mcp_elicitation_request,

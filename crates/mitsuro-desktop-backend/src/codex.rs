@@ -937,6 +937,14 @@ impl AgentBackend for CodexAppServerBackend {
             .await
     }
 
+    async fn review_start(
+        &self,
+        params: crate::protocol::ReviewStartParams,
+    ) -> Result<crate::protocol::ReviewStartResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("review/start", Some(value)).await
+    }
+
     async fn thread_goal_get(&self, params: ThreadGoalGetParams) -> Result<ThreadGoalGetResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("thread/goal/get", Some(value)).await

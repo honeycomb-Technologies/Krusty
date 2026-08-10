@@ -32,11 +32,12 @@ use crate::process::{
 };
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelListParams, ModelListResponse,
-    SkillsListParams, SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse,
-    ThreadCompactStartParams, ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse,
-    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ReviewStartParams, ReviewStartResponse, SkillsListParams, SkillsListResponse,
+    ThreadArchiveParams, ThreadArchiveResponse, ThreadCompactStartParams,
+    ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
+    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams,
+    ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
     ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
     ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
@@ -120,6 +121,13 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<ThreadCompactStartResponse> {
         Err(crate::types::AgentError::NotImplemented(
             "thread/compact/start is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Start a code-review turn.
+    async fn review_start(&self, _params: ReviewStartParams) -> Result<ReviewStartResponse> {
+        Err(crate::types::AgentError::NotImplemented(
+            "review/start is not implemented by this backend".to_owned(),
         ))
     }
 

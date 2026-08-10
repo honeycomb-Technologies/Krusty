@@ -124,6 +124,10 @@ with the exact active-turn precondition, while Mitsuro uses its durable `/chat/s
 endpoint. A non-empty draft therefore shows Send beside Stop during a live turn.
 Codex threads also expose schema-exact manual compaction from the thread overflow;
 the action stays absent for Mitsuro until its HTTP API offers the same contract.
+The same menu exposes a live **Review changes** action only when the Codex backend
+advertises review support. It subscribes before `review/start`, streams the resulting
+review turn through the native transcript and approval UI, and never substitutes
+fixture review content for Mitsuro.
 
 ```bash
 scripts/gpui-codex-protocol-check.sh

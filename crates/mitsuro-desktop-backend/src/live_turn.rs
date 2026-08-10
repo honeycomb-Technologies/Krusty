@@ -15,7 +15,7 @@ use tracing::debug;
 use crate::approvals::{ApprovalChoice, PendingApproval};
 use crate::backend::AgentBackend;
 use crate::codex::CodexAppServerBackend;
-use crate::protocol::TurnStartParams;
+use crate::protocol::{ReviewStartParams, TurnStartParams};
 use crate::types::{AgentError, Result, TurnStreamEvent};
 
 /// Default overall budget for a progressive live turn (wall clock).
@@ -97,6 +97,13 @@ pub struct LiveTurnOutcome {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveReviewOutcome {
+    pub review_thread_id: String,
+    pub turn_id: String,
+    pub stream: LiveTurnOutcome,
+}
+
 /// Run a live turn, invoking `on_event` as soon as each event arrives.
 ///
 /// Mid-stream approvals are answered via `on_approval` **before** the loop
@@ -142,7 +149,7 @@ where
     F: FnMut(PendingApproval) -> Fut,
     Fut: Future<Output = ApprovalChoice>,
 {
-    let mut rx = backend
+    let rx = backend
         .subscribe_turn_events()
         .await
         .ok_or_else(|| AgentError::Other("notification stream unavailable".into()))?;
@@ -155,6 +162,30 @@ where
         ))
         .await?;
 
+    consume_live_events(
+        backend,
+        rx,
+        thread_id,
+        &mut on_event,
+        &mut on_approval,
+        overall_timeout,
+    )
+    .await
+}
+
+async fn consume_live_events<E, F, Fut>(
+    backend: &CodexAppServerBackend,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<TurnStreamEvent>,
+    thread_id: String,
+    on_event: &mut E,
+    on_approval: &mut F,
+    overall_timeout: Duration,
+) -> Result<LiveTurnOutcome>
+where
+    E: FnMut(TurnStreamEvent),
+    F: FnMut(PendingApproval) -> Fut,
+    Fut: Future<Output = ApprovalChoice>,
+{
     let mut event_count = 0usize;
     let mut approvals_answered = 0usize;
     let mut completed = false;
@@ -208,6 +239,54 @@ where
         event_count,
         approvals_answered,
         completed,
+    })
+}
+
+/// Start a code-review turn and consume its progressive event stream.
+///
+/// The subscription is established before `review/start`. Filtering follows the
+/// returned `reviewThreadId`, which keeps detached reviews isolated correctly.
+pub async fn run_live_review_with_bridge<E>(
+    backend: &CodexAppServerBackend,
+    params: ReviewStartParams,
+    mut on_event: E,
+    bridge: Arc<LiveApprovalBridge>,
+    overall_timeout: Duration,
+) -> Result<LiveReviewOutcome>
+where
+    E: FnMut(TurnStreamEvent),
+{
+    let rx = backend
+        .subscribe_turn_events()
+        .await
+        .ok_or_else(|| AgentError::Other("notification stream unavailable".into()))?;
+    let response = backend.review_start(params).await?;
+    let turn_id = response
+        .turn_id()
+        .ok_or_else(|| AgentError::Protocol("review/start response is missing turn.id".into()))?
+        .to_owned();
+    let review_thread_id = response.review_thread_id;
+    let mut on_approval = move |_pending: PendingApproval| {
+        let bridge = Arc::clone(&bridge);
+        async move {
+            tokio::task::spawn_blocking(move || bridge.wait())
+                .await
+                .unwrap_or(ApprovalChoice::Reject)
+        }
+    };
+    let stream = consume_live_events(
+        backend,
+        rx,
+        review_thread_id.clone(),
+        &mut on_event,
+        &mut on_approval,
+        overall_timeout,
+    )
+    .await?;
+    Ok(LiveReviewOutcome {
+        review_thread_id,
+        turn_id,
+        stream,
     })
 }
 
@@ -406,7 +485,9 @@ pub fn run_live_turn_with_bridge_blocking_and_model(
 mod tests {
     use super::*;
     use crate::approvals::ApprovalKind;
-    use crate::protocol::{InitializeResponse, JsonRpcId};
+    use crate::protocol::{
+        InitializeResponse, JsonRpcId, ReviewDelivery, ReviewStartParams, ReviewTarget,
+    };
     use serde_json::Value;
     use tokio::io::{duplex, AsyncReadExt};
 
@@ -424,6 +505,81 @@ mod tests {
             }
         }
         acc.lines().next().unwrap_or("").to_string()
+    }
+
+    #[tokio::test]
+    async fn detached_review_follows_returned_thread_until_completion() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let server_backend = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let line = read_line_from(&mut server_reader).await;
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "review/start");
+            assert_eq!(request["params"]["delivery"], "detached");
+            let id = request["id"].clone();
+            server_backend
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": id,
+                        "result": {
+                            "reviewThreadId": "review-thread",
+                            "turn": {"id": "review-turn", "status": "inProgress"}
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+            server_backend
+                .inject_stdout_line(
+                    r#"{"method":"item/agentMessage/delta","params":{"threadId":"source-thread","turnId":"other","itemId":"other-item","delta":"ignore"}}"#,
+                )
+                .await;
+            for notification in [
+                serde_json::json!({"method":"turn/started","params":{"threadId":"review-thread","turn":{"id":"review-turn"}}}),
+                serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"review-thread","turnId":"review-turn","itemId":"review-message","delta":"finding"}}),
+                serde_json::json!({"method":"turn/completed","params":{"threadId":"review-thread","turn":{"id":"review-turn","status":"completed"}}}),
+            ] {
+                server_backend
+                    .inject_stdout_line(&notification.to_string())
+                    .await;
+            }
+        });
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let outcome = run_live_review_with_bridge(
+            backend.as_ref(),
+            ReviewStartParams {
+                thread_id: "source-thread".to_owned(),
+                target: ReviewTarget::UncommittedChanges,
+                delivery: Some(ReviewDelivery::Detached),
+            },
+            move |event| captured.lock().unwrap().push(event),
+            Arc::new(LiveApprovalBridge::new()),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.review_thread_id, "review-thread");
+        assert_eq!(outcome.turn_id, "review-turn");
+        assert!(outcome.stream.completed);
+        assert_eq!(outcome.stream.event_count, 3);
+        assert!(events.lock().unwrap().iter().all(|event| {
+            event
+                .thread_id()
+                .is_none_or(|thread_id| thread_id == "review-thread")
+        }));
+        server.await.unwrap();
     }
 
     /// Mock stdio live turn with mid-stream approval: assert approve is written

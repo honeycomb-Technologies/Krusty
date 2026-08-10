@@ -29,11 +29,11 @@ use mitsuro_desktop_backend::{
     PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
     PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
     ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
-    ProductModel, ProductProcess, ProductSchedule, ProductSkill, ProductSteer, ProductTurn,
-    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
-    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    ProductModel, ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule,
+    ProductSkill, ProductSteer, ProductTurn, ReasoningEffortOption, SessionDelegationProjection,
+    SessionSummary, SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
+    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
+    ThreadGoalStatus, ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
     TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
@@ -4696,6 +4696,55 @@ impl MitsuroApp {
                 .is_some()
     }
 
+    pub fn can_review_selected_thread(&self) -> bool {
+        !self.turn_in_progress
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().review)
+            && self
+                .selected_thread
+                .as_ref()
+                .and_then(|id| self.live_session_id(id))
+                .is_some()
+    }
+
+    pub fn review_selected_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        if self.turn_in_progress {
+            self.status_line = "Review unavailable · wait for the active turn to finish.".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Review unavailable · backend is not ready.".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().review {
+            self.status_line = "Review is not supported by the selected backend.".into();
+            cx.notify();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            self.status_line = "Review · no thread selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.status_line = "Review · live session identity is missing".into();
+            cx.notify();
+            return;
+        };
+
+        self.turn_in_progress = true;
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.active_turn_thread_id = Some(thread_id.clone());
+        self.status_line = "Reviewing uncommitted changes…".into();
+        self.start_live_review(thread_id, session_id, cx);
+        cx.notify();
+    }
+
     pub fn compact_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
         if self.turn_in_progress {
@@ -5915,6 +5964,162 @@ impl MitsuroApp {
                         app.active_turn_id = None;
                         app.turn_cancel = None;
                         app.status_line = format!("Live turn failed: {e}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_live_review(
+        &mut self,
+        thread_id: String,
+        session_id: BackendSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let turn_generation = self.turn_generation;
+        let Some(backend) = self.backend.clone() else {
+            self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
+            self.status_line = "Review failed · backend disconnected.".into();
+            cx.notify();
+            return;
+        };
+
+        // Review is a real Codex turn. Subscribe before review/start and use the
+        // normal approval bridge so streamed items and prompts remain interactive.
+        let bridge = Arc::new(LiveApprovalBridge::new());
+        self.live_approval_bridge = Some(Arc::clone(&bridge));
+
+        cx.spawn(async move |this, cx| {
+            enum LiveReviewMsg {
+                Event(Box<TurnStreamEvent>),
+                Finished(Result<mitsuro_desktop_backend::LiveReviewOutcome, String>),
+            }
+
+            let (msg_tx, msg_rx) = std::sync::mpsc::channel::<LiveReviewMsg>();
+            let msg_rx = Arc::new(std::sync::Mutex::new(msg_rx));
+
+            let _producer = cx.background_spawn({
+                let backend = Arc::clone(&backend);
+                let bridge = Arc::clone(&bridge);
+                let msg_tx = msg_tx;
+                async move {
+                    let (event_tx, event_rx) = std::sync::mpsc::channel::<TurnStreamEvent>();
+                    let forward_tx = msg_tx.clone();
+                    let forwarder = std::thread::spawn(move || {
+                        while let Ok(event) = event_rx.recv() {
+                            if forward_tx
+                                .send(LiveReviewMsg::Event(Box::new(event)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+
+                    let result = backend
+                        .run_product_review_with_bridge_blocking(
+                            ProductReview {
+                                session_id,
+                                target: ProductReviewTarget::UncommittedChanges,
+                                // The menu action reviews in the selected thread. The
+                                // backend adapter also follows detached review ids for
+                                // future surfaces that explicitly request them.
+                                detached: false,
+                            },
+                            event_tx,
+                            bridge,
+                            DEFAULT_LIVE_TURN_TIMEOUT,
+                        )
+                        .map_err(|error| error.to_string());
+
+                    let _ = forwarder.join();
+                    let _ = msg_tx.send(LiveReviewMsg::Finished(result));
+                }
+            });
+
+            let mut saw_completed = false;
+            let mut outcome: Option<Result<mitsuro_desktop_backend::LiveReviewOutcome, String>> =
+                None;
+            loop {
+                let rx = Arc::clone(&msg_rx);
+                let next = cx
+                    .background_spawn(async move {
+                        let guard = rx.lock().unwrap_or_else(|error| error.into_inner());
+                        guard.recv()
+                    })
+                    .await;
+
+                match next {
+                    Ok(LiveReviewMsg::Event(event)) => {
+                        let event = *event;
+                        let done = matches!(event, TurnStreamEvent::TurnCompleted { .. });
+                        let is_approval = matches!(event, TurnStreamEvent::ApprovalRequested(_));
+                        let _ = this.update(cx, |app, cx| {
+                            if !app.is_current_turn(turn_generation, &thread_id) {
+                                return;
+                            }
+                            app.apply_stream_event(&thread_id, event);
+                            if is_approval {
+                                app.turn_in_progress = true;
+                                app.status_line = "Waiting for review approval (live)…".into();
+                            }
+                            cx.notify();
+                        });
+                        if done {
+                            saw_completed = true;
+                        }
+                    }
+                    Ok(LiveReviewMsg::Finished(result)) => {
+                        outcome = Some(result);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let outcome = outcome.unwrap_or_else(|| Err("live review channel closed".into()));
+            let _ = this.update(cx, |app, cx| {
+                if !app.is_current_turn(turn_generation, &thread_id) {
+                    return;
+                }
+                app.live_approval_bridge = None;
+                match &outcome {
+                    Ok(review) if review.stream.completed || saw_completed => {
+                        if app.pending_approval.is_none() {
+                            app.turn_in_progress = false;
+                            app.active_turn_thread_id = None;
+                            app.active_turn_id = None;
+                            app.turn_cancel = None;
+                            app.status_line = "Review complete.".into();
+                        }
+                    }
+                    Ok(_) => {
+                        if app.pending_approval.is_none() {
+                            app.turn_in_progress = false;
+                            app.active_turn_thread_id = None;
+                            app.active_turn_id = None;
+                            app.turn_cancel = None;
+                            app.status_line = "Review ended (timeout or closed).".into();
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|candidate| candidate.summary.id == thread_id)
+                        {
+                            thread
+                                .messages
+                                .push(DemoMessage::error(format!("Review failed: {error}")));
+                        }
+                        app.turn_in_progress = false;
+                        app.active_turn_thread_id = None;
+                        app.active_turn_id = None;
+                        app.turn_cancel = None;
+                        app.status_line = format!("Review failed: {error}").into();
                     }
                 }
                 cx.notify();

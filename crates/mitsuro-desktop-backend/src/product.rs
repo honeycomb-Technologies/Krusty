@@ -11,11 +11,12 @@ use async_trait::async_trait;
 use crate::{
     ActivityFields, AgentError, BackendKind, BackendSessionId, CommandExecutionFields,
     DesktopBackend, FileChangeFields, FsReadDirectoryParams, FsReadFileParams,
-    FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome,
-    ModelListParams, PluginListParams, Result, SessionDelegationProjection, SkillsListParams,
-    ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams,
-    ThreadSetNameParams, ThreadStartParams, TranscriptMessage, TranscriptRole, TurnInterruptParams,
-    TurnStartParams, TurnSteerParams, TurnStreamEvent,
+    FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveReviewOutcome,
+    LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
+    ReviewTarget, SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams,
+    ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
+    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams,
+    TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +118,27 @@ pub struct ProductSteer {
     pub session_id: BackendSessionId,
     pub expected_turn_id: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductReviewTarget {
+    UncommittedChanges,
+    BaseBranch(String),
+    Commit { sha: String, title: Option<String> },
+    Custom(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductReview {
+    pub session_id: BackendSessionId,
+    pub target: ProductReviewTarget,
+    pub detached: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductReviewStart {
+    pub review_session_id: BackendSessionId,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +282,8 @@ pub trait ProductBackend: Send + Sync {
 
     async fn compact_session(&self, id: &BackendSessionId) -> Result<()>;
 
+    async fn start_review(&self, request: ProductReview) -> Result<ProductReviewStart>;
+
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>>;
 
     async fn read_text_file(&self, path: String) -> Result<ProductFile>;
@@ -310,6 +334,60 @@ impl DesktopBackend {
             bridge,
             timeout,
         )
+    }
+
+    pub fn run_product_review_with_bridge_blocking(
+        &self,
+        request: ProductReview,
+        event_tx: std::sync::mpsc::Sender<TurnStreamEvent>,
+        bridge: Arc<LiveApprovalBridge>,
+        timeout: Duration,
+    ) -> Result<LiveReviewOutcome> {
+        self.ensure_session_origin(&request.session_id)?;
+        if !self.capabilities().review {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not expose code review turns",
+                self.kind().id()
+            )));
+        }
+        let DesktopBackend::Codex(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "review streaming is unavailable for this backend".to_owned(),
+            ));
+        };
+        let params = review_start_params(request);
+        let runtime = Arc::clone(backend);
+        let runner = Arc::clone(backend);
+        runtime.block_on(async move {
+            crate::run_live_review_with_bridge(
+                runner.as_ref(),
+                params,
+                |event| {
+                    let _ = event_tx.send(event);
+                },
+                bridge,
+                timeout,
+            )
+            .await
+        })
+    }
+}
+
+fn review_start_params(request: ProductReview) -> ReviewStartParams {
+    let target = match request.target {
+        ProductReviewTarget::UncommittedChanges => ReviewTarget::UncommittedChanges,
+        ProductReviewTarget::BaseBranch(branch) => ReviewTarget::BaseBranch { branch },
+        ProductReviewTarget::Commit { sha, title } => ReviewTarget::Commit { sha, title },
+        ProductReviewTarget::Custom(instructions) => ReviewTarget::Custom { instructions },
+    };
+    ReviewStartParams {
+        thread_id: request.session_id.raw,
+        target,
+        delivery: Some(if request.detached {
+            ReviewDelivery::Detached
+        } else {
+            ReviewDelivery::Inline
+        }),
     }
 }
 
@@ -478,6 +556,27 @@ impl ProductBackend for DesktopBackend {
         self.thread_compact_start(ThreadCompactStartParams::new(id.raw.clone()))
             .await?;
         Ok(())
+    }
+
+    async fn start_review(&self, request: ProductReview) -> Result<ProductReviewStart> {
+        self.ensure_session_origin(&request.session_id)?;
+        if !self.capabilities().review {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not expose code review turns",
+                self.kind().id()
+            )));
+        }
+        let response = self.review_start(review_start_params(request)).await?;
+        let turn_id = response
+            .turn_id()
+            .ok_or_else(|| {
+                AgentError::Protocol("review/start response is missing turn.id".to_owned())
+            })?
+            .to_owned();
+        Ok(ProductReviewStart {
+            review_session_id: BackendSessionId::new(self.kind(), response.review_thread_id),
+            turn_id,
+        })
     }
 
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>> {
@@ -738,6 +837,25 @@ mod tests {
                 text: "change direction".to_owned(),
             })
             .await
+            .expect_err("mismatched origin must fail");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[test]
+    fn product_review_rejects_a_session_from_another_backend_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let error = backend
+            .run_product_review_with_bridge_blocking(
+                ProductReview {
+                    session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                    target: ProductReviewTarget::UncommittedChanges,
+                    detached: false,
+                },
+                event_tx,
+                Arc::new(LiveApprovalBridge::new()),
+                Duration::from_secs(1),
+            )
             .expect_err("mismatched origin must fail");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
     }

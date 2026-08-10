@@ -909,6 +909,52 @@ impl ThreadCompactStartParams {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadCompactStartResponse {}
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewDelivery {
+    Inline,
+    Detached,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ReviewTarget {
+    UncommittedChanges,
+    BaseBranch {
+        branch: String,
+    },
+    Commit {
+        sha: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    Custom {
+        instructions: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewStartParams {
+    pub thread_id: String,
+    pub target: ReviewTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ReviewDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewStartResponse {
+    pub review_thread_id: String,
+    pub turn: Value,
+}
+
+impl ReviewStartResponse {
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn.get("id").and_then(Value::as_str)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // model/list
 // ---------------------------------------------------------------------------
@@ -2683,6 +2729,29 @@ mod p9_protocol_shape_tests {
         let value = serde_json::to_value(ThreadCompactStartParams::new("thread-1")).unwrap();
         assert_eq!(value, serde_json::json!({"threadId": "thread-1"}));
         let _: ThreadCompactStartResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    }
+
+    #[test]
+    fn review_start_matches_generated_tagged_contract() {
+        let params = ReviewStartParams {
+            thread_id: "thread-1".to_owned(),
+            target: ReviewTarget::UncommittedChanges,
+            delivery: Some(ReviewDelivery::Inline),
+        };
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["threadId"], "thread-1");
+        assert_eq!(
+            value["target"],
+            serde_json::json!({"type": "uncommittedChanges"})
+        );
+        assert_eq!(value["delivery"], "inline");
+
+        let response: ReviewStartResponse = serde_json::from_value(serde_json::json!({
+            "reviewThreadId": "thread-1",
+            "turn": {"id": "turn-review", "status": "inProgress"}
+        }))
+        .unwrap();
+        assert_eq!(response.turn_id(), Some("turn-review"));
     }
 
     #[test]

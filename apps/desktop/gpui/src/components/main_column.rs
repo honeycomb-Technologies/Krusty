@@ -382,6 +382,7 @@ fn thread_title_bar(
     let colors = theme::colors();
     let menu_open = app.thread_menu_open();
     let can_compact = app.can_compact_selected_thread();
+    let can_review = app.can_review_selected_thread();
     let is_archived = app
         .selected_thread()
         .and_then(|t| t.summary.archived)
@@ -395,6 +396,7 @@ fn thread_title_bar(
         || status.starts_with("Fork")
         || status.starts_with("Compact")
         || status.starts_with("Compaction")
+        || status.starts_with("Review")
     {
         Some(status)
     } else {
@@ -456,7 +458,12 @@ fn thread_title_bar(
                 .child(thread_overflow_menu(menu_open, is_archived, cx)),
         )
         .when(menu_open, |this| {
-            this.child(thread_overflow_dropdown(is_archived, can_compact, cx))
+            this.child(thread_overflow_dropdown(
+                is_archived,
+                can_review,
+                can_compact,
+                cx,
+            ))
         })
 }
 
@@ -504,7 +511,7 @@ fn project_path_chip(path: &str, cx: &mut Context<MitsuroApp>) -> impl IntoEleme
         )
 }
 
-/// Subtle ⋯ control that toggles the lifecycle overflow (Archive / Fork / Delete).
+/// Subtle ⋯ control that toggles the thread actions overflow.
 fn thread_overflow_menu(
     menu_open: bool,
     _is_archived: bool,
@@ -540,6 +547,7 @@ fn thread_overflow_menu(
 /// Dense dropdown under the ⋯ control — Codex-like lifecycle actions.
 fn thread_overflow_dropdown(
     is_archived: bool,
+    can_review: bool,
     can_compact: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
@@ -575,6 +583,16 @@ fn thread_overflow_dropdown(
             cx,
             |app, cx| app.fork_selected_thread(cx),
         ))
+        .when(can_review, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-review",
+                "Review changes",
+                "icons/search.svg",
+                false,
+                cx,
+                |app, cx| app.review_selected_thread(cx),
+            ))
+        })
         .when(can_compact, |this| {
             this.child(thread_menu_item(
                 "thread-menu-compact",
