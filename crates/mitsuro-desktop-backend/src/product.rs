@@ -13,10 +13,11 @@ use crate::{
     DesktopBackend, FileChangeFields, FsReadDirectoryParams, FsReadFileParams,
     FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveReviewOutcome,
     LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
-    ReviewTarget, SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams,
-    ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind,
-    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
+    ReviewTarget, SandboxPolicy, SessionDelegationProjection, SkillsListParams,
+    ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams,
+    ThreadSetNameParams, ThreadStartParams, TranscriptAudioSource, TranscriptImageSource,
+    TranscriptMessage, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
+    TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +170,7 @@ pub struct CreateSession {
     pub working_dir: Option<String>,
     pub model: Option<String>,
     pub ephemeral: bool,
+    pub access_mode: Option<ProductAccessMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +179,21 @@ pub struct ProductTurn {
     pub text: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub working_dir: Option<String>,
+    pub access_mode: Option<ProductAccessMode>,
     pub attachments: Vec<ProductAttachment>,
+}
+
+/// Backend-specific access choices rendered in one transport-neutral product slot.
+/// Variants are intentionally not collapsed because Codex sandbox presets and Mitsuro
+/// supervision modes have different semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductAccessMode {
+    CodexReadOnly,
+    CodexAuto,
+    CodexFullAccess,
+    MitsuroSupervised,
+    MitsuroAutonomous,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +419,7 @@ impl DesktopBackend {
         timeout: Duration,
     ) -> Result<LiveTurnOutcome> {
         self.ensure_session_origin(&request.session_id)?;
+        validate_access_mode(self.kind(), request.access_mode)?;
         if request
             .attachments
             .iter()
@@ -436,7 +453,7 @@ impl DesktopBackend {
                 self.kind().id()
             )));
         }
-        let params = product_turn_params(request);
+        let params = product_turn_params(request, self.kind());
         self.run_turn_with_bridge_blocking(params, event_tx, bridge, timeout)
     }
 
@@ -477,10 +494,12 @@ impl DesktopBackend {
     }
 }
 
-fn product_turn_params(request: ProductTurn) -> TurnStartParams {
+fn product_turn_params(request: ProductTurn, backend: BackendKind) -> TurnStartParams {
     let mut params =
         TurnStartParams::text_with_model(request.session_id.raw, request.text, request.model);
     params.effort = request.reasoning_effort;
+    params.cwd = request.working_dir;
+    apply_access_to_turn_params(&mut params, backend, request.access_mode);
     for attachment in request.attachments {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
@@ -490,6 +509,132 @@ fn product_turn_params(request: ProductTurn) -> TurnStartParams {
         }
     }
     params
+}
+
+fn validate_access_mode(backend: BackendKind, mode: Option<ProductAccessMode>) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let valid = matches!(
+        (backend, mode),
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            ProductAccessMode::CodexReadOnly
+                | ProductAccessMode::CodexAuto
+                | ProductAccessMode::CodexFullAccess
+        ) | (
+            BackendKind::MitsuroHttp,
+            ProductAccessMode::MitsuroSupervised | ProductAccessMode::MitsuroAutonomous
+        )
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(AgentError::NotImplemented(format!(
+            "{} does not accept the selected access mode",
+            backend.id()
+        )))
+    }
+}
+
+fn absolute_workspace_roots(cwd: Option<&str>) -> Option<Vec<String>> {
+    cwd.filter(|path| std::path::Path::new(path).is_absolute())
+        .map(|path| vec![path.to_owned()])
+}
+
+fn apply_access_to_turn_params(
+    params: &mut TurnStartParams,
+    backend: BackendKind,
+    mode: Option<ProductAccessMode>,
+) {
+    let roots = absolute_workspace_roots(params.cwd.as_deref());
+    match (backend, mode) {
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexReadOnly),
+        ) => {
+            params.approval_policy = Some("on-request".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox_policy = Some(SandboxPolicy::ReadOnly {
+                network_access: false,
+            });
+            params.runtime_workspace_roots = roots;
+        }
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexAuto),
+        ) => {
+            params.approval_policy = Some("on-request".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox_policy = Some(SandboxPolicy::WorkspaceWrite {
+                writable_roots: roots.clone().unwrap_or_default(),
+                network_access: false,
+                exclude_slash_tmp: false,
+                exclude_tmpdir_env_var: false,
+            });
+            params.runtime_workspace_roots = roots;
+        }
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexFullAccess),
+        ) => {
+            params.approval_policy = Some("never".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox_policy = Some(SandboxPolicy::DangerFullAccess);
+            params.runtime_workspace_roots = roots;
+        }
+        (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroSupervised)) => {
+            params.mitsuro_permission_mode = Some("supervised".to_owned());
+        }
+        (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroAutonomous)) => {
+            params.mitsuro_permission_mode = Some("autonomous".to_owned());
+        }
+        _ => {}
+    }
+}
+
+fn apply_access_to_thread_params(
+    params: &mut ThreadStartParams,
+    backend: BackendKind,
+    mode: Option<ProductAccessMode>,
+) {
+    let roots = absolute_workspace_roots(params.cwd.as_deref());
+    match (backend, mode) {
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexReadOnly),
+        ) => {
+            params.approval_policy = Some("on-request".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox = Some("read-only".to_owned());
+            params.runtime_workspace_roots = roots;
+        }
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexAuto),
+        ) => {
+            params.approval_policy = Some("on-request".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox = Some("workspace-write".to_owned());
+            params.runtime_workspace_roots = roots;
+        }
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            Some(ProductAccessMode::CodexFullAccess),
+        ) => {
+            params.approval_policy = Some("never".to_owned());
+            params.approvals_reviewer = Some("user".to_owned());
+            params.sandbox = Some("danger-full-access".to_owned());
+            params.runtime_workspace_roots = roots;
+        }
+        (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroSupervised)) => {
+            params.mitsuro_permission_mode = Some("supervised".to_owned());
+        }
+        (BackendKind::MitsuroHttp, Some(ProductAccessMode::MitsuroAutonomous)) => {
+            params.mitsuro_permission_mode = Some("autonomous".to_owned());
+        }
+        _ => {}
+    }
 }
 
 fn review_start_params(request: ProductReview) -> ReviewStartParams {
@@ -541,14 +686,15 @@ impl ProductBackend for DesktopBackend {
     }
 
     async fn create_session(&self, request: CreateSession) -> Result<SessionSummary> {
-        let response = self
-            .thread_start(ThreadStartParams {
-                cwd: request.working_dir,
-                model: request.model,
-                ephemeral: Some(request.ephemeral),
-                ..Default::default()
-            })
-            .await?;
+        validate_access_mode(self.kind(), request.access_mode)?;
+        let mut params = ThreadStartParams {
+            cwd: request.working_dir,
+            model: request.model,
+            ephemeral: Some(request.ephemeral),
+            ..Default::default()
+        };
+        apply_access_to_thread_params(&mut params, self.kind(), request.access_mode);
+        let response = self.thread_start(params).await?;
         let thread = response.summary();
         Ok(SessionSummary {
             id: BackendSessionId::new(self.kind(), thread.id),
@@ -925,6 +1071,8 @@ mod tests {
             text: "hello".to_owned(),
             model: None,
             reasoning_effort: None,
+            working_dir: None,
+            access_mode: None,
             attachments: Vec::new(),
         };
         assert_eq!(request.session_id.qualified(), "mitsuro-http:session-7");
@@ -932,15 +1080,20 @@ mod tests {
 
     #[test]
     fn product_turn_preserves_local_images_for_codex_wire_input() {
-        let params = product_turn_params(ProductTurn {
-            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
-            text: "inspect".to_owned(),
-            model: Some("gpt-5".to_owned()),
-            reasoning_effort: Some("high".to_owned()),
-            attachments: vec![ProductAttachment::LocalImage {
-                path: "/tmp/capture.png".to_owned(),
-            }],
-        });
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "inspect".to_owned(),
+                model: Some("gpt-5".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                working_dir: None,
+                access_mode: None,
+                attachments: vec![ProductAttachment::LocalImage {
+                    path: "/tmp/capture.png".to_owned(),
+                }],
+            },
+            BackendKind::CodexStdio,
+        );
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["threadId"], "thread-7");
         assert_eq!(value["effort"], "high");
@@ -951,15 +1104,20 @@ mod tests {
 
     #[test]
     fn product_turn_preserves_local_audio_for_codex_wire_input() {
-        let params = product_turn_params(ProductTurn {
-            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
-            text: "transcribe".to_owned(),
-            model: Some("gpt-5".to_owned()),
-            reasoning_effort: None,
-            attachments: vec![ProductAttachment::LocalAudio {
-                path: "/tmp/recording.wav".to_owned(),
-            }],
-        });
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "transcribe".to_owned(),
+                model: Some("gpt-5".to_owned()),
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                attachments: vec![ProductAttachment::LocalAudio {
+                    path: "/tmp/recording.wav".to_owned(),
+                }],
+            },
+            BackendKind::CodexStdio,
+        );
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["input"][1]["type"], "localAudio");
         assert_eq!(value["input"][1]["path"], "/tmp/recording.wav");
@@ -967,22 +1125,27 @@ mod tests {
 
     #[test]
     fn product_turn_preserves_skill_and_mention_for_codex_wire_input() {
-        let params = product_turn_params(ProductTurn {
-            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
-            text: "use these".to_owned(),
-            model: Some("gpt-5".to_owned()),
-            reasoning_effort: None,
-            attachments: vec![
-                ProductAttachment::Skill {
-                    name: "release".to_owned(),
-                    path: "/skills/release/SKILL.md".to_owned(),
-                },
-                ProductAttachment::Mention {
-                    name: "Cargo.toml".to_owned(),
-                    path: "/workspace/Cargo.toml".to_owned(),
-                },
-            ],
-        });
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "use these".to_owned(),
+                model: Some("gpt-5".to_owned()),
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                attachments: vec![
+                    ProductAttachment::Skill {
+                        name: "release".to_owned(),
+                        path: "/skills/release/SKILL.md".to_owned(),
+                    },
+                    ProductAttachment::Mention {
+                        name: "Cargo.toml".to_owned(),
+                        path: "/workspace/Cargo.toml".to_owned(),
+                    },
+                ],
+            },
+            BackendKind::CodexStdio,
+        );
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(
             value["input"][1],
@@ -1003,6 +1166,135 @@ mod tests {
     }
 
     #[test]
+    fn codex_auto_access_serializes_schema_exact_turn_fields() {
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "modify the workspace".to_owned(),
+                model: None,
+                reasoning_effort: None,
+                working_dir: Some("/workspace/project".to_owned()),
+                access_mode: Some(ProductAccessMode::CodexAuto),
+                attachments: Vec::new(),
+            },
+            BackendKind::CodexStdio,
+        );
+
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["cwd"], "/workspace/project");
+        assert_eq!(value["approvalPolicy"], "on-request");
+        assert_eq!(value["approvalsReviewer"], "user");
+        assert_eq!(
+            value["runtimeWorkspaceRoots"],
+            serde_json::json!(["/workspace/project"])
+        );
+        assert_eq!(
+            value["sandboxPolicy"],
+            serde_json::json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/workspace/project"],
+                "networkAccess": false,
+                "excludeSlashTmp": false,
+                "excludeTmpdirEnvVar": false
+            })
+        );
+        assert!(value.get("mitsuroPermissionMode").is_none());
+    }
+
+    #[test]
+    fn codex_thread_access_presets_keep_exact_sandbox_modes() {
+        for (mode, approval, sandbox) in [
+            (ProductAccessMode::CodexReadOnly, "on-request", "read-only"),
+            (
+                ProductAccessMode::CodexAuto,
+                "on-request",
+                "workspace-write",
+            ),
+            (
+                ProductAccessMode::CodexFullAccess,
+                "never",
+                "danger-full-access",
+            ),
+        ] {
+            let mut params = ThreadStartParams {
+                cwd: Some("/workspace/project".to_owned()),
+                ..Default::default()
+            };
+            apply_access_to_thread_params(&mut params, BackendKind::CodexStdio, Some(mode));
+            let value = serde_json::to_value(params).unwrap();
+            assert_eq!(value["approvalPolicy"], approval);
+            assert_eq!(value["approvalsReviewer"], "user");
+            assert_eq!(value["sandbox"], sandbox);
+            assert_eq!(
+                value["runtimeWorkspaceRoots"],
+                serde_json::json!(["/workspace/project"])
+            );
+            assert!(value.get("mitsuroPermissionMode").is_none());
+        }
+    }
+
+    #[test]
+    fn access_without_an_absolute_workspace_does_not_clear_runtime_roots() {
+        let mut params = ThreadStartParams::default();
+        apply_access_to_thread_params(
+            &mut params,
+            BackendKind::CodexStdio,
+            Some(ProductAccessMode::CodexFullAccess),
+        );
+        let value = serde_json::to_value(params).unwrap();
+        assert!(value.get("runtimeWorkspaceRoots").is_none());
+    }
+
+    #[test]
+    fn mitsuro_access_stays_out_of_codex_wire_json() {
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                text: "inspect".to_owned(),
+                model: None,
+                reasoning_effort: None,
+                working_dir: Some("/workspace/project".to_owned()),
+                access_mode: Some(ProductAccessMode::MitsuroSupervised),
+                attachments: Vec::new(),
+            },
+            BackendKind::MitsuroHttp,
+        );
+        assert_eq!(
+            params.mitsuro_permission_mode.as_deref(),
+            Some("supervised")
+        );
+        let value = serde_json::to_value(params).unwrap();
+        assert!(value.get("mitsuroPermissionMode").is_none());
+        assert!(value.get("approvalPolicy").is_none());
+        assert!(value.get("sandboxPolicy").is_none());
+    }
+
+    #[test]
+    fn access_mode_for_another_backend_is_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let error = backend
+            .run_product_turn_with_bridge_blocking(
+                ProductTurn {
+                    session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                    text: "hello".to_owned(),
+                    model: None,
+                    reasoning_effort: None,
+                    working_dir: None,
+                    access_mode: Some(ProductAccessMode::MitsuroAutonomous),
+                    attachments: Vec::new(),
+                },
+                event_tx,
+                Arc::new(LiveApprovalBridge::new()),
+                Duration::from_secs(1),
+            )
+            .expect_err("mismatched access mode must fail before process I/O");
+        assert!(error
+            .to_string()
+            .contains("does not accept the selected access mode"));
+    }
+
+    #[test]
     fn mitsuro_rejects_product_audio_before_network_io() {
         let backend = DesktopBackend::mitsuro_from_env().expect("default Mitsuro backend");
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
@@ -1013,6 +1305,8 @@ mod tests {
                     text: "transcribe".to_owned(),
                     model: None,
                     reasoning_effort: None,
+                    working_dir: None,
+                    access_mode: None,
                     attachments: vec![ProductAttachment::LocalAudio {
                         path: "/tmp/recording.wav".to_owned(),
                     }],
@@ -1054,6 +1348,8 @@ mod tests {
                         text: "use this".to_owned(),
                         model: None,
                         reasoning_effort: None,
+                        working_dir: None,
+                        access_mode: None,
                         attachments: vec![attachment],
                     },
                     event_tx,
@@ -1076,6 +1372,8 @@ mod tests {
                     text: "hello".to_owned(),
                     model: None,
                     reasoning_effort: None,
+                    working_dir: None,
+                    access_mode: None,
                     attachments: Vec::new(),
                 },
                 event_tx,

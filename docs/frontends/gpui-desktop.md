@@ -53,6 +53,8 @@ backend or are shown as unavailable.
 | File mentions | Unsupported, hidden and rejected before I/O | Live schema-exact `mention { name, path }` from native file picker | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
 | Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
+| Project/workspace | Native folder picker; selected path becomes `working_dir` on real session creation | Native folder picker; absolute `cwd` and runtime workspace root on real session creation | Hidden |
+| Access mode | Live typed `permission_mode`: Supervised or Autonomous | Live schema-exact Read-only, Auto, or Full access approval/sandbox preset | Hidden |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
@@ -134,6 +136,13 @@ work, not as feature completion; the matrix test must change with each typed ada
   persist per backend/model. The transport-neutral turn adapter maps the same selection
   to Codex `effort` and Mitsuro `thinking_enabled`; models with zero or one advertised
   option do not show a misleading selector.
+- Project and access controls are real product adapters rather than prompt decoration.
+  A new conversation is an optimistic local draft until first Send, when the selected
+  absolute project path and backend-specific access preset are used for the real session
+  and first turn. Codex Read-only/Auto/Full access maps to exact approval, reviewer,
+  sandbox, and runtime-root fields. Mitsuro Supervised/Autonomous maps to its typed
+  permission contract. Transport-only Mitsuro metadata is skipped from Codex JSON, and
+  cross-backend access variants are rejected before I/O.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

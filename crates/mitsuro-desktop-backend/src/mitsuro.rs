@@ -5,7 +5,7 @@ use base64::Engine as _;
 use futures::StreamExt as _;
 use mitsuro_client::{
     ChatRequest, ChatStreamEvent, ContentBlock, CreateSessionRequest, ImageSource, MitsuroClient,
-    SessionType, SteerRequest, UpdateSessionRequest,
+    PermissionMode, SessionType, SteerRequest, UpdateSessionRequest,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -176,7 +176,7 @@ impl MitsuroServerBackend {
             model_key: None,
             thinking_enabled: params.effort,
             fast_mode: None,
-            permission_mode: None,
+            permission_mode: mitsuro_permission_mode(params.mitsuro_permission_mode.as_deref())?,
             mode: None,
             research_enabled: None,
         };
@@ -837,7 +837,9 @@ impl AgentBackend for MitsuroServerBackend {
                 workspace_mode: None,
                 target_branch: None,
                 session_type: Some(SessionType::Code),
-                permission_mode: None,
+                permission_mode: mitsuro_permission_mode(
+                    params.mitsuro_permission_mode.as_deref(),
+                )?,
             })
             .await
             .map_err(|error| AgentError::Other(error.to_string()))?;
@@ -1397,9 +1399,34 @@ impl AgentBackend for MitsuroServerBackend {
     }
 }
 
+fn mitsuro_permission_mode(value: Option<&str>) -> Result<Option<PermissionMode>> {
+    match value {
+        None => Ok(None),
+        Some("supervised") => Ok(Some(PermissionMode::Supervised)),
+        Some("autonomous") => Ok(Some(PermissionMode::Autonomous)),
+        Some(other) => Err(AgentError::NotImplemented(format!(
+            "Mitsuro HTTP does not accept permission mode {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_permission_modes_map_to_exact_mitsuro_contract() {
+        assert_eq!(
+            mitsuro_permission_mode(Some("supervised")).unwrap(),
+            Some(PermissionMode::Supervised)
+        );
+        assert_eq!(
+            mitsuro_permission_mode(Some("autonomous")).unwrap(),
+            Some(PermissionMode::Autonomous)
+        );
+        assert_eq!(mitsuro_permission_mode(None).unwrap(), None);
+        assert!(mitsuro_permission_mode(Some("danger-full-access")).is_err());
+    }
 
     #[test]
     fn session_projection_keeps_exact_task_state_cursor_and_unknown_event() {

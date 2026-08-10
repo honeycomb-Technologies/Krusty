@@ -324,6 +324,17 @@ pub struct ThreadStartParams {
     pub ephemeral: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<String>>,
+    /// Transport-neutral product metadata consumed only by the Mitsuro adapter.
+    #[serde(skip)]
+    pub mitsuro_permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -971,10 +982,52 @@ pub struct TurnStartParams {
     /// persists this override for this turn and subsequent turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Approval policy override accepted by Codex app-server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    /// Approval reviewer override accepted by Codex app-server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<String>,
+    /// Typed sandbox policy override accepted by Codex app-server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<SandboxPolicy>,
+    /// Named Codex permissions profile. Presets use `sandbox_policy`, not this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    /// Absolute workspace roots retained by Codex for this and subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_user_message_id: Option<String>,
+    /// Transport-neutral product metadata consumed only by the Mitsuro adapter.
+    #[serde(skip)]
+    pub mitsuro_permission_mode: Option<String>,
+}
+
+/// Schema-exact Codex app-server sandbox policy variants used by the access picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SandboxPolicy {
+    #[serde(rename = "dangerFullAccess")]
+    DangerFullAccess,
+    #[serde(rename = "readOnly")]
+    ReadOnly {
+        #[serde(default, rename = "networkAccess")]
+        network_access: bool,
+    },
+    #[serde(rename = "workspaceWrite")]
+    WorkspaceWrite {
+        #[serde(default, rename = "writableRoots")]
+        writable_roots: Vec<String>,
+        #[serde(default, rename = "networkAccess")]
+        network_access: bool,
+        #[serde(default, rename = "excludeSlashTmp")]
+        exclude_slash_tmp: bool,
+        #[serde(default, rename = "excludeTmpdirEnvVar")]
+        exclude_tmpdir_env_var: bool,
+    },
 }
 
 impl TurnStartParams {
@@ -984,8 +1037,14 @@ impl TurnStartParams {
             input: vec![user_input_text_value(text)],
             model: None,
             effort: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            permissions: None,
+            runtime_workspace_roots: None,
             cwd: None,
             client_user_message_id: None,
+            mitsuro_permission_mode: None,
         }
     }
 

@@ -33,14 +33,14 @@ use mitsuro_desktop_backend::{
     ModelListParams, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
     PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
     PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
-    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
-    ProductSchedule, ProductSkill, ProductSteer, ProductTurn, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
-    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
+    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
+    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSteer, ProductTurn,
+    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
+    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -965,6 +965,13 @@ pub struct MitsuroApp {
     composer_input: Entity<InputState>,
     composer_attachments: Vec<ComposerAttachment>,
     composer_add_menu_open: bool,
+    /// Workspace picked for the next optimistic draft before it has a thread id.
+    composer_default_workspace_dir: Option<String>,
+    /// Backend-specific access preset picked before an optimistic draft exists.
+    composer_default_access_mode: Option<ProductAccessMode>,
+    /// Explicit per-thread access overrides; absent means preserve backend defaults.
+    composer_access_modes: std::collections::HashMap<String, ProductAccessMode>,
+    composer_access_menu_open: bool,
     search_input: Entity<InputState>,
     search_query: String,
     backend: Option<Arc<DesktopBackend>>,
@@ -1247,6 +1254,12 @@ impl MitsuroApp {
             composer_input,
             composer_attachments: Vec::new(),
             composer_add_menu_open: false,
+            composer_default_workspace_dir: std::env::current_dir()
+                .ok()
+                .map(|path| path.display().to_string()),
+            composer_default_access_mode: None,
+            composer_access_modes: std::collections::HashMap::new(),
+            composer_access_menu_open: false,
             search_input,
             search_query: String::new(),
             backend: None,
@@ -4526,6 +4539,7 @@ impl MitsuroApp {
     pub fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_thread = Some(id.clone());
         self.thread_menu_open = false;
+        self.composer_access_menu_open = false;
         let backend_session_id = self
             .threads
             .iter()
@@ -4762,77 +4776,12 @@ impl MitsuroApp {
 
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         let surface = self.active_thread_surface();
-        // Live path: create a server session so Send can attach turns to a real id.
-        if matches!(self.connection, UiConnection::Ready { .. }) {
-            if let Some(backend) = self.backend.clone() {
-                self.status_line = format!("Starting {} via backend…", surface.label()).into();
-                cx.notify();
-                let cwd = match surface {
-                    ThreadSurface::Codex => std::env::current_dir()
-                        .ok()
-                        .map(|path| path.display().to_string()),
-                    ThreadSurface::Chat => None,
-                };
-                let model = self.selected_model_slug();
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(async move {
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .map_err(|e| e.to_string())?;
-                            rt.block_on(async {
-                                backend
-                                    .create_session(CreateSession {
-                                        working_dir: cwd,
-                                        model,
-                                        ephemeral: false,
-                                    })
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            })
-                        })
-                        .await;
-                    let _ = this.update(cx, |app, cx| match result {
-                        Ok(session) => {
-                            let backend_session_id = session.id.clone();
-                            let summary = thread_summary_from_session(session);
-                            let id = summary.id.clone();
-                            app.threads.insert(
-                                0,
-                                DemoThread {
-                                    backend_session_id: Some(backend_session_id),
-                                    summary,
-                                    surface,
-                                    messages: vec![],
-                                },
-                            );
-                            app.selected_thread = Some(id.clone());
-                            match surface {
-                                ThreadSurface::Chat => {
-                                    app.selected_chat_thread = Some(id);
-                                    app.active_mode = ProductMode::Chat;
-                                }
-                                ThreadSurface::Codex => {
-                                    app.selected_codex_thread = Some(id);
-                                    app.active_mode = ProductMode::Codex;
-                                }
-                            }
-                            app.status_line =
-                                format!("Started {} via app-server.", surface.label()).into();
-                            cx.notify();
-                        }
-                        Err(e) => {
-                            app.status_line = format!("thread/start failed · {e}").into();
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-                return;
-            }
-        }
-        if self.is_explicit_fixture() {
+        // New conversations stay local only until first Send. This is an
+        // optimistic draft, not synthetic backend data: promotion creates the
+        // real server session with the selected workspace/access contract.
+        if (matches!(self.connection, UiConnection::Ready { .. }) && self.backend.is_some())
+            || self.is_explicit_fixture()
+        {
             self.new_thread_local(surface, cx);
         } else {
             self.status_line = "New thread is unavailable until a backend is ready.".into();
@@ -4840,17 +4789,28 @@ impl MitsuroApp {
         }
     }
 
-    /// Offline / fallback thread (local id only — not on app-server).
+    /// Optimistic draft (local id only until first live Send).
     fn new_thread_local(&mut self, surface: ThreadSurface, cx: &mut Context<Self>) {
         let id = format!("local-{}", self.threads.len() + 1);
+        let is_fixture = self.is_explicit_fixture();
         let (name, preview, cwd) = match surface {
-            ThreadSurface::Chat => ("New chat".into(), "Local fixture draft".into(), None),
+            ThreadSurface::Chat => (
+                "New chat".into(),
+                if is_fixture {
+                    "Offline fixture draft".into()
+                } else {
+                    "Draft".into()
+                },
+                None,
+            ),
             ThreadSurface::Codex => (
                 "New thread".into(),
-                "Local fixture draft".into(),
-                std::env::current_dir()
-                    .ok()
-                    .map(|path| path.display().to_string()),
+                if is_fixture {
+                    "Offline fixture draft".into()
+                } else {
+                    "Draft".into()
+                },
+                self.composer_default_workspace_dir.clone(),
             ),
         };
         let thread = DemoThread {
@@ -4862,7 +4822,13 @@ impl MitsuroApp {
                 cwd,
                 created_at: None,
                 updated_at: None,
-                model_provider: Some("local".into()),
+                model_provider: Some(if is_fixture {
+                    "fixture".into()
+                } else {
+                    self.active_backend_kind()
+                        .map(|kind| kind.id().to_owned())
+                        .unwrap_or_else(|| "draft".into())
+                }),
                 ephemeral: Some(true),
                 is_pinned: Some(false),
                 archived: Some(false),
@@ -4873,6 +4839,9 @@ impl MitsuroApp {
         };
         self.threads.insert(0, thread);
         self.selected_thread = Some(id.clone());
+        if let Some(mode) = self.composer_default_access_mode {
+            self.composer_access_modes.insert(id.clone(), mode);
+        }
         match surface {
             ThreadSurface::Chat => {
                 self.selected_chat_thread = Some(id);
@@ -4883,7 +4852,11 @@ impl MitsuroApp {
                 self.active_mode = ProductMode::Codex;
             }
         }
-        self.status_line = format!("Started a local {} thread.", surface.label()).into();
+        self.status_line = if is_fixture {
+            format!("Started an offline fixture {} draft.", surface.label()).into()
+        } else {
+            format!("Started a {} draft.", surface.label()).into()
+        };
         cx.notify();
     }
 
@@ -4929,6 +4902,203 @@ impl MitsuroApp {
             return;
         }
         self.composer_add_menu_open = !self.composer_add_menu_open;
+        if self.composer_add_menu_open {
+            self.composer_access_menu_open = false;
+        }
+        cx.notify();
+    }
+
+    pub fn show_composer_workspace_control(&self) -> bool {
+        self.live_backend()
+            .is_some_and(|backend| backend.capabilities().workspace_selection)
+    }
+
+    pub fn can_select_composer_workspace(&self) -> bool {
+        !self.turn_in_progress
+            && self.show_composer_workspace_control()
+            && self
+                .selected_thread()
+                .is_none_or(|thread| thread.backend_session_id.is_none())
+    }
+
+    fn composer_workspace_dir(&self) -> Option<&str> {
+        match self.selected_thread() {
+            Some(thread) => thread.summary.cwd.as_deref(),
+            None => self.composer_default_workspace_dir.as_deref(),
+        }
+    }
+
+    pub fn composer_workspace_label(&self) -> SharedString {
+        let Some(path) = self.composer_workspace_dir() else {
+            return "Choose project".into();
+        };
+        Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(path)
+            .to_owned()
+            .into()
+    }
+
+    pub fn select_composer_workspace(&mut self, cx: &mut Context<Self>) {
+        if !self.can_select_composer_workspace() {
+            self.status_line = if self
+                .selected_thread()
+                .is_some_and(|thread| thread.backend_session_id.is_some())
+            {
+                "The workspace is fixed for this server thread. Start a new thread to change it."
+                    .into()
+            } else {
+                "Project selection is unavailable for the current backend state.".into()
+            };
+            cx.notify();
+            return;
+        }
+        self.composer_access_menu_open = false;
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose project folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let selected = receiver.await;
+            let _ = this.update(cx, |app, cx| {
+                match selected {
+                    Ok(Ok(Some(paths))) => {
+                        let path = paths.into_iter().next();
+                        let canonical = path
+                            .as_deref()
+                            .and_then(|path| std::fs::canonicalize(path).ok())
+                            .filter(|path| path.is_dir());
+                        if let Some(path) = canonical {
+                            let raw_path = path.display().to_string();
+                            app.composer_default_workspace_dir = Some(raw_path.clone());
+                            if let Some(thread_id) = app.selected_thread.clone() {
+                                if let Some(thread) = app.threads.iter_mut().find(|thread| {
+                                    thread.summary.id == thread_id
+                                        && thread.backend_session_id.is_none()
+                                }) {
+                                    thread.summary.cwd = Some(raw_path.clone());
+                                }
+                            }
+                            app.status_line = format!("Project · {raw_path}").into();
+                        } else {
+                            app.status_line =
+                                "Project selection rejected · choose an existing folder.".into();
+                        }
+                    }
+                    Ok(Ok(None)) | Err(_) => {
+                        app.status_line = "Project selection canceled.".into();
+                    }
+                    Ok(Err(error)) => {
+                        app.status_line = format!("Project picker failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn show_composer_access_control(&self) -> bool {
+        self.live_backend()
+            .is_some_and(|backend| backend.capabilities().access_modes)
+    }
+
+    pub fn composer_access_menu_open(&self) -> bool {
+        self.composer_access_menu_open
+    }
+
+    fn composer_access_mode(&self) -> Option<ProductAccessMode> {
+        match self.selected_thread.as_ref() {
+            Some(id) => self.composer_access_modes.get(id).copied(),
+            None => self.composer_default_access_mode,
+        }
+    }
+
+    pub fn composer_access_label(&self) -> &'static str {
+        match self.composer_access_mode() {
+            Some(ProductAccessMode::CodexReadOnly) => "Read-only",
+            Some(ProductAccessMode::CodexAuto) => "Auto",
+            Some(ProductAccessMode::CodexFullAccess) => "Full access",
+            Some(ProductAccessMode::MitsuroSupervised) => "Supervised",
+            Some(ProductAccessMode::MitsuroAutonomous) => "Autonomous",
+            None => "Default access",
+        }
+    }
+
+    pub fn composer_access_mode_is(&self, mode: ProductAccessMode) -> bool {
+        self.composer_access_mode() == Some(mode)
+    }
+
+    pub fn composer_access_choices(&self) -> Vec<(ProductAccessMode, &'static str, &'static str)> {
+        match self.active_backend_kind() {
+            Some(BackendKind::CodexStdio | BackendKind::CodexWebSocket) => vec![
+                (
+                    ProductAccessMode::CodexReadOnly,
+                    "Read-only",
+                    "Ask before actions; do not write files",
+                ),
+                (
+                    ProductAccessMode::CodexAuto,
+                    "Auto",
+                    "Write in the workspace; ask when needed",
+                ),
+                (
+                    ProductAccessMode::CodexFullAccess,
+                    "Full access",
+                    "Run without sandbox or approval prompts",
+                ),
+            ],
+            Some(BackendKind::MitsuroHttp) => vec![
+                (
+                    ProductAccessMode::MitsuroSupervised,
+                    "Supervised",
+                    "Require approval for governed tools",
+                ),
+                (
+                    ProductAccessMode::MitsuroAutonomous,
+                    "Autonomous",
+                    "Use Mitsuro's autonomous permission mode",
+                ),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn toggle_composer_access_menu(&mut self, cx: &mut Context<Self>) {
+        if self.turn_in_progress || !self.show_composer_access_control() {
+            self.status_line =
+                "Access selection is unavailable for the current backend state.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_access_menu_open = !self.composer_access_menu_open;
+        if self.composer_access_menu_open {
+            self.composer_add_menu_open = false;
+        }
+        cx.notify();
+    }
+
+    pub fn select_composer_access_mode(&mut self, mode: ProductAccessMode, cx: &mut Context<Self>) {
+        if !self
+            .composer_access_choices()
+            .iter()
+            .any(|(candidate, _, _)| *candidate == mode)
+        {
+            self.status_line = "That access mode does not belong to the active backend.".into();
+            cx.notify();
+            return;
+        }
+        if let Some(thread_id) = self.selected_thread.clone() {
+            self.composer_access_modes.insert(thread_id, mode);
+        } else {
+            self.composer_default_access_mode = Some(mode);
+        }
+        self.composer_access_menu_open = false;
+        self.status_line = format!("Access · {}", self.composer_access_label()).into();
         cx.notify();
     }
 
@@ -6110,9 +6280,12 @@ impl MitsuroApp {
         });
         self.composer_attachments.clear();
         self.composer_add_menu_open = false;
+        self.composer_access_menu_open = false;
 
         let model_slug = self.selected_model_slug();
         let reasoning_effort = self.selected_reasoning_effort.clone();
+        let working_dir = self.composer_workspace_dir().map(ToOwned::to_owned);
+        let access_mode = self.composer_access_mode();
         if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
             // Still attempt live (server is source of truth) but surface the probe.
             self.status_line =
@@ -6136,6 +6309,8 @@ impl MitsuroApp {
                         trimmed.to_string(),
                         model_slug,
                         reasoning_effort,
+                        working_dir,
+                        access_mode,
                         attachments,
                         cx,
                     );
@@ -6146,6 +6321,8 @@ impl MitsuroApp {
                         trimmed.to_string(),
                         model_slug,
                         reasoning_effort,
+                        working_dir,
+                        access_mode,
                         attachments,
                         cx,
                     );
@@ -6249,6 +6426,8 @@ impl MitsuroApp {
         text: String,
         model: Option<String>,
         reasoning_effort: Option<String>,
+        working_dir: Option<String>,
+        access_mode: Option<ProductAccessMode>,
         attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
@@ -6260,16 +6439,12 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
-        let cwd = self
-            .threads
-            .iter()
-            .find(|t| t.summary.id == local_id)
-            .and_then(|t| t.summary.cwd.clone())
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|path| path.display().to_string())
-            });
+        let cwd = working_dir.or_else(|| {
+            self.threads
+                .iter()
+                .find(|t| t.summary.id == local_id)
+                .and_then(|t| t.summary.cwd.clone())
+        });
         let model_for_start = model.clone();
         cx.spawn(async move |this, cx| {
             let create_backend = Arc::clone(&backend);
@@ -6285,6 +6460,7 @@ impl MitsuroApp {
                                 working_dir: cwd,
                                 model: model_for_start,
                                 ephemeral: false,
+                                access_mode,
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -6310,12 +6486,24 @@ impl MitsuroApp {
                     }
                     app.selected_thread = Some(new_id.clone());
                     app.active_turn_thread_id = Some(new_id.clone());
+                    if let Some(mode) = app.composer_access_modes.remove(&local_id) {
+                        app.composer_access_modes.insert(new_id.clone(), mode);
+                    }
                     match app.active_thread_surface() {
                         ThreadSurface::Chat => app.selected_chat_thread = Some(new_id.clone()),
                         ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
                     }
                     app.status_line = format!("Live turn/start on {new_id}…").into();
-                    app.start_live_turn(new_id, text, model, reasoning_effort, attachments, cx);
+                    app.start_live_turn(
+                        new_id,
+                        text,
+                        model,
+                        reasoning_effort,
+                        app.composer_workspace_dir().map(ToOwned::to_owned),
+                        access_mode,
+                        attachments,
+                        cx,
+                    );
                     cx.notify();
                 }
                 Err(e) => {
@@ -6536,6 +6724,8 @@ impl MitsuroApp {
         text: String,
         model: Option<String>,
         reasoning_effort: Option<String>,
+        working_dir: Option<String>,
+        access_mode: Option<ProductAccessMode>,
         attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
@@ -6602,6 +6792,8 @@ impl MitsuroApp {
                                 text,
                                 model,
                                 reasoning_effort,
+                                working_dir,
+                                access_mode,
                                 attachments,
                             },
                             event_tx,
@@ -7828,6 +8020,12 @@ impl MitsuroApp {
         self.turn_in_progress = false;
         self.composer_attachments.clear();
         self.composer_add_menu_open = false;
+        self.composer_default_workspace_dir = std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string());
+        self.composer_default_access_mode = None;
+        self.composer_access_modes.clear();
+        self.composer_access_menu_open = false;
         self.account = AccountSession::empty(kind.id());
         self.account_state = SurfaceDataState::Loading;
     }

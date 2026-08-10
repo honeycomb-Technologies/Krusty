@@ -2,9 +2,9 @@
 //!
 //! Implemented controls are interactive: text entry, backend-scoped model and
 //! advertised reasoning-effort cycling, real model-gated image and audio file
-//! attachments, Codex skill and file-mention inputs, Send, and Stop. Microphone
-//! recording, speed presets, and project selection remain absent until their
-//! backend contracts exist.
+//! attachments, Codex skill and file-mention inputs, native project selection,
+//! backend-specific access presets, Send, and Stop. Microphone recording and
+//! speed presets remain absent until their backend contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -90,6 +90,9 @@ fn codex_composer(
                 .when(app.composer_add_menu_open(), |this| {
                     this.child(composer_add_menu(app, cx))
                 })
+                .when(app.composer_access_menu_open(), |this| {
+                    this.child(composer_access_menu(app, cx))
+                })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
                 })
@@ -130,6 +133,12 @@ fn codex_composer(
                                 cx,
                                 |app, _, _, cx| app.select_composer_audio(cx),
                             ))
+                        })
+                        .when(app.show_composer_workspace_control(), |this| {
+                            this.child(workspace_chip(app, cx))
+                        })
+                        .when(app.show_composer_access_control(), |this| {
+                            this.child(access_chip(app, cx))
                         })
                         .child(model_chip(&model, cx))
                         .when_some(reasoning, |this, label| {
@@ -668,6 +677,146 @@ fn usage_card(_cx: &mut Context<MitsuroApp>) -> impl IntoElement {
                 .child(div().text_xs().text_color(colors.text_tertiary).child(
                     "Check account settings or wait for the current limit window to reset.",
                 )),
+        )
+}
+
+fn workspace_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let label = app.composer_workspace_label();
+    let enabled = app.can_select_composer_workspace();
+    div()
+        .id("workspace-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w_0()
+        .max_w(px(154.0))
+        .gap(px(5.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .text_color(if enabled {
+            colors.text_tertiary
+        } else {
+            theme::hex_alpha(0xffffff, 0.32)
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(|app, _, _, cx| app.select_composer_workspace(cx)))
+        })
+        .child(Icon::empty().path("icons/folder.svg").with_size(px(12.0)))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_xs()
+                .child(label),
+        )
+}
+
+fn access_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let enabled = !app.turn_in_progress();
+    div()
+        .id("access-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .text_color(if enabled {
+            colors.text_tertiary
+        } else {
+            theme::hex_alpha(0xffffff, 0.32)
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(|app, _, _, cx| app.toggle_composer_access_menu(cx)))
+        })
+        .child(Icon::empty().path("icons/shield.svg").with_size(px(12.0)))
+        .child(div().text_xs().child(app.composer_access_label()))
+        .child(Icon::new(IconName::ChevronDown).with_size(px(11.0)))
+}
+
+fn composer_access_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let choices = app.composer_access_choices();
+    div()
+        .id("composer-access-menu")
+        .w_full()
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .pt(px(5.0))
+                .pb(px(4.0))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.text_tertiary)
+                .child("Agent access"),
+        )
+        .children(
+            choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (mode, label, detail))| {
+                    let selected = app.composer_access_mode_is(mode);
+                    div()
+                        .id(("composer-access-choice", index))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(9.0))
+                        .px(px(8.0))
+                        .py(px(7.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .when(selected, |this| this.bg(colors.bg_hover))
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.select_composer_access_mode(mode, cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(14.0))
+                                .text_xs()
+                                .text_color(colors.text_secondary)
+                                .child(if selected { "✓" } else { "" }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_secondary)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.text_tertiary)
+                                        .child(detail),
+                                ),
+                        )
+                        .into_any_element()
+                }),
         )
 }
 
