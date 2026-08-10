@@ -1,8 +1,8 @@
 //! Transport-neutral chat composer.
 //!
 //! Implemented controls are interactive: text entry, backend-scoped model cycling,
-//! Send, and Stop. Voice, attachments, speed presets, and project selection are
-//! deliberately absent until their backend contracts exist.
+//! real image attachments, Send, and Stop. Voice, speed presets, and project
+//! selection remain absent until their backend contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -46,7 +46,8 @@ fn codex_composer(
     let steerable = app.can_steer_active_turn();
     let calm = app.is_calm_stage();
     let show_usage = app.usage_card_visible();
-    let draft_empty = input.read(cx).value().trim().is_empty();
+    let draft_empty =
+        input.read(cx).value().trim().is_empty() && app.composer_attachments().is_empty();
 
     div()
         .id("composer-wrap")
@@ -80,6 +81,9 @@ fn codex_composer(
                 .pt(px(12.0))
                 .pb(px(10.0))
                 .gap(px(10.0))
+                .when(!app.composer_attachments().is_empty(), |this| {
+                    this.child(attachment_chips(app, cx))
+                })
                 // Multi-line input
                 .child(
                     div()
@@ -101,6 +105,15 @@ fn codex_composer(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
+                        .when(app.can_attach_images(), |this| {
+                            this.child(round_action(
+                                "composer-attach-image",
+                                IconName::Plus,
+                                false,
+                                cx,
+                                |app, _, _, cx| app.select_composer_images(cx),
+                            ))
+                        })
                         .child(model_chip(&model, cx))
                         .child(div().flex_1())
                         .child(if streaming {
@@ -141,7 +154,8 @@ fn chat_slim_composer(
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
     let steerable = app.can_steer_active_turn();
-    let draft_empty = input.read(cx).value().trim().is_empty();
+    let draft_empty =
+        input.read(cx).value().trim().is_empty() && app.composer_attachments().is_empty();
 
     div()
         .id("composer-wrap-chat")
@@ -153,6 +167,9 @@ fn chat_slim_composer(
         .flex()
         .flex_col()
         .items_center()
+        .when(!app.composer_attachments().is_empty(), |this| {
+            this.child(attachment_chips(app, cx))
+        })
         .child(
             div()
                 .w_full()
@@ -166,6 +183,15 @@ fn chat_slim_composer(
                 .bg(theme::hex_alpha(0x1a1a1a, 0.85))
                 .border_1()
                 .border_color(colors.border_subtle)
+                .when(app.can_attach_images(), |this| {
+                    this.child(round_action(
+                        "chat-attach-image",
+                        IconName::Plus,
+                        false,
+                        cx,
+                        |app, _, _, cx| app.select_composer_images(cx),
+                    ))
+                })
                 .child(
                     div()
                         .flex_1()
@@ -205,7 +231,8 @@ fn chat_thread_composer(
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
     let steerable = app.can_steer_active_turn();
-    let draft_empty = input.read(cx).value().trim().is_empty();
+    let draft_empty =
+        input.read(cx).value().trim().is_empty() && app.composer_attachments().is_empty();
 
     div()
         .id("composer-wrap-chat-thread")
@@ -228,6 +255,9 @@ fn chat_thread_composer(
                 .pt(px(10.0))
                 .pb(px(8.0))
                 .gap(px(8.0))
+                .when(!app.composer_attachments().is_empty(), |this| {
+                    this.child(attachment_chips(app, cx))
+                })
                 .child(
                     div()
                         .min_h(px(40.0))
@@ -243,6 +273,15 @@ fn chat_thread_composer(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
+                        .when(app.can_attach_images(), |this| {
+                            this.child(round_action(
+                                "chat-thread-attach-image",
+                                IconName::Plus,
+                                false,
+                                cx,
+                                |app, _, _, cx| app.select_composer_images(cx),
+                            ))
+                        })
                         .child(div().flex_1())
                         .child(if streaming {
                             streaming_actions(
@@ -269,6 +308,66 @@ fn chat_thread_composer(
                             disabled_send("chat-thread-send-disabled").into_any_element()
                         }),
                 ),
+        )
+}
+
+fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("composer-attachments")
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(6.0))
+        .children(
+            app.composer_attachments()
+                .iter()
+                .enumerate()
+                .map(|(index, attachment)| {
+                    div()
+                        .id(("composer-attachment", index))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .max_w(px(220.0))
+                        .px(px(9.0))
+                        .py(px(5.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_button_secondary)
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(
+                            Icon::empty()
+                                .path("icons/gallery-vertical-end.svg")
+                                .with_size(px(13.0))
+                                .text_color(colors.text_tertiary),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(colors.text_secondary)
+                                .overflow_hidden()
+                                .child(attachment.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(("remove-composer-attachment", index))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.remove_composer_attachment(index, cx);
+                                }))
+                                .child(
+                                    Icon::new(IconName::Close)
+                                        .with_size(px(12.0))
+                                        .text_color(colors.text_tertiary),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
         )
 }
 

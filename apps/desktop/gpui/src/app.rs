@@ -1,6 +1,7 @@
 //! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +9,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Window,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, ScrollHandle, SharedString,
+    Styled as _, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
@@ -28,14 +30,15 @@ use mitsuro_desktop_backend::{
     McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams,
     PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginAuthPolicy,
     PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
-    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSteer, ProductTurn, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
-    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
+    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
+    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
+    ProductSchedule, ProductSkill, ProductSteer, ProductTurn, ReasoningEffortOption,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
+    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -756,6 +759,12 @@ pub struct AccountSession {
     pub source: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerAttachment {
+    pub path: String,
+    pub name: String,
+}
+
 impl AccountSession {
     /// Seeded fixture demo profile (signed-in Pro + usage bars + Jacob Burgess).
     pub fn fixture_demo() -> Self {
@@ -940,6 +949,7 @@ pub struct MitsuroApp {
     account: AccountSession,
     account_state: SurfaceDataState,
     composer_input: Entity<InputState>,
+    composer_attachments: Vec<ComposerAttachment>,
     search_input: Entity<InputState>,
     search_query: String,
     backend: Option<Arc<DesktopBackend>>,
@@ -1219,6 +1229,7 @@ impl MitsuroApp {
             account: AccountSession::empty("loading"),
             account_state: SurfaceDataState::Loading,
             composer_input,
+            composer_attachments: Vec::new(),
             search_input,
             search_query: String::new(),
             backend: None,
@@ -4798,6 +4809,113 @@ impl MitsuroApp {
         self.turn_in_progress
     }
 
+    pub fn composer_attachments(&self) -> &[ComposerAttachment] {
+        &self.composer_attachments
+    }
+
+    pub fn can_attach_images(&self) -> bool {
+        !self.turn_in_progress
+            && self
+                .live_backend()
+                .is_some_and(|backend| backend.capabilities().image_attachments)
+    }
+
+    pub fn select_composer_images(&mut self, cx: &mut Context<Self>) {
+        if !self.can_attach_images() {
+            self.status_line =
+                "Image attachments are unavailable for the current backend state.".into();
+            cx.notify();
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach images".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let selected = receiver.await;
+            let _ = this.update(cx, |app, cx| {
+                match selected {
+                    Ok(Ok(Some(paths))) => {
+                        let mut rejected = 0usize;
+                        for path in paths {
+                            if app.composer_attachments.len() >= 4 {
+                                rejected += 1;
+                                continue;
+                            }
+                            let supported = path
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(|extension| {
+                                    matches!(
+                                        extension.to_ascii_lowercase().as_str(),
+                                        "png" | "jpg" | "jpeg" | "webp" | "gif"
+                                    )
+                                });
+                            let size_ok = std::fs::metadata(&path)
+                                .map(|metadata| metadata.is_file() && metadata.len() <= 20 * 1024 * 1024)
+                                .unwrap_or(false);
+                            let Some(raw_path) = path.to_str() else {
+                                rejected += 1;
+                                continue;
+                            };
+                            if !supported || !size_ok || !Path::new(raw_path).is_absolute() {
+                                rejected += 1;
+                                continue;
+                            }
+                            if app
+                                .composer_attachments
+                                .iter()
+                                .any(|attachment| attachment.path == raw_path)
+                            {
+                                continue;
+                            }
+                            let name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("image")
+                                .to_owned();
+                            app.composer_attachments.push(ComposerAttachment {
+                                path: raw_path.to_owned(),
+                                name,
+                            });
+                        }
+                        app.status_line = if rejected == 0 {
+                            format!(
+                                "Attached {} image(s).",
+                                app.composer_attachments.len()
+                            )
+                            .into()
+                        } else {
+                            format!(
+                                "Attached {} image(s) · rejected {rejected} unsupported, oversized, or excess file(s).",
+                                app.composer_attachments.len()
+                            )
+                            .into()
+                        };
+                    }
+                    Ok(Ok(None)) | Err(_) => {
+                        app.status_line = "Image attachment canceled.".into();
+                    }
+                    Ok(Err(error)) => {
+                        app.status_line = format!("Image picker failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn remove_composer_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.composer_attachments.len() {
+            self.composer_attachments.remove(index);
+            self.status_line = "Image attachment removed.".into();
+            cx.notify();
+        }
+    }
+
     pub fn can_steer_active_turn(&self) -> bool {
         self.turn_in_progress
             && self
@@ -5469,13 +5587,18 @@ impl MitsuroApp {
     ) {
         let text = input.read(cx).value().to_string();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && self.composer_attachments.is_empty() {
             self.status_line = "Composer is empty.".into();
             cx.notify();
             return;
         }
 
         if self.turn_in_progress {
+            if !self.composer_attachments.is_empty() {
+                self.status_line = "Image attachments cannot steer an active turn.".into();
+                cx.notify();
+                return;
+            }
             self.submit_live_steer(input, trimmed.to_owned(), window, cx);
             return;
         }
@@ -5513,11 +5636,31 @@ impl MitsuroApp {
             return;
         }
 
+        let attachments = self
+            .composer_attachments
+            .iter()
+            .map(|attachment| ProductAttachment::LocalImage {
+                path: attachment.path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let attachment_names = self
+            .composer_attachments
+            .iter()
+            .map(|attachment| attachment.name.clone())
+            .collect::<Vec<_>>();
+        let visible_user_text = if attachment_names.is_empty() {
+            trimmed.to_owned()
+        } else if trimmed.is_empty() {
+            format!("Attached images · {}", attachment_names.join(", "))
+        } else {
+            format!("{trimmed}\n\nImages · {}", attachment_names.join(", "))
+        };
+
         // Append user bubble immediately; auto-name from first message when still default.
         let mut auto_name: Option<String> = None;
         if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == thread_id) {
-            thread.messages.push(DemoMessage::user(trimmed));
-            thread.summary.preview = Some(trimmed.chars().take(64).collect());
+            thread.messages.push(DemoMessage::user(&visible_user_text));
+            thread.summary.preview = Some(visible_user_text.chars().take(64).collect());
             let is_default_name = thread
                 .summary
                 .name
@@ -5525,7 +5668,7 @@ impl MitsuroApp {
                 .map(|n| n == "New thread" || n == "New chat" || n == "New fixture thread")
                 .unwrap_or(true);
             if is_default_name {
-                let name: String = trimmed.chars().take(48).collect();
+                let name: String = visible_user_text.chars().take(48).collect();
                 thread.summary.name = Some(name.clone());
                 auto_name = Some(name);
             }
@@ -5539,6 +5682,7 @@ impl MitsuroApp {
         input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
+        self.composer_attachments.clear();
 
         let model_slug = self.selected_model_slug();
         if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
@@ -5563,11 +5707,18 @@ impl MitsuroApp {
                         thread_id,
                         trimmed.to_string(),
                         model_slug,
+                        attachments,
                         cx,
                     );
                 } else {
                     self.status_line = format!("Live turn/start{model_note}…").into();
-                    self.start_live_turn(thread_id, trimmed.to_string(), model_slug, cx);
+                    self.start_live_turn(
+                        thread_id,
+                        trimmed.to_string(),
+                        model_slug,
+                        attachments,
+                        cx,
+                    );
                 }
             }
             SendMode::Fixture => {
@@ -5667,6 +5818,7 @@ impl MitsuroApp {
         local_id: String,
         text: String,
         model: Option<String>,
+        attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
         let turn_generation = self.turn_generation;
@@ -5732,7 +5884,7 @@ impl MitsuroApp {
                         ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
                     }
                     app.status_line = format!("Live turn/start on {new_id}…").into();
-                    app.start_live_turn(new_id, text, model, cx);
+                    app.start_live_turn(new_id, text, model, attachments, cx);
                     cx.notify();
                 }
                 Err(e) => {
@@ -5952,6 +6104,7 @@ impl MitsuroApp {
         thread_id: String,
         text: String,
         model: Option<String>,
+        attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
         let turn_generation = self.turn_generation;
@@ -5995,6 +6148,7 @@ impl MitsuroApp {
                 let bridge = Arc::clone(&bridge);
                 let text = text.clone();
                 let model = model.clone();
+                let attachments = attachments.clone();
                 let msg_tx = msg_tx;
                 async move {
                     let (event_tx, event_rx) = std::sync::mpsc::channel::<TurnStreamEvent>();
@@ -6014,6 +6168,7 @@ impl MitsuroApp {
                                 session_id,
                                 text,
                                 model,
+                                attachments,
                             },
                             event_tx,
                             bridge,
@@ -7236,6 +7391,7 @@ impl MitsuroApp {
         self.active_turn_thread_id = None;
         self.active_turn_id = None;
         self.turn_in_progress = false;
+        self.composer_attachments.clear();
         self.account = AccountSession::empty(kind.id());
         self.account_state = SurfaceDataState::Loading;
     }

@@ -835,6 +835,14 @@ impl TurnStartParams {
         self.model = Some(model.into());
         self
     }
+
+    pub fn push_local_image(&mut self, path: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "localImage",
+            "path": path.into(),
+            "detail": null
+        }));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2706,6 +2714,16 @@ mod p9_protocol_shape_tests {
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("model").is_none());
         assert_eq!(v["threadId"], "t");
+    }
+
+    #[test]
+    fn turn_start_local_image_matches_generated_user_input_contract() {
+        let mut params = TurnStartParams::text("thread-1", "inspect this");
+        params.push_local_image("/tmp/screenshot.png");
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["input"][1]["type"], "localImage");
+        assert_eq!(value["input"][1]["path"], "/tmp/screenshot.png");
+        assert!(value["input"][1]["detail"].is_null());
     }
 
     #[test]

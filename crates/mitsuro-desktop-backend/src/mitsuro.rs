@@ -1,12 +1,14 @@
 //! Mitsuro HTTP/SSE backend adapter.
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::StreamExt as _;
 use mitsuro_client::{
-    ChatRequest, ChatStreamEvent, CreateSessionRequest, MitsuroClient, SessionType, SteerRequest,
-    UpdateSessionRequest,
+    ChatRequest, ChatStreamEvent, ContentBlock, CreateSessionRequest, ImageSource, MitsuroClient,
+    SessionType, SteerRequest, UpdateSessionRequest,
 };
 use serde_json::Value;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -154,7 +156,7 @@ impl MitsuroServerBackend {
         overall_timeout: Duration,
     ) -> Result<LiveTurnOutcome> {
         let thread_id = params.thread_id;
-        let text = turn_input_text(&params.input);
+        let (text, content) = turn_input_content(&params.input).await?;
         let turn_id = format!(
             "mitsuro-turn-{}",
             self.next_turn_id.fetch_add(1, Ordering::Relaxed)
@@ -164,7 +166,7 @@ impl MitsuroServerBackend {
         let request = ChatRequest {
             session_id: Some(thread_id.clone()),
             message: text,
-            content: Vec::new(),
+            content,
             project_dir: None,
             working_dir: params.cwd,
             workspace_mode: None,
@@ -563,6 +565,72 @@ fn turn_input_text(input: &[Value]) -> String {
         .join("\n")
 }
 
+async fn turn_input_content(input: &[Value]) -> Result<(String, Vec<ContentBlock>)> {
+    const MAX_LOCAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+    let text = turn_input_text(input);
+    let mut content = Vec::new();
+    for value in input {
+        match value.get("type").and_then(Value::as_str) {
+            Some("image") => {
+                let url = value
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AgentError::Protocol("image input is missing url".to_owned()))?;
+                content.push(ContentBlock::Image {
+                    source: ImageSource::Url {
+                        url: url.to_owned(),
+                    },
+                });
+            }
+            Some("localImage") => {
+                let raw_path = value.get("path").and_then(Value::as_str).ok_or_else(|| {
+                    AgentError::Protocol("localImage input is missing path".to_owned())
+                })?;
+                let path = Path::new(raw_path);
+                let media_type = local_image_media_type(path).ok_or_else(|| {
+                    AgentError::Protocol(format!(
+                        "unsupported local image type: {}",
+                        path.display()
+                    ))
+                })?;
+                let bytes = tokio::fs::read(path).await.map_err(|error| {
+                    AgentError::Other(format!("read local image {}: {error}", path.display()))
+                })?;
+                if bytes.len() > MAX_LOCAL_IMAGE_BYTES {
+                    return Err(AgentError::Other(format!(
+                        "local image exceeds 20 MiB: {}",
+                        path.display()
+                    )));
+                }
+                content.push(ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: media_type.to_owned(),
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok((text, content))
+}
+
+fn local_image_media_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
 fn message_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -902,12 +970,12 @@ impl AgentBackend for MitsuroServerBackend {
     }
 
     async fn turn_steer(&self, params: TurnSteerParams) -> Result<TurnSteerResponse> {
-        let message = turn_input_text(&params.input);
+        let (message, content) = turn_input_content(&params.input).await?;
         self.client
             .steer(SteerRequest {
                 session_id: params.thread_id,
                 message,
-                content: Vec::new(),
+                content,
             })
             .await
             .map_err(|error| AgentError::Other(error.to_string()))?;
@@ -1357,6 +1425,30 @@ mod tests {
             serde_json::json!({"type": "text", "text": "world"}),
         ];
         assert_eq!(turn_input_text(&input), "hello\nworld");
+    }
+
+    #[tokio::test]
+    async fn maps_local_image_input_to_real_mitsuro_content_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture.png");
+        std::fs::write(&path, b"png-bytes").unwrap();
+        let input = vec![
+            serde_json::json!({"type": "text", "text": "inspect"}),
+            serde_json::json!({"type": "localImage", "path": path}),
+        ];
+
+        let (text, content) = turn_input_content(&input).await.unwrap();
+        assert_eq!(text, "inspect");
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            content[0],
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".to_owned(),
+                    data: base64::engine::general_purpose::STANDARD.encode(b"png-bytes"),
+                }
+            }
+        );
     }
 
     #[tokio::test]

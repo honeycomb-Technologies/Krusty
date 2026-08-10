@@ -59,9 +59,10 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Codex sign-in launches the real app-server OAuth URL and remains pending until the
   matching completion notification arrives. The user can reopen or cancel that exact
   login. Fixture device codes remain confined to explicit fixture mode.
-- The composer exposes only implemented behavior: text entry, Send, Stop, and
-  backend-scoped model cycling. Attachment, voice, project, and access stubs are not
-  presented as controls.
+- The composer exposes only implemented behavior: text entry, real image attachments,
+  Send, Stop, and backend-scoped model cycling. GPUI's native path prompt supplies
+  absolute image paths; Codex receives `localImage` input and Mitsuro receives encoded
+  image content. Voice, project, and access stubs are not presented as controls.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

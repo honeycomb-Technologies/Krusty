@@ -47,6 +47,7 @@ backend or are shown as unavailable.
 | Health/connect | Live | Live | Explicit fixture |
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
+| Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
@@ -105,6 +106,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   identity for cancel/reopen, and waits for `account/login/completed` before claiming
   success or loading authenticated usage. Failed logout keeps the last server snapshot
   visible instead of pretending local sign-out succeeded.
+- The composer path picker accepts up to four supported images at 20 MiB each. Codex
+  receives absolute `localImage` user inputs; Mitsuro reads the selected file and sends
+  a real MIME-labeled base64 content block. Attachments are cleared on backend switch
+  and never fall back to fixture data.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

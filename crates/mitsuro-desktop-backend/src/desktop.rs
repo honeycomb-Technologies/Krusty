@@ -46,6 +46,7 @@ impl BackendKind {
 pub struct BackendCapabilities {
     pub sessions: bool,
     pub streaming_chat: bool,
+    pub image_attachments: bool,
     pub steering: bool,
     pub manual_compaction: bool,
     pub review: bool,
@@ -66,6 +67,7 @@ impl BackendCapabilities {
         Self {
             sessions: true,
             streaming_chat: true,
+            image_attachments: true,
             steering: true,
             manual_compaction: true,
             review: true,
@@ -86,6 +88,7 @@ impl BackendCapabilities {
         Self {
             sessions: true,
             streaming_chat: true,
+            image_attachments: true,
             steering: true,
             manual_compaction: false,
             review: false,
@@ -377,6 +380,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().processes);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
+        assert!(BackendCapabilities::mitsuro().image_attachments);
+        assert!(BackendCapabilities::codex().image_attachments);
         assert!(BackendCapabilities::mitsuro().steering);
         assert!(BackendCapabilities::codex().steering);
         assert!(!BackendCapabilities::mitsuro().manual_compaction);

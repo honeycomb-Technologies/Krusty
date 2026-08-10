@@ -111,6 +111,12 @@ pub struct ProductTurn {
     pub session_id: BackendSessionId,
     pub text: String,
     pub model: Option<String>,
+    pub attachments: Vec<ProductAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductAttachment {
+    LocalImage { path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,12 +334,8 @@ impl DesktopBackend {
         timeout: Duration,
     ) -> Result<LiveTurnOutcome> {
         self.ensure_session_origin(&request.session_id)?;
-        self.run_turn_with_bridge_blocking(
-            TurnStartParams::text_with_model(request.session_id.raw, request.text, request.model),
-            event_tx,
-            bridge,
-            timeout,
-        )
+        let params = product_turn_params(request);
+        self.run_turn_with_bridge_blocking(params, event_tx, bridge, timeout)
     }
 
     pub fn run_product_review_with_bridge_blocking(
@@ -371,6 +373,17 @@ impl DesktopBackend {
             .await
         })
     }
+}
+
+fn product_turn_params(request: ProductTurn) -> TurnStartParams {
+    let mut params =
+        TurnStartParams::text_with_model(request.session_id.raw, request.text, request.model);
+    for attachment in request.attachments {
+        match attachment {
+            ProductAttachment::LocalImage { path } => params.push_local_image(path),
+        }
+    }
+    params
 }
 
 fn review_start_params(request: ProductReview) -> ReviewStartParams {
@@ -804,8 +817,26 @@ mod tests {
             session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
             text: "hello".to_owned(),
             model: None,
+            attachments: Vec::new(),
         };
         assert_eq!(request.session_id.qualified(), "mitsuro-http:session-7");
+    }
+
+    #[test]
+    fn product_turn_preserves_local_images_for_codex_wire_input() {
+        let params = product_turn_params(ProductTurn {
+            session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+            text: "inspect".to_owned(),
+            model: Some("gpt-5".to_owned()),
+            attachments: vec![ProductAttachment::LocalImage {
+                path: "/tmp/capture.png".to_owned(),
+            }],
+        });
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["threadId"], "thread-7");
+        assert_eq!(value["input"][0]["text"], "inspect");
+        assert_eq!(value["input"][1]["type"], "localImage");
+        assert_eq!(value["input"][1]["path"], "/tmp/capture.png");
     }
 
     #[test]
@@ -818,6 +849,7 @@ mod tests {
                     session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
                     text: "hello".to_owned(),
                     model: None,
+                    attachments: Vec::new(),
                 },
                 event_tx,
                 Arc::new(LiveApprovalBridge::new()),
