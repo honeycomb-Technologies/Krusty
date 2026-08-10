@@ -210,10 +210,10 @@ pub use protocol::{
     ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse,
     ThreadSearchResult, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
     ThreadStartResponse, ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse,
-    TranscriptAudio, TranscriptAudioSource, TranscriptImage, TranscriptImageSource,
-    TranscriptMessage, TranscriptReference, TranscriptReferenceKind, TranscriptRole,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnSteerParams, TurnSteerResponse,
+    ThreadUnsubscribeParams, ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TranscriptAudio,
+    TranscriptAudioSource, TranscriptImage, TranscriptImageSource, TranscriptMessage,
+    TranscriptReference, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 pub use realtime::{
     CodexResponseHandoffMode, ConversationTextRole, RealtimeConversationVersion, RealtimeEvent,

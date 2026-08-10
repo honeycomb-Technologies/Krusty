@@ -91,8 +91,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 100 typed adapters
-and 33 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 101 typed adapters
+and 32 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -222,6 +222,11 @@ work, not as feature completion; the matrix test must change with each typed ada
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
+- Opening a persisted Codex conversation uses `thread/resume`, matching the reference
+  client's subscription lifecycle. Leaving an idle Codex conversation issues the exact
+  `thread/unsubscribe` request, while returning to it resumes and refreshes authoritative
+  history. Mitsuro remains snapshot-only and never receives the Codex lifecycle method;
+  active turns are not unsubscribed while their stream is still running.
 - Find in conversation searches only backend-owned user/final-assistant text. Selecting
   an unloaded match hydrates five real turns in both directions from the returned turn
   cursor, deduplicates already loaded item ids, and scrolls to the exact persisted item.

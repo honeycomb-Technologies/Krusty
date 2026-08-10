@@ -75,8 +75,9 @@ use crate::protocol::{
     ThreadGoalSetResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
     ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
+    ThreadUnsubscribeResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::realtime::{
     ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
@@ -690,6 +691,15 @@ impl CodexAppServerBackend {
         self.request_typed("thread/resume", Some(value)).await
     }
 
+    /// Release a thread subscription via `thread/unsubscribe`.
+    pub async fn unsubscribe_thread(
+        &self,
+        params: ThreadUnsubscribeParams,
+    ) -> Result<ThreadUnsubscribeResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/unsubscribe", Some(value)).await
+    }
+
     /// Interrupt an in-progress turn via `turn/interrupt`.
     pub async fn interrupt_turn(
         &self,
@@ -1277,6 +1287,13 @@ impl AgentBackend for CodexAppServerBackend {
 
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
         self.resume_thread(params).await
+    }
+
+    async fn thread_unsubscribe(
+        &self,
+        params: ThreadUnsubscribeParams,
+    ) -> Result<ThreadUnsubscribeResponse> {
+        self.unsubscribe_thread(params).await
     }
 
     async fn thread_compact_start(
@@ -1918,6 +1935,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.turn_id, "turn-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thread_unsubscribe_uses_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "thread/unsubscribe");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({ "threadId": "thread-1" })
+            );
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": request["id"],
+                        "result": { "status": "unsubscribed" }
+                    })
+                    .to_string(),
+                )
+                .await;
+        });
+
+        let response = backend
+            .unsubscribe_thread(ThreadUnsubscribeParams::new("thread-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status,
+            crate::protocol::ThreadUnsubscribeStatus::Unsubscribed
+        );
         server.await.unwrap();
     }
 
@@ -3662,8 +3726,20 @@ mod integration_tests {
             })
             .await
             .expect("thread/list");
-        // data may be empty but must deserialize
-        let _ = list.threads();
+        // Data may be empty but must deserialize. If one persisted thread is
+        // available, exercise the exact non-mutating open/close lifecycle.
+        let persisted_thread_id = list.threads().first().map(|thread| thread.id.clone());
+        if let Some(thread_id) = persisted_thread_id {
+            let resumed = backend
+                .resume_thread(ThreadResumeParams::new(thread_id.clone()))
+                .await
+                .expect("thread/resume persisted thread");
+            assert_eq!(resumed.summary().id, thread_id);
+            backend
+                .unsubscribe_thread(ThreadUnsubscribeParams::new(thread_id))
+                .await
+                .expect("thread/unsubscribe persisted thread");
+        }
 
         // ephemeral thread/start — no model turn
         let started = backend
@@ -3690,7 +3766,7 @@ mod integration_tests {
         // thread. A domain error is acceptable because there is no turn to remove;
         // method-not-found would contradict the advertised edit capability.
         match backend
-            .rollback_thread(ThreadRollbackParams::one(summary.id))
+            .rollback_thread(ThreadRollbackParams::one(summary.id.clone()))
             .await
         {
             Ok(_) => {}
@@ -3703,6 +3779,17 @@ mod integration_tests {
             Err(AgentError::Rpc { .. } | AgentError::Protocol(_)) => {}
             Err(error) => panic!("unexpected thread/rollback transport failure: {error}"),
         }
+
+        let unsubscribe = backend
+            .unsubscribe_thread(ThreadUnsubscribeParams::new(summary.id))
+            .await
+            .expect("thread/unsubscribe");
+        assert!(matches!(
+            unsubscribe.status,
+            crate::protocol::ThreadUnsubscribeStatus::NotLoaded
+                | crate::protocol::ThreadUnsubscribeStatus::NotSubscribed
+                | crate::protocol::ThreadUnsubscribeStatus::Unsubscribed
+        ));
 
         backend.disconnect().await.expect("disconnect");
         assert!(matches!(backend.status(), ConnectionStatus::Disconnected));

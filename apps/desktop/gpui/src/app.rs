@@ -8482,7 +8482,13 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
-        if self.selected_thread.as_deref() != Some(id.as_str()) {
+        let selection_changed = self.selected_thread.as_deref() != Some(id.as_str());
+        if selection_changed {
+            if let Some(previous_id) = self.selected_thread.clone() {
+                if self.active_turn_thread_id.as_deref() != Some(previous_id.as_str()) {
+                    self.release_thread_subscription_best_effort(&previous_id, cx);
+                }
+            }
             self.latest_message_edit = None;
             self.latest_message_edit_error = None;
             self.latest_message_edit_generation =
@@ -8541,8 +8547,9 @@ impl MitsuroApp {
             self.status_line = "Thread selected.".into();
         }
 
-        // Real server threads when Ready: always thread/read if local cache is empty
-        // (list/bootstrap leaves messages empty until open).
+        // Real server threads when Ready: Codex resumes every newly selected
+        // conversation so returning after `thread/unsubscribe` owns a fresh
+        // subscription. Snapshot-only backends load only an empty local cache.
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
                 let empty = self
@@ -8551,8 +8558,12 @@ impl MitsuroApp {
                     .find(|t| t.summary.id == id)
                     .map(|t| t.messages.is_empty())
                     .unwrap_or(true);
-                if empty {
-                    self.status_line = "thread/read…".into();
+                if empty || (selection_changed && backend.kind() == BackendKind::CodexStdio) {
+                    self.status_line = if backend.kind() == BackendKind::CodexStdio {
+                        "thread/resume…".into()
+                    } else {
+                        "thread/read…".into()
+                    };
                     self.load_thread_messages(backend, id, cx);
                 }
             }
@@ -8565,6 +8576,39 @@ impl MitsuroApp {
         }
         self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
+    }
+
+    fn release_thread_subscription_best_effort(&self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(session_id) = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == thread_id)
+            .and_then(|thread| thread.backend_session_id.clone())
+        else {
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !should_release_thread_subscription(&session_id, backend.kind(), false) {
+            return;
+        }
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_spawn(async move {
+                    let raw_session_id = session_id.raw.clone();
+                    let runner = Arc::clone(&backend);
+                    if let Err(error) =
+                        runner.block_on(async move { backend.close_session(&session_id).await })
+                    {
+                        eprintln!(
+                            "[mitsuro] thread/unsubscribe failed id={raw_session_id}: {error}"
+                        );
+                    }
+                })
+                .await;
+        })
+        .detach();
     }
 
     /// Select thread and refresh composer placeholder (needs `Window`).
@@ -10980,6 +11024,11 @@ impl MitsuroApp {
                         app.status_line = format!("Live turn failed: {e}").into();
                     }
                 }
+                if !app.turn_in_progress
+                    && app.selected_thread.as_deref() != Some(thread_id.as_str())
+                {
+                    app.release_thread_subscription_best_effort(&thread_id, cx);
+                }
                 cx.notify();
             });
         })
@@ -11135,6 +11184,11 @@ impl MitsuroApp {
                         app.turn_cancel = None;
                         app.status_line = format!("Review failed: {error}").into();
                     }
+                }
+                if !app.turn_in_progress
+                    && app.selected_thread.as_deref() != Some(thread_id.as_str())
+                {
+                    app.release_thread_subscription_best_effort(&thread_id, cx);
                 }
                 cx.notify();
             });
@@ -13007,8 +13061,8 @@ impl MitsuroApp {
         }
     }
 
-    /// Load transcript for a server thread via `thread/read` (includeTurns).
-    /// Used when selecting an empty cached server thread while Ready.
+    /// Open a real server transcript. Codex resumes a subscription; Mitsuro
+    /// reads the current persisted snapshot.
     fn load_thread_messages(
         &mut self,
         backend: Arc<DesktopBackend>,
@@ -13030,14 +13084,14 @@ impl MitsuroApp {
                     let tid = thread_id.clone();
                     let b = Arc::clone(&backend);
                     let prepared = backend.block_on(async move {
-                        match b.read_session(&session_id).await {
+                        match b.open_session(&session_id).await {
                             Ok(conversation) => {
                                 let delegation = conversation.delegation;
                                 let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
                                 let seen = msgs.len();
                                 eprintln!(
-                                    "[mitsuro] thread/read ok id={} tail={} scanned={}",
+                                    "[mitsuro] thread/open ok id={} tail={} scanned={}",
                                     tid,
                                     msgs.len(),
                                     seen
@@ -13048,12 +13102,12 @@ impl MitsuroApp {
                                     .map(demo_message_from_conversation)
                                     .collect();
                                 eprintln!(
-                                    "[mitsuro] thread/read prepared id={} scanned={} ui={}",
+                                    "[mitsuro] thread/open prepared id={} scanned={} ui={}",
                                     tid,
                                     seen,
                                     ui.len()
                                 );
-                                Ok::<_, String>((
+                                Ok::<_, (String, String)>((
                                     tid,
                                     seen.max(n_chat),
                                     ui,
@@ -13062,8 +13116,8 @@ impl MitsuroApp {
                                 ))
                             }
                             Err(e) => {
-                                eprintln!("[mitsuro] thread/read failed id={tid}: {e}");
-                                Err(e.to_string())
+                                eprintln!("[mitsuro] thread/open failed id={tid}: {e}");
+                                Err((tid, e.to_string()))
                             }
                         }
                     });
@@ -13079,38 +13133,43 @@ impl MitsuroApp {
                         if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
                             thread.messages = ui_msgs;
                             app.delegations.insert(tid.clone(), delegation);
-                            app.selected_thread = Some(tid.clone());
-                            app.transcript_scroll_handle.scroll_to_bottom();
-                            app.selected_codex_thread = Some(tid.clone());
-                            if !matches!(
-                                app.active_mode,
-                                ProductMode::Codex | ProductMode::Chat | ProductMode::Terminal
-                            ) {
-                                app.active_mode = ProductMode::Codex;
-                            }
                             eprintln!(
-                                "[mitsuro] thread/read applied id={} server={} ui={}",
+                                "[mitsuro] thread/open applied id={} server={} ui={}",
                                 tid,
                                 n_in,
                                 thread.messages.len()
                             );
-                            let transcript_status = format!(
-                                "thread/read · {} msgs (of {n_in})",
-                                thread.messages.len(),
-                            );
-                            app.status_line = delegation_status
-                                .map(|status| format!("{transcript_status} · {status}"))
-                                .unwrap_or(transcript_status)
-                                .into();
+                            if app.selected_thread.as_deref() == Some(tid.as_str()) {
+                                app.transcript_scroll_handle.scroll_to_bottom();
+                                app.selected_codex_thread = Some(tid.clone());
+                                if !matches!(
+                                    app.active_mode,
+                                    ProductMode::Codex | ProductMode::Chat | ProductMode::Terminal
+                                ) {
+                                    app.active_mode = ProductMode::Codex;
+                                }
+                                let transcript_status = format!(
+                                    "thread/open · {} msgs (of {n_in})",
+                                    thread.messages.len(),
+                                );
+                                app.status_line = delegation_status
+                                    .map(|status| format!("{transcript_status} · {status}"))
+                                    .unwrap_or(transcript_status)
+                                    .into();
+                            }
                         } else {
                             eprintln!(
-                                "[mitsuro] thread/read MISSING sidebar thread id={tid} n={n_in}"
+                                "[mitsuro] thread/open MISSING sidebar thread id={tid} n={n_in}"
                             );
-                            app.status_line = "thread/read · thread missing in sidebar".into();
+                            if app.selected_thread.as_deref() == Some(tid.as_str()) {
+                                app.status_line = "thread/open · thread missing in sidebar".into();
+                            }
                         }
                     }
-                    Err(e) => {
-                        app.status_line = format!("thread/read failed · {e}").into();
+                    Err((tid, e)) => {
+                        if app.selected_thread.as_deref() == Some(tid.as_str()) {
+                            app.status_line = format!("thread/open failed · {e}").into();
+                        }
                     }
                 }
                 if app.active_mode == ProductMode::Terminal {
@@ -13138,6 +13197,16 @@ fn is_app_server_thread_id(id: &str) -> bool {
         || id.starts_with("chat-")
         || id.starts_with("goal-")
         || id.starts_with("fixture-"))
+}
+
+fn should_release_thread_subscription(
+    session_id: &BackendSessionId,
+    active_backend: BackendKind,
+    has_active_turn: bool,
+) -> bool {
+    !has_active_turn
+        && session_id.backend == BackendKind::CodexStdio
+        && active_backend == BackendKind::CodexStdio
 }
 
 fn thread_summary_from_session(session: SessionSummary) -> ThreadSummary {
@@ -14635,6 +14704,32 @@ mod tests {
             decide_send_mode(&ready(), Some(BackendKind::CodexStdio), true, false),
             SendMode::Live
         );
+    }
+
+    #[test]
+    fn only_idle_codex_threads_release_app_server_subscriptions() {
+        let codex = BackendSessionId::new(BackendKind::CodexStdio, "thread-1");
+        let mitsuro = BackendSessionId::new(BackendKind::MitsuroHttp, "session-1");
+        assert!(should_release_thread_subscription(
+            &codex,
+            BackendKind::CodexStdio,
+            false
+        ));
+        assert!(!should_release_thread_subscription(
+            &codex,
+            BackendKind::CodexStdio,
+            true
+        ));
+        assert!(!should_release_thread_subscription(
+            &codex,
+            BackendKind::MitsuroHttp,
+            false
+        ));
+        assert!(!should_release_thread_subscription(
+            &mitsuro,
+            BackendKind::MitsuroHttp,
+            false
+        ));
     }
 
     #[test]

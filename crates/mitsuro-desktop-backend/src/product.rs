@@ -15,7 +15,8 @@ use crate::{
     LiveApprovalBridge, LiveReviewOutcome, LiveTurnOutcome, ModelListParams, PluginListParams,
     Result, ReviewDelivery, ReviewStartParams, ReviewTarget, SessionDelegationProjection,
     SkillsListParams, ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams,
-    ThreadReadParams, ThreadSetNameParams, ThreadStartParams, TranscriptAudioSource,
+    ThreadReadParams, ThreadResumeParams, ThreadSetNameParams, ThreadStartParams,
+    ThreadUnsubscribeParams, ThreadUnsubscribeResponse, TranscriptAudioSource,
     TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind, TranscriptRole,
     TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
@@ -417,6 +418,19 @@ pub trait ProductBackend: Send + Sync {
     async fn create_session(&self, request: CreateSession) -> Result<SessionSummary>;
 
     async fn read_session(&self, id: &BackendSessionId) -> Result<SessionConversation>;
+
+    /// Open a session for interactive use. Backends with explicit subscription
+    /// lifecycles may resume it; snapshot-only backends can reuse `read_session`.
+    async fn open_session(&self, id: &BackendSessionId) -> Result<SessionConversation> {
+        self.read_session(id).await
+    }
+
+    /// Release any interactive subscription owned by the current client.
+    async fn close_session(&self, _id: &BackendSessionId) -> Result<ThreadUnsubscribeResponse> {
+        Err(AgentError::NotImplemented(
+            "session subscription cleanup is not implemented by this backend".to_owned(),
+        ))
+    }
 
     async fn rename_session(&self, id: &BackendSessionId, title: String) -> Result<()>;
 
@@ -923,6 +937,50 @@ impl ProductBackend for DesktopBackend {
         })
     }
 
+    async fn open_session(&self, id: &BackendSessionId) -> Result<SessionConversation> {
+        self.ensure_session_origin(id)?;
+        let DesktopBackend::Codex(_) = self else {
+            return self.read_session(id).await;
+        };
+        let response = self
+            .thread_resume(ThreadResumeParams::new(id.raw.clone()))
+            .await?;
+        let thread = response.summary();
+        let session = SessionSummary {
+            id: id.clone(),
+            title: thread.name,
+            preview: thread.preview,
+            working_dir: thread.cwd,
+            updated_at: thread.updated_at,
+            model_provider: thread.model_provider,
+            ephemeral: thread.ephemeral.unwrap_or(false),
+            archived: thread.archived.unwrap_or(false),
+        };
+        let messages = response
+            .transcript_messages()
+            .into_iter()
+            .map(conversation_message_from_transcript)
+            .collect();
+        Ok(SessionConversation {
+            session,
+            messages,
+            delegation: SessionDelegationProjection::default(),
+        })
+    }
+
+    async fn close_session(&self, id: &BackendSessionId) -> Result<ThreadUnsubscribeResponse> {
+        self.ensure_session_origin(id)?;
+        match self {
+            DesktopBackend::Codex(_) => {
+                self.thread_unsubscribe(ThreadUnsubscribeParams::new(id.raw.clone()))
+                    .await
+            }
+            DesktopBackend::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose thread subscriptions".to_owned(),
+            )),
+        }
+    }
+
     async fn rename_session(&self, id: &BackendSessionId, title: String) -> Result<()> {
         self.ensure_session_origin(id)?;
         self.thread_name_set(ThreadSetNameParams::new(id.raw.clone(), title))
@@ -1298,6 +1356,69 @@ impl ProductBackend for DesktopBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_product_open_resumes_and_close_unsubscribes_exact_thread() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let codex = Arc::new(crate::CodexAppServerBackend::with_defaults());
+        codex.connect_with_mock_writer(client_writer).await;
+        codex.mark_ready_for_test(crate::InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let backend = DesktopBackend::Codex(Arc::clone(&codex));
+        let responder = Arc::clone(&codex);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(&mut server_reader);
+            for expected in ["thread/resume", "thread/unsubscribe"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                assert_eq!(
+                    request["params"],
+                    serde_json::json!({ "threadId": "thread-7" })
+                );
+                let result = if expected == "thread/resume" {
+                    serde_json::json!({
+                        "thread": {
+                            "id": "thread-7",
+                            "name": "Live thread",
+                            "turns": [{
+                                "id": "turn-1",
+                                "items": [{
+                                    "type": "userMessage",
+                                    "id": "item-1",
+                                    "content": [{ "type": "text", "text": "hello" }]
+                                }]
+                            }]
+                        }
+                    })
+                } else {
+                    serde_json::json!({ "status": "unsubscribed" })
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({ "id": request["id"], "result": result }).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let session_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-7");
+        let conversation = backend.open_session(&session_id).await.unwrap();
+        assert_eq!(conversation.session.title.as_deref(), Some("Live thread"));
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.messages[0].body, "hello");
+
+        let closed = backend.close_session(&session_id).await.unwrap();
+        assert_eq!(closed.status, crate::ThreadUnsubscribeStatus::Unsubscribed);
+        server.await.unwrap();
+    }
 
     #[test]
     fn product_turn_keeps_backend_qualified_identity() {

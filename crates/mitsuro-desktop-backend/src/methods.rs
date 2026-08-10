@@ -252,6 +252,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "thread/start",
     "thread/turns/list",
     "thread/unarchive",
+    "thread/unsubscribe",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -374,7 +375,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 100);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 101);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

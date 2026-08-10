@@ -80,8 +80,9 @@ use crate::protocol::{
     ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
     ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
-    ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ThreadUnarchiveResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnSteerParams, TurnSteerResponse,
 };
 use crate::remote_control::{
     RemoteControlClientsListParams, RemoteControlClientsListResponse,
@@ -304,6 +305,16 @@ pub trait AgentBackend: Send + Sync {
 
     /// Resume / rejoin a thread via `thread/resume` (distinct from `thread/start`).
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
+
+    /// Release a server-side thread subscription after the client leaves it.
+    async fn thread_unsubscribe(
+        &self,
+        _params: ThreadUnsubscribeParams,
+    ) -> Result<ThreadUnsubscribeResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread unsubscribe is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Start server-side context compaction for a thread.
     async fn thread_compact_start(

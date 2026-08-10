@@ -1956,6 +1956,45 @@ impl ThreadResumeResponse {
     pub fn summary(&self) -> ThreadSummary {
         ThreadSummary::from_value(&self.thread)
     }
+
+    pub fn transcript_messages(&self) -> Vec<TranscriptMessage> {
+        extract_transcript_from_thread(&self.thread)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// thread/unsubscribe
+// ---------------------------------------------------------------------------
+
+/// Params for releasing an app-server thread subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadUnsubscribeParams {
+    pub thread_id: String,
+}
+
+impl ThreadUnsubscribeParams {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+        }
+    }
+}
+
+/// Exact status returned by `thread/unsubscribe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadUnsubscribeStatus {
+    NotLoaded,
+    NotSubscribed,
+    Unsubscribed,
+}
+
+/// Response for `thread/unsubscribe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadUnsubscribeResponse {
+    pub status: ThreadUnsubscribeStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -3533,6 +3572,23 @@ mod p11_protocol_shape_tests {
         assert_eq!(v["cwd"], "/work");
         assert_eq!(v["excludeTurns"], false);
         assert!(v.get("thread_id").is_none());
+    }
+
+    #[test]
+    fn thread_unsubscribe_shape_matches_generated_contract() {
+        let params = ThreadUnsubscribeParams::new("th-unsubscribe");
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value, serde_json::json!({ "threadId": "th-unsubscribe" }));
+
+        for (wire, expected) in [
+            ("notLoaded", ThreadUnsubscribeStatus::NotLoaded),
+            ("notSubscribed", ThreadUnsubscribeStatus::NotSubscribed),
+            ("unsubscribed", ThreadUnsubscribeStatus::Unsubscribed),
+        ] {
+            let response: ThreadUnsubscribeResponse =
+                serde_json::from_value(serde_json::json!({ "status": wire })).unwrap();
+            assert_eq!(response.status, expected);
+        }
     }
 
     #[test]

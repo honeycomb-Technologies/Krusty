@@ -61,6 +61,8 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `thread/list`
 - `thread/start`
 - `thread/read`
+- `thread/resume`
+- `thread/unsubscribe`
 - `thread/searchOccurrences`
 - `thread/turns/list`
 - `thread/rollback`
@@ -106,6 +108,12 @@ implements the same read-only product behavior from its real persisted session
 transcript; it returns `NotImplemented` for `thread/rollback` because the HTTP API has
 no destructive tail mutation. Fixture behavior remains explicit and typed for offline
 contract tests.
+
+Interactive Codex opens use the generated `thread/resume` contract and return the same
+transport-neutral conversation projection as snapshot reads. Leaving an idle thread
+uses schema-exact `thread/unsubscribe`; its `notLoaded`, `notSubscribed`, and
+`unsubscribed` statuses remain typed. Mitsuro HTTP rejects that Codex-only lifecycle
+mutation instead of manufacturing a successful close.
 
 Latest-message editing is a Codex-only product capability. GPUI retains the exact local,
 remote, or data-URL image/audio inputs plus skill and mention records from the persisted
