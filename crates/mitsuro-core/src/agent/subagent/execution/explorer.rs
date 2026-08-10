@@ -131,11 +131,16 @@ pub(super) fn normalize_explorer_result(
 
 pub(super) fn relative_or_display(path: &str, working_dir: &Path) -> String {
     let candidate = std::path::Path::new(path);
-    candidate
+    let display = candidate
         .strip_prefix(working_dir)
         .unwrap_or(candidate)
         .display()
-        .to_string()
+        .to_string();
+    if display.is_empty() {
+        ".".to_string()
+    } else {
+        display
+    }
 }
 
 pub(super) fn collect_paths_from_tool_result(
@@ -158,6 +163,13 @@ pub(super) fn collect_paths_from_tool_result(
             }
         }
         "glob" => {
+            // A successful empty glob is still canonical negative evidence for
+            // the directory that was searched. Retain the base path so an
+            // explorer can synthesize a truthful report even when there are no
+            // matching files to add below.
+            if let Some(search_path) = payload.get("search_path").and_then(|value| value.as_str()) {
+                paths.push(relative_or_display(search_path, working_dir));
+            }
             if let Some(matches) = payload.get("matches").and_then(|value| value.as_array()) {
                 for entry in matches.iter().take(12) {
                     if let Some(path) = entry.as_str() {

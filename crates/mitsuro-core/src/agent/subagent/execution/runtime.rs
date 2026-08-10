@@ -18,9 +18,9 @@ use crate::tools::ToolResult;
 
 use super::super::lifecycle::AgentMailboxFinish;
 use super::super::types::{
-    parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedEvidenceKind,
-    DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult, SubAgentTask,
-    SubAgentTermination,
+    parse_explore_report, summary_looks_non_substantive, synthesize_explore_report, AgentProgress,
+    AgentProgressStatus, DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact,
+    SubAgentResult, SubAgentTask, SubAgentTermination,
 };
 use super::api::{call_subagent_api, parse_response, parse_response_usage};
 use super::config::AgentConfig;
@@ -94,10 +94,13 @@ fn completed_report_at_turn_budget(
     task: &SubAgentTask,
     evidence: &DelegatedEvidenceSummary,
     output: &str,
+    paths_examined: &[String],
 ) -> bool {
     delegated_is_explore(task)
         && evidence.has_canonical_evidence()
-        && parse_explore_report(output).is_some()
+        && (parse_explore_report(output).is_some()
+            || (!summary_looks_non_substantive(output)
+                && synthesize_explore_report(output, paths_examined).is_some()))
 }
 
 fn evidence_completion_decision(
@@ -596,7 +599,12 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         if loop_guard_landing.is_none() && !max_tokens_landing_pending {
             if let Some(max_turns) = max_turns_budget {
                 if turns >= max_turns {
-                    if completed_report_at_turn_budget(task, &evidence, &final_output) {
+                    if completed_report_at_turn_budget(
+                        task,
+                        &evidence,
+                        &final_output,
+                        &files_examined,
+                    ) {
                         preserve_terminal_mailbox!();
                         let result = enforce_canonical_evidence(normalize_explorer_result(
                             SubAgentResult {
@@ -1870,11 +1878,39 @@ mod tests {
         evidence.record_success(DelegatedEvidenceKind::Observation);
         let output = r#"<explore_report>{"summary":"verified","paths_examined":["."],"files_examined":[],"evidence":"directory inspected","changes":"none"}</explore_report>"#;
 
-        assert!(completed_report_at_turn_budget(&task, &evidence, output));
+        assert!(completed_report_at_turn_budget(
+            &task,
+            &evidence,
+            output,
+            &[".".to_string()]
+        ));
         assert!(!completed_report_at_turn_budget(
             &task,
             &evidence,
-            "unstructured partial prose"
+            "unstructured partial prose",
+            &[]
+        ));
+        assert!(!completed_report_at_turn_budget(
+            &task,
+            &evidence,
+            "Let me inspect the workspace before reporting.",
+            &[".".to_string()]
+        ));
+    }
+
+    #[test]
+    fn exact_turn_boundary_accepts_substantive_negative_evidence_for_a_search_path() {
+        let policy = DelegationPolicy::for_subagent_verify(PermissionMode::Supervised, Some(4));
+        let task = SubAgentTask::new("metadata", "inspect").with_delegation_policy(policy);
+        let mut evidence = DelegatedEvidenceSummary::default();
+        evidence.record_attempt();
+        evidence.record_success(DelegatedEvidenceKind::Observation);
+
+        assert!(completed_report_at_turn_budget(
+            &task,
+            &evidence,
+            "The workspace search completed and found no matching files.",
+            &[".".to_string()]
         ));
     }
 

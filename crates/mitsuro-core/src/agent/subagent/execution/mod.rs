@@ -274,6 +274,22 @@ mod tests {
     }
 
     #[test]
+    fn collect_paths_from_empty_glob_retains_the_searched_directory() {
+        let working_dir = PathBuf::from("/tmp/mitsuro-empty-workspace");
+        let output = json!({
+            "data": {
+                "matches": [],
+                "count": 0,
+                "search_path": "/tmp/mitsuro-empty-workspace"
+            }
+        })
+        .to_string();
+
+        let paths = collect_paths_from_tool_result("glob", &output, &working_dir);
+        assert_eq!(paths, vec!["."]);
+    }
+
+    #[test]
     fn placeholder_forced_summary_gets_replaced() {
         assert!(should_replace_forced_summary(
             "Let me try using glob to inspect this target."
