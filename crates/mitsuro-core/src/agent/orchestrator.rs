@@ -50,10 +50,10 @@ use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
 use crate::workflow::{
-    AttemptProgressInput, AttemptStatus, CriterionStatus, GoalStatus, StartAttemptInput,
-    WorkflowManager, WorkflowMutation, WorkflowStepStatus,
-    DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
-    DEFAULT_GOAL_ATTEMPT_MAX_TURNS, DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+    AttemptProgressInput, AttemptStatus, GoalStatus, StartAttemptInput, WorkflowManager,
+    WorkflowMutation, WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+    DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+    DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
 };
 
 use super::compaction::{
@@ -2193,36 +2193,21 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
-            if successful_task_completion_requires_goal_verification(
+            if successful_task_completion_needs_goal_followthrough(
                 &db_path,
                 &session_id,
                 &result.tool_calls,
                 &tool_msg.content,
             ) {
-                let completion = "All approved plan steps are complete. The Goal remains active until its required verification criteria are passed.";
-                let _ = event_tx.send(LoopEvent::TextDelta {
-                    delta: completion.to_string(),
-                });
-                let assistant_msg = ModelMessage {
-                    role: Role::Assistant,
+                let instruction = "All approved plan steps are now terminal, but the Goal is still active. Continue in this same run: call `workflow_update` with `verify_criterion` and concrete evidence for every pending required criterion, then call `workflow_update` with `complete_goal`. Do not stop or claim completion in prose while the Goal remains active.";
+                conversation.push(ModelMessage {
+                    role: Role::System,
                     content: vec![Content::Text {
-                        text: completion.to_string(),
+                        text: instruction.to_string(),
                     }],
-                };
-                conversation.push(assistant_msg.clone());
+                });
                 context_ledger.update_from_conversation(&conversation);
                 persist_context_state(&db_path, &session_id, &context_ledger);
-                save_message(&db_path, &session_id, &assistant_msg);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: false,
-                });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
-                return;
             }
 
             let loop_guard_owns_blocked_stop = !token_budget_stopped
@@ -2552,7 +2537,7 @@ fn update_validation_state(
     !was_pending && *mutation_needs_validation
 }
 
-fn successful_task_completion_requires_goal_verification(
+fn successful_task_completion_needs_goal_followthrough(
     db_path: &Path,
     session_id: &str,
     tool_calls: &[AiToolCall],
@@ -2590,10 +2575,6 @@ fn successful_task_completion_requires_goal_verification(
                     WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
                 )
             })
-            && snapshot
-                .criteria
-                .iter()
-                .any(|criterion| criterion.required && criterion.status != CriterionStatus::Passed)
     })
 }
 
@@ -2715,7 +2696,7 @@ mod tests {
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
-    use super::successful_task_completion_requires_goal_verification;
+    use super::successful_task_completion_needs_goal_followthrough;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::AttemptProgressTracker;
@@ -2737,10 +2718,9 @@ mod tests {
     };
     use crate::tools::registry::PermissionMode;
     use crate::workflow::{
-        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, CriterionStatus,
-        GoalStatus, PlanProposalInput, SetCriterionInput, StepProposalInput, WorkflowManager,
-        WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
-        DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, GoalStatus,
+        PlanProposalInput, StepProposalInput, WorkflowManager, WorkflowStepStatus,
+        DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -3090,13 +3070,13 @@ mod tests {
             is_error: Some(false),
         }];
         assert!(
-            successful_task_completion_requires_goal_verification(
+            successful_task_completion_needs_goal_followthrough(
                 &db_path,
                 &session_id,
                 &tool_calls,
                 &tool_results,
             ),
-            "the final task completion must stop when required verification is pending"
+            "the final task completion must keep the run alive for Goal follow-through"
         );
 
         let criterion_id = completed.snapshot.criteria[0].id.clone();
@@ -3105,8 +3085,8 @@ mod tests {
             &goal_id,
             &criterion_id,
             completed.snapshot.aggregate_revision,
-            SetCriterionInput {
-                status: CriterionStatus::Passed,
+            crate::workflow::SetCriterionInput {
+                status: crate::workflow::CriterionStatus::Passed,
                 evidence: vec!["focused validation passed".into()],
                 verifier: "agent".into(),
             },
@@ -3114,13 +3094,13 @@ mod tests {
             "agent",
         )?;
         assert!(
-            !successful_task_completion_requires_goal_verification(
+            successful_task_completion_needs_goal_followthrough(
                 &db_path,
                 &session_id,
                 &tool_calls,
                 &tool_results,
             ),
-            "a fully verified Goal must continue so the agent can complete it explicitly"
+            "a fully verified Goal still needs follow-through so the agent completes it explicitly"
         );
         Ok(())
     }
