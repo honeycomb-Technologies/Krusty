@@ -892,6 +892,23 @@ pub struct TurnSteerResponse {
     pub turn_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadCompactStartParams {
+    pub thread_id: String,
+}
+
+impl ThreadCompactStartParams {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadCompactStartResponse {}
+
 // ---------------------------------------------------------------------------
 // model/list
 // ---------------------------------------------------------------------------
@@ -2659,6 +2676,13 @@ mod p9_protocol_shape_tests {
         let response: TurnSteerResponse =
             serde_json::from_value(serde_json::json!({"turnId": "turn-9"})).unwrap();
         assert_eq!(response.turn_id, "turn-9");
+    }
+
+    #[test]
+    fn thread_compact_start_matches_generated_contract() {
+        let value = serde_json::to_value(ThreadCompactStartParams::new("thread-1")).unwrap();
+        assert_eq!(value, serde_json::json!({"threadId": "thread-1"}));
+        let _: ThreadCompactStartResponse = serde_json::from_value(serde_json::json!({})).unwrap();
     }
 
     #[test]

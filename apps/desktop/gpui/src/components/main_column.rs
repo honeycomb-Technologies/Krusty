@@ -381,6 +381,7 @@ fn thread_title_bar(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let menu_open = app.thread_menu_open();
+    let can_compact = app.can_compact_selected_thread();
     let is_archived = app
         .selected_thread()
         .and_then(|t| t.summary.archived)
@@ -392,6 +393,8 @@ fn thread_title_bar(
         || status.starts_with("Archive")
         || status.starts_with("Delete")
         || status.starts_with("Fork")
+        || status.starts_with("Compact")
+        || status.starts_with("Compaction")
     {
         Some(status)
     } else {
@@ -453,7 +456,7 @@ fn thread_title_bar(
                 .child(thread_overflow_menu(menu_open, is_archived, cx)),
         )
         .when(menu_open, |this| {
-            this.child(thread_overflow_dropdown(is_archived, cx))
+            this.child(thread_overflow_dropdown(is_archived, can_compact, cx))
         })
 }
 
@@ -535,7 +538,11 @@ fn thread_overflow_menu(
 }
 
 /// Dense dropdown under the ⋯ control — Codex-like lifecycle actions.
-fn thread_overflow_dropdown(is_archived: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn thread_overflow_dropdown(
+    is_archived: bool,
+    can_compact: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let archive_label = if is_archived { "Unarchive" } else { "Archive" };
     div()
@@ -568,6 +575,16 @@ fn thread_overflow_dropdown(is_archived: bool, cx: &mut Context<MitsuroApp>) -> 
             cx,
             |app, cx| app.fork_selected_thread(cx),
         ))
+        .when(can_compact, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-compact",
+                "Compact",
+                "icons/refresh-cw.svg",
+                false,
+                cx,
+                |app, cx| app.compact_selected_thread(cx),
+            ))
+        })
         .child(
             div()
                 .h(px(1.0))

@@ -76,8 +76,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 46 typed adapters
-and 87 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 47 typed adapters
+and 86 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline

@@ -122,6 +122,8 @@ duplicating turn transcript events.
 Active-turn steering is a transport-neutral product action: Codex uses `turn/steer`
 with the exact active-turn precondition, while Mitsuro uses its durable `/chat/steer`
 endpoint. A non-empty draft therefore shows Send beside Stop during a live turn.
+Codex threads also expose schema-exact manual compaction from the thread overflow;
+the action stays absent for Mitsuro until its HTTP API offers the same contract.
 
 ```bash
 scripts/gpui-codex-protocol-check.sh

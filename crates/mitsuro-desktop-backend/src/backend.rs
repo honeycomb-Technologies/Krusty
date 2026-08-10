@@ -33,14 +33,14 @@ use crate::process::{
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelListParams, ModelListResponse,
     SkillsListParams, SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse,
-    ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse,
-    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams, ThreadListResponse,
-    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse,
-    ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnSteerParams, TurnSteerResponse,
+    ThreadCompactStartParams, ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
+    ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
+    ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{ConnectionStatus, Result};
 
@@ -112,6 +112,16 @@ pub trait AgentBackend: Send + Sync {
 
     /// Resume / rejoin a thread via `thread/resume` (distinct from `thread/start`).
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
+
+    /// Start server-side context compaction for a thread.
+    async fn thread_compact_start(
+        &self,
+        _params: ThreadCompactStartParams,
+    ) -> Result<ThreadCompactStartResponse> {
+        Err(crate::types::AgentError::NotImplemented(
+            "thread/compact/start is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Read the long-running goal attached to a thread via `thread/goal/get`.
     async fn thread_goal_get(&self, params: ThreadGoalGetParams) -> Result<ThreadGoalGetResponse>;

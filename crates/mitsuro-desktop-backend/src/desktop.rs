@@ -47,6 +47,7 @@ pub struct BackendCapabilities {
     pub sessions: bool,
     pub streaming_chat: bool,
     pub steering: bool,
+    pub manual_compaction: bool,
     pub approvals: bool,
     pub models: bool,
     pub files: bool,
@@ -65,6 +66,7 @@ impl BackendCapabilities {
             sessions: true,
             streaming_chat: true,
             steering: true,
+            manual_compaction: true,
             approvals: true,
             models: true,
             files: true,
@@ -83,6 +85,7 @@ impl BackendCapabilities {
             sessions: true,
             streaming_chat: true,
             steering: true,
+            manual_compaction: false,
             approvals: true,
             models: true,
             files: true,
@@ -373,5 +376,7 @@ mod tests {
         assert!(BackendCapabilities::codex().streaming_chat);
         assert!(BackendCapabilities::mitsuro().steering);
         assert!(BackendCapabilities::codex().steering);
+        assert!(!BackendCapabilities::mitsuro().manual_compaction);
+        assert!(BackendCapabilities::codex().manual_compaction);
     }
 }

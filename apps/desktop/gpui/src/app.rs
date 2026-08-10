@@ -4683,6 +4683,72 @@ impl MitsuroApp {
             .collect()
     }
 
+    pub fn can_compact_selected_thread(&self) -> bool {
+        !self.turn_in_progress
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().manual_compaction)
+            && self
+                .selected_thread
+                .as_ref()
+                .and_then(|id| self.live_session_id(id))
+                .is_some()
+    }
+
+    pub fn compact_selected_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        if self.turn_in_progress {
+            self.status_line = "Compact unavailable · wait for the active turn to finish.".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Compact unavailable · backend is not ready.".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().manual_compaction {
+            self.status_line = "Compact is not supported by the selected backend.".into();
+            cx.notify();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            self.status_line = "Compact · no thread selected".into();
+            cx.notify();
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.status_line = "Compact · live session identity is missing".into();
+            cx.notify();
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        self.status_line = "Compacting thread…".into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .compact_session(&session_id)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation {
+                    return;
+                }
+                app.status_line = match result {
+                    Ok(()) => "Compaction started.".into(),
+                    Err(error) => format!("Compact failed · {error}").into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Archive the selected thread (or toggle unarchive when already archived).
     pub fn archive_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;

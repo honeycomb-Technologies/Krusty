@@ -13,9 +13,9 @@ use crate::{
     DesktopBackend, FileChangeFields, FsReadDirectoryParams, FsReadFileParams,
     FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome,
     ModelListParams, PluginListParams, Result, SessionDelegationProjection, SkillsListParams,
-    ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
-    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams,
-    TurnStreamEvent,
+    ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams,
+    ThreadSetNameParams, ThreadStartParams, TranscriptMessage, TranscriptRole, TurnInterruptParams,
+    TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +258,8 @@ pub trait ProductBackend: Send + Sync {
 
     async fn steer_session(&self, request: ProductSteer) -> Result<String>;
 
+    async fn compact_session(&self, id: &BackendSessionId) -> Result<()>;
+
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>>;
 
     async fn read_text_file(&self, path: String) -> Result<ProductFile>;
@@ -463,6 +465,19 @@ impl ProductBackend for DesktopBackend {
             ))
             .await?;
         Ok(response.turn_id)
+    }
+
+    async fn compact_session(&self, id: &BackendSessionId) -> Result<()> {
+        self.ensure_session_origin(id)?;
+        if !self.capabilities().manual_compaction {
+            return Err(AgentError::NotImplemented(format!(
+                "{} does not expose manual thread compaction",
+                self.kind().id()
+            )));
+        }
+        self.thread_compact_start(ThreadCompactStartParams::new(id.raw.clone()))
+            .await?;
+        Ok(())
     }
 
     async fn browse_directory(&self, path: String) -> Result<Vec<ProductDirectoryEntry>> {

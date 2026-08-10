@@ -928,6 +928,15 @@ impl AgentBackend for CodexAppServerBackend {
         self.resume_thread(params).await
     }
 
+    async fn thread_compact_start(
+        &self,
+        params: crate::protocol::ThreadCompactStartParams,
+    ) -> Result<crate::protocol::ThreadCompactStartResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/compact/start", Some(value))
+            .await
+    }
+
     async fn thread_goal_get(&self, params: ThreadGoalGetParams) -> Result<ThreadGoalGetResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("thread/goal/get", Some(value)).await
