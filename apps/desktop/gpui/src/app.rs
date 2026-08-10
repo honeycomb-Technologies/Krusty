@@ -30,27 +30,29 @@ use mitsuro_desktop_backend::{
     ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
     ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
     EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsChangedNotification,
-    FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams,
-    FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
-    GetAccountTokenUsageResponse, HookMetadata, HooksListEntry, HooksListParams, InstalledApp,
-    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
-    McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
-    McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
-    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams,
-    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse, ModelServiceTier,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PermissionProfileListParams,
-    PermissionProfileSummary, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
-    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
-    RemoteControlClient, RemoteControlClientsListParams, RemoteControlClientsRevokeParams,
-    RemoteControlConnectionStatus, RemoteControlDisableParams, RemoteControlEnableParams,
-    RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
+    EnvironmentStatusResponse, EnvironmentSummary, ExternalAgentConfigDetectParams,
+    ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistory,
+    ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FixtureBackend,
+    FsChangedNotification, FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams,
+    FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata, HooksListEntry,
+    HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
+    LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpElicitationMode,
+    McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
+    ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
+    PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
+    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
+    PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
+    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
+    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
+    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer,
+    ProductTurn, ProductWorkMode, RealtimeEvent, RealtimeOutputModality, RealtimeVoice,
+    RealtimeVoicesList, ReasoningEffortOption, RemoteControlClient, RemoteControlClientsListParams,
+    RemoteControlClientsRevokeParams, RemoteControlConnectionStatus, RemoteControlDisableParams,
+    RemoteControlEnableParams, RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
     RemoteControlPairingStatusParams, RemoteControlStatusChangedNotification,
     RemoteControlStatusReadResponse, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
@@ -59,8 +61,9 @@ use mitsuro_desktop_backend::{
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
     ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
     ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, CLAUDE_CODE_MIGRATION_SOURCE,
+    CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -956,6 +959,21 @@ fn remote_control_status_changed(
         .and_then(|params| serde_json::from_value(params).ok())
 }
 
+fn external_agent_import_status(
+    event: &LifecycleNotification,
+) -> Option<ExternalAgentConfigImportCompletedNotification> {
+    if !matches!(
+        event.method.as_str(),
+        "externalAgentConfig/import/progress" | "externalAgentConfig/import/completed"
+    ) {
+        return None;
+    }
+    event
+        .params
+        .clone()
+        .and_then(|params| serde_json::from_value(params).ok())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RealtimeVoicePhase {
     Starting,
@@ -975,6 +993,13 @@ struct RealtimeVoiceRuntime {
     capture_stop: Arc<AtomicBool>,
     phase: RealtimeVoicePhase,
     playback: Option<RealtimePlayback>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternalAgentImportSource {
+    pub id: String,
+    pub label: String,
+    pub items: Vec<ExternalAgentConfigMigrationItem>,
 }
 
 pub struct MitsuroApp {
@@ -1049,6 +1074,13 @@ pub struct MitsuroApp {
     config_default_permissions: Option<String>,
     /// Confirmation required before exposing the dangerous profile in Composer.
     full_access_confirmation_open: bool,
+    /// Read-only discovery and completed history from `externalAgentConfig/*`.
+    external_agent_import_sources: Vec<ExternalAgentImportSource>,
+    external_agent_import_histories: Vec<ExternalAgentConfigImportHistory>,
+    external_agent_import_state: SurfaceDataState,
+    external_agent_import_error: Option<String>,
+    external_agent_import_in_progress: Option<String>,
+    external_agent_import_confirmation: Option<String>,
     /// Skills from `skills/list` (or fixture demo).
     skills: Vec<SkillMetadata>,
     /// Exact per-workspace catalog returned by Codex `hooks/list`.
@@ -1453,6 +1485,12 @@ impl MitsuroApp {
             model_provider_capabilities: None,
             config_default_permissions: None,
             full_access_confirmation_open: false,
+            external_agent_import_sources: Vec::new(),
+            external_agent_import_histories: Vec::new(),
+            external_agent_import_state: SurfaceDataState::Loading,
+            external_agent_import_error: None,
+            external_agent_import_in_progress: None,
+            external_agent_import_confirmation: None,
             skills: Vec::new(),
             hooks: Vec::new(),
             hooks_state: SurfaceDataState::Loading,
@@ -4524,6 +4562,150 @@ impl MitsuroApp {
 
     pub fn connector_apps_state(&self) -> SurfaceDataState {
         self.connector_apps_state
+    }
+
+    pub fn external_agent_import_sources(&self) -> &[ExternalAgentImportSource] {
+        &self.external_agent_import_sources
+    }
+
+    pub fn external_agent_import_histories(&self) -> &[ExternalAgentConfigImportHistory] {
+        &self.external_agent_import_histories
+    }
+
+    pub fn external_agent_import_state(&self) -> SurfaceDataState {
+        self.external_agent_import_state
+    }
+
+    pub fn external_agent_import_error(&self) -> Option<&str> {
+        self.external_agent_import_error.as_deref()
+    }
+
+    pub fn external_agent_import_in_progress(&self) -> Option<&str> {
+        self.external_agent_import_in_progress.as_deref()
+    }
+
+    pub fn external_agent_import_confirmation(&self) -> Option<&str> {
+        self.external_agent_import_confirmation.as_deref()
+    }
+
+    pub fn request_external_agent_import(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        if self.external_agent_import_in_progress.is_some() {
+            return;
+        }
+        if self.external_agent_import_confirmation.as_deref() != Some(provider_id.as_str()) {
+            self.external_agent_import_confirmation = Some(provider_id);
+            cx.notify();
+            return;
+        }
+        let Some(source) = self
+            .external_agent_import_sources
+            .iter()
+            .find(|source| source.id == provider_id)
+            .cloned()
+        else {
+            self.external_agent_import_error = Some("Detected import source is unavailable".into());
+            self.external_agent_import_state = SurfaceDataState::Error;
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().external_agent_import)
+        else {
+            return;
+        };
+        if source.items.is_empty() {
+            return;
+        }
+        self.external_agent_import_confirmation = None;
+        self.external_agent_import_in_progress = Some(source.id.clone());
+        self.external_agent_import_error = None;
+        self.status_line = format!("Import · starting {}", source.label).into();
+        let provider_id = source.id.clone();
+        let label = source.label.clone();
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        runner
+                            .import_external_agent_config(ExternalAgentConfigImportParams {
+                                migration_items: source.items,
+                                migration_source: Some(provider_id.clone()),
+                                provider_id: Some(provider_id),
+                                source: Some("mitsuro-desktop".to_owned()),
+                            })
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(response) => {
+                        if app.external_agent_import_in_progress.is_some() {
+                            app.status_line =
+                                format!("Import · {label} started · {}", response.import_id).into();
+                        }
+                    }
+                    Err(error) => {
+                        app.external_agent_import_in_progress = None;
+                        app.external_agent_import_error = Some(error.clone());
+                        app.external_agent_import_state = SurfaceDataState::Error;
+                        app.status_line = format!("Import failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn cancel_external_agent_import(&mut self, cx: &mut Context<Self>) {
+        self.external_agent_import_confirmation = None;
+        cx.notify();
+    }
+
+    pub fn refresh_external_agent_imports(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().external_agent_import)
+        else {
+            return;
+        };
+        self.external_agent_import_state = SurfaceDataState::Loading;
+        self.external_agent_import_error = None;
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string());
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        read_external_agent_import_snapshot(runner.as_ref(), cwd).await
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(snapshot) => {
+                        app.external_agent_import_sources = snapshot.sources;
+                        app.external_agent_import_histories = snapshot.histories;
+                        app.external_agent_import_state = SurfaceDataState::Live;
+                        app.external_agent_import_error = None;
+                    }
+                    Err(error) => {
+                        app.external_agent_import_state = SurfaceDataState::Error;
+                        app.external_agent_import_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn remote_control_status(&self) -> Option<&RemoteControlStatusReadResponse> {
@@ -10592,6 +10774,43 @@ impl MitsuroApp {
                 }
             }
         }
+        if matches!(
+            event.method.as_str(),
+            "externalAgentConfig/import/progress" | "externalAgentConfig/import/completed"
+        ) {
+            match external_agent_import_status(&event) {
+                Some(status) => {
+                    let successes = status
+                        .item_type_results
+                        .iter()
+                        .map(|result| result.successes.len())
+                        .sum::<usize>();
+                    let failures = status
+                        .item_type_results
+                        .iter()
+                        .map(|result| result.failures.len())
+                        .sum::<usize>();
+                    if event.method == "externalAgentConfig/import/completed" {
+                        self.external_agent_import_in_progress = None;
+                        self.external_agent_import_state = SurfaceDataState::Live;
+                        self.external_agent_import_error = None;
+                        self.status_line =
+                            format!("Import complete · {successes} succeeded · {failures} failed")
+                                .into();
+                        self.refresh_external_agent_imports(cx);
+                    } else {
+                        self.status_line =
+                            format!("Import · {successes} succeeded · {failures} failed so far")
+                                .into();
+                    }
+                }
+                None => {
+                    self.external_agent_import_error =
+                        Some(format!("Malformed {} notification", event.method));
+                    self.external_agent_import_state = SurfaceDataState::Error;
+                }
+            }
+        }
         if let Some(realtime) = RealtimeEvent::from_lifecycle(&event) {
             self.apply_realtime_event(realtime);
             cx.notify();
@@ -10973,6 +11192,12 @@ impl MitsuroApp {
         self.model_provider_capabilities = None;
         self.config_default_permissions = None;
         self.full_access_confirmation_open = false;
+        self.external_agent_import_sources.clear();
+        self.external_agent_import_histories.clear();
+        self.external_agent_import_state = SurfaceDataState::Fixture;
+        self.external_agent_import_error = None;
+        self.external_agent_import_in_progress = None;
+        self.external_agent_import_confirmation = None;
 
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -11150,6 +11375,16 @@ impl MitsuroApp {
         self.model_provider_capabilities = None;
         self.config_default_permissions = None;
         self.full_access_confirmation_open = false;
+        self.external_agent_import_sources.clear();
+        self.external_agent_import_histories.clear();
+        self.external_agent_import_state = match kind {
+            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
+            BackendKind::Fixture => SurfaceDataState::Fixture,
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
+        };
+        self.external_agent_import_error = None;
+        self.external_agent_import_in_progress = None;
+        self.external_agent_import_confirmation = None;
         self.skills.clear();
         self.hooks.clear();
         self.hooks_state = SurfaceDataState::Loading;
@@ -11338,6 +11573,7 @@ impl MitsuroApp {
                             realtime_voices,
                             config_snip,
                             permissions,
+                            external_agent_import,
                             skills,
                             hooks,
                             connector_apps,
@@ -11423,6 +11659,26 @@ impl MitsuroApp {
                                 app.model_provider_capabilities = None;
                                 app.config_default_permissions = None;
                                 app.permission_profiles_state = SurfaceDataState::Error;
+                            }
+                        }
+                        match external_agent_import {
+                            Ok(Some(snapshot)) => {
+                                app.external_agent_import_sources = snapshot.sources;
+                                app.external_agent_import_histories = snapshot.histories;
+                                app.external_agent_import_state = SurfaceDataState::Live;
+                                app.external_agent_import_error = None;
+                            }
+                            Ok(None) => {
+                                app.external_agent_import_sources.clear();
+                                app.external_agent_import_histories.clear();
+                                app.external_agent_import_state = SurfaceDataState::Unsupported;
+                                app.external_agent_import_error = None;
+                            }
+                            Err(error) => {
+                                app.external_agent_import_sources.clear();
+                                app.external_agent_import_histories.clear();
+                                app.external_agent_import_state = SurfaceDataState::Error;
+                                app.external_agent_import_error = Some(error);
                             }
                         }
                         app.apply_skills(skills);
@@ -12731,6 +12987,7 @@ struct BackendBootstrap {
     realtime_voices: Result<Option<RealtimeVoicesList>, String>,
     config_snip: Option<String>,
     permissions: Result<Option<PermissionsSnapshot>, String>,
+    external_agent_import: Result<Option<ExternalAgentImportSnapshot>, String>,
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
     connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
@@ -12753,6 +13010,11 @@ struct PermissionsSnapshot {
     requirements: Option<ConfigRequirements>,
     provider_capabilities: ModelProviderCapabilitiesReadResponse,
     default_permissions: Option<String>,
+}
+
+struct ExternalAgentImportSnapshot {
+    sources: Vec<ExternalAgentImportSource>,
+    histories: Vec<ExternalAgentConfigImportHistory>,
 }
 
 fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendBootstrap, String> {
@@ -12803,7 +13065,18 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             && b.capabilities().config_requirements
             && b.capabilities().model_provider_capabilities
         {
-            read_permissions_snapshot(b.as_ref(), effective_cwd, config_default_permissions)
+            read_permissions_snapshot(
+                b.as_ref(),
+                effective_cwd.clone(),
+                config_default_permissions,
+            )
+            .await
+            .map(Some)
+        } else {
+            Ok(None)
+        };
+        let external_agent_import = if b.capabilities().external_agent_import {
+            read_external_agent_import_snapshot(b.as_ref(), effective_cwd.clone())
                 .await
                 .map(Some)
         } else {
@@ -12872,6 +13145,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             realtime_voices,
             config_snip,
             permissions,
+            external_agent_import,
             skills,
             hooks,
             connector_apps,
@@ -12883,6 +13157,39 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             schedules,
         })
     })
+}
+
+async fn read_external_agent_import_snapshot(
+    backend: &DesktopBackend,
+    cwd: Option<String>,
+) -> Result<ExternalAgentImportSnapshot, String> {
+    let mut sources = Vec::new();
+    for (id, label) in [
+        (CLAUDE_CODE_MIGRATION_SOURCE, "Claude Code"),
+        (CURSOR_MIGRATION_SOURCE, "Cursor"),
+    ] {
+        let response = backend
+            .detect_external_agent_config(ExternalAgentConfigDetectParams {
+                cwds: cwd.clone().map(|cwd| vec![cwd]),
+                include_home: true,
+                max_session_age_days: Some(90),
+                max_sessions: Some(100),
+                migration_source: Some(id.to_owned()),
+            })
+            .await
+            .map_err(|error| format!("{label} detection: {error}"))?;
+        sources.push(ExternalAgentImportSource {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            items: response.items,
+        });
+    }
+    let histories = backend
+        .read_external_agent_import_histories()
+        .await
+        .map_err(|error| format!("import history: {error}"))?
+        .data;
+    Ok(ExternalAgentImportSnapshot { sources, histories })
 }
 
 async fn read_permissions_snapshot(
@@ -13241,6 +13548,32 @@ mod tests {
         )
         .expect("known lifecycle family");
         assert!(remote_control_status_changed(&malformed).is_none());
+    }
+
+    #[test]
+    fn external_agent_import_lifecycle_is_typed_and_correlated() {
+        let event = LifecycleNotification::from_known(
+            "externalAgentConfig/import/completed",
+            Some(&serde_json::json!({
+                "importId": "import-1",
+                "itemTypeResults": [{
+                    "itemType": "SKILLS",
+                    "successes": [{"itemType": "SKILLS", "target": "/tmp/skills"}],
+                    "failures": []
+                }]
+            })),
+        )
+        .expect("known external-agent lifecycle event");
+        let status = external_agent_import_status(&event).expect("typed import completion");
+        assert_eq!(status.import_id, "import-1");
+        assert_eq!(status.item_type_results[0].successes.len(), 1);
+
+        let malformed = LifecycleNotification::from_known(
+            "externalAgentConfig/import/completed",
+            Some(&serde_json::json!({"importId": "import-1"})),
+        )
+        .expect("known external-agent lifecycle family");
+        assert!(external_agent_import_status(&malformed).is_none());
     }
 
     #[test]

@@ -176,6 +176,10 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "environment/add",
     "environment/info",
     "environment/status",
+    "externalAgentConfig/detect",
+    "externalAgentConfig/import",
+    "externalAgentConfig/import/readHistories",
+    "externalAgentConfig/import/recordHistory",
     "fs/copy",
     "fs/createDirectory",
     "fs/getMetadata",
@@ -361,7 +365,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 87);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 91);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

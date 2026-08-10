@@ -10,12 +10,15 @@ use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, CommandExecParams,
     CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
     CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
-    CommandExecWriteResponse, ConfigRequirementsReadResponse, FsCopyParams, FsCopyResponse,
-    FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse,
-    FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams,
-    FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome,
-    McpServerConfigAddParams, McpServerOauthLoginParams, McpServerOauthLoginResponse,
-    MitsuroServerBackend, ModelProviderCapabilitiesReadParams,
+    CommandExecWriteResponse, ConfigRequirementsReadResponse, ExternalAgentConfigDetectParams,
+    ExternalAgentConfigDetectResponse, ExternalAgentConfigImportHistoriesReadResponse,
+    ExternalAgentConfigImportHistoryRecordParams, ExternalAgentConfigImportHistoryRecordResponse,
+    ExternalAgentConfigImportParams, ExternalAgentConfigImportResponse, FsCopyParams,
+    FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams,
+    FsRemoveResponse, FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse,
+    FsWriteFileParams, FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge,
+    LiveTurnOutcome, McpServerConfigAddParams, McpServerOauthLoginParams,
+    McpServerOauthLoginResponse, MitsuroServerBackend, ModelProviderCapabilitiesReadParams,
     ModelProviderCapabilitiesReadResponse, PendingApproval, PermissionProfileListParams,
     PermissionProfileListResponse, PluginInstallParams, PluginInstallResponse,
     PluginUninstallParams, PluginUninstallResponse, RemoteControlClientsListParams,
@@ -99,6 +102,7 @@ pub struct BackendCapabilities {
     pub permission_profiles: bool,
     pub config_requirements: bool,
     pub model_provider_capabilities: bool,
+    pub external_agent_import: bool,
     pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
@@ -142,6 +146,7 @@ impl BackendCapabilities {
             permission_profiles: true,
             config_requirements: true,
             model_provider_capabilities: true,
+            external_agent_import: true,
             remote_control: true,
             hive: false,
             schedules: false,
@@ -188,6 +193,7 @@ impl BackendCapabilities {
             permission_profiles: false,
             config_requirements: false,
             model_provider_capabilities: false,
+            external_agent_import: false,
             remote_control: false,
             hive: true,
             schedules: true,
@@ -538,6 +544,57 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.model_provider_capabilities_read(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP exposes capabilities through its own model catalog".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn detect_external_agent_config(
+        &self,
+        params: ExternalAgentConfigDetectParams,
+    ) -> Result<ExternalAgentConfigDetectResponse> {
+        match self {
+            Self::Codex(backend) => backend.external_agent_config_detect(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex external-agent imports".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn import_external_agent_config(
+        &self,
+        params: ExternalAgentConfigImportParams,
+    ) -> Result<ExternalAgentConfigImportResponse> {
+        match self {
+            Self::Codex(backend) => backend.external_agent_config_import(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex external-agent imports".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_external_agent_import_histories(
+        &self,
+    ) -> Result<ExternalAgentConfigImportHistoriesReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.external_agent_config_import_read_histories().await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex external-agent import history".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn record_external_agent_import_history(
+        &self,
+        params: ExternalAgentConfigImportHistoryRecordParams,
+    ) -> Result<ExternalAgentConfigImportHistoryRecordResponse> {
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .external_agent_config_import_record_history(params)
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex external-agent import history".to_owned(),
             )),
         }
     }
@@ -980,6 +1037,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().config_requirements);
         assert!(BackendCapabilities::codex().model_provider_capabilities);
         assert!(!BackendCapabilities::mitsuro().model_provider_capabilities);
+        assert!(BackendCapabilities::codex().external_agent_import);
+        assert!(!BackendCapabilities::mitsuro().external_agent_import);
         assert!(BackendCapabilities::codex().file_mutations);
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);

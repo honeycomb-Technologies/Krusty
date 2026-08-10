@@ -67,10 +67,16 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `remoteControl/status/read` · `remoteControl/enable` · `remoteControl/disable`
 - `remoteControl/pairing/start` · `remoteControl/pairing/status`
 - `remoteControl/client/list` · `remoteControl/client/revoke`
+- `externalAgentConfig/detect` · `externalAgentConfig/import`
+- `externalAgentConfig/import/readHistories` · `externalAgentConfig/import/recordHistory`
 
 Remote Control is a Codex-only capability in the current transport matrix. Its typed
 status, pairing, client-list, revocation, and lifecycle contracts never fall back to
 fixture records; Mitsuro HTTP returns `NotImplemented` through the desktop boundary.
+
+External-agent discovery, import, progress/completion, and history use generated typed
+contracts. Detection is read-only; import preserves each detected item's lossless
+details payload and remains Codex-only at the desktop capability boundary.
 
 The generated protocol inventories are committed in `fixtures/`: 95 stable client
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable

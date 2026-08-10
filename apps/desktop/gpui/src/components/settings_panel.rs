@@ -17,8 +17,8 @@ use mitsuro_desktop_backend::{
 };
 
 use crate::app::{
-    AccountSession, McpAddTransport, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection,
-    SurfaceDataState, UiConnection,
+    AccountSession, ExternalAgentImportSource, McpAddTransport, MitsuroApp, ProductMode,
+    SettingsNavGroup, SettingsSection, SurfaceDataState, UiConnection,
 };
 use crate::theme;
 
@@ -674,7 +674,12 @@ fn linux_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
 
 // ─── Other sections (bar-like multi-row chrome) ─────────────────────────────
 
-fn import_body(_app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn import_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let state = app.external_agent_import_state();
+    let sources = app.external_agent_import_sources().to_vec();
+    let histories = app.external_agent_import_histories().to_vec();
+    let error = app.external_agent_import_error().map(str::to_owned);
+    let confirming = app.external_agent_import_confirmation().map(str::to_owned);
     div()
         .id("settings-import")
         .flex()
@@ -686,38 +691,83 @@ fn import_body(_app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
             div()
                 .text_xs()
                 .text_color(theme::colors().text_tertiary)
-                .child(
-                    "Import adapters are not connected in this native build. Existing settings are unchanged."
-                        .to_string(),
-                ),
+                .child(match state {
+                    SurfaceDataState::Live => "Choose content detected by the active Codex app-server. Your existing source-app setup won’t be affected.",
+                    SurfaceDataState::Loading => "Looking for importable content through Codex app-server…",
+                    SurfaceDataState::Unsupported => "External-agent imports are a Codex app-server capability and are not exposed by Mitsuro HTTP.",
+                    SurfaceDataState::Fixture => "Offline fixture mode never invents importable content.",
+                    SurfaceDataState::Error => "Codex app-server could not finish external-agent discovery.",
+                }),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
-                .child(import_source_card(
-                    "Claude Code",
-                    "Projects, CLAUDE.md → AGENTS.md, settings.json → config.toml, skills & plugins",
-                    "Import",
-                    "import-claude-code",
-                    cx,
-                ))
-                .child(import_source_card(
-                    "Cursor",
-                    "Cursor rules → AGENTS.md, Cursor settings → config.toml, recent projects",
-                    "Import",
-                    "import-cursor",
-                    cx,
-                ))
-                .child(import_source_card(
-                    "Claude Cowork",
-                    "Shared workspaces and instruction packs from Claude Cowork",
-                    "Import",
-                    "import-claude-cowork",
-                    cx,
-                )),
+                .children(sources.iter().map(|source| {
+                    import_source_card(source, app, cx).into_any_element()
+                }))
+                .when(
+                    matches!(state, SurfaceDataState::Unsupported | SurfaceDataState::Fixture),
+                    |this| {
+                        this.child(settings_card().child(empty_list_message(
+                            "Import unavailable",
+                            if matches!(state, SurfaceDataState::Unsupported) {
+                                "Switch to Codex app-server to detect and import external-agent configuration."
+                            } else {
+                                "Connect a live Codex app-server to detect external-agent configuration."
+                            },
+                        )))
+                    },
+                )
+                .when(matches!(state, SurfaceDataState::Loading), |this| {
+                    this.child(settings_card().child(empty_list_message(
+                        "Detecting external tools",
+                        "Reading Claude Code and Cursor configuration without changing it.",
+                    )))
+                })
+                .when(matches!(state, SurfaceDataState::Error), |this| {
+                    this.child(settings_card().child(empty_list_message(
+                        "Couldn’t detect external tools",
+                        error.as_deref().unwrap_or("The app-server returned an unknown error."),
+                    )))
+                }),
         )
+        .when_some(confirming, |this, provider_id| {
+            this.child(group_label("Confirm import")).child(
+                import_confirmation_card(&provider_id, app, cx),
+            )
+        })
+        .child(group_label("Import history"))
+        .child(
+            settings_card()
+                .children(histories.iter().take(6).enumerate().flat_map(|(index, history)| {
+                    let mut rows = Vec::new();
+                    if index > 0 {
+                        rows.push(card_divider().into_any_element());
+                    }
+                    let provider = history
+                        .provider_id
+                        .as_deref()
+                        .map(external_agent_provider_label)
+                        .unwrap_or("External tool");
+                    let detail = format!(
+                        "{} succeeded · {} failed · {}",
+                        history.successes.len(),
+                        history.failures.len(),
+                        format_remote_control_timestamp(history.completed_at_ms)
+                    );
+                    rows.push(info_row(provider, &detail).into_any_element());
+                    rows
+                }))
+                .when(histories.is_empty(), |this| {
+                    this.child(empty_list_message(
+                        "No imports yet",
+                        "Completed imports returned by Codex app-server will appear here.",
+                    ))
+                }),
+        )
+        .child(settings_card().child(import_refresh_row(app, cx)))
 }
 
 fn profile_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -3327,15 +3377,45 @@ fn archived_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
 }
 
 fn import_source_card(
-    title: &str,
-    subtitle: &str,
-    _button: &str,
-    id: &'static str,
-    _cx: &mut Context<MitsuroApp>,
+    source: &ExternalAgentImportSource,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
-    let title = title.to_string();
-    let subtitle = subtitle.to_string();
+    let title = source.label.clone();
+    let id = source.id.clone();
+    let item_count = source.items.len();
+    let detail_count = source
+        .items
+        .iter()
+        .map(|item| item.detail_count())
+        .sum::<usize>();
+    let item_labels = source
+        .items
+        .iter()
+        .map(|item| item.item_type.label())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let subtitle = if item_count == 0 {
+        "Nothing importable was detected".to_owned()
+    } else if detail_count > 0 {
+        format!("{item_count} group(s), {detail_count} item(s) · {item_labels}")
+    } else {
+        format!("{item_count} group(s) · {item_labels}")
+    };
+    let busy = app.external_agent_import_in_progress().is_some();
+    let importing = app.external_agent_import_in_progress() == Some(id.as_str());
+    let button_label = if importing {
+        "Importing…"
+    } else if item_count == 0 {
+        "Nothing found"
+    } else {
+        "Review"
+    };
+    let clickable = item_count > 0 && !busy;
+    let click_id = id.clone();
     div()
         .id(SharedId(format!("import-card-{id}")))
         .flex()
@@ -3382,14 +3462,186 @@ fn import_source_card(
                 .flex()
                 .items_center()
                 .justify_center()
+                .when(clickable, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.request_external_agent_import(click_id.clone(), cx)
+                        }))
+                })
+                .when(!clickable, |button| button.opacity(0.55))
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text_tertiary)
-                        .child("Unavailable"),
+                        .text_color(if clickable {
+                            colors.text_secondary
+                        } else {
+                            colors.text_tertiary
+                        })
+                        .child(button_label),
                 ),
         )
+}
+
+fn import_confirmation_card(
+    provider_id: &str,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let source = app
+        .external_agent_import_sources()
+        .iter()
+        .find(|source| source.id == provider_id)
+        .cloned();
+    let provider_id = provider_id.to_owned();
+    let import_id = provider_id.clone();
+    settings_card()
+        .child(info_row(
+            "Source",
+            source
+                .as_ref()
+                .map(|source| source.label.as_str())
+                .unwrap_or("External tool"),
+        ))
+        .children(source.iter().flat_map(|source| {
+            source.items.iter().flat_map(|item| {
+                vec![
+                    card_divider().into_any_element(),
+                    info_row(item.item_type.label(), &item.description).into_any_element(),
+                ]
+            })
+        }))
+        .child(card_divider())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap(px(8.0))
+                .px(px(14.0))
+                .py(px(12.0))
+                .child(
+                    div()
+                        .id("external-agent-import-cancel")
+                        .h(px(30.0))
+                        .px(px(14.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(|app, _, _, cx| app.cancel_external_agent_import(cx)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text_secondary)
+                                .child("Cancel"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedId(format!(
+                            "external-agent-import-confirm-{provider_id}"
+                        )))
+                        .h(px(30.0))
+                        .px(px(14.0))
+                        .rounded(px(8.0))
+                        .bg(colors.accent_soft)
+                        .border_1()
+                        .border_color(colors.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.request_external_agent_import(import_id.clone(), cx)
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.accent)
+                                .child("Import all"),
+                        ),
+                ),
+        )
+}
+
+fn import_refresh_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = matches!(app.external_agent_import_state(), SurfaceDataState::Live)
+        && app.external_agent_import_in_progress().is_none();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Refresh detection"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Re-read available content and completed import history"),
+                ),
+        )
+        .child(
+            div()
+                .id("refresh-external-agent-imports")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(available, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(
+                            cx.listener(|app, _, _, cx| app.refresh_external_agent_imports(cx)),
+                        )
+                })
+                .when(!available, |button| button.opacity(0.55))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text_secondary)
+                        .child("Refresh"),
+                ),
+        )
+}
+
+fn external_agent_provider_label(provider_id: &str) -> &str {
+    match provider_id {
+        "claude-code" => "Claude Code",
+        "claude-cowork" => "Claude Cowork",
+        "cursor" => "Cursor",
+        _ => provider_id,
+    }
 }
 
 fn empty_list_message(title: &str, subtitle: &str) -> impl IntoElement {

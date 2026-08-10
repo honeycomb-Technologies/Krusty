@@ -27,6 +27,12 @@ use crate::extensions::{
     McpServerToolCallResponse, PluginInstalledParams, PluginInstalledResponse, PluginListParams,
     PluginListResponse, PluginReadParams, PluginReadResponse,
 };
+use crate::external_agent_config::{
+    ExternalAgentConfigDetectParams, ExternalAgentConfigDetectResponse,
+    ExternalAgentConfigImportHistoriesReadResponse, ExternalAgentConfigImportHistoryRecordParams,
+    ExternalAgentConfigImportHistoryRecordResponse, ExternalAgentConfigImportParams,
+    ExternalAgentConfigImportResponse,
+};
 use crate::fs::{
     FsCopyParams, FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse,
     FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryParams, FsReadDirectoryResponse,
@@ -168,6 +174,45 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<ModelProviderCapabilitiesReadResponse> {
         Err(crate::AgentError::NotImplemented(
             "model provider capabilities are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Detect importable external-agent configuration without changing it.
+    async fn external_agent_config_detect(
+        &self,
+        _params: ExternalAgentConfigDetectParams,
+    ) -> Result<ExternalAgentConfigDetectResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "external-agent configuration detection is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Import selected items returned by [`Self::external_agent_config_detect`].
+    async fn external_agent_config_import(
+        &self,
+        _params: ExternalAgentConfigImportParams,
+    ) -> Result<ExternalAgentConfigImportResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "external-agent configuration import is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read completed external-agent import history.
+    async fn external_agent_config_import_read_histories(
+        &self,
+    ) -> Result<ExternalAgentConfigImportHistoriesReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "external-agent import history is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Record an import completed outside app-server.
+    async fn external_agent_config_import_record_history(
+        &self,
+        _params: ExternalAgentConfigImportHistoryRecordParams,
+    ) -> Result<ExternalAgentConfigImportHistoryRecordResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "external-agent import history recording is not implemented by this backend".to_owned(),
         ))
     }
 

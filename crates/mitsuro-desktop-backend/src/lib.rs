@@ -9,6 +9,7 @@ pub mod command;
 pub mod desktop;
 pub mod environment;
 pub mod extensions;
+pub mod external_agent_config;
 pub mod fixture;
 pub mod fs;
 pub mod hooks;
@@ -84,6 +85,19 @@ pub use extensions::{
     PluginAvailability, PluginDetail, PluginInstallPolicy, PluginInstalledParams,
     PluginInstalledResponse, PluginInterface, PluginListParams, PluginListResponse,
     PluginMarketplaceEntry, PluginReadParams, PluginReadResponse, PluginSource, PluginSummary,
+};
+pub use external_agent_config::{
+    ExternalAgentConfigDetectParams, ExternalAgentConfigDetectResponse,
+    ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistoriesReadResponse,
+    ExternalAgentConfigImportHistory, ExternalAgentConfigImportHistoryRecordParams,
+    ExternalAgentConfigImportHistoryRecordResponse, ExternalAgentConfigImportItemTypeFailure,
+    ExternalAgentConfigImportItemTypeSuccess, ExternalAgentConfigImportParams,
+    ExternalAgentConfigImportProgressNotification, ExternalAgentConfigImportResponse,
+    ExternalAgentConfigImportStatusNotification, ExternalAgentConfigImportTypeResult,
+    ExternalAgentConfigMigrationItem, ExternalAgentConfigMigrationItemType,
+    ExternalAgentDetectedConnectorCandidate, ExternalAgentDetectedConnectorSource,
+    ExternalAgentImportedConnectorCandidate, ExternalAgentImportedConnectorSource,
+    CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE,
 };
 pub use fixture::{
     load_sample_turn_events, replay_events, replay_sample_turn, FixtureBackend, SAMPLE_TURN_JSONL,

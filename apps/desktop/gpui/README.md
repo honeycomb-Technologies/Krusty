@@ -56,6 +56,14 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   Mitsuro HTTP and explicit fixture mode show honest unsupported/fixture states. The
   removed local “Computer use” toggles never changed either backend and are no longer
   presented as operational controls.
+- Settings → Import detects real Claude Code and Cursor content through typed
+  `externalAgentConfig/detect` calls, shows the exact returned migration groups for
+  review, and requires an explicit confirmation before calling
+  `externalAgentConfig/import`. Progress/completion notifications and
+  `externalAgentConfig/import/readHistories` drive status and history. The current
+  local app-server does not expose Claude Cowork as a distinct migration selector, so
+  GPUI does not present a fake Cowork action. Mitsuro HTTP and explicit fixture mode
+  show honest unsupported/fixture states.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.
@@ -178,7 +186,7 @@ authenticated backend sends a provider-backed turn when the user presses Send. K
 `MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
 
 The Codex adapter negotiates experimental APIs because the desktop exposes process,
-environment, realtime, Remote Control, and background-terminal protocol families. The reviewed
+environment, realtime, Remote Control, external-agent import, and background-terminal protocol families. The reviewed
 `codex-cli 0.147.0` contract is checked with generated inventories: all 70
 notifications must map to a typed transcript/lifecycle event, and all 11 server
 requests must have an approval, interaction, or automatic transport disposition.

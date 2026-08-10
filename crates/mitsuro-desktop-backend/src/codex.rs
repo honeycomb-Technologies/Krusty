@@ -1076,6 +1076,40 @@ impl AgentBackend for CodexAppServerBackend {
         self.read_model_provider_capabilities(params).await
     }
 
+    async fn external_agent_config_detect(
+        &self,
+        params: crate::ExternalAgentConfigDetectParams,
+    ) -> Result<crate::ExternalAgentConfigDetectResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("externalAgentConfig/detect", Some(value))
+            .await
+    }
+
+    async fn external_agent_config_import(
+        &self,
+        params: crate::ExternalAgentConfigImportParams,
+    ) -> Result<crate::ExternalAgentConfigImportResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("externalAgentConfig/import", Some(value))
+            .await
+    }
+
+    async fn external_agent_config_import_read_histories(
+        &self,
+    ) -> Result<crate::ExternalAgentConfigImportHistoriesReadResponse> {
+        self.request_typed("externalAgentConfig/import/readHistories", None)
+            .await
+    }
+
+    async fn external_agent_config_import_record_history(
+        &self,
+        params: crate::ExternalAgentConfigImportHistoryRecordParams,
+    ) -> Result<crate::ExternalAgentConfigImportHistoryRecordResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("externalAgentConfig/import/recordHistory", Some(value))
+            .await
+    }
+
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         self.search_threads(params).await
     }
@@ -2091,6 +2125,106 @@ mod tests {
         assert!(capabilities.namespace_tools);
         assert!(capabilities.image_generation);
         assert!(capabilities.web_search);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_agent_config_family_matches_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "externalAgentConfig/detect",
+                "externalAgentConfig/import",
+                "externalAgentConfig/import/readHistories",
+                "externalAgentConfig/import/recordHistory",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "externalAgentConfig/detect" => {
+                        assert_eq!(request["params"]["migrationSource"], "cursor");
+                        assert_eq!(request["params"]["includeHome"], true);
+                        serde_json::json!({
+                            "items": [{
+                                "itemType": "SKILLS",
+                                "description": "Migrate Cursor skills",
+                                "cwd": null,
+                                "details": {"skills": [{"name": "canvas"}]}
+                            }],
+                            "connectors": []
+                        })
+                    }
+                    "externalAgentConfig/import" => {
+                        assert_eq!(request["params"]["providerId"], "cursor");
+                        assert_eq!(request["params"]["migrationItems"][0]["itemType"], "SKILLS");
+                        serde_json::json!({"importId": "import-1"})
+                    }
+                    "externalAgentConfig/import/readHistories" => {
+                        assert!(request.get("params").is_none());
+                        serde_json::json!({"data": [], "connectors": []})
+                    }
+                    "externalAgentConfig/import/recordHistory" => {
+                        assert_eq!(request["params"]["providerId"], "external-provider");
+                        serde_json::json!({"importId": "import-2"})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let detected = backend
+            .external_agent_config_detect(crate::ExternalAgentConfigDetectParams {
+                include_home: true,
+                migration_source: Some(crate::CURSOR_MIGRATION_SOURCE.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(detected.items[0].detail_count(), 1);
+        let imported = backend
+            .external_agent_config_import(crate::ExternalAgentConfigImportParams {
+                migration_items: detected.items,
+                migration_source: Some(crate::CURSOR_MIGRATION_SOURCE.to_owned()),
+                provider_id: Some(crate::CURSOR_MIGRATION_SOURCE.to_owned()),
+                source: Some("mitsuro-test".to_owned()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(imported.import_id, "import-1");
+        assert!(backend
+            .external_agent_config_import_read_histories()
+            .await
+            .unwrap()
+            .data
+            .is_empty());
+        let recorded = backend
+            .external_agent_config_import_record_history(
+                crate::ExternalAgentConfigImportHistoryRecordParams {
+                    item_type_results: Vec::new(),
+                    provider_id: "external-provider".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded.import_id, "import-2");
         server.await.unwrap();
     }
 
