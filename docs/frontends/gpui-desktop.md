@@ -69,15 +69,16 @@ success payloads.
   list must use `BackendSessionId::qualified()` as its row/selection key instead of
   the raw server ID.
 
-## Remaining release work
+## Release posture
 
-1. Keep Codex WebSocket explicitly unsupported unless attaching to an already-running
-   app-server becomes a required deployment mode; managed stdio is the supported path.
-2. Run the full workspace and dual-provider acceptance gauntlet, produce the GPUI
-   release build, and verify source, built artifact, installed binary, and live process
-   provenance independently.
-3. Split `app.rs` into state/controllers and bounded views as a post-release
-   maintainability slice; this must not change the backend capability boundary.
+- The fixture/live visual matrix, dual-provider acceptance gauntlet, full workspace
+  gates, optimized GPUI build, and isolated runtime provenance check are complete.
+- Codex WebSocket stays explicitly unsupported unless attaching to an already-running
+  app-server becomes a required deployment mode; managed stdio is the supported path.
+- Installation and deployment are separate operator actions. A built GPUI artifact is
+  not evidence that the installed Mitsuro CLI/server or any live process changed.
+- Splitting `app.rs` into state/controllers and bounded views is a post-release
+  maintainability slice and must not change the backend capability boundary.
 
 ## Validation
 

@@ -59,15 +59,15 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 The home shell, open transcript, Settings, and every product destination have been
 reviewed in a live 940×1054 GPUI window against the reversed ChatGPT desktop reference.
-Pull requests and Sites
-retain their navigation destinations but render
+Pull requests and Sites retain their navigation destinations but render
 explicit capability states: neither backend exposes a typed API for those products, so
 the native client does not show sample repositories, sample deployments, or inactive
 create/review controls. Atlas/browser, the composer, live-turn failure handling, and
 secondary Settings actions follow the same honest capability treatment. Desktop-only
 Settings values are durable and explicitly distinguished from live server configuration.
-Finalization still requires the release/runtime provenance checks described in the
-repository validation plan.
+The release candidate has passed the complete surface matrix, dual-provider live
+acceptance, full workspace gates, optimized build, and isolated runtime provenance
+check. Installation and deployment remain separate operator actions.
 
 ## Build
 
