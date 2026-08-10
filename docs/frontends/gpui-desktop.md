@@ -48,6 +48,7 @@ backend or are shown as unavailable.
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Conversation find/history | Live search over the real persisted transcript plus bounded turn pages | Live `thread/searchOccurrences` plus bidirectional `thread/turns/list`; runtimes returning `-32601` fall back to a real `thread/read(includeTurns)` projection | Typed fixture transcript; no invented matches |
+| Edit latest user message | Unsupported; hidden because there is no destructive tail mutation | Live `thread/rollback { numTurns: 1 }`, authoritative returned-thread replacement, then real turn resubmit with retained text/media/reference inputs | Unsupported in product UI; typed rollback fixture is contract-test only |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
 | Audio-file attachments | Unsupported, hidden and rejected before I/O | Live schema-exact `localAudio`, selected-model gated | Unsupported, hidden |
 | Skill references | Unsupported, hidden and rejected before I/O | Live schema-exact `skill { name, path }` from enabled server skills | Unsupported, hidden |

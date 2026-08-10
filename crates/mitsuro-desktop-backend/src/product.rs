@@ -136,14 +136,20 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
     }
 }
 
+pub fn conversation_messages_from_thread_value(
+    thread: &serde_json::Value,
+) -> Vec<ConversationMessage> {
+    crate::extract_transcript_from_thread(thread)
+        .into_iter()
+        .map(conversation_message_from_transcript)
+        .collect()
+}
+
 pub(crate) fn conversation_messages_from_turn_values(
     turns: Vec<serde_json::Value>,
 ) -> Vec<ConversationMessage> {
     let thread = serde_json::json!({ "turns": turns });
-    crate::extract_transcript_from_thread(&thread)
-        .into_iter()
-        .map(conversation_message_from_transcript)
-        .collect()
+    conversation_messages_from_thread_value(&thread)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,7 +249,9 @@ pub enum ProductAccessMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductAttachment {
     LocalImage { path: String },
+    ImageUrl { url: String },
     LocalAudio { path: String },
+    AudioUrl { url: String },
     Skill { name: String, path: String },
     Mention { name: String, path: String },
 }
@@ -473,11 +481,12 @@ impl DesktopBackend {
         validate_access_mode(self.kind(), request.access_mode)?;
         validate_speed_mode(self.kind(), request.speed_mode.as_ref())?;
         validate_work_mode(self.kind(), request.work_mode.as_ref())?;
-        if request
-            .attachments
-            .iter()
-            .any(|attachment| matches!(attachment, ProductAttachment::LocalAudio { .. }))
-            && !self.capabilities().audio_attachments
+        if request.attachments.iter().any(|attachment| {
+            matches!(
+                attachment,
+                ProductAttachment::LocalAudio { .. } | ProductAttachment::AudioUrl { .. }
+            )
+        }) && !self.capabilities().audio_attachments
         {
             return Err(AgentError::NotImplemented(format!(
                 "{} does not accept audio attachments",
@@ -558,7 +567,9 @@ fn product_turn_params(request: ProductTurn, backend: BackendKind) -> TurnStartP
     for attachment in request.attachments {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
+            ProductAttachment::ImageUrl { url } => params.push_image_url(url),
             ProductAttachment::LocalAudio { path } => params.push_local_audio(path),
+            ProductAttachment::AudioUrl { url } => params.push_audio_url(url),
             ProductAttachment::Skill { name, path } => params.push_skill(name, path),
             ProductAttachment::Mention { name, path } => params.push_mention(name, path),
         }
@@ -1351,6 +1362,39 @@ mod tests {
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["input"][1]["type"], "localAudio");
         assert_eq!(value["input"][1]["path"], "/tmp/recording.wav");
+    }
+
+    #[test]
+    fn product_turn_preserves_remote_and_embedded_media_for_edit_resubmit() {
+        let embedded_image = "data:image/png;base64,cG5n";
+        let embedded_audio = "data:audio/ogg;base64,b2dn";
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-edit"),
+                text: "edited".to_owned(),
+                model: None,
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                speed_mode: None,
+                work_mode: None,
+                attachments: vec![
+                    ProductAttachment::ImageUrl {
+                        url: embedded_image.to_owned(),
+                    },
+                    ProductAttachment::AudioUrl {
+                        url: embedded_audio.to_owned(),
+                    },
+                ],
+            },
+            BackendKind::CodexStdio,
+        );
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["input"][1]["type"], "image");
+        assert_eq!(value["input"][1]["url"], embedded_image);
+        assert_eq!(value["input"][1]["detail"], serde_json::Value::Null);
+        assert_eq!(value["input"][2]["type"], "audio");
+        assert_eq!(value["input"][2]["url"], embedded_audio);
     }
 
     #[test]

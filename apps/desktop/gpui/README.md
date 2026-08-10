@@ -76,6 +76,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - An authenticated Ready Mitsuro or Codex backend sends a real turn by default.
   Fixture turns require an explicit fixture backend or fixture environment flag, and
   session/turn failures remain visible errors instead of replaying synthetic success.
+- The latest persisted Codex user message exposes the reference-style hover action and
+  double-click inline editor. Send performs one real `thread/rollback`, replaces the UI
+  from the returned thread, and resubmits the edited text with every retained local,
+  remote, embedded, skill, and mention input. Cancel is local and non-destructive.
+  Navigation/backend switching is held during the rollback/resubmit boundary. Mitsuro
+  hides editing because its HTTP API has no destructive turn rollback.
 - Mitsuro Work is a read-only projection of `/api/hive/current`; Hive dispatch and
   task mutations are deliberately unavailable in GPUI for now.
 - Scheduled reads `/api/hive/schedules`; create, pause, resume, and delete are not

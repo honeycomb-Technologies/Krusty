@@ -17,17 +17,18 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
-    activity_item_fields, command_execution_fields, decode_base64_lossy, file_change_fields,
-    fixture_demo_account_response, fixture_demo_collaboration_modes, fixture_demo_config,
-    fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
-    fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
-    load_sample_turn_events, normalize_abs_path, summarize_file_changes, valid_mcp_server_name,
-    Account, ActivityFields, AddCreditsNudgeCreditType, AddCreditsNudgeEmailStatus, AgentBackend,
-    AppInfo, ApprovalChoice, AppsInstalledParams, AppsListParams, BackendKind, BackendSelection,
-    BackendSessionId, CancelLoginAccountParams, CancelLoginAccountStatus,
-    CollaborationModeListParams, CollaborationModeMask, CommandExecOutputDeltaNotification,
-    CommandExecOutputStream, CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams,
-    ConfigBatchWriteParams, ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
+    activity_item_fields, command_execution_fields, conversation_messages_from_thread_value,
+    decode_base64_lossy, file_change_fields, fixture_demo_account_response,
+    fixture_demo_collaboration_modes, fixture_demo_config, fixture_demo_environments,
+    fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
+    fixture_demo_skills, fixture_demo_usage, join_abs, load_sample_turn_events, normalize_abs_path,
+    summarize_file_changes, valid_mcp_server_name, Account, ActivityFields,
+    AddCreditsNudgeCreditType, AddCreditsNudgeEmailStatus, AgentBackend, AppInfo, ApprovalChoice,
+    AppsInstalledParams, AppsListParams, BackendKind, BackendSelection, BackendSessionId,
+    CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
+    CollaborationModeMask, CommandExecOutputDeltaNotification, CommandExecOutputStream,
+    CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams, ConfigBatchWriteParams,
+    ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
     ConsumeAccountRateLimitResetCreditOutcome, ConsumeAccountRateLimitResetCreditParams,
     ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
     ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
@@ -837,6 +838,15 @@ pub enum ComposerAttachmentKind {
     Mention,
 }
 
+#[derive(Clone, Debug)]
+struct LatestMessageEdit {
+    thread_id: String,
+    message_index: usize,
+    item_id: Option<String>,
+    original_message: DemoMessage,
+    attachments: Vec<ProductAttachment>,
+}
+
 impl AccountSession {
     /// Seeded fixture demo profile (signed-in Pro + usage bars + Jacob Burgess).
     pub fn fixture_demo() -> Self {
@@ -1042,6 +1052,13 @@ pub struct MitsuroApp {
     thread_find_hydrating: bool,
     thread_find_error: Option<String>,
     thread_find_generation: u64,
+    /// Inline editor for the latest persisted Codex user message. Submission
+    /// performs one real turn rollback before starting the replacement turn.
+    latest_message_edit_input: Entity<InputState>,
+    latest_message_edit: Option<LatestMessageEdit>,
+    latest_message_edit_in_progress: bool,
+    latest_message_edit_error: Option<String>,
+    latest_message_edit_generation: u64,
     selected_thread: Option<String>,
     status_line: SharedString,
     /// Active product shell mode (rail selection).
@@ -1310,6 +1327,22 @@ impl MitsuroApp {
         )
         .detach();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let latest_message_edit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Edit message")
+                .multi_line(true)
+        });
+        cx.subscribe_in(
+            &latest_message_edit_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let _ = app;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let thread_find_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         cx.subscribe_in(
@@ -1498,6 +1531,11 @@ impl MitsuroApp {
             thread_find_hydrating: false,
             thread_find_error: None,
             thread_find_generation: 0,
+            latest_message_edit_input,
+            latest_message_edit: None,
+            latest_message_edit_in_progress: false,
+            latest_message_edit_error: None,
+            latest_message_edit_generation: 0,
             selected_thread: None,
             selected_chat_thread: None,
             selected_codex_thread: None,
@@ -1764,6 +1802,15 @@ impl MitsuroApp {
     }
 
     pub fn switch_backend(&mut self, kind: BackendKind, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            self.status_line =
+                "Finish the message rollback and resend before switching backends.".into();
+            cx.notify();
+            return;
+        }
+        self.latest_message_edit = None;
+        self.latest_message_edit_error = None;
+        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
         if self.active_backend_kind() == Some(kind)
             && matches!(
                 self.connection,
@@ -1792,6 +1839,11 @@ impl MitsuroApp {
     }
 
     pub fn reconnect_backend(&mut self, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            self.status_line = "Finish the message rollback and resend before reconnecting.".into();
+            cx.notify();
+            return;
+        }
         let kind = self
             .active_backend_kind()
             .unwrap_or(BackendKind::MitsuroHttp);
@@ -1822,6 +1874,18 @@ impl MitsuroApp {
     /// Selection is preserved: Chat/Codex each remember their last thread; Work
     /// keeps `selected_goal` across hops (goals list is never cleared here).
     pub fn set_mode(&mut self, mode: ProductMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress && mode != self.active_mode {
+            self.status_line =
+                "Finish the message rollback and resend before leaving this conversation.".into();
+            cx.notify();
+            return;
+        }
+        if mode != self.active_mode && self.latest_message_edit.is_some() {
+            self.latest_message_edit = None;
+            self.latest_message_edit_error = None;
+            self.latest_message_edit_generation =
+                self.latest_message_edit_generation.wrapping_add(1);
+        }
         self.remember_thread_selection_for_mode(self.active_mode);
 
         // Entering Settings from any other mode: land on General + remember return.
@@ -6891,6 +6955,274 @@ impl MitsuroApp {
         .detach();
     }
 
+    pub fn latest_message_edit_input(&self) -> &Entity<InputState> {
+        &self.latest_message_edit_input
+    }
+
+    pub fn latest_message_edit_in_progress(&self) -> bool {
+        self.latest_message_edit_in_progress
+    }
+
+    pub fn latest_message_edit_error(&self) -> Option<&str> {
+        self.latest_message_edit_error.as_deref()
+    }
+
+    pub fn can_edit_transcript_message(&self, message_index: usize) -> bool {
+        if self.turn_in_progress
+            || self.latest_message_edit_in_progress
+            || self.latest_message_edit.is_some()
+        {
+            return false;
+        }
+        let Some(backend) = self.live_backend() else {
+            return false;
+        };
+        if !backend.capabilities().edit_latest_message {
+            return false;
+        }
+        self.selected_thread()
+            .and_then(|thread| latest_user_message_index(&thread.messages))
+            == Some(message_index)
+    }
+
+    pub fn transcript_message_is_being_edited(&self, message_index: usize) -> bool {
+        self.latest_message_edit.as_ref().is_some_and(|edit| {
+            self.selected_thread.as_deref() == Some(edit.thread_id.as_str())
+                && edit.message_index == message_index
+        })
+    }
+
+    pub fn begin_latest_message_edit(
+        &mut self,
+        message_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.turn_in_progress {
+            self.status_line = "Edit unavailable while a turn is running.".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Edit unavailable · backend is not ready.".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().edit_latest_message {
+            self.status_line =
+                "Edit unavailable · this backend does not expose turn rollback.".into();
+            cx.notify();
+            return;
+        }
+        let Some(thread) = self.selected_thread() else {
+            self.status_line = "Edit unavailable · select a conversation first.".into();
+            cx.notify();
+            return;
+        };
+        if latest_user_message_index(&thread.messages) != Some(message_index) {
+            self.status_line = "Only the latest user message can be edited.".into();
+            cx.notify();
+            return;
+        }
+        let Some(message) = thread.messages.get(message_index).cloned() else {
+            return;
+        };
+        let body = match &message.kind {
+            DemoMessageKind::User { body, .. } => body.clone(),
+            _ => return,
+        };
+        let attachments = match product_attachments_from_demo_message(&message) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                self.status_line = format!("Edit unavailable · {error}").into();
+                self.latest_message_edit_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let thread_id = thread.summary.id.clone();
+        self.thread_find_open = false;
+        self.thread_find_matches.clear();
+        self.thread_find_loading = false;
+        self.thread_find_hydrating = false;
+        self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
+        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
+        self.latest_message_edit = Some(LatestMessageEdit {
+            thread_id,
+            message_index,
+            item_id: message.item_id.clone(),
+            original_message: message,
+            attachments,
+        });
+        self.latest_message_edit_in_progress = false;
+        self.latest_message_edit_error = None;
+        self.latest_message_edit_input.update(cx, |state, cx| {
+            state.set_value(body, window, cx);
+            state.focus(window, cx);
+        });
+        self.scroll_thread_find_match_after_layout(message_index, cx);
+        self.status_line = "Editing latest message.".into();
+        cx.notify();
+    }
+
+    pub fn cancel_latest_message_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            self.status_line = "Finishing message rollback and resend…".into();
+            cx.notify();
+            return;
+        }
+        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
+        self.latest_message_edit = None;
+        self.latest_message_edit_error = None;
+        self.latest_message_edit_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.status_line = "Message edit canceled.".into();
+        cx.notify();
+    }
+
+    pub fn submit_latest_message_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            return;
+        }
+        let Some(edit) = self.latest_message_edit.clone() else {
+            return;
+        };
+        let text = self
+            .latest_message_edit_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if text.is_empty() && edit.attachments.is_empty() {
+            self.latest_message_edit_error = Some("Message cannot be empty".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.latest_message_edit_error = Some("Backend is not ready".to_owned());
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().edit_latest_message {
+            self.latest_message_edit_error =
+                Some("The active backend does not expose destructive turn rollback".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(session_id) = self.live_session_id(&edit.thread_id) else {
+            self.latest_message_edit_error =
+                Some("Conversation has no live backend identity".to_owned());
+            cx.notify();
+            return;
+        };
+        let still_latest = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == edit.thread_id)
+            .and_then(|thread| {
+                let latest = latest_user_message_index(&thread.messages)?;
+                let message = thread.messages.get(latest)?;
+                Some(
+                    latest == edit.message_index
+                        && (edit.item_id.is_none() || message.item_id == edit.item_id),
+                )
+            })
+            .unwrap_or(false);
+        if !still_latest {
+            self.latest_message_edit_error =
+                Some("Conversation changed; reopen the latest message editor".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let mut replacement_message = edit.original_message.clone();
+        if let DemoMessageKind::User { body, .. } = &mut replacement_message.kind {
+            *body = text.clone();
+        }
+        replacement_message.item_id = None;
+        replacement_message.streaming = false;
+
+        let backend_generation = self.backend_generation;
+        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
+        let edit_generation = self.latest_message_edit_generation;
+        self.latest_message_edit_in_progress = true;
+        self.latest_message_edit_error = None;
+        self.status_line = "Rolling back the latest turn…".into();
+
+        let model_slug = self.selected_model_slug();
+        let reasoning_effort = self.selected_reasoning_effort.clone();
+        let speed_mode = self.selected_speed_mode();
+        let work_mode = self.selected_work_mode();
+        let working_dir = self.composer_workspace_dir().map(ToOwned::to_owned);
+        let access_mode = self.composer_access_mode();
+        let attachments = edit.attachments.clone();
+        let thread_id = edit.thread_id.clone();
+        cx.spawn(async move |this, cx| {
+            let rollback_backend = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        rollback_backend
+                            .rollback_thread(&session_id, 1)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.latest_message_edit_generation != edit_generation
+                    || app.selected_thread.as_deref() != Some(thread_id.as_str())
+                {
+                    return;
+                }
+                match result {
+                    Ok(response) => {
+                        let messages =
+                            demo_messages_after_rollback(&response.thread, replacement_message);
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == thread_id)
+                        {
+                            thread.messages = messages;
+                            thread.summary.preview =
+                                Some(demo_user_preview(&text, &edit.original_message));
+                        }
+                        app.latest_message_edit = None;
+                        app.latest_message_edit_in_progress = false;
+                        app.latest_message_edit_error = None;
+                        app.turn_in_progress = true;
+                        app.turn_generation = app.turn_generation.wrapping_add(1);
+                        app.active_turn_thread_id = Some(thread_id.clone());
+                        app.status_line = "Resubmitting edited message…".into();
+                        app.start_live_turn(
+                            thread_id,
+                            text,
+                            model_slug,
+                            reasoning_effort,
+                            speed_mode,
+                            work_mode,
+                            working_dir,
+                            access_mode,
+                            attachments,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        app.latest_message_edit_in_progress = false;
+                        app.latest_message_edit_error = Some(error.clone());
+                        app.status_line = format!("Message edit failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn toggle_transcript_message_expanded(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.expanded_transcript_messages.remove(&key) {
             self.expanded_transcript_messages.insert(key);
@@ -8142,6 +8474,20 @@ impl MitsuroApp {
     }
 
     pub fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress
+            && self.selected_thread.as_deref() != Some(id.as_str())
+        {
+            self.status_line =
+                "Finish the message rollback and resend before changing conversations.".into();
+            cx.notify();
+            return;
+        }
+        if self.selected_thread.as_deref() != Some(id.as_str()) {
+            self.latest_message_edit = None;
+            self.latest_message_edit_error = None;
+            self.latest_message_edit_generation =
+                self.latest_message_edit_generation.wrapping_add(1);
+        }
         self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
         self.thread_find_matches.clear();
         self.thread_find_selected = 0;
@@ -9933,6 +10279,7 @@ impl MitsuroApp {
             .map(|attachment| DemoImageAttachment {
                 label: attachment.name.clone(),
                 source: DemoImageSource::LocalPath(attachment.path.clone()),
+                resubmit_url: None,
             })
             .collect::<Vec<_>>();
         let demo_audio = self
@@ -9942,6 +10289,7 @@ impl MitsuroApp {
             .map(|attachment| DemoAudioAttachment {
                 label: attachment.name.clone(),
                 source: DemoAudioSource::LocalPath(attachment.path.clone()),
+                resubmit_url: None,
             })
             .collect::<Vec<_>>();
         let demo_references = self
@@ -12050,6 +12398,10 @@ impl MitsuroApp {
             let _ = bridge.submit(ApprovalChoice::Abort);
         }
         self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.latest_message_edit = None;
+        self.latest_message_edit_in_progress = false;
+        self.latest_message_edit_error = None;
+        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
         self.threads.clear();
         self.expanded_transcript_messages.clear();
         self.selected_thread = None;
@@ -13488,6 +13840,107 @@ async fn replay_fixture_events(
     });
 }
 
+fn latest_user_message_index(messages: &[DemoMessage]) -> Option<usize> {
+    messages
+        .iter()
+        .rposition(|message| matches!(message.kind, DemoMessageKind::User { .. }))
+}
+
+fn product_attachments_from_demo_message(
+    message: &DemoMessage,
+) -> std::result::Result<Vec<ProductAttachment>, String> {
+    let DemoMessageKind::User {
+        images,
+        audio,
+        references,
+        ..
+    } = &message.kind
+    else {
+        return Err("only user messages can be edited".to_owned());
+    };
+    let mut attachments = Vec::with_capacity(images.len() + audio.len() + references.len());
+    for image in images {
+        match &image.source {
+            DemoImageSource::LocalPath(path) => {
+                attachments.push(ProductAttachment::LocalImage { path: path.clone() })
+            }
+            DemoImageSource::Url(url) => {
+                attachments.push(ProductAttachment::ImageUrl { url: url.clone() })
+            }
+            DemoImageSource::Decoded(_) | DemoImageSource::Unavailable(_) => {
+                let Some(url) = image.resubmit_url.clone() else {
+                    return Err(format!("{} cannot be resubmitted safely", image.label));
+                };
+                attachments.push(ProductAttachment::ImageUrl { url });
+            }
+        }
+    }
+    for audio in audio {
+        match &audio.source {
+            DemoAudioSource::LocalPath(path) => {
+                attachments.push(ProductAttachment::LocalAudio { path: path.clone() })
+            }
+            DemoAudioSource::Url(url) => {
+                attachments.push(ProductAttachment::AudioUrl { url: url.clone() })
+            }
+            DemoAudioSource::Embedded { .. } | DemoAudioSource::Unavailable(_) => {
+                let Some(url) = audio.resubmit_url.clone() else {
+                    return Err(format!("{} cannot be resubmitted safely", audio.label));
+                };
+                attachments.push(ProductAttachment::AudioUrl { url });
+            }
+        }
+    }
+    attachments.extend(references.iter().map(|reference| match reference.kind {
+        DemoReferenceKind::Skill => ProductAttachment::Skill {
+            name: reference.name.clone(),
+            path: reference.path.clone(),
+        },
+        DemoReferenceKind::Mention => ProductAttachment::Mention {
+            name: reference.name.clone(),
+            path: reference.path.clone(),
+        },
+    }));
+    Ok(attachments)
+}
+
+fn demo_user_preview(text: &str, message: &DemoMessage) -> String {
+    let names = match &message.kind {
+        DemoMessageKind::User {
+            images,
+            audio,
+            references,
+            ..
+        } => images
+            .iter()
+            .map(|attachment| attachment.label.as_str())
+            .chain(audio.iter().map(|attachment| attachment.label.as_str()))
+            .chain(references.iter().map(|attachment| attachment.name.as_str()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let visible = if names.is_empty() {
+        text.to_owned()
+    } else if text.is_empty() {
+        format!("Attachments · {}", names.join(", "))
+    } else {
+        format!("{text}\n\nAttachments · {}", names.join(", "))
+    };
+    visible.chars().take(64).collect()
+}
+
+fn demo_messages_after_rollback(
+    thread: &serde_json::Value,
+    replacement_message: DemoMessage,
+) -> Vec<DemoMessage> {
+    let mut messages = conversation_messages_from_thread_value(thread)
+        .into_iter()
+        .map(demo_message_from_conversation)
+        .collect::<Vec<_>>();
+    messages.push(replacement_message);
+    messages
+}
+
 fn demo_message_from_conversation(message: ConversationMessage) -> DemoMessage {
     let mut demo = match message.role {
         MessageRole::User => DemoMessage::user_with_attachments(
@@ -13575,6 +14028,7 @@ fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttach
                 DemoImageAttachment {
                     label,
                     source: DemoImageSource::LocalPath(path),
+                    resubmit_url: None,
                 }
             }
             ConversationImage::Url(url) => {
@@ -13585,10 +14039,12 @@ fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttach
                     .to_owned();
                 DemoImageAttachment {
                     label,
-                    source: DemoImageSource::Url(url),
+                    source: DemoImageSource::Url(url.clone()),
+                    resubmit_url: Some(url),
                 }
             }
             ConversationImage::Embedded { media_type, data } => {
+                let resubmit_url = format!("data:{media_type};base64,{data}");
                 let format = ImageFormat::from_mime_type(&media_type);
                 let decoded = if data.len() <= MAX_EMBEDDED_BASE64_CHARS {
                     base64::engine::general_purpose::STANDARD.decode(data).ok()
@@ -13606,6 +14062,7 @@ fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttach
                 DemoImageAttachment {
                     label: format!("Attached {media_type}"),
                     source,
+                    resubmit_url: Some(resubmit_url),
                 }
             }
         })
@@ -13628,6 +14085,7 @@ fn demo_audio_attachments(audio: Vec<ConversationAudio>) -> Vec<DemoAudioAttachm
                 DemoAudioAttachment {
                     label,
                     source: DemoAudioSource::LocalPath(path),
+                    resubmit_url: None,
                 }
             }
             ConversationAudio::Url(url) => {
@@ -13638,10 +14096,12 @@ fn demo_audio_attachments(audio: Vec<ConversationAudio>) -> Vec<DemoAudioAttachm
                     .to_owned();
                 DemoAudioAttachment {
                     label,
-                    source: DemoAudioSource::Url(url),
+                    source: DemoAudioSource::Url(url.clone()),
+                    resubmit_url: Some(url),
                 }
             }
             ConversationAudio::Embedded { media_type, data } => {
+                let resubmit_url = format!("data:{media_type};base64,{data}");
                 let decoded = if data.len() <= MAX_EMBEDDED_BASE64_CHARS {
                     base64::engine::general_purpose::STANDARD.decode(data).ok()
                 } else {
@@ -13661,6 +14121,7 @@ fn demo_audio_attachments(audio: Vec<ConversationAudio>) -> Vec<DemoAudioAttachm
                 DemoAudioAttachment {
                     label: format!("Attached {media_type}"),
                     source,
+                    resubmit_url: Some(resubmit_url),
                 }
             }
         })
@@ -14372,6 +14833,110 @@ mod tests {
             DemoImageSource::Url(url) if url == "https://example.com/remote.webp"
         ));
         assert!(matches!(&images[2].source, DemoImageSource::Decoded(_)));
+        assert_eq!(
+            images[2].resubmit_url.as_deref(),
+            Some("data:image/png;base64,cG5nIGJ5dGVz")
+        );
+    }
+
+    #[test]
+    fn latest_message_edit_preserves_every_resubmittable_attachment() {
+        let message = demo_message_from_conversation(ConversationMessage {
+            role: MessageRole::User,
+            body: "revise this".to_owned(),
+            item_id: Some("user-latest".to_owned()),
+            command: None,
+            file_change: None,
+            activity: None,
+            images: vec![
+                ConversationImage::LocalPath("/tmp/local.png".to_owned()),
+                ConversationImage::Url("https://example.com/remote.webp".to_owned()),
+                ConversationImage::Embedded {
+                    media_type: "image/png".to_owned(),
+                    data: "cG5n".to_owned(),
+                },
+            ],
+            audio: vec![
+                ConversationAudio::LocalPath("/tmp/local.wav".to_owned()),
+                ConversationAudio::Url("https://example.com/remote.mp3".to_owned()),
+                ConversationAudio::Embedded {
+                    media_type: "audio/ogg".to_owned(),
+                    data: "b2dn".to_owned(),
+                },
+            ],
+            references: vec![
+                ConversationReference {
+                    kind: ConversationReferenceKind::Skill,
+                    name: "release".to_owned(),
+                    path: "/skills/release/SKILL.md".to_owned(),
+                },
+                ConversationReference {
+                    kind: ConversationReferenceKind::Mention,
+                    name: "Cargo.toml".to_owned(),
+                    path: "/workspace/Cargo.toml".to_owned(),
+                },
+            ],
+        });
+
+        assert_eq!(
+            product_attachments_from_demo_message(&message).unwrap(),
+            vec![
+                ProductAttachment::LocalImage {
+                    path: "/tmp/local.png".to_owned()
+                },
+                ProductAttachment::ImageUrl {
+                    url: "https://example.com/remote.webp".to_owned()
+                },
+                ProductAttachment::ImageUrl {
+                    url: "data:image/png;base64,cG5n".to_owned()
+                },
+                ProductAttachment::LocalAudio {
+                    path: "/tmp/local.wav".to_owned()
+                },
+                ProductAttachment::AudioUrl {
+                    url: "https://example.com/remote.mp3".to_owned()
+                },
+                ProductAttachment::AudioUrl {
+                    url: "data:audio/ogg;base64,b2dn".to_owned()
+                },
+                ProductAttachment::Skill {
+                    name: "release".to_owned(),
+                    path: "/skills/release/SKILL.md".to_owned()
+                },
+                ProductAttachment::Mention {
+                    name: "Cargo.toml".to_owned(),
+                    path: "/workspace/Cargo.toml".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rollback_replacement_uses_authoritative_history_and_new_user_message() {
+        let thread = serde_json::json!({
+            "turns": [{
+                "id": "turn-older",
+                "items": [
+                    {"id":"user-older","type":"userMessage","content":[{"type":"text","text":"older"}]},
+                    {"id":"agent-older","type":"agentMessage","text":"answer"}
+                ]
+            }]
+        });
+        let messages = demo_messages_after_rollback(&thread, DemoMessage::user("edited"));
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(
+            &messages[0].kind,
+            DemoMessageKind::User { body, .. } if body == "older"
+        ));
+        assert!(matches!(
+            &messages[1].kind,
+            DemoMessageKind::Assistant { body } if body == "answer"
+        ));
+        assert!(matches!(
+            &messages[2].kind,
+            DemoMessageKind::User { body, .. } if body == "edited"
+        ));
+        assert_eq!(latest_user_message_index(&messages), Some(2));
     }
 
     #[test]
@@ -14416,6 +14981,10 @@ mod tests {
             DemoImageSource::Unavailable(reason)
                 if reason == "Embedded image could not be decoded safely"
         ));
+        assert!(images[0]
+            .resubmit_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("data:text/plain;base64,")));
     }
 
     #[test]
@@ -14445,6 +15014,10 @@ mod tests {
             DemoAudioSource::Embedded { media_type, byte_len }
                 if media_type == "audio/ogg" && *byte_len == 9
         ));
+        assert_eq!(
+            audio[2].resubmit_url.as_deref(),
+            Some("data:audio/ogg;base64,b2dnIGJ5dGVz")
+        );
     }
 
     #[test]
@@ -14458,6 +15031,10 @@ mod tests {
             DemoAudioSource::Unavailable(reason)
                 if reason == "Embedded audio could not be decoded safely"
         ));
+        assert_eq!(
+            audio[0].resubmit_url.as_deref(),
+            Some("data:audio/wav;base64,not base64")
+        );
     }
 
     #[test]

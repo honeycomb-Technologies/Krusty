@@ -1031,6 +1031,8 @@ fn transcript(
             let highlighted = app
                 .selected_thread_find_item_id()
                 .is_some_and(|item_id| msg.item_id.as_deref() == Some(item_id));
+            let editing = app.transcript_message_is_being_edited(absolute_index);
+            let editable = app.can_edit_transcript_message(absolute_index);
             transcript_block(
                 absolute_index as u64,
                 msg,
@@ -1038,6 +1040,11 @@ fn transcript(
                 message_key,
                 expanded,
                 highlighted,
+                editable,
+                editing,
+                editing.then(|| app.latest_message_edit_input().clone()),
+                app.latest_message_edit_in_progress(),
+                app.latest_message_edit_error().map(str::to_owned),
                 cx,
             )
         }))
@@ -1221,6 +1228,11 @@ fn transcript_block(
     message_key: String,
     expanded: bool,
     highlighted: bool,
+    editable: bool,
+    editing: bool,
+    edit_input: Option<Entity<InputState>>,
+    edit_in_progress: bool,
+    edit_error: Option<String>,
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     match &msg.kind {
@@ -1242,6 +1254,11 @@ fn transcript_block(
             message_key,
             expanded,
             highlighted,
+            editable,
+            editing,
+            edit_input,
+            edit_in_progress,
+            edit_error,
             cx,
         )
         .into_any_element(),
@@ -1258,6 +1275,11 @@ fn transcript_block(
             message_key,
             expanded,
             highlighted,
+            false,
+            false,
+            None,
+            false,
+            None,
             cx,
         )
         .into_any_element(),
@@ -1277,6 +1299,11 @@ fn transcript_block(
                     message_key,
                     expanded,
                     false,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
                     cx,
                 )
                 .into_any_element()
@@ -1299,6 +1326,11 @@ fn transcript_block(
                     message_key,
                     expanded,
                     false,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
                     cx,
                 )
                 .into_any_element()
@@ -1327,6 +1359,11 @@ fn transcript_block(
                     message_key,
                     expanded,
                     false,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
                     cx,
                 )
                 .into_any_element()
@@ -1353,6 +1390,11 @@ fn transcript_block(
                     message_key,
                     expanded,
                     false,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
                     cx,
                 )
                 .into_any_element()
@@ -1524,6 +1566,11 @@ fn chat_bubble(
     message_key: String,
     expanded: bool,
     highlighted: bool,
+    editable: bool,
+    editing: bool,
+    edit_input: Option<Entity<InputState>>,
+    edit_in_progress: bool,
+    edit_error: Option<String>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -1534,86 +1581,243 @@ fn chat_bubble(
         theme::transparent()
     };
     let (display, truncated) = display_body_light(body, streaming, expanded);
+    let group_name = format!("message-actions-{index}");
+    let bubble = if editing {
+        latest_message_editor(
+            index,
+            edit_input.expect("editing message has an input entity"),
+            images,
+            audio,
+            references,
+            edit_in_progress,
+            edit_error,
+            cx,
+        )
+        .into_any_element()
+    } else {
+        div()
+            .id(("message-bubble", index))
+            .rounded(px(14.0))
+            .px(if is_user { px(12.0) } else { px(0.0) })
+            .py(if is_user { px(8.0) } else { px(4.0) })
+            .max_w(if is_user {
+                px(560.0)
+            } else {
+                px(CONTENT_MAX_W)
+            })
+            .bg(bubble_bg)
+            .when(is_user, |this| {
+                this.border_1().border_color(colors.border_subtle)
+            })
+            .when(highlighted, |this| {
+                this.border_1()
+                    .border_color(theme::hex_alpha(0x60a5fa, 0.9))
+                    .bg(theme::hex_alpha(0x60a5fa, 0.10))
+            })
+            .when(editable, |this| {
+                this.cursor_pointer().on_click(cx.listener(
+                    move |app, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() >= 2 {
+                            app.begin_latest_message_edit(index as usize, window, cx);
+                        }
+                    },
+                ))
+            })
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .when(!is_user, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(label_color)
+                        .child(label.to_string()),
+                )
+            })
+            .when(!images.is_empty(), |this| {
+                this.child(user_image_grid(index, images))
+            })
+            .when(!audio.is_empty(), |this| {
+                this.child(user_audio_attachments(index, audio))
+            })
+            .when(!references.is_empty(), |this| {
+                this.child(user_reference_attachments(index, references))
+            })
+            .when(!display.is_empty(), |this| {
+                this.child(if is_user {
+                    div()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(display)
+                        .into_any_element()
+                } else {
+                    markdown::markdown_body(index, &display).into_any_element()
+                })
+            })
+            .when(truncated || expanded, |this| {
+                let key = message_key.clone();
+                this.child(
+                    div()
+                        .id(("message-expand", index))
+                        .mt(px(3.0))
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(colors.text_secondary))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.toggle_transcript_message_expanded(key.clone(), cx);
+                        }))
+                        .child(if expanded {
+                            "Show less"
+                        } else {
+                            "Show full response"
+                        }),
+                )
+            })
+            .into_any_element()
+    };
 
     div()
         .id(("msg", index))
+        .group(group_name.clone())
         .flex()
         .flex_col()
         .gap(px(2.0))
         .w_full()
         .when(is_user, |this| this.items_end())
         .when(!is_user, |this| this.items_start())
+        .child(bubble)
+        .when(editable, |this| {
+            this.child(
+                div()
+                    .id(("message-edit", index))
+                    .mt(px(2.0))
+                    .w(px(26.0))
+                    .h(px(24.0))
+                    .rounded(px(7.0))
+                    .opacity(0.0)
+                    .group_hover(group_name, |style| style.opacity(1.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.bg_hover))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.begin_latest_message_edit(index as usize, window, cx);
+                    }))
+                    .child(
+                        Icon::empty()
+                            .path("icons/pen-line.svg")
+                            .with_size(px(13.0))
+                            .text_color(colors.text_tertiary),
+                    ),
+            )
+        })
+}
+
+fn latest_message_editor(
+    index: u64,
+    input: Entity<InputState>,
+    images: &[DemoImageAttachment],
+    audio: &[DemoAudioAttachment],
+    references: &[DemoReferenceAttachment],
+    busy: bool,
+    error: Option<String>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let can_send = !busy
+        && (!input.read(cx).value().trim().is_empty()
+            || !images.is_empty()
+            || !audio.is_empty()
+            || !references.is_empty());
+    div()
+        .id(("message-editor", index))
+        .w(px(560.0))
+        .max_w_full()
+        .rounded(px(14.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_elevated)
+        .px(px(12.0))
+        .pt(px(10.0))
+        .pb(px(9.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .when(!images.is_empty(), |this| {
+            this.child(user_image_grid(index, images))
+        })
+        .when(!audio.is_empty(), |this| {
+            this.child(user_audio_attachments(index, audio))
+        })
+        .when(!references.is_empty(), |this| {
+            this.child(user_reference_attachments(index, references))
+        })
         .child(
             div()
-                .rounded(px(14.0))
-                .px(if is_user { px(12.0) } else { px(0.0) })
-                .py(if is_user { px(8.0) } else { px(4.0) })
-                .max_w(if is_user {
-                    px(560.0)
-                } else {
-                    px(CONTENT_MAX_W)
-                })
-                .bg(bubble_bg)
-                .when(is_user, |this| {
-                    this.border_1().border_color(colors.border_subtle)
-                })
-                .when(highlighted, |this| {
-                    this.border_1()
-                        .border_color(theme::hex_alpha(0x60a5fa, 0.9))
-                        .bg(theme::hex_alpha(0x60a5fa, 0.10))
-                })
+                .h(px(96.0))
+                .w_full()
+                .overflow_hidden()
+                .text_sm()
+                .text_color(colors.text)
+                .child(Input::new(&input).appearance(false).h_full()),
+        )
+        .when_some(error, |this, error| {
+            this.child(div().text_xs().text_color(colors.status_error).child(error))
+        })
+        .child(
+            div()
                 .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .when(!is_user, |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(label_color)
-                            .child(label.to_string()),
-                    )
-                })
-                .when(!images.is_empty(), |this| {
-                    this.child(user_image_grid(index, images))
-                })
-                .when(!audio.is_empty(), |this| {
-                    this.child(user_audio_attachments(index, audio))
-                })
-                .when(!references.is_empty(), |this| {
-                    this.child(user_reference_attachments(index, references))
-                })
-                .when(!display.is_empty(), |this| {
-                    this.child(if is_user {
-                        div()
-                            .text_sm()
-                            .text_color(colors.text)
-                            .child(display)
-                            .into_any_element()
-                    } else {
-                        markdown::markdown_body(index, &display).into_any_element()
-                    })
-                })
-                .when(truncated || expanded, |this| {
-                    let key = message_key.clone();
-                    this.child(
-                        div()
-                            .id(("message-expand", index))
-                            .mt(px(3.0))
-                            .text_xs()
-                            .text_color(colors.text_tertiary)
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(colors.text_secondary))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.toggle_transcript_message_expanded(key.clone(), cx);
-                            }))
-                            .child(if expanded {
-                                "Show less"
-                            } else {
-                                "Show full response"
-                            }),
-                    )
-                }),
+                .items_center()
+                .justify_end()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .id(("message-edit-cancel", index))
+                        .px(px(11.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .when(!busy, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.cancel_latest_message_edit(window, cx);
+                                }))
+                        })
+                        .when(busy, |this| this.opacity(0.45))
+                        .child("Cancel"),
+                )
+                .child(
+                    div()
+                        .id(("message-edit-send", index))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(if can_send {
+                            colors.text
+                        } else {
+                            theme::hex_alpha(0xffffff, 0.12)
+                        })
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(if can_send {
+                            colors.bg_main
+                        } else {
+                            colors.text_tertiary
+                        })
+                        .when(can_send, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.opacity(0.9))
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.submit_latest_message_edit(window, cx);
+                                }))
+                        })
+                        .child(if busy { "Sending…" } else { "Send" }),
+                ),
         )
 }
 

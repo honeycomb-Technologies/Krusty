@@ -3686,6 +3686,24 @@ mod integration_tests {
             })
             .await;
 
+        // Probe the destructive edit primitive only against this empty ephemeral
+        // thread. A domain error is acceptable because there is no turn to remove;
+        // method-not-found would contradict the advertised edit capability.
+        match backend
+            .rollback_thread(ThreadRollbackParams::one(summary.id))
+            .await
+        {
+            Ok(_) => {}
+            Err(AgentError::Rpc {
+                code: -32601,
+                message,
+            }) => {
+                panic!("thread/rollback is advertised but unavailable: {message}")
+            }
+            Err(AgentError::Rpc { .. } | AgentError::Protocol(_)) => {}
+            Err(error) => panic!("unexpected thread/rollback transport failure: {error}"),
+        }
+
         backend.disconnect().await.expect("disconnect");
         assert!(matches!(backend.status(), ConnectionStatus::Disconnected));
     }

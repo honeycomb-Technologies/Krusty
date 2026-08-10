@@ -9,6 +9,9 @@ use mitsuro_desktop_backend::{BackendSessionId, ThreadSummary};
 pub struct DemoImageAttachment {
     pub label: String,
     pub source: DemoImageSource,
+    /// Exact remote/data URL retained so editing a persisted message can resend
+    /// the original input even when the decoded preview is unavailable.
+    pub resubmit_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +26,8 @@ pub enum DemoImageSource {
 pub struct DemoAudioAttachment {
     pub label: String,
     pub source: DemoAudioSource,
+    /// Exact remote/data URL retained for rollback-and-resubmit editing.
+    pub resubmit_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]

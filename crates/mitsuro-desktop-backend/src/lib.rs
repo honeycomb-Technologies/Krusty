@@ -182,13 +182,14 @@ pub use process::{
     ThreadBackgroundTerminalsTerminateResponse,
 };
 pub use product::{
-    ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
-    ConversationReferenceKind, CreateSession, MessageRole, ProductAccessMode, ProductAttachment,
-    ProductBackend, ProductDirectoryEntry, ProductExtension, ProductFile, ProductFileMatch,
-    ProductHiveRun, ProductHiveSnapshot, ProductHiveStatus, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReasoningEffort, ProductReview, ProductReviewStart, ProductReviewTarget,
-    ProductSchedule, ProductSkill, ProductSpeedMode, ProductSpeedOption, ProductSteer, ProductTurn,
-    ProductWorkMode, SessionConversation, SessionSummary,
+    conversation_messages_from_thread_value, ConversationAudio, ConversationImage,
+    ConversationMessage, ConversationReference, ConversationReferenceKind, CreateSession,
+    MessageRole, ProductAccessMode, ProductAttachment, ProductBackend, ProductDirectoryEntry,
+    ProductExtension, ProductFile, ProductFileMatch, ProductHiveRun, ProductHiveSnapshot,
+    ProductHiveStatus, ProductMcpServer, ProductModel, ProductProcess, ProductReasoningEffort,
+    ProductReview, ProductReviewStart, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSpeedMode, ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode,
+    SessionConversation, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,

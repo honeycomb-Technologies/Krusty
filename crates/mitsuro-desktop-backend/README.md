@@ -107,6 +107,14 @@ transcript; it returns `NotImplemented` for `thread/rollback` because the HTTP A
 no destructive tail mutation. Fixture behavior remains explicit and typed for offline
 contract tests.
 
+Latest-message editing is a Codex-only product capability. GPUI retains the exact local,
+remote, or data-URL image/audio inputs plus skill and mention records from the persisted
+user message. Send first calls `thread/rollback` with `numTurns: 1`, replaces the local
+transcript from the returned authoritative thread, and starts a real replacement turn
+with the edited text and retained inputs. A rollback failure leaves the editor and the
+server transcript unchanged. Mitsuro does not render the affordance because it cannot
+provide the required atomic tail mutation.
+
 The generated protocol inventories are committed in `fixtures/`: 95 stable client
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable
 server requests (11 experimental), and 18 thread item variants for `codex-cli 0.147.0`.

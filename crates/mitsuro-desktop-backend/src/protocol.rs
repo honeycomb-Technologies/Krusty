@@ -1106,10 +1106,25 @@ impl TurnStartParams {
         }));
     }
 
+    pub fn push_image_url(&mut self, url: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "image",
+            "url": url.into(),
+            "detail": null
+        }));
+    }
+
     pub fn push_local_audio(&mut self, path: impl Into<String>) {
         self.input.push(serde_json::json!({
             "type": "localAudio",
             "path": path.into()
+        }));
+    }
+
+    pub fn push_audio_url(&mut self, url: impl Into<String>) {
+        self.input.push(serde_json::json!({
+            "type": "audio",
+            "url": url.into()
         }));
     }
 
