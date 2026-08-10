@@ -49,6 +49,7 @@ backend or are shown as unavailable.
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
+| Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
@@ -113,6 +114,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   user message. Missing files, failed remote loads, invalid MIME types, oversized data,
   and decode failures use explicit visual fallbacks. Attachments are cleared on backend
   switch and never fall back to fixture data.
+- Reasoning choices come only from the selected model's live capability metadata and
+  persist per backend/model. The transport-neutral turn adapter maps the same selection
+  to Codex `effort` and Mitsuro `thinking_enabled`; models with zero or one advertised
+  option do not show a misleading selector.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.

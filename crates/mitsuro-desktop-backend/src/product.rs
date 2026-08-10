@@ -130,6 +130,7 @@ pub struct ProductTurn {
     pub session_id: BackendSessionId,
     pub text: String,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub attachments: Vec<ProductAttachment>,
 }
 
@@ -397,6 +398,7 @@ impl DesktopBackend {
 fn product_turn_params(request: ProductTurn) -> TurnStartParams {
     let mut params =
         TurnStartParams::text_with_model(request.session_id.raw, request.text, request.model);
+    params.effort = request.reasoning_effort;
     for attachment in request.attachments {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
@@ -836,6 +838,7 @@ mod tests {
             session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
             text: "hello".to_owned(),
             model: None,
+            reasoning_effort: None,
             attachments: Vec::new(),
         };
         assert_eq!(request.session_id.qualified(), "mitsuro-http:session-7");
@@ -847,12 +850,14 @@ mod tests {
             session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
             text: "inspect".to_owned(),
             model: Some("gpt-5".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
             attachments: vec![ProductAttachment::LocalImage {
                 path: "/tmp/capture.png".to_owned(),
             }],
         });
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["threadId"], "thread-7");
+        assert_eq!(value["effort"], "high");
         assert_eq!(value["input"][0]["text"], "inspect");
         assert_eq!(value["input"][1]["type"], "localImage");
         assert_eq!(value["input"][1]["path"], "/tmp/capture.png");
@@ -868,6 +873,7 @@ mod tests {
                     session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
                     text: "hello".to_owned(),
                     model: None,
+                    reasoning_effort: None,
                     attachments: Vec::new(),
                 },
                 event_tx,

@@ -47,15 +47,15 @@ use crate::process::{
 };
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelInfo, ModelListParams,
-    ModelListResponse, SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse,
-    ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams, ThreadDeleteResponse,
-    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
-    ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
-    ThreadUnarchiveResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ModelListResponse, ReasoningEffortOption, SkillMetadata, SkillsListEntry, SkillsListParams,
+    SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams,
+    ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams,
+    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
+    ThreadGoalSetResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
+    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
@@ -174,7 +174,7 @@ impl MitsuroServerBackend {
             session_type: Some(SessionType::Code),
             model: params.model,
             model_key: None,
-            thinking_enabled: None,
+            thinking_enabled: params.effort,
             fast_mode: None,
             permission_mode: None,
             mode: None,
@@ -690,6 +690,21 @@ fn mitsuro_user_content(value: &Value) -> Vec<Value> {
         .collect()
 }
 
+fn mitsuro_reasoning_effort_name(effort: mitsuro_client::ReasoningEffort) -> Option<&'static str> {
+    use mitsuro_client::ReasoningEffort;
+    match effort {
+        ReasoningEffort::None => Some("none"),
+        ReasoningEffort::Minimal => Some("minimal"),
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::XHigh => Some("xhigh"),
+        ReasoningEffort::Max => Some("max"),
+        ReasoningEffort::Ultra => Some("ultra"),
+        ReasoningEffort::Unknown => None,
+    }
+}
+
 fn session_json(session: &mitsuro_client::SessionInfo) -> Value {
     serde_json::json!({
         "id": session.id,
@@ -876,19 +891,33 @@ impl AgentBackend for MitsuroServerBackend {
         let data = response
             .models
             .into_iter()
-            .map(|model| ModelInfo {
-                id: model.id.clone(),
-                model: model.id.clone(),
-                display_name: model.display_name,
-                description: format!("{} provider", model.provider),
-                hidden: false,
-                is_default: default.as_deref() == Some(model.id.as_str()),
-                default_reasoning_effort: model
+            .map(|model| {
+                let default_reasoning_effort = model
                     .default_reasoning_level
-                    .map(|effort| format!("{effort:?}").to_lowercase())
-                    .unwrap_or_default(),
-                supported_reasoning_efforts: Vec::new(),
-                upgrade: None,
+                    .and_then(mitsuro_reasoning_effort_name)
+                    .unwrap_or_default()
+                    .to_owned();
+                let supported_reasoning_efforts = model
+                    .supported_reasoning_levels
+                    .into_iter()
+                    .filter_map(|effort| {
+                        mitsuro_reasoning_effort_name(effort).map(|name| ReasoningEffortOption {
+                            reasoning_effort: name.to_owned(),
+                            description: format!("Mitsuro {name} reasoning"),
+                        })
+                    })
+                    .collect();
+                ModelInfo {
+                    id: model.id.clone(),
+                    model: model.id.clone(),
+                    display_name: model.display_name,
+                    description: format!("{} provider", model.provider),
+                    hidden: false,
+                    is_default: default.as_deref() == Some(model.id.as_str()),
+                    default_reasoning_effort,
+                    supported_reasoning_efforts,
+                    upgrade: None,
+                }
             })
             .collect();
         Ok(ModelListResponse {
@@ -1506,6 +1535,22 @@ mod tests {
                 serde_json::json!({"type": "image", "url": "https://example.com/a.png"}),
                 serde_json::json!({"type": "image", "url": "data:image/png;base64,cG5n"})
             ]
+        );
+    }
+
+    #[test]
+    fn maps_mitsuro_reasoning_efforts_without_inventing_unknown_values() {
+        assert_eq!(
+            mitsuro_reasoning_effort_name(mitsuro_client::ReasoningEffort::Minimal),
+            Some("minimal")
+        );
+        assert_eq!(
+            mitsuro_reasoning_effort_name(mitsuro_client::ReasoningEffort::XHigh),
+            Some("xhigh")
+        );
+        assert_eq!(
+            mitsuro_reasoning_effort_name(mitsuro_client::ReasoningEffort::Unknown),
+            None
         );
     }
 

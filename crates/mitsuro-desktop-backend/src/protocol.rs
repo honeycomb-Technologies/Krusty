@@ -865,6 +865,10 @@ pub struct TurnStartParams {
     pub input: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reasoning effort advertised by the selected model. Codex app-server
+    /// persists this override for this turn and subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -877,6 +881,7 @@ impl TurnStartParams {
             thread_id: thread_id.into(),
             input: vec![user_input_text_value(text)],
             model: None,
+            effort: None,
             cwd: None,
             client_user_message_id: None,
         }
@@ -2794,10 +2799,12 @@ mod p9_protocol_shape_tests {
 
     #[test]
     fn turn_start_params_serializes_model_camel_case() {
-        let p = TurnStartParams::text_with_model("thread-1", "hello", Some("gpt-5".into()));
+        let mut p = TurnStartParams::text_with_model("thread-1", "hello", Some("gpt-5".into()));
+        p.effort = Some("high".into());
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["threadId"], "thread-1");
         assert_eq!(v["model"], "gpt-5");
+        assert_eq!(v["effort"], "high");
         assert!(
             v.get("thread_id").is_none(),
             "must not emit snake_case thread_id"

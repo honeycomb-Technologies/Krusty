@@ -1,8 +1,9 @@
 //! Transport-neutral chat composer.
 //!
-//! Implemented controls are interactive: text entry, backend-scoped model cycling,
-//! real image attachments, Send, and Stop. Voice, speed presets, and project
-//! selection remain absent until their backend contracts exist.
+//! Implemented controls are interactive: text entry, backend-scoped model and
+//! advertised reasoning-effort cycling, real image attachments, Send, and Stop.
+//! Voice, speed presets, and project selection remain absent until their backend
+//! contracts exist.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -41,6 +42,10 @@ fn codex_composer(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let model = app.model_label().to_string();
+    let reasoning = app
+        .has_reasoning_effort_control()
+        .then(|| app.reasoning_effort_label())
+        .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
     let steerable = app.can_steer_active_turn();
@@ -115,6 +120,9 @@ fn codex_composer(
                             ))
                         })
                         .child(model_chip(&model, cx))
+                        .when_some(reasoning, |this, label| {
+                            this.child(reasoning_chip(&label, cx))
+                        })
                         .child(div().flex_1())
                         .child(if streaming {
                             streaming_actions(
@@ -151,6 +159,10 @@ fn chat_slim_composer(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
+    let reasoning = app
+        .has_reasoning_effort_control()
+        .then(|| app.reasoning_effort_label())
+        .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
     let steerable = app.can_steer_active_turn();
@@ -201,6 +213,9 @@ fn chat_slim_composer(
                         .text_color(colors.text)
                         .child(Input::new(input).appearance(false).h(px(30.0))),
                 )
+                .when_some(reasoning, |this, label| {
+                    this.child(reasoning_chip(&label, cx))
+                })
                 .child(if streaming {
                     streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
                         .into_any_element()
@@ -228,6 +243,10 @@ fn chat_thread_composer(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
+    let reasoning = app
+        .has_reasoning_effort_control()
+        .then(|| app.reasoning_effort_label())
+        .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
     let steerable = app.can_steer_active_turn();
@@ -281,6 +300,9 @@ fn chat_thread_composer(
                                 cx,
                                 |app, _, _, cx| app.select_composer_images(cx),
                             ))
+                        })
+                        .when_some(reasoning, |this, label| {
+                            this.child(reasoning_chip(&label, cx))
                         })
                         .child(div().flex_1())
                         .child(if streaming {
@@ -462,6 +484,34 @@ fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
         .hover(|style| style.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, _, cx| app.cycle_model(cx)))
         .child(div().text_xs().text_color(colors.text_tertiary).child("✧"))
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label),
+        )
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .with_size(px(11.0))
+                .text_color(colors.text_tertiary),
+        )
+}
+
+fn reasoning_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let label = label.to_string();
+    div()
+        .id("reasoning-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(|app, _, _, cx| app.cycle_reasoning_effort(cx)))
         .child(
             div()
                 .text_xs()

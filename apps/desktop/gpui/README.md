@@ -60,7 +60,10 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   matching completion notification arrives. The user can reopen or cancel that exact
   login. Fixture device codes remain confined to explicit fixture mode.
 - The composer exposes only implemented behavior: text entry, real image attachments,
-  Send, Stop, and backend-scoped model cycling. GPUI's native path prompt supplies
+  Send, Stop, backend-scoped model cycling, and model-advertised reasoning-effort
+  cycling. The selected effort is stored per backend/model; Codex receives the exact
+  `turn/start.effort` value and Mitsuro receives the equivalent `thinking_enabled`
+  value. GPUI's native path prompt supplies
   absolute image paths; Codex receives `localImage` input and Mitsuro receives encoded
   image content. Reopened threads restore local-path, remote, and embedded image inputs
   as real transcript thumbnails; missing or unsafe image data remains visible as an

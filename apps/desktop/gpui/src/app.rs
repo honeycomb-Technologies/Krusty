@@ -926,6 +926,8 @@ pub struct MitsuroApp {
     models: Vec<ModelInfo>,
     /// Selected model id (matches [`ModelInfo::id`]).
     selected_model_id: Option<String>,
+    /// Backend/model-scoped effort chosen from the live model capability list.
+    selected_reasoning_effort: Option<String>,
     /// Short config snippet from `config/read` (Settings).
     config_snippet: SharedString,
     /// Skills from `skills/list` (or fixture demo).
@@ -1216,6 +1218,7 @@ impl MitsuroApp {
             hive_snapshot: None,
             models: Vec::new(),
             selected_model_id: None,
+            selected_reasoning_effort: None,
             config_snippet: SharedString::from(""),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
@@ -2804,6 +2807,89 @@ impl MitsuroApp {
         })
     }
 
+    pub fn selected_reasoning_effort(&self) -> Option<&str> {
+        self.selected_reasoning_effort.as_deref()
+    }
+
+    pub fn reasoning_effort_label(&self) -> Option<String> {
+        self.selected_reasoning_effort()
+            .map(reasoning_effort_display_name)
+    }
+
+    pub fn has_reasoning_effort_control(&self) -> bool {
+        self.reasoning_options_for_selected_model().len() > 1
+    }
+
+    fn reasoning_options_for_selected_model(&self) -> Vec<String> {
+        let Some(model) = self.selected_model() else {
+            return Vec::new();
+        };
+        let mut options = model
+            .supported_reasoning_efforts
+            .iter()
+            .map(|effort| effort.reasoning_effort.trim())
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        options.dedup();
+        if options.is_empty() && !model.default_reasoning_effort.trim().is_empty() {
+            options.push(model.default_reasoning_effort.trim().to_owned());
+        }
+        options
+    }
+
+    fn restore_reasoning_for_selected_model(&mut self) {
+        let options = self.reasoning_options_for_selected_model();
+        let Some(model_id) = self.selected_model_id.as_deref() else {
+            self.selected_reasoning_effort = None;
+            return;
+        };
+        let remembered = self
+            .active_backend_kind()
+            .and_then(|backend| self.preferences.reasoning_for(backend, model_id))
+            .filter(|effort| options.iter().any(|option| option == effort))
+            .map(str::to_owned);
+        let default = self
+            .selected_model()
+            .map(|model| model.default_reasoning_effort.trim())
+            .filter(|effort| options.iter().any(|option| option == effort))
+            .map(str::to_owned);
+        self.selected_reasoning_effort =
+            remembered.or(default).or_else(|| options.first().cloned());
+    }
+
+    fn remember_selected_reasoning(&mut self) {
+        let (Some(backend), Some(model_id), Some(effort)) = (
+            self.active_backend_kind(),
+            self.selected_model_id.as_deref(),
+            self.selected_reasoning_effort.clone(),
+        ) else {
+            return;
+        };
+        self.preferences
+            .remember_reasoning(backend, model_id, effort);
+        self.save_preferences_best_effort();
+    }
+
+    pub fn cycle_reasoning_effort(&mut self, cx: &mut Context<Self>) {
+        let options = self.reasoning_options_for_selected_model();
+        if options.len() <= 1 {
+            self.status_line =
+                "The selected model does not advertise multiple reasoning levels.".into();
+            cx.notify();
+            return;
+        }
+        let current = self.selected_reasoning_effort.as_deref();
+        let index = current
+            .and_then(|effort| options.iter().position(|option| option == effort))
+            .unwrap_or(0);
+        let next = options[(index + 1) % options.len()].clone();
+        self.selected_reasoning_effort = Some(next.clone());
+        self.remember_selected_reasoning();
+        self.status_line = format!("Reasoning: {}", reasoning_effort_display_name(&next)).into();
+        cx.notify();
+    }
+
     /// Config snippet from `config/read` for Settings.
     pub fn config_snippet(&self) -> &SharedString {
         &self.config_snippet
@@ -2841,6 +2927,7 @@ impl MitsuroApp {
             .map(|m| m.id.clone());
         self.selected_model_id = remembered.or(keep).or(default_id);
         self.models = models;
+        self.restore_reasoning_for_selected_model();
     }
 
     fn apply_skills(&mut self, skills: Vec<SkillMetadata>) {
@@ -5535,6 +5622,7 @@ impl MitsuroApp {
     pub fn select_model(&mut self, id: String, cx: &mut Context<Self>) {
         if self.models.iter().any(|m| m.id == id) {
             self.selected_model_id = Some(id);
+            self.restore_reasoning_for_selected_model();
             self.remember_selected_model();
             let label = self.model_label();
             self.status_line = format!("Model: {label}").into();
@@ -5557,6 +5645,7 @@ impl MitsuroApp {
             .unwrap_or(0);
         let next = (idx + 1) % self.models.len();
         self.selected_model_id = Some(self.models[next].id.clone());
+        self.restore_reasoning_for_selected_model();
         self.remember_selected_model();
         let label = self.model_label();
         self.status_line = format!("Model: {label}").into();
@@ -5696,6 +5785,7 @@ impl MitsuroApp {
         self.composer_attachments.clear();
 
         let model_slug = self.selected_model_slug();
+        let reasoning_effort = self.selected_reasoning_effort.clone();
         if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
             // Still attempt live (server is source of truth) but surface the probe.
             self.status_line =
@@ -5718,6 +5808,7 @@ impl MitsuroApp {
                         thread_id,
                         trimmed.to_string(),
                         model_slug,
+                        reasoning_effort,
                         attachments,
                         cx,
                     );
@@ -5727,6 +5818,7 @@ impl MitsuroApp {
                         thread_id,
                         trimmed.to_string(),
                         model_slug,
+                        reasoning_effort,
                         attachments,
                         cx,
                     );
@@ -5829,6 +5921,7 @@ impl MitsuroApp {
         local_id: String,
         text: String,
         model: Option<String>,
+        reasoning_effort: Option<String>,
         attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
@@ -5895,7 +5988,7 @@ impl MitsuroApp {
                         ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
                     }
                     app.status_line = format!("Live turn/start on {new_id}…").into();
-                    app.start_live_turn(new_id, text, model, attachments, cx);
+                    app.start_live_turn(new_id, text, model, reasoning_effort, attachments, cx);
                     cx.notify();
                 }
                 Err(e) => {
@@ -6115,6 +6208,7 @@ impl MitsuroApp {
         thread_id: String,
         text: String,
         model: Option<String>,
+        reasoning_effort: Option<String>,
         attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
@@ -6159,6 +6253,7 @@ impl MitsuroApp {
                 let bridge = Arc::clone(&bridge);
                 let text = text.clone();
                 let model = model.clone();
+                let reasoning_effort = reasoning_effort.clone();
                 let attachments = attachments.clone();
                 let msg_tx = msg_tx;
                 async move {
@@ -6179,6 +6274,7 @@ impl MitsuroApp {
                                 session_id,
                                 text,
                                 model,
+                                reasoning_effort,
                                 attachments,
                             },
                             event_tx,
@@ -7374,6 +7470,7 @@ impl MitsuroApp {
         self.selected_codex_thread = None;
         self.models.clear();
         self.selected_model_id = None;
+        self.selected_reasoning_effort = None;
         self.config_snippet = SharedString::from("");
         self.skills.clear();
         self.mcp_servers.clear();
@@ -7926,6 +8023,22 @@ fn model_info_from_product(model: ProductModel) -> ModelInfo {
             })
             .collect(),
         upgrade: model.upgrade,
+    }
+}
+
+fn reasoning_effort_display_name(effort: &str) -> String {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => "Off".to_owned(),
+        "xhigh" | "x-high" => "XHigh".to_owned(),
+        "ultra" => "Ultra".to_owned(),
+        "" => "Default".to_owned(),
+        value => {
+            let mut chars = value.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_else(|| "Default".to_owned())
+        }
     }
 }
 
@@ -8796,5 +8909,13 @@ mod tests {
             DemoImageSource::Unavailable(reason)
                 if reason == "Embedded image could not be decoded safely"
         ));
+    }
+
+    #[test]
+    fn reasoning_effort_labels_match_the_advertised_wire_values() {
+        assert_eq!(reasoning_effort_display_name("none"), "Off");
+        assert_eq!(reasoning_effort_display_name("xhigh"), "XHigh");
+        assert_eq!(reasoning_effort_display_name("ultra"), "Ultra");
+        assert_eq!(reasoning_effort_display_name("medium"), "Medium");
     }
 }

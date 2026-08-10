@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 3;
+const CURRENT_VERSION: u32 = 4;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +29,10 @@ pub struct DesktopPreferences {
     pub settings_choices: HashMap<String, String>,
     #[serde(default)]
     pub models_by_backend: HashMap<BackendKind, String>,
+    /// Last reasoning effort selected for each backend/model pair. Values come
+    /// only from that model's live advertised capability list.
+    #[serde(default)]
+    pub reasoning_by_model: HashMap<String, String>,
 }
 
 impl Default for DesktopPreferences {
@@ -41,6 +45,7 @@ impl Default for DesktopPreferences {
             settings_toggles: HashMap::new(),
             settings_choices: HashMap::new(),
             models_by_backend: HashMap::new(),
+            reasoning_by_model: HashMap::new(),
         }
     }
 }
@@ -107,6 +112,21 @@ impl DesktopPreferences {
     pub fn remember_model(&mut self, backend: BackendKind, model_id: String) {
         self.models_by_backend.insert(backend, model_id);
     }
+
+    pub fn remember_reasoning(&mut self, backend: BackendKind, model_id: &str, effort: String) {
+        self.reasoning_by_model
+            .insert(reasoning_key(backend, model_id), effort);
+    }
+
+    pub fn reasoning_for(&self, backend: BackendKind, model_id: &str) -> Option<&str> {
+        self.reasoning_by_model
+            .get(&reasoning_key(backend, model_id))
+            .map(String::as_str)
+    }
+}
+
+fn reasoning_key(backend: BackendKind, model_id: &str) -> String {
+    format!("{}:{model_id}", backend.id())
 }
 
 fn default_path() -> PathBuf {
@@ -168,6 +188,27 @@ mod tests {
         assert_eq!(
             state.models_by_backend.get(&BackendKind::CodexStdio),
             Some(&"gpt-5.6".to_owned())
+        );
+    }
+
+    #[test]
+    fn reasoning_selection_is_namespaced_by_backend_and_model() {
+        let mut state = DesktopPreferences::default();
+        state.remember_reasoning(BackendKind::MitsuroHttp, "grok-4.5", "max".into());
+        state.remember_reasoning(BackendKind::CodexStdio, "gpt-5.6", "high".into());
+        state.remember_reasoning(BackendKind::CodexStdio, "gpt-5.5", "medium".into());
+
+        assert_eq!(
+            state.reasoning_for(BackendKind::MitsuroHttp, "grok-4.5"),
+            Some("max")
+        );
+        assert_eq!(
+            state.reasoning_for(BackendKind::CodexStdio, "gpt-5.6"),
+            Some("high")
+        );
+        assert_eq!(
+            state.reasoning_for(BackendKind::CodexStdio, "grok-4.5"),
+            None
         );
     }
 
