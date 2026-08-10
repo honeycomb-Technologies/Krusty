@@ -50,10 +50,10 @@ use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
 use crate::workflow::{
-    AttemptProgressInput, AttemptStatus, GoalStatus, StartAttemptInput, WorkflowManager,
-    WorkflowMutation, WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
-    DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
-    DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+    AttemptProgressInput, AttemptStatus, CriterionStatus, GoalStatus, StartAttemptInput,
+    WorkflowManager, WorkflowMutation, WorkflowStepStatus,
+    DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
+    DEFAULT_GOAL_ATTEMPT_MAX_TURNS, DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
 };
 
 use super::compaction::{
@@ -2193,7 +2193,7 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
-            if successful_task_completion_finished_plan(
+            if successful_task_completion_requires_goal_verification(
                 &db_path,
                 &session_id,
                 &result.tool_calls,
@@ -2552,7 +2552,7 @@ fn update_validation_state(
     !was_pending && *mutation_needs_validation
 }
 
-fn successful_task_completion_finished_plan(
+fn successful_task_completion_requires_goal_verification(
     db_path: &Path,
     session_id: &str,
     tool_calls: &[AiToolCall],
@@ -2590,6 +2590,10 @@ fn successful_task_completion_finished_plan(
                     WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
                 )
             })
+            && snapshot
+                .criteria
+                .iter()
+                .any(|criterion| criterion.required && criterion.status != CriterionStatus::Passed)
     })
 }
 
@@ -2711,7 +2715,7 @@ mod tests {
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
-    use super::successful_task_completion_finished_plan;
+    use super::successful_task_completion_requires_goal_verification;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::AttemptProgressTracker;
@@ -2733,9 +2737,10 @@ mod tests {
     };
     use crate::tools::registry::PermissionMode;
     use crate::workflow::{
-        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, GoalStatus,
-        PlanProposalInput, StepProposalInput, WorkflowManager, WorkflowStepStatus,
-        DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, CriterionStatus,
+        GoalStatus, PlanProposalInput, SetCriterionInput, StepProposalInput, WorkflowManager,
+        WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+        DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -3058,7 +3063,7 @@ mod tests {
             "a running attempt must not be duplicated"
         );
 
-        manager.complete_step(
+        let completed = manager.complete_step(
             &session_id,
             &goal_id,
             &step_id,
@@ -3085,13 +3090,37 @@ mod tests {
             is_error: Some(false),
         }];
         assert!(
-            successful_task_completion_finished_plan(
+            successful_task_completion_requires_goal_verification(
                 &db_path,
                 &session_id,
                 &tool_calls,
                 &tool_results,
             ),
-            "the final successful task completion must terminate the current run"
+            "the final task completion must stop when required verification is pending"
+        );
+
+        let criterion_id = completed.snapshot.criteria[0].id.clone();
+        manager.set_criterion(
+            &session_id,
+            &goal_id,
+            &criterion_id,
+            completed.snapshot.aggregate_revision,
+            SetCriterionInput {
+                status: CriterionStatus::Passed,
+                evidence: vec!["focused validation passed".into()],
+                verifier: "agent".into(),
+            },
+            "verify-auto-goal",
+            "agent",
+        )?;
+        assert!(
+            !successful_task_completion_requires_goal_verification(
+                &db_path,
+                &session_id,
+                &tool_calls,
+                &tool_results,
+            ),
+            "a fully verified Goal must continue so the agent can complete it explicitly"
         );
         Ok(())
     }
