@@ -4,9 +4,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::account::{
-    CancelLoginAccountParams, CancelLoginAccountResponse, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageResponse,
+    CancelLoginAccountParams, CancelLoginAccountResponse, ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
     LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
+    SendAddCreditsNudgeEmailParams, SendAddCreditsNudgeEmailResponse,
 };
 use crate::apps::{
     AppsInstalledParams, AppsInstalledResponse, AppsListParams, AppsListResponse, AppsReadParams,
@@ -691,6 +693,21 @@ pub trait AgentBackend: Send + Sync {
 
     /// Rate-limit windows via `account/rateLimits/read` (fixture demo % offline).
     async fn account_rate_limits_read(&self) -> Result<GetAccountRateLimitsResponse>;
+
+    /// Active organization messages via `account/workspaceMessages/read`.
+    async fn account_workspace_messages_read(&self) -> Result<GetWorkspaceMessagesResponse>;
+
+    /// Redeem one earned reset credit with an idempotency key.
+    async fn account_rate_limit_reset_credit_consume(
+        &self,
+        params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse>;
+
+    /// Ask the workspace owner for more credits or usage capacity by email.
+    async fn account_send_add_credits_nudge_email(
+        &self,
+        params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse>;
 
     /// Best-effort shutdown of the child process / connection.
     async fn disconnect(&self) -> Result<()>;

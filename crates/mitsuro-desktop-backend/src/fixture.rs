@@ -14,9 +14,11 @@ use crate::account::{
     fixture_demo_account_response, fixture_demo_rate_limits, fixture_demo_usage,
     fixture_login_chatgpt_response, fixture_login_device_code_response,
     fixture_signed_out_account_response, CancelLoginAccountParams, CancelLoginAccountResponse,
-    CancelLoginAccountStatus, GetAccountParams, GetAccountRateLimitsResponse, GetAccountResponse,
-    GetAccountTokenUsageResponse, LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
-    FIXTURE_LOGIN_ID,
+    CancelLoginAccountStatus, ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
+    LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
+    SendAddCreditsNudgeEmailParams, SendAddCreditsNudgeEmailResponse, FIXTURE_LOGIN_ID,
 };
 use crate::backend::AgentBackend;
 use crate::environment::{
@@ -1702,6 +1704,31 @@ impl AgentBackend for FixtureBackend {
     async fn account_rate_limits_read(&self) -> Result<GetAccountRateLimitsResponse> {
         self.require_connected()?;
         Ok(fixture_demo_rate_limits())
+    }
+
+    async fn account_workspace_messages_read(&self) -> Result<GetWorkspaceMessagesResponse> {
+        self.require_connected()?;
+        Ok(GetWorkspaceMessagesResponse::default())
+    }
+
+    async fn account_rate_limit_reset_credit_consume(
+        &self,
+        _params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
+        self.require_connected()?;
+        Err(AgentError::NotImplemented(
+            "fixture mode never consumes account reset credits".into(),
+        ))
+    }
+
+    async fn account_send_add_credits_nudge_email(
+        &self,
+        _params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse> {
+        self.require_connected()?;
+        Err(AgentError::NotImplemented(
+            "fixture mode never sends account credit email".into(),
+        ))
     }
 
     async fn disconnect(&self) -> Result<()> {

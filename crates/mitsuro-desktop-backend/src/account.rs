@@ -7,6 +7,9 @@
 //! - `account/logout`
 //! - `account/usage/read`
 //! - `account/rateLimits/read`
+//! - `account/workspaceMessages/read`
+//! - `account/rateLimitResetCredit/consume`
+//! - `account/sendAddCreditsNudgeEmail`
 //!
 //! Includes account, login, usage, and rate-limit shapes.
 //! `LoginAccount*.json`, `LogoutAccountResponse.json`,
@@ -17,6 +20,7 @@
 //! usage numbers, and a device-code login stub **without network**.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -369,6 +373,27 @@ pub struct CreditsSnapshot {
     pub balance: Option<String>,
 }
 
+/// Workspace spend-control detail returned with a rate-limit snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendControlLimitSnapshot {
+    pub limit: String,
+    pub used: String,
+    pub remaining_percent: i32,
+    pub resets_at: i64,
+}
+
+/// Why the account is currently blocked by usage policy, when reported.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitReachedType {
+    RateLimitReached,
+    WorkspaceOwnerCreditsDepleted,
+    WorkspaceMemberCreditsDepleted,
+    WorkspaceOwnerUsageLimitReached,
+    WorkspaceMemberUsageLimitReached,
+}
+
 /// Rate-limit snapshot (primary/secondary windows + plan).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -384,9 +409,54 @@ pub struct RateLimitSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub individual_limit: Option<SpendControlLimitSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<PlanType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_control_reached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reached_type: Option<RateLimitReachedType>,
+}
+
+/// Kind of earned rate-limit reset credit.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RateLimitResetType {
+    CodexRateLimits,
+    #[default]
+    Unknown,
+}
+
+/// Current backend state for an earned reset credit.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RateLimitResetCreditStatus {
+    Available,
+    Redeeming,
+    Redeemed,
+    #[default]
+    Unknown,
+}
+
+/// One earned reset credit returned by `account/rateLimits/read`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitResetCredit {
+    pub id: String,
+    pub reset_type: RateLimitResetType,
+    pub status: RateLimitResetCreditStatus,
+    pub granted_at: i64,
+    pub expires_at: Option<i64>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Available reset-credit count and optional detailed records.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitResetCreditsSummary {
+    pub available_count: i64,
+    pub credits: Option<Vec<RateLimitResetCredit>>,
 }
 
 /// Response for `account/rateLimits/read`.
@@ -394,6 +464,97 @@ pub struct RateLimitSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct GetAccountRateLimitsResponse {
     pub rate_limits: RateLimitSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits_by_limit_id: Option<BTreeMap<String, RateLimitSnapshot>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// account/workspaceMessages/read
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceMessageType {
+    Headline,
+    Announcement,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMessage {
+    pub message_id: String,
+    pub message_type: WorkspaceMessageType,
+    pub message_body: String,
+    pub created_at: Option<i64>,
+    pub archived_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetWorkspaceMessagesResponse {
+    pub feature_enabled: bool,
+    pub messages: Vec<WorkspaceMessage>,
+}
+
+// ---------------------------------------------------------------------------
+// account/rateLimitResetCredit/consume
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumeAccountRateLimitResetCreditParams {
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConsumeAccountRateLimitResetCreditOutcome {
+    Reset,
+    NothingToReset,
+    NoCredit,
+    AlreadyRedeemed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumeAccountRateLimitResetCreditResponse {
+    pub outcome: ConsumeAccountRateLimitResetCreditOutcome,
+}
+
+// ---------------------------------------------------------------------------
+// account/sendAddCreditsNudgeEmail
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AddCreditsNudgeCreditType {
+    Credits,
+    UsageLimit,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AddCreditsNudgeEmailStatus {
+    Sent,
+    CooldownActive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAddCreditsNudgeEmailParams {
+    pub credit_type: AddCreditsNudgeCreditType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAddCreditsNudgeEmailResponse {
+    pub status: AddCreditsNudgeEmailStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -511,9 +672,13 @@ pub fn fixture_demo_rate_limits() -> GetAccountRateLimitsResponse {
                 unlimited: false,
                 balance: None,
             }),
+            individual_limit: None,
             plan_type: Some(PlanType::Pro),
             spend_control_reached: Some(false),
+            rate_limit_reached_type: None,
         },
+        rate_limits_by_limit_id: None,
+        rate_limit_reset_credits: None,
     }
 }
 
@@ -649,5 +814,125 @@ mod tests {
         assert_eq!(v["status"], "canceled");
         let empty = serde_json::to_value(LogoutAccountResponse::default()).unwrap();
         assert!(empty.as_object().unwrap().is_empty() || empty == serde_json::json!({}));
+    }
+
+    #[test]
+    fn complete_rate_limit_response_preserves_named_buckets_credits_and_resets() {
+        let response: GetAccountRateLimitsResponse = serde_json::from_value(serde_json::json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "limitName": "Codex",
+                "primary": {
+                    "usedPercent": 96,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1786320000
+                },
+                "secondary": null,
+                "credits": {
+                    "hasCredits": false,
+                    "unlimited": false,
+                    "balance": "0"
+                },
+                "planType": "pro",
+                "spendControlReached": false,
+                "rateLimitReachedType": "workspace_member_usage_limit_reached"
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "limitName": "Codex",
+                    "primary": {
+                        "usedPercent": 96,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1786320000
+                    }
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1786323600
+                    }
+                }
+            },
+            "rateLimitResetCredits": {
+                "availableCount": 1,
+                "credits": [{
+                    "id": "reset-1",
+                    "resetType": "codexRateLimits",
+                    "status": "available",
+                    "grantedAt": 1786300000,
+                    "expiresAt": 1786900000,
+                    "title": "Usage limit reset",
+                    "description": "Reset eligible limits."
+                }]
+            }
+        }))
+        .expect("complete rate-limit response");
+
+        let named = response
+            .rate_limits_by_limit_id
+            .as_ref()
+            .expect("named limit map");
+        assert_eq!(named.len(), 2);
+        assert_eq!(
+            named["codex_bengalfox"].limit_name.as_deref(),
+            Some("GPT-5.3-Codex-Spark")
+        );
+        assert_eq!(
+            response.rate_limits.rate_limit_reached_type,
+            Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached)
+        );
+        let resets = response
+            .rate_limit_reset_credits
+            .as_ref()
+            .expect("reset summary");
+        assert_eq!(resets.available_count, 1);
+        assert_eq!(
+            resets.credits.as_ref().expect("reset records")[0].status,
+            RateLimitResetCreditStatus::Available
+        );
+    }
+
+    #[test]
+    fn workspace_messages_and_account_actions_match_generated_wire_shapes() {
+        let messages: GetWorkspaceMessagesResponse = serde_json::from_value(serde_json::json!({
+            "featureEnabled": true,
+            "messages": [{
+                "messageId": "message-1",
+                "messageType": "announcement",
+                "messageBody": "Workspace maintenance begins Friday.",
+                "createdAt": 1786320000,
+                "archivedAt": null
+            }]
+        }))
+        .expect("workspace messages");
+        assert!(messages.feature_enabled);
+        assert_eq!(messages.messages.len(), 1);
+        assert_eq!(
+            messages.messages[0].message_type,
+            WorkspaceMessageType::Announcement
+        );
+
+        assert_eq!(
+            serde_json::to_value(ConsumeAccountRateLimitResetCreditParams {
+                idempotency_key: "request-1".to_owned(),
+                credit_id: Some("reset-1".to_owned()),
+            })
+            .expect("consume params"),
+            serde_json::json!({
+                "idempotencyKey": "request-1",
+                "creditId": "reset-1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(SendAddCreditsNudgeEmailParams {
+                credit_type: AddCreditsNudgeCreditType::UsageLimit,
+            })
+            .expect("nudge params"),
+            serde_json::json!({"creditType": "usage_limit"})
+        );
     }
 }

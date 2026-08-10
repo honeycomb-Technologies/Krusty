@@ -14,9 +14,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crate::account::{
-    CancelLoginAccountParams, CancelLoginAccountResponse, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageResponse,
+    CancelLoginAccountParams, CancelLoginAccountResponse, ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
     LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
+    SendAddCreditsNudgeEmailParams, SendAddCreditsNudgeEmailResponse,
 };
 use crate::approvals::{ApprovalChoice, ApprovalKind, PendingApproval};
 use crate::backend::AgentBackend;
@@ -1400,6 +1402,30 @@ impl AgentBackend for MitsuroServerBackend {
     async fn account_rate_limits_read(&self) -> Result<GetAccountRateLimitsResponse> {
         Err(AgentError::NotImplemented(
             "MitsuroServerBackend::account_rate_limits_read — not implemented".into(),
+        ))
+    }
+
+    async fn account_workspace_messages_read(&self) -> Result<GetWorkspaceMessagesResponse> {
+        Err(AgentError::NotImplemented(
+            "Mitsuro HTTP does not expose Codex workspace account messages".into(),
+        ))
+    }
+
+    async fn account_rate_limit_reset_credit_consume(
+        &self,
+        _params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
+        Err(AgentError::NotImplemented(
+            "Mitsuro HTTP does not expose Codex rate-limit reset credits".into(),
+        ))
+    }
+
+    async fn account_send_add_credits_nudge_email(
+        &self,
+        _params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse> {
+        Err(AgentError::NotImplemented(
+            "Mitsuro HTTP does not expose Codex workspace credit email actions".into(),
         ))
     }
 

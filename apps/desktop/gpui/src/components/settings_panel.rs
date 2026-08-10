@@ -12,8 +12,10 @@ use gpui::{
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{
-    AppInfo, BackendKind, ExperimentalFeature, HookMetadata, InstalledApp, RemoteControlClient,
-    RemoteControlConnectionStatus,
+    AddCreditsNudgeCreditType, AppInfo, BackendKind, ExperimentalFeature, HookMetadata,
+    InstalledApp, RateLimitReachedType, RateLimitResetCredit, RateLimitResetCreditStatus,
+    RateLimitSnapshot, RateLimitWindow, RemoteControlClient, RemoteControlConnectionStatus,
+    WorkspaceMessage,
 };
 
 use crate::app::{
@@ -1798,7 +1800,7 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
         )
 }
 
-fn usage_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn usage_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let account = app.account_session();
     let state = app.account_state();
     if !matches!(state, SurfaceDataState::Live | SurfaceDataState::Fixture) {
@@ -1827,13 +1829,131 @@ fn usage_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoEleme
             )));
     }
 
-    let primary = account.primary_used_percent().clamp(0, 100) as f32;
-    let secondary = account.secondary_used_percent().clamp(0, 100) as f32;
-    let lifetime = format_token_count(account.lifetime_tokens());
+    let lifetime = account
+        .usage
+        .summary
+        .lifetime_tokens
+        .map(format_token_count)
+        .unwrap_or_else(|| "Not reported".to_owned());
     let plan = account
         .plan_label
         .clone()
         .unwrap_or_else(|| "Not reported".into());
+
+    let mut limit_cards = Vec::new();
+    if let Some(rate_limits_by_id) = account
+        .rate_limits
+        .rate_limits_by_limit_id
+        .as_ref()
+        .filter(|limits| !limits.is_empty())
+    {
+        for (limit_id, snapshot) in rate_limits_by_id {
+            let title = rate_limit_title(limit_id, snapshot);
+            limit_cards.push(rate_limit_card(&title, snapshot).into_any_element());
+        }
+    } else {
+        let title = rate_limit_title("codex", &account.rate_limits.rate_limits);
+        limit_cards
+            .push(rate_limit_card(&title, &account.rate_limits.rate_limits).into_any_element());
+    }
+
+    let credits = account
+        .rate_limits
+        .rate_limits
+        .credits
+        .as_ref()
+        .or_else(|| {
+            account
+                .rate_limits
+                .rate_limits_by_limit_id
+                .as_ref()
+                .and_then(|limits| limits.values().find_map(|limit| limit.credits.as_ref()))
+        });
+    let individual_limit = account
+        .rate_limits
+        .rate_limits
+        .individual_limit
+        .as_ref()
+        .or_else(|| {
+            account
+                .rate_limits
+                .rate_limits_by_limit_id
+                .as_ref()
+                .and_then(|limits| {
+                    limits
+                        .values()
+                        .find_map(|limit| limit.individual_limit.as_ref())
+                })
+        });
+
+    let reset_summary = account.rate_limits.rate_limit_reset_credits.as_ref();
+    let reset_busy = app.account_reset_in_progress();
+    let mut reset_rows = Vec::new();
+    if let Some(summary) = reset_summary {
+        if let Some(reset_credits) = summary
+            .credits
+            .as_ref()
+            .filter(|credits| !credits.is_empty())
+        {
+            for (index, credit) in reset_credits.iter().enumerate() {
+                if index > 0 {
+                    reset_rows.push(card_divider().into_any_element());
+                }
+                reset_rows.push(rate_limit_reset_row(credit, app, cx).into_any_element());
+            }
+        } else if summary.available_count > 0 {
+            reset_rows.push(automatic_rate_limit_reset_row(app, cx).into_any_element());
+        } else {
+            reset_rows.push(
+                empty_list_message(
+                    "No resets available",
+                    "Earned usage-limit resets will appear here when the server reports them.",
+                )
+                .into_any_element(),
+            );
+        }
+    } else {
+        reset_rows.push(
+            empty_list_message(
+                "Reset availability not reported",
+                "The connected account response did not include usage-limit reset credits.",
+            )
+            .into_any_element(),
+        );
+    }
+
+    let workspace_messages = app.account_workspace_messages();
+    let workspace_messages_enabled = app.account_workspace_messages_enabled();
+    let workspace_message_error = app.account_workspace_messages_error().map(str::to_owned);
+    let workspace_rows = workspace_messages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, message)| {
+            let mut rows = Vec::new();
+            if index > 0 {
+                rows.push(card_divider().into_any_element());
+            }
+            rows.push(workspace_message_row(message).into_any_element());
+            rows
+        })
+        .collect::<Vec<_>>();
+
+    let nudge = rate_limit_reached_type(account).and_then(|reached| match reached {
+        RateLimitReachedType::WorkspaceMemberCreditsDepleted => Some((
+            AddCreditsNudgeCreditType::Credits,
+            "Notify workspace owner",
+            "Ask a workspace owner to add credits. Codex applies a server-side cooldown.",
+        )),
+        RateLimitReachedType::WorkspaceMemberUsageLimitReached => Some((
+            AddCreditsNudgeCreditType::UsageLimit,
+            "Request limit increase",
+            "Ask a workspace owner to increase your individual usage limit.",
+        )),
+        _ => None,
+    });
+    let nudge_busy = app.account_credit_nudge_in_progress();
+    let action_detail = app.account_usage_action_detail().map(str::to_owned);
+
     div()
         .id("settings-usage")
         .flex()
@@ -1849,26 +1969,471 @@ fn usage_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoEleme
                 .child(card_divider())
                 .child(info_row("Lifetime tokens", &lifetime)),
         )
-        .child(group_label("Rate limits"))
-        .child(
-            settings_card().child(
-                div()
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(usage_bar_row(
-                        "Primary window",
-                        primary,
-                        format!("{primary:.0}% used"),
+        .child(group_label("General usage limits"))
+        .children(limit_cards)
+        .when_some(credits, |this, credits| {
+            let balance = if credits.unlimited {
+                "Unlimited".to_owned()
+            } else {
+                credits
+                    .balance
+                    .clone()
+                    .unwrap_or_else(|| "Not reported".to_owned())
+            };
+            let availability = if credits.unlimited {
+                "Unlimited"
+            } else if credits.has_credits {
+                "Available"
+            } else {
+                "No credits"
+            };
+            this.child(group_label("Credits")).child(
+                settings_card()
+                    .child(info_row("Balance", &balance))
+                    .child(card_divider())
+                    .child(info_row("Status", availability)),
+            )
+        })
+        .when_some(individual_limit, |this, limit| {
+            this.child(group_label("Workspace usage limit")).child(
+                settings_card()
+                    .child(info_row("Limit", &limit.limit))
+                    .child(card_divider())
+                    .child(info_row("Used", &limit.used))
+                    .child(card_divider())
+                    .child(info_row(
+                        "Remaining",
+                        &format!("{}%", limit.remaining_percent.clamp(0, 100)),
                     ))
-                    .child(usage_bar_row(
-                        "Secondary window",
-                        secondary,
-                        format!("{secondary:.0}% used"),
-                    )),
-            ),
+                    .child(card_divider())
+                    .child(info_row("Resets", &format_usage_timestamp(limit.resets_at))),
+            )
+        })
+        .when_some(nudge, |this, (credit_type, label, description)| {
+            this.child(group_label("Workspace limit action")).child(
+                settings_card().child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.0))
+                        .px(px(14.0))
+                        .py(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme::colors().text)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .whitespace_normal()
+                                        .text_color(theme::colors().text_tertiary)
+                                        .child(description),
+                                ),
+                        )
+                        .child(usage_action_button(
+                            "usage-credit-nudge".to_owned(),
+                            if nudge_busy {
+                                "Sending…".to_owned()
+                            } else {
+                                label.to_owned()
+                            },
+                            true,
+                            !nudge_busy,
+                            cx,
+                            move |app, window, cx| {
+                                app.send_account_credit_nudge(credit_type, window, cx)
+                            },
+                        )),
+                ),
+            )
+        })
+        .child(group_label("Usage limit resets"))
+        .child(
+            settings_card()
+                .when(reset_busy, |this| {
+                    this.child(info_row("Status", "Applying reset…"))
+                        .child(card_divider())
+                })
+                .children(reset_rows),
+        )
+        .when_some(action_detail, |this, detail| {
+            this.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme::colors().border)
+                    .bg(theme::colors().bg_button_secondary)
+                    .text_xs()
+                    .whitespace_normal()
+                    .text_color(theme::colors().text_secondary)
+                    .child(detail),
+            )
+        })
+        .when(
+            workspace_messages_enabled && !workspace_rows.is_empty(),
+            |this| {
+                this.child(group_label("Workspace messages"))
+                    .child(settings_card().children(workspace_rows))
+            },
+        )
+        .when_some(workspace_message_error, |this, error| {
+            this.child(group_label("Workspace messages")).child(
+                settings_card().child(empty_list_message("Workspace messages unavailable", &error)),
+            )
+        })
+}
+
+fn rate_limit_title(limit_id: &str, snapshot: &RateLimitSnapshot) -> String {
+    snapshot
+        .limit_name
+        .clone()
+        .or_else(|| {
+            snapshot
+                .limit_id
+                .as_deref()
+                .filter(|id| *id != "codex")
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| {
+            if limit_id == "codex" {
+                "Codex".to_owned()
+            } else {
+                limit_id.to_owned()
+            }
+        })
+}
+
+fn rate_limit_card(title: &str, snapshot: &RateLimitSnapshot) -> impl IntoElement {
+    let colors = theme::colors();
+    let mut windows = Vec::new();
+    if let Some(primary) = snapshot.primary.as_ref() {
+        windows.push(
+            usage_limit_row(primary, usage_window_label(primary, "Primary")).into_any_element(),
+        );
+    }
+    if let Some(secondary) = snapshot.secondary.as_ref() {
+        if !windows.is_empty() {
+            windows.push(card_divider().into_any_element());
+        }
+        windows.push(
+            usage_limit_row(secondary, usage_window_label(secondary, "Secondary"))
+                .into_any_element(),
+        );
+    }
+    if windows.is_empty() {
+        windows.push(
+            empty_list_message(
+                "No active windows",
+                "This limit bucket did not report a primary or secondary window.",
+            )
+            .into_any_element(),
+        );
+    }
+    settings_card()
+        .child(
+            div()
+                .px(px(14.0))
+                .pt(px(12.0))
+                .pb(px(8.0))
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child(title.to_owned()),
+        )
+        .children(windows)
+}
+
+fn usage_window_label(window: &RateLimitWindow, fallback: &str) -> String {
+    match window.window_duration_mins {
+        Some(300) => "5-hour usage limit".to_owned(),
+        Some(1_440) => "Daily usage limit".to_owned(),
+        Some(10_080) => "Weekly usage limit".to_owned(),
+        Some(43_200..=44_640) => "Monthly usage limit".to_owned(),
+        Some(minutes) if minutes > 0 && minutes % 1_440 == 0 => {
+            format!("{}-day usage limit", minutes / 1_440)
+        }
+        Some(minutes) if minutes > 0 && minutes % 60 == 0 => {
+            format!("{}-hour usage limit", minutes / 60)
+        }
+        Some(minutes) if minutes > 0 => format!("{minutes}-minute usage limit"),
+        _ => format!("{fallback} usage limit"),
+    }
+}
+
+fn usage_limit_row(window: &RateLimitWindow, label: String) -> impl IntoElement {
+    let reset = window
+        .resets_at
+        .map(|timestamp| format!(" · Resets {}", format_usage_timestamp(timestamp)))
+        .unwrap_or_default();
+    let remaining = window.remaining_percent();
+    div().px(px(14.0)).py(px(10.0)).child(usage_bar_row(
+        &label,
+        window.used_percent.clamp(0, 100) as f32,
+        format!("{remaining}% remaining{reset}"),
+    ))
+}
+
+fn rate_limit_reset_row(
+    credit: &RateLimitResetCredit,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let credit_id = credit.id.clone();
+    let title = credit
+        .title
+        .clone()
+        .unwrap_or_else(|| "Usage limit reset".to_owned());
+    let mut detail = credit
+        .description
+        .clone()
+        .unwrap_or_else(|| "Reset eligible Codex usage limits immediately.".to_owned());
+    if let Some(expires_at) = credit.expires_at {
+        detail.push_str(&format!(" Expires {}.", format_usage_timestamp(expires_at)));
+    }
+    let available = credit.status == RateLimitResetCreditStatus::Available;
+    let confirming = app.account_reset_confirmation_matches(Some(&credit.id));
+    let busy = app.account_reset_in_progress();
+    let button_label = if busy {
+        "Applying…"
+    } else if confirming {
+        "Confirm"
+    } else if available {
+        "Use reset"
+    } else {
+        rate_limit_reset_status_label(credit.status)
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .whitespace_normal()
+                        .text_color(colors.text_tertiary)
+                        .child(detail),
+                ),
+        )
+        .child(usage_action_button(
+            format!("usage-reset-{credit_id}"),
+            button_label.to_owned(),
+            confirming,
+            available && !busy,
+            cx,
+            move |app, window, cx| {
+                app.use_account_rate_limit_reset(Some(credit_id.clone()), window, cx)
+            },
+        ))
+}
+
+fn automatic_rate_limit_reset_row(
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let confirming = app.account_reset_confirmation_matches(None);
+    let busy = app.account_reset_in_progress();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Usage limit reset"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .whitespace_normal()
+                        .text_color(colors.text_tertiary)
+                        .child("Use one server-selected reset credit on eligible Codex limits."),
+                ),
+        )
+        .child(usage_action_button(
+            "usage-reset-automatic".to_owned(),
+            if busy {
+                "Applying…".to_owned()
+            } else if confirming {
+                "Confirm".to_owned()
+            } else {
+                "Use reset".to_owned()
+            },
+            confirming,
+            !busy,
+            cx,
+            |app, window, cx| app.use_account_rate_limit_reset(None, window, cx),
+        ))
+}
+
+fn workspace_message_row(message: &WorkspaceMessage) -> impl IntoElement {
+    let colors = theme::colors();
+    let title = match message.message_type {
+        mitsuro_desktop_backend::WorkspaceMessageType::Headline => "Workspace headline",
+        mitsuro_desktop_backend::WorkspaceMessageType::Announcement => "Workspace announcement",
+        mitsuro_desktop_backend::WorkspaceMessageType::Unknown => "Workspace message",
+    };
+    let created = message
+        .created_at
+        .map(format_usage_timestamp)
+        .unwrap_or_else(|| "Date not reported".to_owned());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(created),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .whitespace_normal()
+                .text_color(colors.text_secondary)
+                .child(message.message_body.clone()),
+        )
+}
+
+fn rate_limit_reached_type(account: &AccountSession) -> Option<RateLimitReachedType> {
+    account
+        .rate_limits
+        .rate_limits
+        .rate_limit_reached_type
+        .or_else(|| {
+            account
+                .rate_limits
+                .rate_limits_by_limit_id
+                .as_ref()
+                .and_then(|limits| {
+                    limits
+                        .values()
+                        .find_map(|limit| limit.rate_limit_reached_type)
+                })
+        })
+}
+
+fn rate_limit_reset_status_label(status: RateLimitResetCreditStatus) -> &'static str {
+    match status {
+        RateLimitResetCreditStatus::Available => "Available",
+        RateLimitResetCreditStatus::Redeeming => "Redeeming…",
+        RateLimitResetCreditStatus::Redeemed => "Redeemed",
+        RateLimitResetCreditStatus::Unknown => "Unavailable",
+    }
+}
+
+fn format_usage_timestamp(value: i64) -> String {
+    format_remote_control_timestamp(value)
+}
+
+fn usage_action_button(
+    id: String,
+    label: String,
+    primary: bool,
+    enabled: bool,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(SharedId(id))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .h(px(30.0))
+        .px(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(if primary {
+            colors.accent_soft
+        } else {
+            colors.bg_button_secondary
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    on_click(app, window, cx);
+                }))
+        })
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if !enabled {
+                    colors.text_tertiary
+                } else if primary {
+                    colors.accent
+                } else {
+                    colors.text_secondary
+                })
+                .child(label),
         )
 }
 
@@ -4965,5 +5530,55 @@ struct SharedId(String);
 impl From<SharedId> for gpui::ElementId {
     fn from(value: SharedId) -> Self {
         gpui::ElementId::Name(value.0.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(minutes: Option<i64>) -> RateLimitWindow {
+        RateLimitWindow {
+            used_percent: 25,
+            window_duration_mins: minutes,
+            resets_at: None,
+        }
+    }
+
+    #[test]
+    fn usage_window_labels_follow_server_durations() {
+        assert_eq!(
+            usage_window_label(&window(Some(300)), "Primary"),
+            "5-hour usage limit"
+        );
+        assert_eq!(
+            usage_window_label(&window(Some(10_080)), "Primary"),
+            "Weekly usage limit"
+        );
+        assert_eq!(
+            usage_window_label(&window(Some(43_200)), "Primary"),
+            "Monthly usage limit"
+        );
+        assert_eq!(
+            usage_window_label(&window(None), "Secondary"),
+            "Secondary usage limit"
+        );
+    }
+
+    #[test]
+    fn named_rate_limit_title_preserves_server_display_name() {
+        let snapshot = RateLimitSnapshot {
+            limit_id: Some("codex_bengalfox".to_owned()),
+            limit_name: Some("GPT-5.3-Codex-Spark".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            rate_limit_title("codex_bengalfox", &snapshot),
+            "GPT-5.3-Codex-Spark"
+        );
+        assert_eq!(
+            rate_limit_title("codex", &RateLimitSnapshot::default()),
+            "Codex"
+        );
     }
 }

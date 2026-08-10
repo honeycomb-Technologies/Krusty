@@ -11,7 +11,8 @@ use crate::{
     CommandExecResizeParams, CommandExecResizeResponse, CommandExecResponse,
     CommandExecTerminateParams, CommandExecTerminateResponse, CommandExecWriteParams,
     CommandExecWriteResponse, ConfigBatchWriteParams, ConfigRequirementsReadResponse,
-    ConfigWriteResponse, ExperimentalFeatureEnablementSetParams,
+    ConfigWriteResponse, ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse, ExperimentalFeatureEnablementSetParams,
     ExperimentalFeatureEnablementSetResponse, ExperimentalFeatureListParams,
     ExperimentalFeatureListResponse, ExternalAgentConfigDetectParams,
     ExternalAgentConfigDetectResponse, ExternalAgentConfigImportHistoriesReadResponse,
@@ -19,8 +20,8 @@ use crate::{
     ExternalAgentConfigImportParams, ExternalAgentConfigImportResponse, FsCopyParams,
     FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams,
     FsRemoveResponse, FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse,
-    FsWriteFileParams, FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge,
-    LiveTurnOutcome, McpServerConfigAddParams, McpServerOauthLoginParams,
+    FsWriteFileParams, FsWriteFileResponse, GetWorkspaceMessagesResponse, LifecycleNotification,
+    LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams, McpServerOauthLoginParams,
     McpServerOauthLoginResponse, MitsuroServerBackend, ModelProviderCapabilitiesReadParams,
     ModelProviderCapabilitiesReadResponse, PendingApproval, PermissionProfileListParams,
     PermissionProfileListResponse, PluginInstallParams, PluginInstallResponse,
@@ -30,6 +31,7 @@ use crate::{
     RemoteControlEnableParams, RemoteControlEnableResponse, RemoteControlPairingStartParams,
     RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
     RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse, Result,
+    SendAddCreditsNudgeEmailParams, SendAddCreditsNudgeEmailResponse,
     ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
     ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
     ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
@@ -107,6 +109,9 @@ pub struct BackendCapabilities {
     pub model_provider_capabilities: bool,
     pub external_agent_import: bool,
     pub experimental_features: bool,
+    pub account_workspace_messages: bool,
+    pub account_reset_credits: bool,
+    pub account_credit_nudge: bool,
     pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
@@ -152,6 +157,9 @@ impl BackendCapabilities {
             model_provider_capabilities: true,
             external_agent_import: true,
             experimental_features: true,
+            account_workspace_messages: true,
+            account_reset_credits: true,
+            account_credit_nudge: true,
             remote_control: true,
             hive: false,
             schedules: false,
@@ -200,6 +208,9 @@ impl BackendCapabilities {
             model_provider_capabilities: false,
             external_agent_import: false,
             experimental_features: false,
+            account_workspace_messages: false,
+            account_reset_credits: false,
+            account_credit_nudge: false,
             remote_control: false,
             hive: true,
             schedules: true,
@@ -586,6 +597,43 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.config_batch_write(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose Codex configuration writes".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_account_workspace_messages(&self) -> Result<GetWorkspaceMessagesResponse> {
+        match self {
+            Self::Codex(backend) => backend.account_workspace_messages_read().await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex workspace account messages".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn consume_account_rate_limit_reset_credit(
+        &self,
+        params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .account_rate_limit_reset_credit_consume(params)
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex rate-limit reset credits".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn send_account_add_credits_nudge_email(
+        &self,
+        params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse> {
+        match self {
+            Self::Codex(backend) => backend.account_send_add_credits_nudge_email(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex workspace credit email actions".to_owned(),
             )),
         }
     }
@@ -1083,6 +1131,12 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().external_agent_import);
         assert!(BackendCapabilities::codex().experimental_features);
         assert!(!BackendCapabilities::mitsuro().experimental_features);
+        assert!(BackendCapabilities::codex().account_workspace_messages);
+        assert!(!BackendCapabilities::mitsuro().account_workspace_messages);
+        assert!(BackendCapabilities::codex().account_reset_credits);
+        assert!(!BackendCapabilities::mitsuro().account_reset_credits);
+        assert!(BackendCapabilities::codex().account_credit_nudge);
+        assert!(!BackendCapabilities::mitsuro().account_credit_nudge);
         assert!(BackendCapabilities::codex().file_mutations);
         assert!(!BackendCapabilities::mitsuro().file_mutations);
         assert!(BackendCapabilities::codex().file_watches);

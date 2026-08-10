@@ -64,6 +64,8 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `turn/start` (live; fixture replay requires explicit fixture mode)
 - `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
 - `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
+- `account/workspaceMessages/read` · `account/rateLimitResetCredit/consume`
+- `account/sendAddCreditsNudgeEmail`
 - `remoteControl/status/read` · `remoteControl/enable` · `remoteControl/disable`
 - `remoteControl/pairing/start` · `remoteControl/pairing/status`
 - `remoteControl/client/list` · `remoteControl/client/revoke`
@@ -83,6 +85,12 @@ details payload and remains Codex-only at the desktop capability boundary.
 The experimental-feature catalog and process-wide enablement methods are typed. The
 desktop persists user-facing beta toggles with typed atomic `config/batchWrite` edits
 and asks app-server to reload user config; Mitsuro HTTP returns `NotImplemented`.
+
+The Codex account adapter preserves the complete named rate-limit map, credit and
+workspace-spend state, earned reset-credit records, and workspace messages. Reset
+consumption and workspace-owner nudges use exact typed mutations. Mitsuro HTTP exposes
+none of these ChatGPT account contracts, so its capability flags are false and the
+desktop boundary returns `NotImplemented` instead of substituting fixture data.
 
 The generated protocol inventories are committed in `fixtures/`: 95 stable client
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable

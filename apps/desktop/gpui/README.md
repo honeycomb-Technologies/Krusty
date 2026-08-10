@@ -98,6 +98,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Account and Usage render protocol data only when the connected backend supplies a
   complete snapshot. Mitsuro HTTP shows an explicit unsupported state; it does not show
   sample identities, plans, credits, limits, or billing history.
+- Codex Usage renders every named bucket returned by `account/rateLimits/read`, including
+  server labels, primary/secondary windows, remaining percentages, reset timestamps,
+  credit balance, workspace spend control, and earned reset credits. Reset redemption
+  requires a second confirmation and a fresh idempotency key; automated acceptance never
+  invokes it. Workspace announcements and member credit/limit requests use the typed
+  `account/workspaceMessages/read` and `account/sendAddCreditsNudgeEmail` contracts.
 - Codex sign-in launches the real app-server OAuth URL and remains pending until the
   matching completion notification arrives. The user can reopen or cancel that exact
   login. Fixture device codes remain confined to explicit fixture mode.

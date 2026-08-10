@@ -22,22 +22,24 @@ use mitsuro_desktop_backend::{
     fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
     fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, valid_mcp_server_name,
-    Account, ActivityFields, AgentBackend, AppInfo, ApprovalChoice, AppsInstalledParams,
-    AppsListParams, BackendKind, BackendSelection, BackendSessionId, CancelLoginAccountParams,
-    CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask,
-    CommandExecOutputDeltaNotification, CommandExecOutputStream, CommandExecParams,
-    CommandExecTerminateParams, CommandExecWriteParams, ConfigBatchWriteParams, ConfigEdit,
-    ConfigReadParams, ConfigRequirements, ConfigWriteStatus, ConversationAudio, ConversationImage,
-    ConversationReference, ConversationReferenceKind, CreateSession, DesktopBackend,
-    EnvironmentAddParams, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, ExperimentalFeature,
-    ExperimentalFeatureListParams, ExternalAgentConfigDetectParams,
-    ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistory,
-    ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FixtureBackend,
-    FsChangedNotification, FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry,
-    FsReadDirectoryParams, FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams,
-    FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata, HooksListEntry,
+    Account, ActivityFields, AddCreditsNudgeCreditType, AddCreditsNudgeEmailStatus, AgentBackend,
+    AppInfo, ApprovalChoice, AppsInstalledParams, AppsListParams, BackendKind, BackendSelection,
+    BackendSessionId, CancelLoginAccountParams, CancelLoginAccountStatus,
+    CollaborationModeListParams, CollaborationModeMask, CommandExecOutputDeltaNotification,
+    CommandExecOutputStream, CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams,
+    ConfigBatchWriteParams, ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
+    ConsumeAccountRateLimitResetCreditOutcome, ConsumeAccountRateLimitResetCreditParams,
+    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
+    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
+    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
+    EnvironmentSummary, ExperimentalFeature, ExperimentalFeatureListParams,
+    ExternalAgentConfigDetectParams, ExternalAgentConfigImportCompletedNotification,
+    ExternalAgentConfigImportHistory, ExternalAgentConfigImportParams,
+    ExternalAgentConfigMigrationItem, FixtureBackend, FsChangedNotification, FsCopyParams,
+    FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams,
+    FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams, FuzzyFileSearchParams,
+    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse, HookMetadata, HooksListEntry,
     HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
     LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpElicitationMode,
     McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
@@ -62,9 +64,9 @@ use mitsuro_desktop_backend::{
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
     ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
     ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, CLAUDE_CODE_MIGRATION_SOURCE,
-    CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
-    FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, WorkspaceMessage,
+    CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT,
+    FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -807,6 +809,8 @@ pub struct AccountSession {
     pub usage: GetAccountTokenUsageResponse,
     /// Rate-limit windows for usage bars.
     pub rate_limits: GetAccountRateLimitsResponse,
+    /// Active organization messages returned by `account/workspaceMessages/read`.
+    pub workspace_messages: GetWorkspaceMessagesResponse,
     /// Current OAuth/device-code status shown in Settings.
     pub login_detail: Option<String>,
     /// Server identity for an asynchronous login that may be canceled.
@@ -856,6 +860,7 @@ impl AccountSession {
             plan_label: plan,
             usage: fixture_demo_usage(),
             rate_limits: fixture_demo_rate_limits(),
+            workspace_messages: GetWorkspaceMessagesResponse::default(),
             login_detail: None,
             pending_login_id: None,
             pending_login_url: None,
@@ -874,7 +879,10 @@ impl AccountSession {
             },
             rate_limits: GetAccountRateLimitsResponse {
                 rate_limits: Default::default(),
+                rate_limits_by_limit_id: None,
+                rate_limit_reset_credits: None,
             },
+            workspace_messages: GetWorkspaceMessagesResponse::default(),
             login_detail: None,
             pending_login_id: None,
             pending_login_url: None,
@@ -916,6 +924,12 @@ impl AccountSession {
     pub fn lifetime_tokens(&self) -> i64 {
         self.usage.summary.lifetime_tokens.unwrap_or(0)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AccountResetSelection {
+    Automatic,
+    Credit(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1140,6 +1154,13 @@ pub struct MitsuroApp {
     /// Account / usage session for Settings Account section.
     account: AccountSession,
     account_state: SurfaceDataState,
+    account_workspace_messages_error: Option<String>,
+    /// Two-step confirmation for a live Codex rate-limit reset redemption.
+    account_reset_confirmation: Option<AccountResetSelection>,
+    account_reset_in_progress: bool,
+    /// Last truthful result or failure from an account usage action.
+    account_usage_action_detail: Option<String>,
+    account_credit_nudge_in_progress: bool,
     composer_input: Entity<InputState>,
     composer_attachments: Vec<ComposerAttachment>,
     composer_add_menu_open: bool,
@@ -1537,6 +1558,11 @@ impl MitsuroApp {
             composer_plan_mode: false,
             account: AccountSession::empty("loading"),
             account_state: SurfaceDataState::Loading,
+            account_workspace_messages_error: None,
+            account_reset_confirmation: None,
+            account_reset_in_progress: false,
+            account_usage_action_detail: None,
+            account_credit_nudge_in_progress: false,
             composer_input,
             composer_attachments: Vec::new(),
             composer_add_menu_open: false,
@@ -6592,6 +6618,40 @@ impl MitsuroApp {
         &self.account
     }
 
+    pub fn account_workspace_messages(&self) -> &[WorkspaceMessage] {
+        &self.account.workspace_messages.messages
+    }
+
+    pub fn account_workspace_messages_enabled(&self) -> bool {
+        self.account.workspace_messages.feature_enabled
+    }
+
+    pub fn account_workspace_messages_error(&self) -> Option<&str> {
+        self.account_workspace_messages_error.as_deref()
+    }
+
+    pub fn account_reset_confirmation_matches(&self, credit_id: Option<&str>) -> bool {
+        match (&self.account_reset_confirmation, credit_id) {
+            (Some(AccountResetSelection::Automatic), None) => true,
+            (Some(AccountResetSelection::Credit(selected)), Some(credit_id)) => {
+                selected == credit_id
+            }
+            _ => false,
+        }
+    }
+
+    pub fn account_reset_in_progress(&self) -> bool {
+        self.account_reset_in_progress
+    }
+
+    pub fn account_usage_action_detail(&self) -> Option<&str> {
+        self.account_usage_action_detail.as_deref()
+    }
+
+    pub fn account_credit_nudge_in_progress(&self) -> bool {
+        self.account_credit_nudge_in_progress
+    }
+
     /// Human-readable account status: Signed out / Fixture demo / Ready.
     pub fn account_status_label(&self) -> SharedString {
         match &self.connection {
@@ -6645,12 +6705,14 @@ impl MitsuroApp {
         let previous_detail = self.account.login_detail.clone();
         let pending_login_id = self.account.pending_login_id.clone();
         let pending_login_url = self.account.pending_login_url.clone();
+        let workspace_messages = self.account.workspace_messages.clone();
         self.account = AccountSession {
             signed_in,
             email_display,
             plan_label,
             usage,
             rate_limits,
+            workspace_messages,
             login_detail: login_detail.or(previous_detail),
             pending_login_id,
             pending_login_url,
@@ -6679,6 +6741,7 @@ impl MitsuroApp {
                                     None,
                                     empty.usage,
                                     empty.rate_limits,
+                                    Ok(GetWorkspaceMessagesResponse::default()),
                                     "mitsuro-http",
                                     SurfaceDataState::Unsupported,
                                 ));
@@ -6687,7 +6750,7 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let (usage, limits) = if acc.has_account() {
+                            let (usage, limits, workspace_messages) = if acc.has_account() {
                                 let usage = backend
                                     .account_usage_read()
                                     .await
@@ -6696,15 +6759,24 @@ impl MitsuroApp {
                                     .account_rate_limits_read()
                                     .await
                                     .map_err(|error| format!("account/rateLimits/read: {error}"))?;
-                                (usage, limits)
+                                let workspace_messages =
+                                    backend.read_account_workspace_messages().await.map_err(
+                                        |error| format!("account/workspaceMessages/read: {error}"),
+                                    );
+                                (usage, limits, workspace_messages)
                             } else {
                                 let empty = AccountSession::empty("app-server");
-                                (empty.usage, empty.rate_limits)
+                                (
+                                    empty.usage,
+                                    empty.rate_limits,
+                                    Ok(GetWorkspaceMessagesResponse::default()),
+                                )
                             };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
                                 limits,
+                                workspace_messages,
                                 "app-server",
                                 SurfaceDataState::Live,
                             ));
@@ -6733,6 +6805,7 @@ impl MitsuroApp {
                         acc.account,
                         usage,
                         limits,
+                        Ok(GetWorkspaceMessagesResponse::default()),
                         "fixture",
                         SurfaceDataState::Fixture,
                     ))
@@ -6744,8 +6817,19 @@ impl MitsuroApp {
                     return;
                 }
                 match result {
-                    Ok((account, usage, limits, source, state)) => {
+                    Ok((account, usage, limits, workspace_messages, source, state)) => {
                         app.apply_account_snapshot(account, usage, limits, source, None);
+                        match workspace_messages {
+                            Ok(messages) => {
+                                app.account.workspace_messages = messages;
+                                app.account_workspace_messages_error = None;
+                            }
+                            Err(error) => {
+                                app.account.workspace_messages =
+                                    GetWorkspaceMessagesResponse::default();
+                                app.account_workspace_messages_error = Some(error);
+                            }
+                        }
                         app.account_state = state;
                     }
                     Err(_) => {
@@ -6782,6 +6866,7 @@ impl MitsuroApp {
                                     None,
                                     empty.usage,
                                     empty.rate_limits,
+                                    Ok(GetWorkspaceMessagesResponse::default()),
                                     "mitsuro-http",
                                     SurfaceDataState::Unsupported,
                                 ));
@@ -6790,7 +6875,7 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let (usage, limits) = if acc.has_account() {
+                            let (usage, limits, workspace_messages) = if acc.has_account() {
                                 let usage = backend
                                     .account_usage_read()
                                     .await
@@ -6799,15 +6884,24 @@ impl MitsuroApp {
                                     .account_rate_limits_read()
                                     .await
                                     .map_err(|error| format!("account/rateLimits/read: {error}"))?;
-                                (usage, limits)
+                                let workspace_messages =
+                                    backend.read_account_workspace_messages().await.map_err(
+                                        |error| format!("account/workspaceMessages/read: {error}"),
+                                    );
+                                (usage, limits, workspace_messages)
                             } else {
                                 let empty = AccountSession::empty("app-server");
-                                (empty.usage, empty.rate_limits)
+                                (
+                                    empty.usage,
+                                    empty.rate_limits,
+                                    Ok(GetWorkspaceMessagesResponse::default()),
+                                )
                             };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
                                 limits,
+                                workspace_messages,
                                 "app-server",
                                 SurfaceDataState::Live,
                             ));
@@ -6836,6 +6930,7 @@ impl MitsuroApp {
                         acc.account,
                         usage,
                         limits,
+                        Ok(GetWorkspaceMessagesResponse::default()),
                         "fixture",
                         SurfaceDataState::Fixture,
                     ))
@@ -6844,8 +6939,19 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((account, usage, limits, source, state)) => {
+                    Ok((account, usage, limits, workspace_messages, source, state)) => {
                         app.apply_account_snapshot(account, usage, limits, source, None);
+                        match workspace_messages {
+                            Ok(messages) => {
+                                app.account.workspace_messages = messages;
+                                app.account_workspace_messages_error = None;
+                            }
+                            Err(error) => {
+                                app.account.workspace_messages =
+                                    GetWorkspaceMessagesResponse::default();
+                                app.account_workspace_messages_error = Some(error);
+                            }
+                        }
                         app.account_state = state;
                         app.status_line = format!(
                             "Account · {} · {}",
@@ -6866,6 +6972,167 @@ impl MitsuroApp {
                         app.account = AccountSession::empty(source);
                         app.account_state = SurfaceDataState::Error;
                         app.status_line = format!("Account refresh failed · {message}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Two clicks are required to redeem an earned rate-limit reset. The first
+    /// selects the exact backend credit (or automatic selection); the second
+    /// performs the idempotent mutation and refreshes effective account state.
+    pub fn use_account_rate_limit_reset(
+        &mut self,
+        credit_id: Option<String>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selection = credit_id
+            .clone()
+            .map(AccountResetSelection::Credit)
+            .unwrap_or(AccountResetSelection::Automatic);
+        if self.account_reset_confirmation.as_ref() != Some(&selection) {
+            self.account_reset_confirmation = Some(selection);
+            self.account_usage_action_detail = Some(
+                "Confirm to consume this reset and immediately reset eligible usage limits."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.account_reset_in_progress {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.account_usage_action_detail =
+                Some("Rate-limit reset is unavailable while disconnected.".to_owned());
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().account_reset_credits {
+            self.account_usage_action_detail = Some(
+                "The active backend does not expose Codex rate-limit reset credits.".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        self.account_reset_confirmation = None;
+        self.account_reset_in_progress = true;
+        self.account_usage_action_detail = None;
+        self.status_line = "Usage · applying reset…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .consume_account_rate_limit_reset_credit(
+                            ConsumeAccountRateLimitResetCreditParams {
+                                idempotency_key: uuid::Uuid::new_v4().to_string(),
+                                credit_id,
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.account_reset_in_progress = false;
+                match result {
+                    Ok(response) => {
+                        let detail = match response.outcome {
+                            ConsumeAccountRateLimitResetCreditOutcome::Reset => {
+                                "Usage limits reset".to_owned()
+                            }
+                            ConsumeAccountRateLimitResetCreditOutcome::NothingToReset => {
+                                "Nothing currently needs to be reset".to_owned()
+                            }
+                            ConsumeAccountRateLimitResetCreditOutcome::NoCredit => {
+                                "No earned reset credit is available".to_owned()
+                            }
+                            ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed => {
+                                "That reset credit was already redeemed".to_owned()
+                            }
+                        };
+                        app.status_line = format!("Usage · {detail}").into();
+                        app.account_usage_action_detail = Some(detail);
+                        app.kick_account_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line = format!("Usage reset failed · {error}").into();
+                        app.account_usage_action_detail =
+                            Some(format!("Could not apply usage reset: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn send_account_credit_nudge(
+        &mut self,
+        credit_type: AddCreditsNudgeCreditType,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account_credit_nudge_in_progress {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.account_usage_action_detail =
+                Some("Workspace credit request is unavailable while disconnected.".to_owned());
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().account_credit_nudge {
+            self.account_usage_action_detail = Some(
+                "The active backend does not expose workspace credit email actions.".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        self.account_credit_nudge_in_progress = true;
+        self.account_usage_action_detail = None;
+        self.status_line = "Usage · contacting workspace owner…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .send_account_add_credits_nudge_email(
+                            mitsuro_desktop_backend::SendAddCreditsNudgeEmailParams { credit_type },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.account_credit_nudge_in_progress = false;
+                match result {
+                    Ok(response) => {
+                        let detail = match response.status {
+                            AddCreditsNudgeEmailStatus::Sent => "Workspace owner notified",
+                            AddCreditsNudgeEmailStatus::CooldownActive => {
+                                "A request was already sent recently"
+                            }
+                        };
+                        app.status_line = format!("Usage · {detail}").into();
+                        app.account_usage_action_detail = Some(detail.to_owned());
+                    }
+                    Err(error) => {
+                        app.status_line = format!("Workspace request failed · {error}").into();
+                        app.account_usage_action_detail =
+                            Some(format!("Could not send workspace request: {error}"));
                     }
                 }
                 cx.notify();
@@ -11590,6 +11857,11 @@ impl MitsuroApp {
         self.composer_access_menu_open = false;
         self.account = AccountSession::empty(kind.id());
         self.account_state = SurfaceDataState::Loading;
+        self.account_workspace_messages_error = None;
+        self.account_reset_confirmation = None;
+        self.account_reset_in_progress = false;
+        self.account_usage_action_detail = None;
+        self.account_credit_nudge_in_progress = false;
     }
 
     fn bootstrap_backend(&mut self, cx: &mut Context<Self>) {

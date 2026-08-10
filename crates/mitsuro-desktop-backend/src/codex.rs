@@ -16,9 +16,11 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
 use crate::account::{
-    CancelLoginAccountParams, CancelLoginAccountResponse, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageResponse,
+    CancelLoginAccountParams, CancelLoginAccountResponse, ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
     LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
+    SendAddCreditsNudgeEmailParams, SendAddCreditsNudgeEmailResponse,
 };
 use crate::approvals::{ApprovalChoice, PendingApproval};
 use crate::backend::AgentBackend;
@@ -441,6 +443,32 @@ impl CodexAppServerBackend {
     /// Typed `account/rateLimits/read`.
     pub async fn account_rate_limits_read(&self) -> Result<GetAccountRateLimitsResponse> {
         self.request_typed("account/rateLimits/read", Some(serde_json::json!({})))
+            .await
+    }
+
+    /// Typed `account/workspaceMessages/read`.
+    pub async fn account_workspace_messages_read(&self) -> Result<GetWorkspaceMessagesResponse> {
+        self.request_typed("account/workspaceMessages/read", None)
+            .await
+    }
+
+    /// Typed `account/rateLimitResetCredit/consume`.
+    pub async fn account_rate_limit_reset_credit_consume(
+        &self,
+        params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("account/rateLimitResetCredit/consume", Some(value))
+            .await
+    }
+
+    /// Typed `account/sendAddCreditsNudgeEmail`.
+    pub async fn account_send_add_credits_nudge_email(
+        &self,
+        params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("account/sendAddCreditsNudgeEmail", Some(value))
             .await
     }
 
@@ -1621,6 +1649,29 @@ impl AgentBackend for CodexAppServerBackend {
             .await
     }
 
+    async fn account_workspace_messages_read(&self) -> Result<GetWorkspaceMessagesResponse> {
+        self.request_typed("account/workspaceMessages/read", None)
+            .await
+    }
+
+    async fn account_rate_limit_reset_credit_consume(
+        &self,
+        params: ConsumeAccountRateLimitResetCreditParams,
+    ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("account/rateLimitResetCredit/consume", Some(value))
+            .await
+    }
+
+    async fn account_send_add_credits_nudge_email(
+        &self,
+        params: SendAddCreditsNudgeEmailParams,
+    ) -> Result<SendAddCreditsNudgeEmailResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("account/sendAddCreditsNudgeEmail", Some(value))
+            .await
+    }
+
     async fn disconnect(&self) -> Result<()> {
         {
             let mut stdin = self.inner.stdin.lock().await;
@@ -2353,6 +2404,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write.status, crate::ConfigWriteStatus::Ok);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_message_reset_and_nudge_methods_match_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "account/workspaceMessages/read",
+                "account/rateLimitResetCredit/consume",
+                "account/sendAddCreditsNudgeEmail",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "account/workspaceMessages/read" => {
+                        assert!(request.get("params").is_none());
+                        serde_json::json!({
+                            "featureEnabled": true,
+                            "messages": [{
+                                "messageId": "message-1",
+                                "messageType": "headline",
+                                "messageBody": "Live workspace message",
+                                "createdAt": 1786320000,
+                                "archivedAt": null
+                            }]
+                        })
+                    }
+                    "account/rateLimitResetCredit/consume" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "idempotencyKey": "request-1",
+                                "creditId": "reset-1"
+                            })
+                        );
+                        serde_json::json!({"outcome": "reset"})
+                    }
+                    "account/sendAddCreditsNudgeEmail" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"creditType": "usage_limit"})
+                        );
+                        serde_json::json!({"status": "sent"})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let messages = backend.account_workspace_messages_read().await.unwrap();
+        assert!(messages.feature_enabled);
+        assert_eq!(messages.messages[0].message_body, "Live workspace message");
+        let consumed = backend
+            .account_rate_limit_reset_credit_consume(
+                crate::ConsumeAccountRateLimitResetCreditParams {
+                    idempotency_key: "request-1".to_owned(),
+                    credit_id: Some("reset-1".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            consumed.outcome,
+            crate::ConsumeAccountRateLimitResetCreditOutcome::Reset
+        );
+        let nudge = backend
+            .account_send_add_credits_nudge_email(crate::SendAddCreditsNudgeEmailParams {
+                credit_type: crate::AddCreditsNudgeCreditType::UsageLimit,
+            })
+            .await
+            .unwrap();
+        assert_eq!(nudge.status, crate::AddCreditsNudgeEmailStatus::Sent);
         server.await.unwrap();
     }
 

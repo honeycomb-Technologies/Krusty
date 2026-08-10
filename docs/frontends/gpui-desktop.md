@@ -61,6 +61,7 @@ backend or are shown as unavailable.
 | Fork | Unsupported, capability-gated | Live | Typed fixture |
 | Review changes | Unsupported, capability-gated | Live streamed `review/start` with approvals | Unsupported, hidden |
 | Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
+| Account usage/billing | Unsupported; no ChatGPT account projection | Live token summary, all named rate-limit buckets, credits/spend control, workspace messages, confirmed reset redemption, and member owner-nudge actions | Explicit offline fixture snapshot only |
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
@@ -88,8 +89,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 94 typed adapters
-and 39 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 97 typed adapters
+and 36 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -176,6 +177,13 @@ work, not as feature completion; the matrix test must change with each typed ada
   identity for cancel/reopen, and waits for `account/login/completed` before claiming
   success or loading authenticated usage. Failed logout keeps the last server snapshot
   visible instead of pretending local sign-out succeeded.
+- Settings Usage preserves every `rateLimitsByLimitId` record rather than collapsing
+  the response to two generic bars. It renders server-provided names, window durations,
+  remaining percentages, reset times, credits, individual spend control, earned resets,
+  and enabled workspace messages. Reset consumption is a two-step confirmed mutation
+  with a unique idempotency key; workspace-member exhaustion states alone expose the
+  typed owner-nudge action. Mitsuro explicitly reports this Codex-only surface as
+  unsupported, and read-only acceptance does not invoke either mutation.
 - The composer path picker accepts up to four supported images at 20 MiB each. Codex
   receives absolute `localImage` user inputs; Mitsuro reads the selected file and sends
   a real MIME-labeled base64 content block. Both thread-read adapters preserve persisted

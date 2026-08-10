@@ -158,9 +158,12 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "account/login/cancel",
     "account/login/start",
     "account/logout",
+    "account/rateLimitResetCredit/consume",
     "account/rateLimits/read",
     "account/read",
+    "account/sendAddCreditsNudgeEmail",
     "account/usage/read",
+    "account/workspaceMessages/read",
     "app/installed",
     "app/list",
     "app/read",
@@ -368,7 +371,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 94);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 97);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),
