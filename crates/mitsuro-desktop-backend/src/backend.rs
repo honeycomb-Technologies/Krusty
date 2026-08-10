@@ -25,6 +25,7 @@ use crate::fs::{
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
+use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::methods::is_known_client_method;
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
@@ -229,6 +230,15 @@ pub trait AgentBackend: Send + Sync {
         &self,
         params: McpServerToolCallParams,
     ) -> Result<McpServerToolCallResponse>;
+
+    async fn mcp_server_oauth_login(
+        &self,
+        _params: McpServerOauthLoginParams,
+    ) -> Result<McpServerOauthLoginResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "MCP OAuth login is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// List plugins / marketplaces via `plugin/list`.
     async fn plugin_list(&self, params: PluginListParams) -> Result<PluginListResponse>;

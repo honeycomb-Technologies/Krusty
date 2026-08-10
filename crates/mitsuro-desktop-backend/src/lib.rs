@@ -10,6 +10,7 @@ pub mod extensions;
 pub mod fixture;
 pub mod fs;
 pub mod live_turn;
+pub mod mcp_auth;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
@@ -86,6 +87,9 @@ pub use live_turn::{
     run_live_turn_with_policy, run_live_turn_with_policy_and_model,
     run_live_turn_with_policy_blocking, LiveApprovalBridge, LiveApprovalPolicy, LiveReviewOutcome,
     LiveTurnOutcome, DEFAULT_LIVE_TURN_TIMEOUT,
+};
+pub use mcp_auth::{
+    McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerOauthLoginResponse,
 };
 pub use methods::{
     client_method_coverage, client_methods_txt_path, is_known_client_method,

@@ -39,6 +39,7 @@ use crate::fs::{
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
+use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
 };
@@ -1159,6 +1160,15 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("mcpServer/tool/call", Some(value)).await
     }
 
+    async fn mcp_server_oauth_login(
+        &self,
+        params: McpServerOauthLoginParams,
+    ) -> Result<McpServerOauthLoginResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("mcpServer/oauth/login", Some(value))
+            .await
+    }
+
     async fn plugin_list(&self, params: PluginListParams) -> Result<PluginListResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("plugin/list", Some(value)).await
@@ -1590,6 +1600,45 @@ mod tests {
             })
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_login_uses_the_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "mcpServer/oauth/login");
+            assert_eq!(request["params"], serde_json::json!({"name": "github"}));
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({
+                        "id": request["id"],
+                        "result": {"authorizationUrl": "https://auth.example.test"}
+                    })
+                    .to_string(),
+                )
+                .await;
+        });
+        let response = backend
+            .mcp_server_oauth_login(McpServerOauthLoginParams::new("github"))
+            .await
+            .unwrap();
+        assert_eq!(response.authorization_url, "https://auth.example.test");
         server.await.unwrap();
     }
 

@@ -174,6 +174,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "fuzzyFileSearch/sessionStop",
     "fuzzyFileSearch/sessionUpdate",
     "initialize",
+    "mcpServer/oauth/login",
     "mcpServer/tool/call",
     "mcpServerStatus/list",
     "model/list",
@@ -330,7 +331,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 56);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 57);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

@@ -2063,7 +2063,7 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                             if i > 0 {
                                 rows.push(card_divider().into_any_element());
                             }
-                            rows.push(mcp_server_row(s).into_any_element());
+                            rows.push(mcp_server_row(s, app, cx).into_any_element());
                             rows
                         })
                         .collect::<Vec<_>>(),
@@ -2576,11 +2576,20 @@ fn empty_list_message(title: &str, subtitle: &str) -> impl IntoElement {
         )
 }
 
-fn mcp_server_row(server: &mitsuro_desktop_backend::McpServerStatus) -> impl IntoElement {
+fn mcp_server_row(
+    server: &mitsuro_desktop_backend::McpServerStatus,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let title = server.display_title().to_string();
     let status = server.status_label();
     let name = server.name.clone();
+    let action_id = SharedId(format!("mcp-auth-{}", server.name));
+    let pending = app.mcp_oauth_pending(&server.name);
+    let can_login = app.mcp_oauth_available()
+        && server.auth_status == mitsuro_desktop_backend::McpAuthStatus::NotLoggedIn;
+    let server_for_login = server.clone();
     div()
         .flex()
         .flex_row()
@@ -2613,13 +2622,28 @@ fn mcp_server_row(server: &mitsuro_desktop_backend::McpServerStatus) -> impl Int
         )
         .child(
             div()
+                .id(action_id)
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(px(999.0))
                 .bg(colors.bg_button_secondary)
                 .text_xs()
                 .text_color(colors.text_secondary)
-                .child(status),
+                .when(can_login && !pending, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.start_mcp_oauth(server_for_login.clone(), cx);
+                        }))
+                })
+                .when(pending, |this| this.opacity(0.6))
+                .child(if pending {
+                    "Waiting…".to_owned()
+                } else if can_login {
+                    "Sign in".to_owned()
+                } else {
+                    status
+                }),
         )
 }
 

@@ -31,21 +31,22 @@ use mitsuro_desktop_backend::{
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
     LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
-    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModeKind,
-    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
-    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
-    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
-    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerOauthLoginCompleted,
+    McpServerOauthLoginParams, McpServerStatus, MessageRole, ModeKind, ModelInfo, ModelListParams,
+    ModelServiceTier, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
+    PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
+    PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
+    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
+    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
+    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer,
+    ProductTurn, ProductWorkMode, RealtimeEvent, RealtimeOutputModality, RealtimeVoice,
+    RealtimeVoicesList, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
+    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
+    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
+    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
+    FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -982,6 +983,7 @@ pub struct MitsuroApp {
     skills: Vec<SkillMetadata>,
     /// MCP servers from `mcpServerStatus/list` (or fixture demo).
     mcp_servers: Vec<McpServerStatus>,
+    pending_mcp_oauth: std::collections::HashSet<String>,
     /// Plugins from `plugin/list` (flattened marketplace entries).
     plugins: Vec<PluginSummary>,
     extensions_state: SurfaceDataState,
@@ -1327,6 +1329,7 @@ impl MitsuroApp {
             config_snippet: SharedString::from(""),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
+            pending_mcp_oauth: std::collections::HashSet::new(),
             plugins: Vec::new(),
             extensions_state: SurfaceDataState::Loading,
             plugin_mutation_in_progress: None,
@@ -3501,6 +3504,73 @@ impl MitsuroApp {
     /// MCP servers for the Extensions panel.
     pub fn mcp_servers(&self) -> &[McpServerStatus] {
         &self.mcp_servers
+    }
+
+    pub fn mcp_oauth_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().mcp_oauth)
+    }
+
+    pub fn mcp_oauth_pending(&self, name: &str) -> bool {
+        self.pending_mcp_oauth.contains(name)
+    }
+
+    pub fn start_mcp_oauth(&mut self, server: McpServerStatus, cx: &mut Context<Self>) {
+        if server.auth_status != McpAuthStatus::NotLoggedIn {
+            self.status_line = format!("MCP · {} does not require OAuth login", server.name).into();
+            cx.notify();
+            return;
+        }
+        if self.pending_mcp_oauth.contains(&server.name) {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "MCP OAuth requires a connected Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().mcp_oauth {
+            self.status_line = "MCP OAuth is unavailable for this backend".into();
+            cx.notify();
+            return;
+        }
+        let name = server.name;
+        let generation = self.backend_generation;
+        self.pending_mcp_oauth.insert(name.clone());
+        self.status_line = format!("MCP · starting {name} sign-in…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let request_name = name.clone();
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .mcp_oauth_login(McpServerOauthLoginParams::new(request_name))
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(response) => {
+                        let opened = open_system_browser(&response.authorization_url);
+                        app.status_line =
+                            format!("MCP · {name} sign-in pending · {}", opened.summary()).into();
+                    }
+                    Err(error) => {
+                        app.pending_mcp_oauth.remove(&name);
+                        app.status_line = format!("MCP · {name} sign-in failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Flattened plugins for the Extensions panel.
@@ -8597,6 +8667,26 @@ impl MitsuroApp {
             self.pending_mcp_elicitation = None;
             self.mcp_form_values.clear();
         }
+        if event.method == "mcpServer/oauthLogin/completed" {
+            if let Some(completion) = event
+                .params
+                .clone()
+                .and_then(|params| serde_json::from_value(params).ok())
+            {
+                let completion: McpServerOauthLoginCompleted = completion;
+                self.pending_mcp_oauth.remove(&completion.name);
+                self.status_line = if completion.success {
+                    format!("MCP · {} signed in", completion.name).into()
+                } else {
+                    format!(
+                        "MCP · {} sign-in failed · {}",
+                        completion.name,
+                        completion.error.as_deref().unwrap_or("unknown error")
+                    )
+                    .into()
+                };
+            }
+        }
 
         let login_completion = account_login_completion(&event);
         if let Some(completion) = login_completion.as_ref() {
@@ -9077,6 +9167,7 @@ impl MitsuroApp {
         self.config_snippet = SharedString::from("");
         self.skills.clear();
         self.mcp_servers.clear();
+        self.pending_mcp_oauth.clear();
         self.plugins.clear();
         self.extensions_state = SurfaceDataState::Loading;
         self.plugin_mutation_in_progress = None;

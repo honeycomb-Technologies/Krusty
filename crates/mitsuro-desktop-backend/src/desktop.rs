@@ -8,14 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
-    LiveApprovalBridge, LiveTurnOutcome, MitsuroServerBackend, PendingApproval,
-    PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
-    Result, ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
-    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
-    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
-    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
-    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
-    TurnStartParams, TurnStreamEvent,
+    LiveApprovalBridge, LiveTurnOutcome, McpServerOauthLoginParams, McpServerOauthLoginResponse,
+    MitsuroServerBackend, PendingApproval, PluginInstallParams, PluginInstallResponse,
+    PluginUninstallParams, PluginUninstallResponse, Result, ThreadRealtimeAppendAudioParams,
+    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
+    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
+    ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
+    ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams, ThreadRealtimeStartResponse,
+    ThreadRealtimeStopParams, ThreadRealtimeStopResponse, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -69,6 +69,7 @@ pub struct BackendCapabilities {
     pub extensions: bool,
     pub plugin_mutations: bool,
     pub environment_add: bool,
+    pub mcp_oauth: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -98,6 +99,7 @@ impl BackendCapabilities {
             extensions: true,
             plugin_mutations: true,
             environment_add: true,
+            mcp_oauth: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -130,6 +132,7 @@ impl BackendCapabilities {
             extensions: true,
             plugin_mutations: false,
             environment_add: false,
+            mcp_oauth: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -350,6 +353,18 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn mcp_oauth_login(
+        &self,
+        params: McpServerOauthLoginParams,
+    ) -> Result<McpServerOauthLoginResponse> {
+        match self {
+            Self::Codex(backend) => backend.mcp_server_oauth_login(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex MCP OAuth login".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -548,6 +563,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().plugin_mutations);
         assert!(BackendCapabilities::codex().environment_add);
         assert!(!BackendCapabilities::mitsuro().environment_add);
+        assert!(BackendCapabilities::codex().mcp_oauth);
+        assert!(!BackendCapabilities::mitsuro().mcp_oauth);
     }
 
     #[tokio::test]

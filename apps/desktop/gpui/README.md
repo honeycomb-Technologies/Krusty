@@ -40,6 +40,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   the desktop never simulates a successful mutation. Marketplace search filters live
   plugin, skill, and MCP metadata, and section expansion reveals the exact hidden
   server records rather than fabricated marketplace totals.
+- MCP rows requiring authentication can start the typed Codex OAuth flow, open the
+  returned authorization URL in the system browser, wait for the matching completion
+  notification, and refresh live connector status. Mitsuro remains read-only here.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.
