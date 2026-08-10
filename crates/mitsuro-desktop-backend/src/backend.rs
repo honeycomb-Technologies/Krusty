@@ -23,11 +23,14 @@ use crate::extensions::{
     PluginListResponse, PluginReadParams, PluginReadResponse,
 };
 use crate::fs::{
+    FsCopyParams, FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse,
     FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryParams, FsReadDirectoryResponse,
-    FsReadFileParams, FsReadFileResponse, FuzzyFileSearchParams, FuzzyFileSearchResponse,
-    FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
-    FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
-    FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
+    FsReadFileParams, FsReadFileResponse, FsRemoveParams, FsRemoveResponse, FsUnwatchParams,
+    FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams, FsWriteFileResponse,
+    FuzzyFileSearchParams, FuzzyFileSearchResponse, FuzzyFileSearchSessionStartParams,
+    FuzzyFileSearchSessionStartResponse, FuzzyFileSearchSessionStopParams,
+    FuzzyFileSearchSessionStopResponse, FuzzyFileSearchSessionUpdateParams,
+    FuzzyFileSearchSessionUpdateResponse,
 };
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::mcp_config::{
@@ -256,6 +259,51 @@ pub trait AgentBackend: Send + Sync {
 
     /// Read file contents (base64) via `fs/readFile`.
     async fn fs_read_file(&self, params: FsReadFileParams) -> Result<FsReadFileResponse>;
+
+    /// Write file contents (base64) via `fs/writeFile`.
+    async fn fs_write_file(&self, _params: FsWriteFileParams) -> Result<FsWriteFileResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "filesystem writes are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Create a directory via `fs/createDirectory`.
+    async fn fs_create_directory(
+        &self,
+        _params: FsCreateDirectoryParams,
+    ) -> Result<FsCreateDirectoryResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "directory creation is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Remove a file or directory via `fs/remove`.
+    async fn fs_remove(&self, _params: FsRemoveParams) -> Result<FsRemoveResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "filesystem removal is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Copy a file or directory tree via `fs/copy`.
+    async fn fs_copy(&self, _params: FsCopyParams) -> Result<FsCopyResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "filesystem copy is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Start filesystem notifications via `fs/watch`.
+    async fn fs_watch(&self, _params: FsWatchParams) -> Result<FsWatchResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "filesystem watches are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Stop filesystem notifications via `fs/unwatch`.
+    async fn fs_unwatch(&self, _params: FsUnwatchParams) -> Result<FsUnwatchResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "filesystem watches are not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Path metadata via `fs/getMetadata`.
     async fn fs_get_metadata(&self, params: FsGetMetadataParams) -> Result<FsGetMetadataResponse>;

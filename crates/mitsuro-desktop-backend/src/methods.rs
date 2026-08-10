@@ -171,9 +171,15 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "environment/add",
     "environment/info",
     "environment/status",
+    "fs/copy",
+    "fs/createDirectory",
     "fs/getMetadata",
     "fs/readDirectory",
     "fs/readFile",
+    "fs/remove",
+    "fs/unwatch",
+    "fs/watch",
+    "fs/writeFile",
     "fuzzyFileSearch",
     "fuzzyFileSearch/sessionStart",
     "fuzzyFileSearch/sessionStop",
@@ -338,7 +344,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 64);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 70);
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

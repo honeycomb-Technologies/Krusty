@@ -3,6 +3,7 @@
 //! Offline path uses [`mitsuro_desktop_backend::FixtureBackend`] virtual tree at `/fixture-project`.
 //! Codex dark theme, Mitsuro labels.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
@@ -16,13 +17,18 @@ use mitsuro_desktop_backend::{
 use crate::app::MitsuroApp;
 use crate::theme;
 
+const DIRECTORY_RENDER_LIMIT: usize = 200;
+
 /// Full-height Files panel: path bar, search, directory list, file preview.
 pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     let session = app.files_session();
     let path_input = app.files_path_input().clone();
     let search_input = app.files_search_input().clone();
+    let name_input = app.files_name_input().clone();
+    let editor_input = app.files_editor_input().clone();
     let browsing = session.search_query.is_empty();
+    let mutations_available = app.files_mutations_available();
 
     div()
         .id("files-panel")
@@ -38,6 +44,13 @@ pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         ))
         .child(path_bar(app, &path_input, cx))
         .child(search_bar(app, &search_input, cx))
+        .child(mutation_bar(
+            &name_input,
+            mutations_available,
+            session.selected_path.is_some(),
+            app.files_delete_pending(),
+            cx,
+        ))
         .child(
             div()
                 .id("files-body")
@@ -62,6 +75,8 @@ pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
                     session.selected_path.as_deref(),
                     session.preview.as_ref(),
                     session.preview_error.as_deref(),
+                    &editor_input,
+                    mutations_available,
                 )),
         )
         .child(status_footer(
@@ -241,9 +256,7 @@ fn files_breadcrumb(cwd: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                 .cursor_pointer()
                 .hover(|s| s.bg(colors.bg_hover))
                 .on_click(cx.listener(|app, _, window, cx| {
-                    app.set_status_line("Files · root", cx);
-                    // Navigate via path bar value set is heavier; status only for fixture.
-                    let _ = window;
+                    app.files_navigate_to("/".to_owned(), window, cx);
                 }))
                 .child(
                     Icon::new(IconName::Folder)
@@ -272,6 +285,140 @@ fn files_breadcrumb(cwd: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                 )
                 .into_any_element()
         }))
+}
+
+fn mutation_bar(
+    name_input: &gpui::Entity<gpui_component::input::InputState>,
+    mutations_available: bool,
+    has_selection: bool,
+    delete_pending: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("files-mutation-bar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .child(
+            div()
+                .id("files-name-input")
+                .flex()
+                .flex_1()
+                .min_w(px(170.0))
+                .h(px(32.0))
+                .px(px(10.0))
+                .rounded(px(9.0))
+                .bg(colors.bg_elevated)
+                .border_1()
+                .border_color(colors.border)
+                .text_sm()
+                .text_color(colors.text)
+                .child(Input::new(name_input).appearance(false).h(px(26.0))),
+        )
+        .child(file_action_button(
+            "files-create-file",
+            "New file",
+            mutations_available,
+            false,
+            cx,
+            |app, window, cx| app.files_create_file(window, cx),
+        ))
+        .child(file_action_button(
+            "files-create-folder",
+            "New folder",
+            mutations_available,
+            false,
+            cx,
+            |app, window, cx| app.files_create_directory(window, cx),
+        ))
+        .child(file_action_button(
+            "files-save",
+            "Save",
+            mutations_available && has_selection,
+            false,
+            cx,
+            |app, window, cx| app.files_save_selected(window, cx),
+        ))
+        .child(file_action_button(
+            "files-copy",
+            "Duplicate",
+            mutations_available && has_selection,
+            false,
+            cx,
+            |app, window, cx| app.files_duplicate_selected(window, cx),
+        ))
+        .child(file_action_button(
+            "files-delete",
+            if delete_pending {
+                "Confirm delete"
+            } else {
+                "Delete"
+            },
+            mutations_available && has_selection,
+            delete_pending,
+            cx,
+            |app, window, cx| app.files_delete_selected(window, cx),
+        ))
+        .when(!mutations_available, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.text_tertiary)
+                    .child("Read-only on the active backend"),
+            )
+        })
+}
+
+fn file_action_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    destructive: bool,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(32.0))
+        .px(px(10.0))
+        .rounded(px(9.0))
+        .bg(if destructive {
+            colors.bg_selected
+        } else {
+            colors.bg_button_secondary
+        })
+        .border_1()
+        .border_color(colors.border)
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if enabled {
+            if destructive {
+                colors.status_error
+            } else {
+                colors.text_secondary
+            }
+        } else {
+            colors.text_tertiary
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    on_click(app, window, cx);
+                }))
+        })
+        .child(label)
 }
 
 fn search_bar(
@@ -368,8 +515,9 @@ fn directory_list(
                 .child("Empty directory")
                 .into_any_element()]
         } else {
-            entries
+            let mut rows: Vec<_> = entries
                 .iter()
+                .take(DIRECTORY_RENDER_LIMIT)
                 .enumerate()
                 .map(|(i, e)| {
                     let name = e.file_name.clone();
@@ -390,8 +538,34 @@ fn directory_list(
                     )
                     .into_any_element()
                 })
-                .collect()
+                .collect();
+            let hidden = entries.len().saturating_sub(DIRECTORY_RENDER_LIMIT);
+            if hidden > 0 {
+                rows.push(
+                    div()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(format!(
+                            "{hidden} more entries · use fuzzy search to reach them"
+                        ))
+                        .into_any_element(),
+                );
+            }
+            rows
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_directories_have_a_bounded_render_budget() {
+        assert_eq!(DIRECTORY_RENDER_LIMIT, 200);
+        assert_eq!(312usize.saturating_sub(DIRECTORY_RENDER_LIMIT), 112);
+    }
 }
 
 fn fuzzy_list(
@@ -441,7 +615,11 @@ fn fuzzy_list(
                         sel,
                         cx,
                         move |app, window, cx| {
-                            app.files_open_path(path_for_click.clone(), window, cx);
+                            if is_dir {
+                                app.files_navigate_to(path_for_click.clone(), window, cx);
+                            } else {
+                                app.files_open_path(path_for_click.clone(), window, cx);
+                            }
                         },
                     )
                     .into_any_element()
@@ -571,7 +749,13 @@ fn entry_row_with_sub(
         )
 }
 
-fn preview_pane(path: Option<&str>, preview: &str, error: Option<&str>) -> impl IntoElement {
+fn preview_pane(
+    path: Option<&str>,
+    preview: &str,
+    error: Option<&str>,
+    editor_input: &gpui::Entity<gpui_component::input::InputState>,
+    writable: bool,
+) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("files-preview")
@@ -612,6 +796,19 @@ fn preview_pane(path: Option<&str>, preview: &str, error: Option<&str>) -> impl 
                         .text_sm()
                         .text_color(colors.status_error)
                         .child(format!("[error] {err}"))
+                        .into_any_element()
+                } else if writable && path.is_some() {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h(px(240.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_elevated)
+                        .border_1()
+                        .border_color(colors.border)
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .child(Input::new(editor_input).appearance(false).h_full())
                         .into_any_element()
                 } else if preview.is_empty() {
                     div()

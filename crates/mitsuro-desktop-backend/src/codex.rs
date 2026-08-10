@@ -33,11 +33,14 @@ use crate::extensions::{
     PluginListResponse, PluginReadParams, PluginReadResponse,
 };
 use crate::fs::{
+    FsCopyParams, FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse,
     FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryParams, FsReadDirectoryResponse,
-    FsReadFileParams, FsReadFileResponse, FuzzyFileSearchParams, FuzzyFileSearchResponse,
-    FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
-    FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
-    FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
+    FsReadFileParams, FsReadFileResponse, FsRemoveParams, FsRemoveResponse, FsUnwatchParams,
+    FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams, FsWriteFileResponse,
+    FuzzyFileSearchParams, FuzzyFileSearchResponse, FuzzyFileSearchSessionStartParams,
+    FuzzyFileSearchSessionStartResponse, FuzzyFileSearchSessionStopParams,
+    FuzzyFileSearchSessionStopResponse, FuzzyFileSearchSessionUpdateParams,
+    FuzzyFileSearchSessionUpdateResponse,
 };
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::plugin_mutations::{
@@ -1146,6 +1149,39 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("fs/readFile", Some(value)).await
     }
 
+    async fn fs_write_file(&self, params: FsWriteFileParams) -> Result<FsWriteFileResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/writeFile", Some(value)).await
+    }
+
+    async fn fs_create_directory(
+        &self,
+        params: FsCreateDirectoryParams,
+    ) -> Result<FsCreateDirectoryResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/createDirectory", Some(value)).await
+    }
+
+    async fn fs_remove(&self, params: FsRemoveParams) -> Result<FsRemoveResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/remove", Some(value)).await
+    }
+
+    async fn fs_copy(&self, params: FsCopyParams) -> Result<FsCopyResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/copy", Some(value)).await
+    }
+
+    async fn fs_watch(&self, params: FsWatchParams) -> Result<FsWatchResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/watch", Some(value)).await
+    }
+
+    async fn fs_unwatch(&self, params: FsUnwatchParams) -> Result<FsUnwatchResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("fs/unwatch", Some(value)).await
+    }
+
     async fn fs_get_metadata(&self, params: FsGetMetadataParams) -> Result<FsGetMetadataResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("fs/getMetadata", Some(value)).await
@@ -2007,6 +2043,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_mutations_and_watches_use_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "fs/createDirectory",
+                "fs/writeFile",
+                "fs/copy",
+                "fs/watch",
+                "fs/unwatch",
+                "fs/remove",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                match expected {
+                    "fs/createDirectory" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({"path": "/tmp/fs-test", "recursive": true})
+                    ),
+                    "fs/writeFile" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({
+                            "path": "/tmp/fs-test/note.txt",
+                            "dataBase64": "aGVsbG8="
+                        })
+                    ),
+                    "fs/copy" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({
+                            "sourcePath": "/tmp/fs-test/note.txt",
+                            "destinationPath": "/tmp/fs-test/note-copy.txt",
+                            "recursive": true
+                        })
+                    ),
+                    "fs/watch" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({"watchId": "files-main", "path": "/tmp/fs-test"})
+                    ),
+                    "fs/unwatch" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({"watchId": "files-main"})
+                    ),
+                    "fs/remove" => assert_eq!(
+                        request["params"],
+                        serde_json::json!({
+                            "path": "/tmp/fs-test",
+                            "recursive": true,
+                            "force": false
+                        })
+                    ),
+                    _ => unreachable!(),
+                }
+                let result = if expected == "fs/watch" {
+                    serde_json::json!({"path": "/tmp/fs-test"})
+                } else {
+                    serde_json::json!({})
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        backend
+            .fs_create_directory(FsCreateDirectoryParams::new("/tmp/fs-test"))
+            .await
+            .unwrap();
+        backend
+            .fs_write_file(FsWriteFileParams::from_text(
+                "/tmp/fs-test/note.txt",
+                "hello",
+            ))
+            .await
+            .unwrap();
+        backend
+            .fs_copy(FsCopyParams::new(
+                "/tmp/fs-test/note.txt",
+                "/tmp/fs-test/note-copy.txt",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .fs_watch(FsWatchParams::new("files-main", "/tmp/fs-test"))
+                .await
+                .unwrap()
+                .path,
+            "/tmp/fs-test"
+        );
+        backend
+            .fs_unwatch(FsUnwatchParams::new("files-main"))
+            .await
+            .unwrap();
+        backend
+            .fs_remove(FsRemoveParams::new("/tmp/fs-test"))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn browser_login_keeps_async_completion_on_lifecycle_stream() {
         let (client_writer, mut server_reader) = duplex(64 * 1024);
         let backend = Arc::new(CodexAppServerBackend::with_defaults());
@@ -2374,6 +2524,68 @@ mod integration_tests {
 
         backend.disconnect().await.expect("disconnect");
         assert!(matches!(backend.status(), ConnectionStatus::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn real_app_server_filesystem_mutation_round_trip() {
+        if !should_run_integration() {
+            eprintln!("skip: codex binary not available");
+            return;
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        let root = format!(
+            "/tmp/mitsuro-fs-it-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_millis()
+        );
+        let note = format!("{root}/note.txt");
+        let copy = format!("{root}/note-copy.txt");
+
+        backend
+            .fs_create_directory(FsCreateDirectoryParams::new(root.clone()))
+            .await
+            .expect("create test directory");
+        backend
+            .fs_write_file(FsWriteFileParams::from_text(
+                note.clone(),
+                "live filesystem",
+            ))
+            .await
+            .expect("write test file");
+        backend
+            .fs_copy(FsCopyParams::new(note.clone(), copy.clone()))
+            .await
+            .expect("copy test file");
+        assert_eq!(
+            backend
+                .fs_read_file(FsReadFileParams::new(copy))
+                .await
+                .expect("read copied file")
+                .text_lossy(),
+            "live filesystem"
+        );
+        assert_eq!(
+            backend
+                .fs_watch(FsWatchParams::new("filesystem-it", root.clone()))
+                .await
+                .expect("watch test directory")
+                .path,
+            root
+        );
+        backend
+            .fs_unwatch(FsUnwatchParams::new("filesystem-it"))
+            .await
+            .expect("unwatch test directory");
+        backend
+            .fs_remove(FsRemoveParams::new(root))
+            .await
+            .expect("remove test directory");
+        backend.disconnect().await.expect("disconnect");
     }
 
     /// Live `turn/start` hits paid models — only runs with explicit opt-in + auth.

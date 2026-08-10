@@ -3,6 +3,8 @@
 //! Typed Codex app-server filesystem and fuzzy-search shapes.
 //!
 //! - Client methods: `fs/readDirectory`, `fs/readFile`, `fs/getMetadata`,
+//!   `fs/writeFile`, `fs/createDirectory`, `fs/remove`, `fs/copy`,
+//!   `fs/watch`, `fs/unwatch`,
 //!   `fuzzyFileSearch`, `fuzzyFileSearch/sessionStart|sessionUpdate|sessionStop`
 //! - Fixture virtual tree root: [`FIXTURE_PROJECT_ROOT`] (`/fixture-project/`)
 
@@ -112,6 +114,174 @@ impl FsReadFileResponse {
             Err(_) => String::new(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem mutations
+// ---------------------------------------------------------------------------
+
+/// Params for `fs/writeFile`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWriteFileParams {
+    /// Absolute path to write.
+    pub path: String,
+    /// File contents encoded as base64.
+    pub data_base64: String,
+}
+
+impl FsWriteFileParams {
+    pub fn from_bytes(path: impl Into<String>, data: &[u8]) -> Self {
+        Self {
+            path: path.into(),
+            data_base64: encode_base64(data),
+        }
+    }
+
+    pub fn from_text(path: impl Into<String>, text: &str) -> Self {
+        Self::from_bytes(path, text.as_bytes())
+    }
+}
+
+/// Empty success for `fs/writeFile`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsWriteFileResponse {}
+
+/// Params for `fs/createDirectory`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsCreateDirectoryParams {
+    /// Absolute directory path to create.
+    pub path: String,
+    /// Whether parent directories should also be created. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
+}
+
+impl FsCreateDirectoryParams {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            recursive: Some(true),
+        }
+    }
+}
+
+/// Empty success for `fs/createDirectory`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsCreateDirectoryResponse {}
+
+/// Params for `fs/remove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsRemoveParams {
+    /// Absolute path to remove.
+    pub path: String,
+    /// Whether directory removal should recurse. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
+    /// Whether missing paths should be ignored. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+}
+
+impl FsRemoveParams {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            recursive: Some(true),
+            force: Some(false),
+        }
+    }
+}
+
+/// Empty success for `fs/remove`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsRemoveResponse {}
+
+/// Params for `fs/copy`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsCopyParams {
+    /// Absolute source path.
+    pub source_path: String,
+    /// Absolute destination path.
+    pub destination_path: String,
+    /// Required for directory copies; ignored for file copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
+}
+
+impl FsCopyParams {
+    pub fn new(source_path: impl Into<String>, destination_path: impl Into<String>) -> Self {
+        Self {
+            source_path: source_path.into(),
+            destination_path: destination_path.into(),
+            recursive: Some(true),
+        }
+    }
+}
+
+/// Empty success for `fs/copy`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsCopyResponse {}
+
+// ---------------------------------------------------------------------------
+// Filesystem watches
+// ---------------------------------------------------------------------------
+
+/// Params for `fs/watch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWatchParams {
+    /// Connection-scoped identifier used by `fs/unwatch` and `fs/changed`.
+    pub watch_id: String,
+    /// Absolute file or directory path to watch.
+    pub path: String,
+}
+
+impl FsWatchParams {
+    pub fn new(watch_id: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            watch_id: watch_id.into(),
+            path: path.into(),
+        }
+    }
+}
+
+/// Response for `fs/watch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWatchResponse {
+    /// Canonicalized path associated with the watch.
+    pub path: String,
+}
+
+/// Params for `fs/unwatch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsUnwatchParams {
+    pub watch_id: String,
+}
+
+impl FsUnwatchParams {
+    pub fn new(watch_id: impl Into<String>) -> Self {
+        Self {
+            watch_id: watch_id.into(),
+        }
+    }
+}
+
+/// Empty success for `fs/unwatch`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsUnwatchResponse {}
+
+/// `fs/changed` notification payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FsChangedNotification {
+    pub watch_id: String,
+    pub changed_paths: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +896,44 @@ mod tests {
         assert_eq!(v["file_name"], "main.rs");
         assert_eq!(v["match_type"], "file");
         assert_eq!(v["score"], 42);
+    }
+
+    #[test]
+    fn filesystem_mutations_match_generated_contracts() {
+        assert_eq!(
+            serde_json::to_value(FsWriteFileParams::from_text("/tmp/note.txt", "hello")).unwrap(),
+            serde_json::json!({"path": "/tmp/note.txt", "dataBase64": "aGVsbG8="})
+        );
+        assert_eq!(
+            serde_json::to_value(FsCreateDirectoryParams::new("/tmp/new-dir")).unwrap(),
+            serde_json::json!({"path": "/tmp/new-dir", "recursive": true})
+        );
+        assert_eq!(
+            serde_json::to_value(FsRemoveParams::new("/tmp/old-dir")).unwrap(),
+            serde_json::json!({"path": "/tmp/old-dir", "recursive": true, "force": false})
+        );
+        assert_eq!(
+            serde_json::to_value(FsCopyParams::new("/tmp/a", "/tmp/b")).unwrap(),
+            serde_json::json!({
+                "sourcePath": "/tmp/a",
+                "destinationPath": "/tmp/b",
+                "recursive": true
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(FsWatchParams::new("files-main", "/tmp")).unwrap(),
+            serde_json::json!({"watchId": "files-main", "path": "/tmp"})
+        );
+        assert_eq!(
+            serde_json::to_value(FsUnwatchParams::new("files-main")).unwrap(),
+            serde_json::json!({"watchId": "files-main"})
+        );
+        let changed: FsChangedNotification = serde_json::from_value(serde_json::json!({
+            "watchId": "files-main",
+            "changedPaths": ["/tmp/note.txt"]
+        }))
+        .unwrap();
+        assert_eq!(changed.changed_paths, vec!["/tmp/note.txt"]);
     }
 
     #[test]

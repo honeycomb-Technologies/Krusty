@@ -28,25 +28,26 @@ use mitsuro_desktop_backend::{
     ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
     ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
     EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
-    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
-    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata,
-    HooksListEntry, HooksListParams, InstalledApp, LifecycleNotification,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
-    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
-    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
-    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsConfigWriteParams,
-    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
+    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsChangedNotification,
+    FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams,
+    FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams,
+    FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountTokenUsageResponse, HookMetadata, HooksListEntry, HooksListParams, InstalledApp,
+    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
+    McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
+    McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
+    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams, ModelServiceTier,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginInstallParams,
+    PluginInterface, PluginListParams, PluginSource, PluginSummary, PluginUninstallParams,
+    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode,
+    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
+    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
+    ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
+    RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
+    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
+    SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams,
+    ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams,
+    ThreadGoalStatus, ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
     ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
     ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
     FIXTURE_PROJECT_ROOT,
@@ -537,6 +538,9 @@ pub struct FilesSession {
     pub search_query: String,
     pub fuzzy_results: Vec<FuzzyFileSearchResult>,
     pub backend_label: SharedString,
+    pub pending_delete_path: Option<String>,
+    pub watch_path: Option<String>,
+    pub watch_refresh_scheduled: bool,
 }
 
 impl FilesSession {
@@ -550,6 +554,9 @@ impl FilesSession {
             search_query: String::new(),
             fuzzy_results: Vec::new(),
             backend_label: backend_label.into(),
+            pending_delete_path: None,
+            watch_path: None,
+            watch_refresh_scheduled: false,
         }
     }
 }
@@ -940,6 +947,7 @@ struct RealtimeVoiceRuntime {
 
 pub struct MitsuroApp {
     focus_handle: FocusHandle,
+    window_handle: gpui::AnyWindowHandle,
     connection: UiConnection,
     threads: Vec<DemoThread>,
     /// Canonical reconnect/live delegation state retained independently from
@@ -1126,6 +1134,10 @@ pub struct MitsuroApp {
     files_path_input: Entity<InputState>,
     /// Fuzzy search query input.
     files_search_input: Entity<InputState>,
+    /// New child name or duplicate destination name for Files mutations.
+    files_name_input: Entity<InputState>,
+    /// Editable contents for the selected file when the backend supports writes.
+    files_editor_input: Entity<InputState>,
     /// Scheduled: show explicit-fixture task rows (vs suggestions only).
     scheduled_show_tasks: bool,
     /// Scheduled fixture row enabled toggles.
@@ -1243,6 +1255,13 @@ impl MitsuroApp {
         });
         let files_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Fuzzy search file names…"));
+        let files_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("New item or copy name…"));
+        let files_editor_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Empty file — type to edit…")
+                .multi_line(true)
+        });
         let settings_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
         let plugins_search_input =
@@ -1323,6 +1342,7 @@ impl MitsuroApp {
 
         let mut app = Self {
             focus_handle: cx.focus_handle(),
+            window_handle: window.window_handle(),
             connection: UiConnection::Connecting,
             threads: Vec::new(),
             delegations: std::collections::HashMap::new(),
@@ -1436,6 +1456,8 @@ impl MitsuroApp {
             files: FilesSession::new("loading"),
             files_path_input,
             files_search_input,
+            files_name_input,
+            files_editor_input,
             // Suggestions-first like bar; Create / suggestion pick reveals Your tasks.
             scheduled_show_tasks: false,
             scheduled_enabled: vec![true, true],
@@ -1445,10 +1467,14 @@ impl MitsuroApp {
             pending_start_thread: {
                 let mode_raw = std::env::var("MITSURO_START_MODE").ok();
                 parse_start_thread(mode_raw.as_deref()).or_else(|| {
-                    preferences
-                        .selected_session
-                        .as_ref()
-                        .map(BackendSessionId::qualified)
+                    if mode_raw.is_none() {
+                        preferences
+                            .selected_session
+                            .as_ref()
+                            .map(BackendSessionId::qualified)
+                    } else {
+                        None
+                    }
                 })
             },
         };
@@ -2144,9 +2170,32 @@ impl MitsuroApp {
         &self.files_search_input
     }
 
+    pub fn files_name_input(&self) -> &Entity<InputState> {
+        &self.files_name_input
+    }
+
+    pub fn files_editor_input(&self) -> &Entity<InputState> {
+        &self.files_editor_input
+    }
+
+    pub fn files_mutations_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().file_mutations)
+    }
+
+    pub fn files_delete_pending(&self) -> bool {
+        self.files
+            .pending_delete_path
+            .as_deref()
+            .is_some_and(|path| self.files.selected_path.as_deref() == Some(path))
+    }
+
     fn files_backend_label(&self) -> SharedString {
-        if self.live_backend().is_some() {
-            "app-server".into()
+        if let Some(backend) = self.live_backend() {
+            backend.kind().id().into()
         } else if self.is_explicit_fixture() {
             "fixture".into()
         } else {
@@ -2223,11 +2272,32 @@ impl MitsuroApp {
         let result = self.files_call_read_directory(FsReadDirectoryParams::new(path), cx);
         match result {
             Ok(entries) => {
+                let keep_selection =
+                    self.files.selected_path.as_deref().is_some_and(|selected| {
+                        let parent = selected.rsplit_once('/').map(|(parent, _)| {
+                            if parent.is_empty() {
+                                "/"
+                            } else {
+                                parent
+                            }
+                        });
+                        let name = selected.rsplit('/').next();
+                        parent == Some(self.files.cwd.as_ref())
+                            && name.is_some_and(|name| {
+                                entries
+                                    .iter()
+                                    .any(|entry| entry.file_name == name && entry.is_file)
+                            })
+                    });
                 self.files.entries = entries;
                 self.files.backend_label = self.files_backend_label();
-                self.files.preview = SharedString::from("");
-                self.files.preview_error = None;
-                self.files.selected_path = None;
+                if !keep_selection {
+                    self.files.preview = SharedString::from("");
+                    self.files.preview_error = None;
+                    self.files.selected_path = None;
+                    self.files.pending_delete_path = None;
+                }
+                self.files_sync_watch(cx);
                 self.status_line = format!(
                     "Files · {} · {} · {} item(s)",
                     self.files.backend_label,
@@ -2245,6 +2315,63 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    fn files_sync_watch(&mut self, _cx: &mut Context<Self>) {
+        let Some(backend) = self.live_backend() else {
+            self.files.watch_path = None;
+            return;
+        };
+        if !backend.capabilities().file_watches {
+            self.files.watch_path = None;
+            return;
+        }
+        let path = normalize_abs_path(self.files.cwd.as_ref());
+        if self.files.watch_path.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        let previous = self.files.watch_path.take();
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        let result = runtime.block_on(async move {
+            if previous.is_some() {
+                runner
+                    .unwatch_path(FsUnwatchParams::new("mitsuro-files-main"))
+                    .await?;
+            }
+            runner
+                .watch_path(FsWatchParams::new("mitsuro-files-main", path))
+                .await
+        });
+        if let Ok(response) = result {
+            self.files.watch_path = Some(response.path);
+        }
+    }
+
+    fn files_schedule_watch_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.files.watch_refresh_scheduled {
+            return;
+        }
+        self.files.watch_refresh_scheduled = true;
+        let generation = self.backend_generation;
+        let expected_path = self.files.watch_path.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = cx
+                .background_spawn(async {
+                    std::thread::sleep(Duration::from_millis(250));
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.files.watch_refresh_scheduled = false;
+                if app.backend_generation == generation
+                    && app.active_mode == ProductMode::Files
+                    && app.files.watch_path == expected_path
+                {
+                    app.files_refresh_directory_data(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Navigate path bar value as cwd.
     pub fn files_navigate_path_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.files_path_input.read(cx).value().to_string();
@@ -2255,6 +2382,11 @@ impl MitsuroApp {
             return;
         }
         self.files.cwd = path.into();
+        self.files_refresh_directory(window, cx);
+    }
+
+    pub fn files_navigate_to(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.files.cwd = normalize_abs_path(&path).into();
         self.files_refresh_directory(window, cx);
     }
 
@@ -2301,11 +2433,15 @@ impl MitsuroApp {
     pub fn files_open_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let path = normalize_abs_path(&path);
         self.files.selected_path = Some(path.clone());
+        self.files.pending_delete_path = None;
         let params = FsReadFileParams::new(path.clone());
         match self.files_call_read_file(params, cx) {
             Ok(text) => {
-                self.files.preview = text.into();
+                self.files.preview = text.clone().into();
                 self.files.preview_error = None;
+                self.files_editor_input.update(cx, |state, cx| {
+                    state.set_value(text, window, cx);
+                });
                 self.status_line = format!("Files · preview · {path}").into();
             }
             Err(e) => {
@@ -2314,8 +2450,201 @@ impl MitsuroApp {
                 self.status_line = format!("Files · read failed: {e}").into();
             }
         }
-        let _ = window;
         cx.notify();
+    }
+
+    pub fn files_create_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.files_requested_child_name(cx) else {
+            return;
+        };
+        let path = join_abs(self.files.cwd.as_ref(), &name);
+        let Some(backend) = self.files_mutation_backend(cx) else {
+            return;
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        match runtime.block_on(async move {
+            runner
+                .create_directory(FsCreateDirectoryParams::new(path))
+                .await
+        }) {
+            Ok(_) => {
+                self.files_name_input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+                self.files_refresh_directory(window, cx);
+                self.status_line = format!("Files · created folder {name}").into();
+            }
+            Err(error) => {
+                self.status_line =
+                    format!("Files · could not create folder {name} · {error}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn files_create_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.files_requested_child_name(cx) else {
+            return;
+        };
+        let path = join_abs(self.files.cwd.as_ref(), &name);
+        let Some(backend) = self.files_mutation_backend(cx) else {
+            return;
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        let request_path = path.clone();
+        match runtime.block_on(async move {
+            runner
+                .write_file(FsWriteFileParams::from_text(request_path, ""))
+                .await
+        }) {
+            Ok(_) => {
+                self.files_name_input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+                self.files_refresh_directory(window, cx);
+                self.files_open_path(path, window, cx);
+                self.status_line = format!("Files · created file {name}").into();
+            }
+            Err(error) => {
+                self.status_line = format!("Files · could not create file {name} · {error}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn files_save_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.files.selected_path.clone() else {
+            self.status_line = "Files · select a file before saving".into();
+            cx.notify();
+            return;
+        };
+        let text = self.files_editor_input.read(cx).value().to_string();
+        let Some(backend) = self.files_mutation_backend(cx) else {
+            return;
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        let request_path = path.clone();
+        match runtime.block_on(async move {
+            runner
+                .write_file(FsWriteFileParams::from_text(request_path, &text))
+                .await
+        }) {
+            Ok(_) => {
+                self.files_open_path(path.clone(), window, cx);
+                self.status_line = format!("Files · saved {path}").into();
+            }
+            Err(error) => {
+                self.status_line = format!("Files · could not save {path} · {error}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn files_duplicate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.files.selected_path.clone() else {
+            self.status_line = "Files · select a file before duplicating".into();
+            cx.notify();
+            return;
+        };
+        let requested = self.files_name_input.read(cx).value().trim().to_owned();
+        let name = if requested.is_empty() {
+            duplicate_file_name(&source)
+        } else if valid_file_child_name(&requested) {
+            requested
+        } else {
+            self.status_line = "Files · copy name must be one child name without /, . or ..".into();
+            cx.notify();
+            return;
+        };
+        let destination = join_abs(self.files.cwd.as_ref(), &name);
+        if destination == source {
+            self.status_line = "Files · copy destination must differ from the selected file".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.files_mutation_backend(cx) else {
+            return;
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        match runtime.block_on(async move {
+            runner
+                .copy_path(FsCopyParams::new(source, destination))
+                .await
+        }) {
+            Ok(_) => {
+                self.files_name_input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+                self.files_refresh_directory(window, cx);
+                self.status_line = format!("Files · created copy {name}").into();
+            }
+            Err(error) => {
+                self.status_line = format!("Files · could not copy to {name} · {error}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn files_delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.files.selected_path.clone() else {
+            self.status_line = "Files · select a file before deleting".into();
+            cx.notify();
+            return;
+        };
+        if self.files.pending_delete_path.as_deref() != Some(path.as_str()) {
+            self.files.pending_delete_path = Some(path.clone());
+            self.status_line = format!("Files · select Confirm delete to remove {path}").into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.files_mutation_backend(cx) else {
+            return;
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        let request_path = path.clone();
+        match runtime
+            .block_on(async move { runner.remove_path(FsRemoveParams::new(request_path)).await })
+        {
+            Ok(_) => {
+                self.files.pending_delete_path = None;
+                self.files_refresh_directory(window, cx);
+                self.status_line = format!("Files · deleted {path}").into();
+            }
+            Err(error) => {
+                self.status_line = format!("Files · could not delete {path} · {error}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn files_requested_child_name(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let name = self.files_name_input.read(cx).value().trim().to_owned();
+        if valid_file_child_name(&name) {
+            return Some(name);
+        }
+        self.status_line = "Files · enter one child name without /, . or ..".into();
+        cx.notify();
+        None
+    }
+
+    fn files_mutation_backend(&mut self, cx: &mut Context<Self>) -> Option<Arc<DesktopBackend>> {
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Files · mutations require a connected Codex app-server".into();
+            cx.notify();
+            return None;
+        };
+        if !backend.capabilities().file_mutations {
+            self.status_line =
+                "Files · this backend exposes file reads but not filesystem mutations".into();
+            cx.notify();
+            return None;
+        }
+        Some(backend)
     }
 
     /// Run `fuzzyFileSearch` against fixture/project roots.
@@ -9255,8 +9584,17 @@ impl MitsuroApp {
         {
             self.kick_thread_list_refresh(cx);
         }
-        if event.method == "fs/changed" && self.active_mode == ProductMode::Files {
-            self.files_refresh_directory_data(cx);
+        if event.method == "fs/changed"
+            && self.active_mode == ProductMode::Files
+            && event
+                .params
+                .as_ref()
+                .and_then(|params| {
+                    serde_json::from_value::<FsChangedNotification>(params.clone()).ok()
+                })
+                .is_some_and(|notification| notification.watch_id == "mitsuro-files-main")
+        {
+            self.files_schedule_watch_refresh(cx);
         }
 
         if self.selected_thread.as_deref() == event.thread_id.as_deref() {
@@ -9472,6 +9810,7 @@ impl MitsuroApp {
         self.realtime_voices = None;
         self.realtime_voices_state = SurfaceDataState::Unsupported;
 
+        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -9537,7 +9876,7 @@ impl MitsuroApp {
                 })
                 .await;
 
-            let _ = this.update(cx, |app, cx| {
+            let path_sync = this.update(cx, |app, cx| {
                 if let Ok((
                     remote,
                     models,
@@ -9608,7 +9947,13 @@ impl MitsuroApp {
                 // Single quiet status; counts live in Settings, not title chrome.
                 app.status_line = SharedString::from("");
                 cx.notify();
+                (app.files_path_input.clone(), app.files.cwd.to_string())
             });
+            if let Ok((input, path)) = path_sync {
+                let _ = window_handle.update(cx, move |_root, window, cx| {
+                    input.update(cx, |state, cx| state.set_value(path, window, cx));
+                });
+            }
         })
         .detach();
     }
@@ -9768,6 +10113,7 @@ impl MitsuroApp {
         self.status_line = format!("Connecting to {backend_label}…").into();
         cx.notify();
 
+        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -9779,9 +10125,9 @@ impl MitsuroApp {
                 })
                 .await;
 
-            let _ = this.update(cx, |app, cx| {
+            let path_sync = this.update(cx, |app, cx| {
                 if app.backend_generation != generation {
-                    return;
+                    return None;
                 }
                 match result {
                     Ok(bootstrap) => {
@@ -9982,7 +10328,14 @@ impl MitsuroApp {
                     }
                 }
                 cx.notify();
+                (app.active_mode == ProductMode::Files)
+                    .then(|| (app.files_path_input.clone(), app.files.cwd.to_string()))
             });
+            if let Ok(Some((input, path))) = path_sync {
+                let _ = window_handle.update(cx, move |_root, window, cx| {
+                    input.update(cx, |state, cx| state.set_value(path, window, cx));
+                });
+            }
         })
         .detach();
     }
@@ -11272,6 +11625,20 @@ impl Render for MitsuroApp {
     }
 }
 
+fn valid_file_child_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+}
+
+fn duplicate_file_name(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or("copy");
+    if let Some((stem, extension)) = name.rsplit_once('.') {
+        if !stem.is_empty() && !extension.is_empty() {
+            return format!("{stem} copy.{extension}");
+        }
+    }
+    format!("{name} copy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11281,6 +11648,18 @@ mod tests {
             detail: "test".into(),
             has_auth: true,
         }
+    }
+
+    #[test]
+    fn file_mutation_names_stay_inside_the_current_directory() {
+        assert!(valid_file_child_name("notes.txt"));
+        assert!(valid_file_child_name("folder name"));
+        assert!(!valid_file_child_name(""));
+        assert!(!valid_file_child_name("."));
+        assert!(!valid_file_child_name(".."));
+        assert!(!valid_file_child_name("../escape"));
+        assert_eq!(duplicate_file_name("/tmp/notes.txt"), "notes copy.txt");
+        assert_eq!(duplicate_file_name("/tmp/LICENSE"), "LICENSE copy");
     }
 
     #[test]

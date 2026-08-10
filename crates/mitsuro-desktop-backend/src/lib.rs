@@ -82,8 +82,11 @@ pub use fixture::{
 pub use fs::{
     fixture_fuzzy_search, fixture_get_metadata, fixture_project_tree, fixture_read_directory,
     fixture_read_file, fuzzy_score_name, join_abs, normalize_abs_path, FixtureFsNode,
-    FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadDirectoryResponse, FsReadFileParams, FsReadFileResponse, FuzzyFileSearchMatchType,
+    FsChangedNotification, FsCopyParams, FsCopyResponse, FsCreateDirectoryParams,
+    FsCreateDirectoryResponse, FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadDirectoryResponse, FsReadFileParams, FsReadFileResponse,
+    FsRemoveParams, FsRemoveResponse, FsUnwatchParams, FsUnwatchResponse, FsWatchParams,
+    FsWatchResponse, FsWriteFileParams, FsWriteFileResponse, FuzzyFileSearchMatchType,
     FuzzyFileSearchParams, FuzzyFileSearchResponse, FuzzyFileSearchResult,
     FuzzyFileSearchSessionStartParams, FuzzyFileSearchSessionStartResponse,
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,

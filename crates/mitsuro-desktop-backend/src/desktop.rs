@@ -7,16 +7,18 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
-    LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams, McpServerOauthLoginParams,
-    McpServerOauthLoginResponse, MitsuroServerBackend, PendingApproval, PluginInstallParams,
-    PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse, Result,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
-    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
-    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
-    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
-    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
-    TurnStartParams, TurnStreamEvent,
+    AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, FsCopyParams, FsCopyResponse,
+    FsCreateDirectoryParams, FsCreateDirectoryResponse, FsRemoveParams, FsRemoveResponse,
+    FsUnwatchParams, FsUnwatchResponse, FsWatchParams, FsWatchResponse, FsWriteFileParams,
+    FsWriteFileResponse, LifecycleNotification, LiveApprovalBridge, LiveTurnOutcome,
+    McpServerConfigAddParams, McpServerOauthLoginParams, McpServerOauthLoginResponse,
+    MitsuroServerBackend, PendingApproval, PluginInstallParams, PluginInstallResponse,
+    PluginUninstallParams, PluginUninstallResponse, Result, ThreadRealtimeAppendAudioParams,
+    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
+    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
+    ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
+    ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams, ThreadRealtimeStartResponse,
+    ThreadRealtimeStopParams, ThreadRealtimeStopResponse, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -66,6 +68,8 @@ pub struct BackendCapabilities {
     pub approvals: bool,
     pub models: bool,
     pub files: bool,
+    pub file_mutations: bool,
+    pub file_watches: bool,
     pub processes: bool,
     pub extensions: bool,
     pub plugin_mutations: bool,
@@ -100,6 +104,8 @@ impl BackendCapabilities {
             approvals: true,
             models: true,
             files: true,
+            file_mutations: true,
+            file_watches: true,
             processes: true,
             extensions: true,
             plugin_mutations: true,
@@ -134,6 +140,8 @@ impl BackendCapabilities {
             approvals: true,
             models: true,
             files: true,
+            file_mutations: false,
+            file_watches: false,
             // The HTTP API can inspect/kill tracked background processes, but it
             // does not expose the interactive spawn/stdin/PTY contract used by
             // the native terminal panel.
@@ -456,6 +464,63 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn write_file(&self, params: FsWriteFileParams) -> Result<FsWriteFileResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_write_file(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes file reads but not filesystem writes".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn create_directory(
+        &self,
+        params: FsCreateDirectoryParams,
+    ) -> Result<FsCreateDirectoryResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_create_directory(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes directory reads but not directory creation".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn remove_path(&self, params: FsRemoveParams) -> Result<FsRemoveResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_remove(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes file reads but not filesystem removal".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn copy_path(&self, params: FsCopyParams) -> Result<FsCopyResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_copy(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP exposes file reads but not filesystem copy".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn watch_path(&self, params: FsWatchParams) -> Result<FsWatchResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_watch(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose filesystem watch subscriptions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn unwatch_path(&self, params: FsUnwatchParams) -> Result<FsUnwatchResponse> {
+        match self {
+            Self::Codex(backend) => backend.fs_unwatch(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose filesystem watch subscriptions".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -664,6 +729,10 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().apps);
         assert!(BackendCapabilities::codex().skill_config_write);
         assert!(!BackendCapabilities::mitsuro().skill_config_write);
+        assert!(BackendCapabilities::codex().file_mutations);
+        assert!(!BackendCapabilities::mitsuro().file_mutations);
+        assert!(BackendCapabilities::codex().file_watches);
+        assert!(!BackendCapabilities::mitsuro().file_watches);
     }
 
     #[tokio::test]
