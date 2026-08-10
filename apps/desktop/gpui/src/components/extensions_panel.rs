@@ -16,7 +16,7 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
 };
-use gpui_component::{Icon, IconName, Sizable as _};
+use gpui_component::{input::Input, Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{McpServerStatus, PluginSummary, SkillMetadata};
 
 use crate::app::{MitsuroApp, PluginsFilter, PluginsSurfaceTab, SurfaceDataState};
@@ -35,6 +35,9 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let source = data_state.label();
     let mutations_available = app.plugin_mutations_available();
     let mutating_plugin_id = app.plugin_mutation_id().map(ToOwned::to_owned);
+    let search_input = app.plugins_search_input().clone();
+    let query = search_input.read(cx).value().trim().to_ascii_lowercase();
+    let expanded_sections = app.expanded_plugin_sections().clone();
 
     let installed: Vec<PluginSummary> = plugins.iter().filter(|p| p.installed).cloned().collect();
 
@@ -55,7 +58,7 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
             cx,
         ))
         .child(surface_tabs(tab, cx))
-        .child(search_placeholder(tab))
+        .child(search_field(&search_input))
         .child(
             div()
                 .id("extensions-body")
@@ -77,10 +80,14 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                         data_state,
                         mutations_available,
                         mutating_plugin_id.as_deref(),
+                        &query,
+                        &expanded_sections,
                         cx,
                     )
                     .into_any_element(),
-                    PluginsSurfaceTab::Skills => skills_body(&skills, source).into_any_element(),
+                    PluginsSurfaceTab::Skills => {
+                        skills_body(&skills, source, &query).into_any_element()
+                    }
                 }),
         )
 }
@@ -248,12 +255,10 @@ fn surface_tab(
         )
 }
 
-fn search_placeholder(tab: PluginsSurfaceTab) -> impl IntoElement {
+fn search_field(
+    search_input: &gpui::Entity<gpui_component::input::InputState>,
+) -> impl IntoElement {
     let colors = theme::colors();
-    let placeholder = match tab {
-        PluginsSurfaceTab::Plugins => "Search plugins",
-        PluginsSurfaceTab::Skills => "Search skills",
-    };
     div()
         .id("plugins-search")
         .mx(px(28.0))
@@ -275,9 +280,12 @@ fn search_placeholder(tab: PluginsSurfaceTab) -> impl IntoElement {
         )
         .child(
             div()
+                .flex()
+                .flex_1()
+                .min_w_0()
                 .text_sm()
-                .text_color(colors.text_tertiary)
-                .child(placeholder),
+                .text_color(colors.text)
+                .child(Input::new(search_input).appearance(false).h(px(28.0))),
         )
 }
 
@@ -289,12 +297,18 @@ fn plugins_body(
     data_state: SurfaceDataState,
     mutations_available: bool,
     mutating_plugin_id: Option<&str>,
+    query: &str,
+    expanded_sections: &std::collections::HashSet<String>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     // Marketplace chrome: hide internal `tools` fixtures (still available via plugin/read).
     let market: Vec<&PluginSummary> = plugins
         .iter()
-        .filter(|p| p.category() != "tools" && !p.name.starts_with("fixture-"))
+        .filter(|p| {
+            p.category() != "tools"
+                && !p.name.starts_with("fixture-")
+                && plugin_matches_query(p, query)
+        })
         .collect();
     let featured: Vec<&PluginSummary> = market
         .iter()
@@ -322,8 +336,19 @@ fn plugins_body(
         .collect();
 
     // Brand strip only — ~12 geometric brand-mark chips (bar-like order).
-    let strip = brand_installed_strip(installed);
+    let filtered_installed: Vec<PluginSummary> = installed
+        .iter()
+        .filter(|plugin| plugin_matches_query(plugin, query))
+        .cloned()
+        .collect();
+    let strip = brand_installed_strip(&filtered_installed);
     let market_empty = market.is_empty() && mcp.is_empty();
+    let search_empty = !query.is_empty()
+        && match filter {
+            PluginsFilter::Mcp => !mcp.iter().any(|server| mcp_matches_query(server, query)),
+            PluginsFilter::Personal => strip.is_empty(),
+            PluginsFilter::Public => market.is_empty(),
+        };
 
     div()
         .id("plugins-market")
@@ -332,7 +357,21 @@ fn plugins_body(
         .gap(px(20.0))
         .child(installed_strip(&strip))
         .child(scope_chips(filter, cx))
-        .when(market_empty && data_state != SurfaceDataState::Fixture, |this| {
+        .when(search_empty, |this| {
+            this.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(18.0))
+                    .rounded(px(12.0))
+                    .bg(colors_empty_card())
+                    .border_1()
+                    .border_color(theme::colors().border)
+                    .text_sm()
+                    .text_color(theme::colors().text_tertiary)
+                    .child(format!("No results match “{query}”.")),
+            )
+        })
+        .when(!search_empty && market_empty && data_state != SurfaceDataState::Fixture, |this| {
             this.child(
                 div()
                     .px(px(14.0))
@@ -352,8 +391,15 @@ fn plugins_body(
                     }),
             )
         })
-        .child(if filter == PluginsFilter::Mcp {
-            mcp_marketplace(mcp).into_any_element()
+        .child(if search_empty {
+            div().into_any_element()
+        } else if filter == PluginsFilter::Mcp {
+            let filtered: Vec<McpServerStatus> = mcp
+                .iter()
+                .filter(|server| mcp_matches_query(server, query))
+                .cloned()
+                .collect();
+            mcp_marketplace(&filtered).into_any_element()
         } else if filter == PluginsFilter::Personal {
             // Personal: brand installed only (no fixture chrome).
             let personal: Vec<PluginSummary> = strip.to_vec();
@@ -376,6 +422,7 @@ fn plugins_body(
                         &featured,
                         mutations_available,
                         mutating_plugin_id,
+                        !query.is_empty() || expanded_sections.contains("Featured"),
                         cx,
                     ))
                 })
@@ -385,6 +432,7 @@ fn plugins_body(
                         &productivity,
                         mutations_available,
                         mutating_plugin_id,
+                        !query.is_empty() || expanded_sections.contains("Productivity"),
                         cx,
                     ))
                 })
@@ -394,6 +442,7 @@ fn plugins_body(
                         &creativity,
                         mutations_available,
                         mutating_plugin_id,
+                        !query.is_empty() || expanded_sections.contains("Creativity"),
                         cx,
                     ))
                 })
@@ -403,6 +452,7 @@ fn plugins_body(
                         &other,
                         mutations_available,
                         mutating_plugin_id,
+                        !query.is_empty() || expanded_sections.contains("More"),
                         cx,
                     ))
                 })
@@ -625,6 +675,7 @@ fn category_section(
     plugins: &[&PluginSummary],
     mutations_available: bool,
     mutating_plugin_id: Option<&str>,
+    expanded: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let (section_id, base): (&'static str, u64) = match title {
@@ -633,8 +684,16 @@ fn category_section(
         "Creativity" => ("plugins-section-creativity", 200),
         _ => ("plugins-section-more", 300),
     };
-    let visible: Vec<&PluginSummary> = plugins.iter().copied().take(SECTION_VISIBLE_CAP).collect();
-    let overflow: Vec<&PluginSummary> = plugins.iter().copied().skip(SECTION_VISIBLE_CAP).collect();
+    let visible: Vec<&PluginSummary> = if expanded {
+        plugins.to_vec()
+    } else {
+        plugins.iter().copied().take(SECTION_VISIBLE_CAP).collect()
+    };
+    let overflow: Vec<&PluginSummary> = if expanded {
+        Vec::new()
+    } else {
+        plugins.iter().copied().skip(SECTION_VISIBLE_CAP).collect()
+    };
     div()
         .id(section_id)
         .flex()
@@ -649,43 +708,24 @@ fn category_section(
             cx,
         ))
         .when(!overflow.is_empty(), |this| {
-            this.child(see_more_row(title, base, &overflow))
+            this.child(see_more_row(title, base, &overflow, cx))
         })
 }
 
-/// Bar-language remainder for overflow rows (may exceed fixture pool — marketplace flavor).
-fn overflow_more_count(section: &str, real_overflow: usize) -> usize {
-    let rest = real_overflow.saturating_sub(2);
-    match section {
-        // bar-plugins-real: "See GitHub, SharePoint, and 21 more"
-        "Featured" => rest.max(21),
-        // bar-plugins-real: "See Documents, PDF, and 443 more"
-        "Productivity" => rest.max(443),
-        _ => rest,
-    }
-}
-
-/// Bar-style overflow: "See GitHub, SharePoint, and N more".
-fn see_more_row(section: &str, index_base: u64, overflow: &[&PluginSummary]) -> impl IntoElement {
+/// Expand a marketplace section using the exact number of hidden server records.
+fn see_more_row(
+    section: &str,
+    index_base: u64,
+    overflow: &[&PluginSummary],
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
-    let n = overflow.len();
-    let label = if n == 1 {
-        format!("See {}", overflow[0].display_name())
-    } else if n == 2 {
-        format!(
-            "See {} and {}",
-            overflow[0].display_name(),
-            overflow[1].display_name()
-        )
-    } else {
-        let rest = overflow_more_count(section, n);
-        format!(
-            "See {}, {}, and {} more",
-            overflow[0].display_name(),
-            overflow[1].display_name(),
-            rest
-        )
-    };
+    let names: Vec<&str> = overflow
+        .iter()
+        .map(|plugin| plugin.display_name())
+        .collect();
+    let label = see_more_label(&names);
+    let section_for_action = section.to_owned();
     // Mini geometric brand chips for first few overflow entries.
     let chips: Vec<_> = overflow
         .iter()
@@ -708,6 +748,9 @@ fn see_more_row(section: &str, index_base: u64, overflow: &[&PluginSummary]) -> 
         .pb(px(2.0))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.expand_plugin_section(section_for_action.clone(), cx);
+        }))
         .children(chips)
         .child(
             div()
@@ -715,6 +758,17 @@ fn see_more_row(section: &str, index_base: u64, overflow: &[&PluginSummary]) -> 
                 .text_color(colors.text_secondary)
                 .child(label),
         )
+}
+
+fn see_more_label(names: &[&str]) -> String {
+    match names {
+        [] => "See more".to_owned(),
+        [only] => format!("See {only}"),
+        [first, second] => format!("See {first} and {second}"),
+        [first, second, rest @ ..] => {
+            format!("See {first}, {second}, and {} more", rest.len())
+        }
+    }
 }
 
 fn section_heading(title: &str) -> impl IntoElement {
@@ -1826,8 +1880,12 @@ fn dot_at(x: f32, y: f32, d: f32, color: u32) -> impl IntoElement {
         .bg(theme::hex(color))
 }
 
-fn skills_body(skills: &[SkillMetadata], source: &str) -> impl IntoElement {
+fn skills_body(skills: &[SkillMetadata], source: &str, query: &str) -> impl IntoElement {
     let colors = theme::colors();
+    let filtered: Vec<&SkillMetadata> = skills
+        .iter()
+        .filter(|skill| skill_matches_query(skill, query))
+        .collect();
     let empty_msg = if source == "app-server" {
         "app-server · skills/list returned empty."
     } else {
@@ -1847,7 +1905,7 @@ fn skills_body(skills: &[SkillMetadata], source: &str) -> impl IntoElement {
                     "Reusable instructions Codex can load into a turn · {source}"
                 )),
         )
-        .children(if skills.is_empty() {
+        .children(if filtered.is_empty() {
             vec![div()
                 .px(px(14.0))
                 .py(px(18.0))
@@ -1857,15 +1915,54 @@ fn skills_body(skills: &[SkillMetadata], source: &str) -> impl IntoElement {
                 .border_color(colors.border)
                 .text_sm()
                 .text_color(colors.text_tertiary)
-                .child(empty_msg)
+                .child(if query.is_empty() {
+                    empty_msg.to_owned()
+                } else {
+                    format!("No skills match “{query}”.")
+                })
                 .into_any_element()]
         } else {
-            skills
-                .iter()
+            filtered
+                .into_iter()
                 .enumerate()
                 .map(|(i, s)| skill_card(i as u64, s).into_any_element())
                 .collect()
         })
+}
+
+fn plugin_matches_query(plugin: &PluginSummary, query: &str) -> bool {
+    query.is_empty()
+        || plugin.name.to_ascii_lowercase().contains(query)
+        || plugin.display_name().to_ascii_lowercase().contains(query)
+        || plugin.category().to_ascii_lowercase().contains(query)
+        || plugin
+            .short_description()
+            .is_some_and(|description| description.to_ascii_lowercase().contains(query))
+}
+
+fn skill_matches_query(skill: &SkillMetadata, query: &str) -> bool {
+    query.is_empty()
+        || skill.name.to_ascii_lowercase().contains(query)
+        || skill.description.to_ascii_lowercase().contains(query)
+        || skill
+            .short_description
+            .as_ref()
+            .is_some_and(|description| description.to_ascii_lowercase().contains(query))
+        || skill.scope.to_ascii_lowercase().contains(query)
+}
+
+fn mcp_matches_query(server: &McpServerStatus, query: &str) -> bool {
+    query.is_empty()
+        || server.name.to_ascii_lowercase().contains(query)
+        || server.server_info.as_ref().is_some_and(|info| {
+            info.title
+                .as_ref()
+                .is_some_and(|title| title.to_ascii_lowercase().contains(query))
+        })
+        || server
+            .tools
+            .keys()
+            .any(|name| name.to_ascii_lowercase().contains(query))
 }
 
 fn skill_card(index: u64, skill: &SkillMetadata) -> impl IntoElement {
@@ -2107,4 +2204,47 @@ fn mcp_card(index: u64, server: &McpServerStatus) -> impl IntoElement {
                 .text_color(colors.text_secondary)
                 .child(status),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_real_plugin_skill_and_mcp_fields() {
+        let plugin = mitsuro_desktop_backend::fixture_demo_plugins()
+            .marketplaces
+            .into_iter()
+            .flat_map(|marketplace| marketplace.plugins)
+            .find(|plugin| plugin.name == "documents")
+            .expect("documents fixture plugin");
+        assert!(plugin_matches_query(&plugin, "document"));
+        assert!(!plugin_matches_query(&plugin, "definitely absent"));
+
+        let skill = mitsuro_desktop_backend::fixture_demo_skills()
+            .data
+            .into_iter()
+            .flat_map(|entry| entry.skills)
+            .next()
+            .expect("fixture skill");
+        assert!(skill_matches_query(
+            &skill,
+            &skill.name.to_ascii_lowercase()
+        ));
+
+        let mcp = mitsuro_desktop_backend::fixture_demo_mcp_servers()
+            .data
+            .into_iter()
+            .next()
+            .expect("fixture MCP server");
+        assert!(mcp_matches_query(&mcp, &mcp.name.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn overflow_label_uses_only_the_exact_hidden_record_count() {
+        assert_eq!(
+            see_more_label(&["One", "Two", "Three", "Four", "Five"]),
+            "See One, Two, and 3 more"
+        );
+    }
 }

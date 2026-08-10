@@ -37,7 +37,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   transport-neutral `ProductBackend` contract.
 - Codex plugin installation and removal use typed app-server methods and refresh the
   live marketplace afterward. Mitsuro and fixture extension inventories are read-only;
-  the desktop never simulates a successful mutation.
+  the desktop never simulates a successful mutation. Marketplace search filters live
+  plugin, skill, and MCP metadata, and section expansion reveals the exact hidden
+  server records rather than fabricated marketplace totals.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.

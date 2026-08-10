@@ -97,7 +97,8 @@ work, not as feature completion; the matrix test must change with each typed ada
   actions call typed `plugin/install` and `plugin/uninstall`, disable concurrent
   mutations, and refresh the live catalog after success. Mitsuro and explicit fixture
   catalogs are visibly read-only because neither backend exposes a production mutation
-  contract.
+  contract. Search filters the live plugin, skill, and MCP records; expanding a category
+  uses its exact hidden-record count and never pads the catalog with decorative totals.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,

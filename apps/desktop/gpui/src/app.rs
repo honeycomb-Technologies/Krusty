@@ -944,6 +944,10 @@ pub struct MitsuroApp {
     settings_search_query: String,
     /// Settings search input entity.
     settings_search_input: Entity<InputState>,
+    /// Extensions catalog search shared by Plugins and Skills tabs.
+    plugins_search_input: Entity<InputState>,
+    /// Marketplace sections explicitly expanded by the user.
+    expanded_plugin_sections: std::collections::HashSet<String>,
     /// Desktop-local toggles. Persistence does not imply a server configuration write.
     settings_toggles: std::collections::HashMap<String, bool>,
     /// Desktop-local string choices (e.g. "Bottom"/"Right", "Fast").
@@ -1202,6 +1206,19 @@ impl MitsuroApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Fuzzy search file names…"));
         let settings_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        let plugins_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search plugins and skills…"));
+        cx.subscribe_in(
+            &plugins_search_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let _ = app;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let server_request_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
         let server_request_secret_input = cx.new(|cx| {
@@ -1284,6 +1301,8 @@ impl MitsuroApp {
             settings_return_mode: ProductMode::Codex,
             settings_search_query: String::new(),
             settings_search_input,
+            plugins_search_input,
+            expanded_plugin_sections: std::collections::HashSet::new(),
             settings_toggles,
             settings_choices,
             goals: Vec::new(),
@@ -2797,6 +2816,20 @@ impl MitsuroApp {
 
     pub fn plugins_surface_tab(&self) -> PluginsSurfaceTab {
         self.plugins_surface_tab
+    }
+
+    pub fn plugins_search_input(&self) -> &Entity<InputState> {
+        &self.plugins_search_input
+    }
+
+    pub fn expanded_plugin_sections(&self) -> &std::collections::HashSet<String> {
+        &self.expanded_plugin_sections
+    }
+
+    pub fn expand_plugin_section(&mut self, section: String, cx: &mut Context<Self>) {
+        self.expanded_plugin_sections.insert(section.clone());
+        self.status_line = format!("Plugins · expanded {section}").into();
+        cx.notify();
     }
 
     pub fn set_plugins_surface_tab(&mut self, tab: PluginsSurfaceTab, cx: &mut Context<Self>) {
@@ -8933,6 +8966,7 @@ impl MitsuroApp {
         self.plugins.clear();
         self.extensions_state = SurfaceDataState::Loading;
         self.plugin_mutation_in_progress = None;
+        self.expanded_plugin_sections.clear();
         self.goals.clear();
         self.selected_goal = None;
         self.goals_are_live_hive = false;
