@@ -61,8 +61,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   presented as controls.
 - Long transcripts start with a 16-message tail and reveal earlier history in bounded
   pages. Reopened threads preserve structured reasoning, plans, commands, and file
-  changes. Assistant Markdown, fenced code, visible errors, and bounded full-response
-  expansion render while the composer remains pinned outside the transcript scroll.
+  changes. The current 18-type Codex thread item surface is preserved across hydration
+  and live updates: non-chat tool/search/image/collaboration/review lifecycle records
+  render as real, cardless activity rows rather than being dropped or converted into
+  assistant prose. Assistant Markdown, fenced code, visible errors, and bounded
+  full-response expansion render while the composer remains pinned outside the
+  transcript scroll.
 
 ## Parity status
 
@@ -100,6 +104,14 @@ Use `MITSURO_BACKEND=codex-stdio` for a managed Codex app-server child. A Ready,
 authenticated backend sends a provider-backed turn when the user presses Send. Keep
 `MITSURO_NO_LIVE_TURN=1` for read-only visual validation; use
 `MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
+
+The Codex adapter negotiates experimental APIs because the desktop exposes process,
+environment, realtime, and background-terminal protocol families. The reviewed
+`codex-cli 0.147.0` contract is checked with:
+
+```bash
+scripts/gpui-codex-protocol-check.sh
+```
 
 The optional `browser-native` feature links Wry/WebKitGTK. The default build uses the
 external-browser bridge only while native embedding remains incomplete.

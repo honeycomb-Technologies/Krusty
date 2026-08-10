@@ -38,6 +38,12 @@ pub enum DemoMessageKind {
         patch_preview: String,
         status: String,
     },
+    Activity {
+        kind: String,
+        title: String,
+        body: String,
+        status: String,
+    },
     Error {
         body: String,
     },
@@ -122,6 +128,25 @@ impl DemoMessage {
         }
     }
 
+    pub fn activity(
+        kind: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        status: impl Into<String>,
+        item_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: DemoMessageKind::Activity {
+                kind: kind.into(),
+                title: title.into(),
+                body: body.into(),
+                status: status.into(),
+            },
+            item_id,
+            streaming: false,
+        }
+    }
+
     pub fn error(body: impl Into<String>) -> Self {
         Self {
             kind: DemoMessageKind::Error { body: body.into() },
@@ -139,6 +164,7 @@ impl DemoMessage {
             | DemoMessageKind::Plan { body } => body,
             DemoMessageKind::CommandExecution { output, .. } => output,
             DemoMessageKind::FileChange { patch_preview, .. } => patch_preview,
+            DemoMessageKind::Activity { body, .. } => body,
             DemoMessageKind::Error { body } => body,
         }
     }
@@ -168,6 +194,7 @@ impl DemoMessage {
             DemoMessageKind::Plan { .. } => DemoRole::Plan,
             DemoMessageKind::CommandExecution { .. } => DemoRole::CommandExecution,
             DemoMessageKind::FileChange { .. } => DemoRole::FileChange,
+            DemoMessageKind::Activity { .. } => DemoRole::Activity,
             DemoMessageKind::Error { .. } => DemoRole::Error,
         }
     }
@@ -183,6 +210,7 @@ pub enum DemoRole {
     Plan,
     CommandExecution,
     FileChange,
+    Activity,
     Error,
 }
 

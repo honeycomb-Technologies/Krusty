@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -104,7 +104,12 @@ impl Default for CodexAppServerConfig {
                 title: Some(CLIENT_TITLE.into()),
             },
             capabilities: Some(InitializeCapabilities {
-                experimental_api: Some(false),
+                // The desktop renders process, environment, realtime, and
+                // background-terminal workflows that Codex currently exposes
+                // through the experimental contract. Negotiate that contract
+                // explicitly instead of advertising controls that the default
+                // handshake then rejects.
+                experimental_api: Some(true),
                 ..Default::default()
             }),
         }
@@ -616,6 +621,30 @@ impl CodexAppServerBackend {
                 let _ = inner.notify_tx.send(n);
             }
             JsonRpcMessage::ServerRequest { id, method, params } => {
+                if method == "currentTime/read" {
+                    // The experimental protocol asks the client-owned wall clock
+                    // for whole Unix seconds. Answer in the pump so a model turn
+                    // cannot stall while waiting for UI event handling.
+                    let current_time_at = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "currentTimeAt": current_time_at },
+                    });
+                    match serde_json::to_string(&response) {
+                        Ok(mut line) => {
+                            line.push('\n');
+                            if let Err(error) = Self::write_line_inner(inner, &line).await {
+                                warn!("failed to answer currentTime/read: {error}");
+                            }
+                        }
+                        Err(error) => warn!("failed to encode currentTime/read response: {error}"),
+                    }
+                    return;
+                }
                 // Surface as pseudo-notification so `subscribe_notifications` and
                 // `subscribe_turn_events` both see approvals (mapped via
                 // `map_notification_to_event` → ApprovalRequested).
@@ -1181,6 +1210,29 @@ mod tests {
         let v: Value = serde_json::from_str(line).unwrap();
         assert_eq!(v["id"], 77);
         assert_eq!(v["result"]["decision"], "accept");
+    }
+
+    #[tokio::test]
+    async fn current_time_server_request_is_answered_without_ui_round_trip() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect_with_mock_writer(client_writer).await;
+
+        backend
+            .inject_stdout_line(
+                r#"{"id":"clock-1","method":"currentTime/read","params":{"threadId":"thread-1"}}"#,
+            )
+            .await;
+
+        let mut line = String::new();
+        let mut reader = BufReader::new(&mut server_reader);
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .expect("clock response timeout")
+            .expect("clock response readable");
+        let value: Value = serde_json::from_str(line.trim()).expect("valid JSON-RPC response");
+        assert_eq!(value["id"], "clock-1");
+        assert!(value["result"]["currentTimeAt"].as_u64().is_some());
     }
 
     #[tokio::test]

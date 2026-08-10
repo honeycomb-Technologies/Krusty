@@ -81,8 +81,10 @@ pub use live_turn::{
     LiveApprovalPolicy, LiveTurnOutcome, DEFAULT_LIVE_TURN_TIMEOUT,
 };
 pub use methods::{
-    client_methods_txt_path, is_known_client_method, load_client_methods_from_bar, CLIENT_METHODS,
-    CLIENT_METHOD_COUNT,
+    client_methods_txt_path, is_known_client_method, is_stable_client_method,
+    load_client_methods_from_bar, load_stable_client_methods_from_bar, requires_experimental_api,
+    stable_client_methods_txt_path, CLIENT_METHODS, CLIENT_METHOD_COUNT,
+    EXPERIMENTAL_ONLY_CLIENT_METHOD_COUNT, STABLE_CLIENT_METHODS_TEXT, STABLE_CLIENT_METHOD_COUNT,
 };
 pub use mitsuro::MitsuroServerBackend;
 pub use process::{
@@ -98,13 +100,13 @@ pub use product::{
     ProductSchedule, ProductSkill, ProductTurn, SessionConversation, SessionSummary,
 };
 pub use protocol::{
-    command_execution_fields, extract_chat_tail_from_thread, extract_transcript_from_thread,
-    file_change_fields, fixture_demo_config, fixture_demo_models, fixture_demo_skills,
-    map_notification_to_event, map_server_request_to_event, parse_fixture_jsonl,
-    parse_notification_line, summarize_file_changes, user_input_text_value, ClientInfo,
-    CommandExecutionFields, ConfigReadParams, ConfigReadResponse, FileChangeFields,
-    InitializeCapabilities, InitializeParams, InitializeResponse, JsonRpcError, JsonRpcId,
-    JsonRpcMessage, ModelInfo, ModelListParams, ModelListResponse, Notification,
+    activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,
+    extract_transcript_from_thread, file_change_fields, fixture_demo_config, fixture_demo_models,
+    fixture_demo_skills, map_notification_to_event, map_server_request_to_event,
+    parse_fixture_jsonl, parse_notification_line, summarize_file_changes, user_input_text_value,
+    ActivityFields, ClientInfo, CommandExecutionFields, ConfigReadParams, ConfigReadResponse,
+    FileChangeFields, InitializeCapabilities, InitializeParams, InitializeResponse, JsonRpcError,
+    JsonRpcId, JsonRpcMessage, ModelInfo, ModelListParams, ModelListResponse, Notification,
     ReasoningEffortOption, SkillMetadata, SkillsListEntry, SkillsListParams, SkillsListResponse,
     ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams, ThreadDeleteResponse,
     ThreadForkParams, ThreadForkResponse, ThreadGoal, ThreadGoalClearParams,

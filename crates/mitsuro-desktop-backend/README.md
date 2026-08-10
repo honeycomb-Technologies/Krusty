@@ -34,7 +34,8 @@ read-only product surfaces in GPUI; their mutation routes are intentionally not 
 
 ## Transport assumptions (Codex app-server)
 
-Verified against `codex` 0.146.0 on Linux (`~/.local/bin/codex app-server --stdio`):
+Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
+(`~/.local/bin/codex app-server --stdio`):
 
 1. **Spawn:** `codex app-server --stdio` (or `CODEX_BIN` env override, default `~/.local/bin/codex` then `codex` on `PATH`).
 2. **Framing:** newline-delimited JSON (JSONL). One JSON object per line on stdin/stdout. **Not** LSP `Content-Length` framing.
@@ -46,7 +47,7 @@ Verified against `codex` 0.146.0 on Linux (`~/.local/bin/codex app-server --stdi
 4. **Response shape:** `{"id":1,"result":{...}}` or `{"id":1,"error":{"code":...,"message":"..."}}`.
 5. **Notifications:** server→client messages with `method` + `params` and **no** `id` (often include `emittedAtMs`).
 6. **Server requests:** client must answer approvals (`execCommandApproval`, `applyPatchApproval`, `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`). Incoming requests are classified, mapped to `TurnStreamEvent::ApprovalRequested`, and answered via `CodexAppServerBackend::respond_approval` / `approve` / `deny`.
-7. **Handshake:** first client call must be `initialize` with `clientInfo` (`name`, `version`; optional `title`) and optional `capabilities`.
+7. **Handshake:** first client call must be `initialize` with `clientInfo` (`name`, `version`; optional `title`) and optional `capabilities`. The desktop explicitly enables `experimentalApi` because its process, environment, realtime, and background-terminal surfaces use experimental methods.
 8. **Offline-safe methods:** `initialize`, `thread/list`, and `thread/start` (use `ephemeral: true` when probing) do not require paid model calls.
 9. **Correlation:** request `id` may be `u64` or `string`; this client uses monotonic integer ids.
 
@@ -60,8 +61,14 @@ Verified against `codex` 0.146.0 on Linux (`~/.local/bin/codex app-server --stdi
 - `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
 - `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
 
-The maintained Codex method inventory is in `fixtures/client-methods.txt`. Inventory and
-generic Codex forwarding are not evidence that a fixture or UI feature is implemented.
+The generated protocol inventories are committed in `fixtures/`: 95 stable client
+methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable
+server requests (11 experimental), and 18 thread item variants for `codex-cli 0.147.0`.
+The experimental-only `currentTime/read` request is answered directly from the
+client-owned system clock so it cannot stall a turn. Run
+`scripts/gpui-codex-protocol-check.sh` after changing the Codex CLI; use `--update` only
+when intentionally accepting a reviewed protocol baseline. Inventory and generic Codex
+forwarding are not evidence that a fixture or UI feature is implemented.
 
 ## Turn streaming
 
@@ -78,6 +85,12 @@ Server notifications are mapped to [`TurnStreamEvent`](src/types.rs):
 | `item/reasoning/summaryTextDelta` | `ReasoningSummaryDelta` |
 | `item/plan/delta` | `PlanDelta` |
 | `execCommandApproval` / `applyPatchApproval` / `item/*/requestApproval` | `ApprovalRequested` |
+
+Hydrated and live transcripts preserve all 18 current thread item variants. The six
+conversation-native variants keep their specialized renderers; tool, search, image,
+collaboration, review-mode, compaction, hook, and sleep variants render as restrained
+activity rows with their real title, status, and bounded protocol summary. Unknown
+future variants remain visible as forward-compatible activity instead of disappearing.
 
 Offline path: [`FixtureBackend`](src/fixture.rs) + `fixtures/sample-turn.jsonl` (embedded as `SAMPLE_TURN_JSONL`). The sample stream injects a mid-turn `item/commandExecution/requestApproval` server request.
 

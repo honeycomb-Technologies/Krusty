@@ -11,28 +11,28 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
-    command_execution_fields, file_change_fields, fixture_demo_account_response,
-    fixture_demo_collaboration_modes, fixture_demo_config, fixture_demo_environments,
-    fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
-    fixture_demo_skills, fixture_demo_usage, join_abs, load_sample_turn_events, normalize_abs_path,
-    summarize_file_changes, Account, AgentBackend, ApprovalChoice, BackendKind, BackendSelection,
-    BackendSessionId, CollaborationModeListParams, CollaborationModeMask, ConfigReadParams,
-    CreateSession, DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse,
-    EnvironmentStatusParams, EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend,
-    FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
-    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
-    GetAccountTokenUsageResponse, ListMcpServerStatusParams, LiveApprovalBridge,
-    LoginAccountParams, McpAuthStatus, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
-    ModelListParams, PendingApproval, PlanType, PluginAuthPolicy, PluginAvailability,
-    PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource, PluginSummary,
-    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
-    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
-    ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
-    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
-    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
-    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    activity_item_fields, command_execution_fields, file_change_fields,
+    fixture_demo_account_response, fixture_demo_collaboration_modes, fixture_demo_config,
+    fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
+    fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
+    load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, ActivityFields,
+    AgentBackend, ApprovalChoice, BackendKind, BackendSelection, BackendSessionId,
+    CollaborationModeListParams, CollaborationModeMask, ConfigReadParams, CreateSession,
+    DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
+    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
+    McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams, PendingApproval,
+    PlanType, PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface,
+    PluginListParams, PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductBackend, ProductExtension, ProductFileMatch,
+    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductSchedule,
+    ProductSkill, ProductTurn, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
+    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -5498,7 +5498,18 @@ impl MitsuroApp {
                         m.streaming = true;
                         thread.messages.push(m);
                     }
-                    _ => {}
+                    mitsuro_desktop_backend::ItemKind::UserMessage => {}
+                    _ => {
+                        let exists = thread
+                            .messages
+                            .iter()
+                            .any(|message| message.item_id.as_deref() == Some(item_id.as_str()));
+                        if !exists {
+                            let mut message = activity_message(&kind, item_id, item.as_ref());
+                            message.streaming = true;
+                            thread.messages.push(message);
+                        }
+                    }
                 },
                 TurnStreamEvent::AgentMessageDelta { item_id, delta, .. } => {
                     if let Some(msg) = find_message_mut(&mut thread.messages, &item_id) {
@@ -5655,6 +5666,28 @@ impl MitsuroApp {
                                     }
                                 }
                             }
+                            _ if matches!(&msg.kind, DemoMessageKind::Activity { .. }) => {
+                                let fields = item.as_ref().map(activity_item_fields).unwrap_or(
+                                    ActivityFields {
+                                        kind: kind.as_str().to_owned(),
+                                        title: activity_title(kind.as_str()),
+                                        summary: text.clone().unwrap_or_default(),
+                                        status: String::new(),
+                                    },
+                                );
+                                if let DemoMessageKind::Activity {
+                                    kind,
+                                    title,
+                                    body,
+                                    status,
+                                } = &mut msg.kind
+                                {
+                                    *kind = fields.kind;
+                                    *title = fields.title;
+                                    *body = fields.summary;
+                                    *status = fields.status;
+                                }
+                            }
                             _ => {
                                 if let Some(final_text) = text {
                                     if !final_text.is_empty() {
@@ -5719,7 +5752,14 @@ impl MitsuroApp {
                                         Some(item_id),
                                     ));
                                 }
-                                _ => {}
+                                mitsuro_desktop_backend::ItemKind::UserMessage => {}
+                                _ => {
+                                    thread.messages.push(activity_message(
+                                        &kind,
+                                        item_id,
+                                        item.as_ref(),
+                                    ));
+                                }
                             }
                         }
                     } else if matches!(
@@ -5754,6 +5794,10 @@ impl MitsuroApp {
                             }
                             _ => {}
                         }
+                    } else if !matches!(kind, mitsuro_desktop_backend::ItemKind::UserMessage) {
+                        thread
+                            .messages
+                            .push(activity_message(&kind, item_id, item.as_ref()));
                     }
                 }
                 TurnStreamEvent::TurnCompleted { status, .. } => {
@@ -6356,8 +6400,23 @@ impl MitsuroApp {
                                     .map(|m| {
                                         let mut msg = match m.role {
                                             MessageRole::User => DemoMessage::user(m.body),
-                                            MessageRole::Assistant | MessageRole::Activity => {
+                                            MessageRole::Assistant => {
                                                 DemoMessage::assistant(m.body)
+                                            }
+                                            MessageRole::Activity => {
+                                                let fields = m.activity.unwrap_or(ActivityFields {
+                                                    kind: "activity".to_owned(),
+                                                    title: "Activity".to_owned(),
+                                                    summary: m.body,
+                                                    status: String::new(),
+                                                });
+                                                DemoMessage::activity(
+                                                    fields.kind,
+                                                    fields.title,
+                                                    fields.summary,
+                                                    fields.status,
+                                                    m.item_id.clone(),
+                                                )
                                             }
                                             MessageRole::Reasoning => {
                                                 DemoMessage::reasoning(m.body, m.item_id.clone())
@@ -6684,6 +6743,32 @@ fn path_from_cwd_field(cwd: &str) -> String {
         return rest.to_string();
     }
     s.to_string()
+}
+
+fn activity_title(kind: &str) -> String {
+    activity_item_fields(&serde_json::json!({ "type": kind })).title
+}
+
+fn activity_message(
+    kind: &mitsuro_desktop_backend::ItemKind,
+    item_id: String,
+    item: Option<&serde_json::Value>,
+) -> DemoMessage {
+    let fields = item
+        .map(activity_item_fields)
+        .unwrap_or_else(|| ActivityFields {
+            kind: kind.as_str().to_owned(),
+            title: activity_title(kind.as_str()),
+            summary: String::new(),
+            status: String::new(),
+        });
+    DemoMessage::activity(
+        fields.kind,
+        fields.title,
+        fields.summary,
+        fields.status,
+        Some(item_id),
+    )
 }
 
 fn find_message_mut<'a>(

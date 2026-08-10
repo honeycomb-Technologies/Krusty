@@ -383,6 +383,9 @@ pub struct TranscriptMessage {
     pub command: Option<CommandExecutionFields>,
     /// Populated when `role` is [`TranscriptRole::FileChange`].
     pub file_change: Option<FileChangeFields>,
+    /// Populated for every non-chat activity item so reopening a thread keeps
+    /// the same semantic block that was shown while the turn streamed.
+    pub activity: Option<ActivityFields>,
 }
 
 impl TranscriptMessage {
@@ -393,8 +396,18 @@ impl TranscriptMessage {
             item_id,
             command: None,
             file_change: None,
+            activity: None,
         }
     }
+}
+
+/// Compact, backend-neutral presentation fields for an app-server activity item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityFields {
+    pub kind: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,6 +557,7 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 item_id: id,
                 command: Some(fields),
                 file_change: None,
+                activity: None,
             })
         }
         "fileChange" => {
@@ -563,9 +577,189 @@ fn transcript_from_item(item: &Value) -> Option<TranscriptMessage> {
                 item_id: id,
                 command: None,
                 file_change: Some(fields),
+                activity: None,
             })
         }
-        _ => None,
+        _ => {
+            let activity = activity_item_fields(item);
+            Some(TranscriptMessage {
+                role: TranscriptRole::System,
+                body: activity.summary.clone(),
+                item_id: id,
+                command: None,
+                file_change: None,
+                activity: Some(activity),
+            })
+        }
+    }
+}
+
+/// Normalize every current or future non-chat ThreadItem into a bounded activity block.
+/// Rich renderers can specialize by `kind`; this fallback prevents protocol evolution
+/// from silently deleting durable thread history.
+pub fn activity_item_fields(item: &Value) -> ActivityFields {
+    let kind = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("activity")
+        .to_owned();
+    let status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    let (title, summary) = match kind.as_str() {
+        "mcpToolCall" => {
+            let server = value_string(item, "server");
+            let tool = value_string(item, "tool");
+            let label = join_nonempty(&[server.as_str(), tool.as_str()], " · ");
+            ("MCP tool".to_owned(), label)
+        }
+        "dynamicToolCall" => {
+            let namespace = value_string(item, "namespace");
+            let tool = value_string(item, "tool");
+            let label = join_nonempty(&[namespace.as_str(), tool.as_str()], " · ");
+            ("Tool call".to_owned(), label)
+        }
+        "webSearch" => ("Web search".to_owned(), value_string(item, "query")),
+        "imageGeneration" => {
+            let prompt = value_string(item, "revisedPrompt");
+            let saved = value_string(item, "savedPath");
+            (
+                "Image generation".to_owned(),
+                if prompt.is_empty() { saved } else { prompt },
+            )
+        }
+        "imageView" => ("Viewed image".to_owned(), value_string(item, "path")),
+        "collabAgentToolCall" => {
+            let tool = value_string(item, "tool");
+            let prompt = value_string(item, "prompt");
+            (
+                "Collaboration".to_owned(),
+                join_nonempty(&[tool.as_str(), prompt.as_str()], " · "),
+            )
+        }
+        "subAgentActivity" => {
+            let path = value_string(item, "agentPath");
+            let activity_kind = value_string(item, "kind");
+            (
+                "Subagent activity".to_owned(),
+                join_nonempty(&[path.as_str(), activity_kind.as_str()], " · "),
+            )
+        }
+        "contextCompaction" => (
+            "Context compacted".to_owned(),
+            "Conversation context was condensed for continuation.".to_owned(),
+        ),
+        "enteredReviewMode" => (
+            "Review started".to_owned(),
+            bounded_json_summary(item.get("review")),
+        ),
+        "exitedReviewMode" => (
+            "Review completed".to_owned(),
+            bounded_json_summary(item.get("review")),
+        ),
+        "hookPrompt" => (
+            "Hook".to_owned(),
+            collect_text_fragments(item.get("fragments")),
+        ),
+        "sleep" => {
+            let duration = item
+                .get("durationMs")
+                .and_then(Value::as_u64)
+                .map(format_duration_ms)
+                .unwrap_or_default();
+            ("Waiting".to_owned(), duration)
+        }
+        other => (humanize_item_kind(other), bounded_json_summary(Some(item))),
+    };
+
+    ActivityFields {
+        kind,
+        title,
+        summary: bound_text(summary, 2_000),
+        status,
+    }
+}
+
+fn value_string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn join_nonempty(parts: &[&str], separator: &str) -> String {
+    parts
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn collect_text_fragments(value: Option<&Value>) -> String {
+    let Some(parts) = value.and_then(Value::as_array) else {
+        return bounded_json_summary(value);
+    };
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            part.as_str()
+                .map(str::to_owned)
+                .or_else(|| part.get("text").and_then(Value::as_str).map(str::to_owned))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    bound_text(text, 2_000)
+}
+
+fn bounded_json_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(text) = value.as_str() {
+        return bound_text(text.to_owned(), 2_000);
+    }
+    bound_text(serde_json::to_string(value).unwrap_or_default(), 2_000)
+}
+
+fn bound_text(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut bounded = text.chars().take(max_chars).collect::<String>();
+    bounded.push('…');
+    bounded
+}
+
+fn humanize_item_kind(kind: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in kind.chars().enumerate() {
+        if index > 0 && ch.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        if index == 0 {
+            out.extend(ch.to_uppercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        "Activity".to_owned()
+    } else {
+        out
+    }
+}
+
+fn format_duration_ms(duration_ms: u64) -> String {
+    if duration_ms >= 1_000 {
+        let seconds = duration_ms as f64 / 1_000.0;
+        format!("Waiting for {seconds:.1} seconds")
+    } else {
+        format!("Waiting for {duration_ms} ms")
     }
 }
 
@@ -2232,6 +2426,72 @@ mod event_tests {
         assert!(fc.patch_preview.contains("fn main"));
         assert_eq!(fc.status, "completed");
         assert_eq!(msgs[4].role, TranscriptRole::Plan);
+    }
+
+    #[test]
+    fn every_current_thread_item_kind_is_typed_and_round_trips() {
+        let inventory = include_str!("../fixtures/thread-item-types.txt");
+        let kinds = inventory.lines().filter(|line| !line.is_empty());
+        for wire in kinds {
+            let kind = crate::types::ItemKind::from_type_str(wire);
+            assert!(
+                !matches!(kind, crate::types::ItemKind::Other(_)),
+                "current item kind must be typed: {wire}"
+            );
+            assert_eq!(kind.as_str(), wire);
+        }
+    }
+
+    #[test]
+    fn hydrated_transcript_preserves_non_chat_activity_items() {
+        let thread = serde_json::json!({
+            "turns": [{
+                "items": [
+                    {
+                        "type": "mcpToolCall",
+                        "id": "mcp-1",
+                        "server": "github",
+                        "tool": "search_issues",
+                        "status": "completed",
+                        "arguments": {}
+                    },
+                    {
+                        "type": "webSearch",
+                        "id": "search-1",
+                        "query": "Codex app-server protocol"
+                    },
+                    {
+                        "type": "subAgentActivity",
+                        "id": "agent-1",
+                        "agentPath": "/root/reviewer",
+                        "agentThreadId": "thread-2",
+                        "kind": "completed"
+                    },
+                    {
+                        "type": "futureItem",
+                        "id": "future-1",
+                        "status": "inProgress",
+                        "value": "kept"
+                    }
+                ]
+            }]
+        });
+
+        let messages = extract_transcript_from_thread(&thread);
+        assert_eq!(messages.len(), 4);
+        assert!(messages
+            .iter()
+            .all(|message| message.role == TranscriptRole::System));
+        assert_eq!(messages[0].activity.as_ref().unwrap().kind, "mcpToolCall");
+        assert_eq!(messages[0].activity.as_ref().unwrap().title, "MCP tool");
+        assert!(messages[0].body.contains("search_issues"));
+        assert_eq!(messages[1].activity.as_ref().unwrap().title, "Web search");
+        assert_eq!(
+            messages[2].activity.as_ref().unwrap().title,
+            "Subagent activity"
+        );
+        assert_eq!(messages[3].activity.as_ref().unwrap().kind, "futureItem");
+        assert!(messages[3].body.contains("kept"));
     }
 }
 

@@ -9,12 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    AgentError, BackendKind, BackendSessionId, CommandExecutionFields, DesktopBackend,
-    FileChangeFields, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
-    ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome, ModelListParams,
-    PluginListParams, Result, SessionDelegationProjection, SkillsListParams, ThreadDeleteParams,
-    ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams, TranscriptMessage,
-    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
+    ActivityFields, AgentError, BackendKind, BackendSessionId, CommandExecutionFields,
+    DesktopBackend, FileChangeFields, FsReadDirectoryParams, FsReadFileParams,
+    FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveTurnOutcome,
+    ModelListParams, PluginListParams, Result, SessionDelegationProjection, SkillsListParams,
+    ThreadDeleteParams, ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
+    TranscriptMessage, TranscriptRole, TurnInterruptParams, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,7 @@ pub struct ConversationMessage {
     pub item_id: Option<String>,
     pub command: Option<CommandExecutionFields>,
     pub file_change: Option<FileChangeFields>,
+    pub activity: Option<ActivityFields>,
 }
 
 fn conversation_message_from_transcript(message: TranscriptMessage) -> ConversationMessage {
@@ -64,6 +65,7 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
         item_id: message.item_id,
         command: message.command,
         file_change: message.file_change,
+        activity: message.activity,
     }
 }
 
@@ -703,6 +705,7 @@ mod tests {
             item_id: Some("item-7".to_owned()),
             command: Some(command.clone()),
             file_change: None,
+            activity: None,
         });
 
         assert_eq!(message.role, MessageRole::CommandExecution);

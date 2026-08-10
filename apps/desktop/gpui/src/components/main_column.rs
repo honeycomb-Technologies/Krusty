@@ -1067,8 +1067,120 @@ fn transcript_block(
                     .into_any_element()
             }
         }
+        DemoMessageKind::Activity {
+            kind,
+            title,
+            body,
+            status,
+        } => activity_block(index, kind, title, body, status, msg.streaming).into_any_element(),
         DemoMessageKind::Error { body } => error_block(index, body).into_any_element(),
     }
+}
+
+fn activity_block(
+    index: u64,
+    kind: &str,
+    title: &str,
+    body: &str,
+    status: &str,
+    streaming: bool,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let icon = match kind {
+        "mcpToolCall" | "dynamicToolCall" => "icons/puzzle.svg",
+        "webSearch" => "icons/globe.svg",
+        "imageGeneration" | "imageView" => "icons/eye.svg",
+        "collabAgentToolCall" | "subAgentActivity" => "icons/bot.svg",
+        "contextCompaction" => "icons/replace.svg",
+        "enteredReviewMode" | "exitedReviewMode" => "icons/eye.svg",
+        "hookPrompt" => "icons/anchor.svg",
+        "sleep" => "icons/clock.svg",
+        _ => "icons/asterisk.svg",
+    };
+    let normalized_status = status.to_ascii_lowercase();
+    let status_color = if normalized_status.contains("fail")
+        || normalized_status.contains("error")
+        || normalized_status.contains("declin")
+    {
+        colors.status_error
+    } else if normalized_status.contains("complete") || normalized_status.contains("success") {
+        colors.status_ready
+    } else {
+        colors.text_tertiary
+    };
+    let display_body = if body.is_empty() {
+        if streaming {
+            "Working…".to_owned()
+        } else {
+            "No additional details".to_owned()
+        }
+    } else {
+        body.to_owned()
+    };
+
+    div()
+        .id(("msg-activity", index))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(10.0))
+        .w_full()
+        .py(px(7.0))
+        .child(
+            div()
+                .w(px(26.0))
+                .h(px(26.0))
+                .rounded(px(7.0))
+                .bg(colors.bg_sidebar)
+                .border_1()
+                .border_color(colors.border_subtle)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::empty()
+                        .path(icon)
+                        .with_size(px(13.0))
+                        .text_color(colors.text_tertiary),
+                ),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text_secondary)
+                                .child(title.to_owned()),
+                        )
+                        .when(!status.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(status_color)
+                                    .child(status.to_owned()),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .whitespace_normal()
+                        .child(display_body),
+                ),
+        )
 }
 
 fn error_block(index: u64, body: &str) -> impl IntoElement {

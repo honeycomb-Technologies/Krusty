@@ -63,9 +63,14 @@ backend or are shown as unavailable.
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
-`BackendCapabilities`. A method name appearing in the 127-method Codex inventory
-does not make it implemented. Fixture `call_raw` no longer manufactures generic
-success payloads.
+`BackendCapabilities`. A method name appearing in the Codex inventory does not make it
+implemented. The committed `codex-cli 0.147.0` baseline contains 95 stable client
+methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 server
+requests in the stable contract (11 with experimental APIs), and 18 thread item
+variants. The desktop automatically answers the experimental `currentTime/read` server
+request and negotiates experimental APIs because its process, environment, realtime,
+and background-terminal surfaces require them. Fixture `call_raw` no longer
+manufactures generic success payloads.
 
 ## Established recovery baseline
 
@@ -73,6 +78,9 @@ success payloads.
   `/home/.../vendor/gpui` patch.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events.
+- Reopened and live Codex transcripts preserve every current thread item type. Tool,
+  search, image, collaboration, review-mode, compaction, hook, and sleep items render as
+  real activity rows; unknown future variants remain visible rather than disappearing.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
@@ -105,6 +113,7 @@ cargo check -p mitsuro-desktop-backend
 cargo test -p mitsuro-client -p mitsuro-desktop-backend
 cargo check -p mitsuro-gpui-desktop
 cargo test -p mitsuro-gpui-desktop
+scripts/gpui-codex-protocol-check.sh
 
 # Read-only check against a running local Mitsuro server
 MITSURO_RUN_SERVER_IT=1 cargo test -p mitsuro-desktop-backend \

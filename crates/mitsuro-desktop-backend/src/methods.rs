@@ -1,7 +1,10 @@
 //! Canonical registry of Codex app-server **client** methods.
 //!
-//! Source inventory: `fixtures/client-methods.txt` (keep in sync with the
-//! supported Codex app-server protocol; inventory is not implementation proof).
+//! Source inventory: generated from the Codex CLI named in
+//! `fixtures/codex-protocol-version.txt`. `fixtures/client-methods.txt` is the
+//! complete stable + experimental surface, while `stable-client-methods.txt`
+//! records the methods available without `experimentalApi` negotiation.
+//! Inventory is not implementation proof.
 //! Universal RPC entry point: [`crate::backend::AgentBackend::call_raw`].
 
 /// All known client JSON-RPC methods from the protocol bar.
@@ -71,6 +74,7 @@ pub const CLIENT_METHODS: &[&str] = &[
     "plugin/installed",
     "plugin/list",
     "plugin/read",
+    "plugin/search",
     "plugin/share/checkout",
     "plugin/share/delete",
     "plugin/share/list",
@@ -124,12 +128,17 @@ pub const CLIENT_METHODS: &[&str] = &[
     "thread/rollback",
     "thread/search",
     "thread/searchOccurrences",
+    "thread/section/move",
     "thread/settings/update",
     "thread/shellCommand",
     "thread/start",
     "thread/turns/list",
     "thread/unarchive",
     "thread/unsubscribe",
+    "threadSection/create",
+    "threadSection/delete",
+    "threadSection/list",
+    "threadSection/update",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -140,14 +149,40 @@ pub const CLIENT_METHODS: &[&str] = &[
 /// Number of registered client methods (convenience for tests / UI).
 pub const CLIENT_METHOD_COUNT: usize = CLIENT_METHODS.len();
 
+/// Current methods available without `initialize.capabilities.experimentalApi`.
+pub const STABLE_CLIENT_METHODS_TEXT: &str = include_str!("../fixtures/stable-client-methods.txt");
+
+/// Number of methods in the generated stable app-server contract.
+pub const STABLE_CLIENT_METHOD_COUNT: usize = 95;
+
+/// Number of additional methods exposed after experimental API negotiation.
+pub const EXPERIMENTAL_ONLY_CLIENT_METHOD_COUNT: usize =
+    CLIENT_METHOD_COUNT - STABLE_CLIENT_METHOD_COUNT;
+
 /// Returns `true` if `m` is in [`CLIENT_METHODS`].
 pub fn is_known_client_method(m: &str) -> bool {
     CLIENT_METHODS.binary_search(&m).is_ok() || CLIENT_METHODS.contains(&m)
 }
 
+/// Returns true when `method` is part of the generated stable contract.
+pub fn is_stable_client_method(method: &str) -> bool {
+    STABLE_CLIENT_METHODS_TEXT
+        .lines()
+        .any(|candidate| candidate == method)
+}
+
+/// Returns true when a known method requires experimental API negotiation.
+pub fn requires_experimental_api(method: &str) -> bool {
+    is_known_client_method(method) && !is_stable_client_method(method)
+}
+
 /// Path to the maintained protocol method inventory.
 pub fn client_methods_txt_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/client-methods.txt")
+}
+
+pub fn stable_client_methods_txt_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/stable-client-methods.txt")
 }
 
 /// Load method names from `client-methods.txt` on disk (for parity tests).
@@ -158,6 +193,16 @@ pub fn load_client_methods_from_bar() -> std::io::Result<Vec<String>> {
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn load_stable_client_methods_from_bar() -> std::io::Result<Vec<String>> {
+    let text = std::fs::read_to_string(stable_client_methods_txt_path())?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .collect())
 }
@@ -176,7 +221,10 @@ mod tests {
             CLIENT_METHODS.len(),
             disk.len()
         );
-        assert_eq!(CLIENT_METHOD_COUNT, 127, "bar documents 127 client methods");
+        assert_eq!(
+            CLIENT_METHOD_COUNT, 133,
+            "Codex 0.147.0 experimental schema documents 133 client methods"
+        );
         for (i, (reg, file)) in CLIENT_METHODS.iter().zip(disk.iter()).enumerate() {
             assert_eq!(
                 *reg,
@@ -192,5 +240,25 @@ mod tests {
         assert!(is_known_client_method("initialize"));
         assert!(is_known_client_method("thread/list"));
         assert!(is_known_client_method("process/spawn"));
+    }
+
+    #[test]
+    fn stable_and_experimental_methods_are_classified_from_generated_inventory() {
+        let stable =
+            load_stable_client_methods_from_bar().expect("stable-client-methods.txt readable");
+        assert_eq!(stable.len(), STABLE_CLIENT_METHOD_COUNT);
+        assert_eq!(EXPERIMENTAL_ONLY_CLIENT_METHOD_COUNT, 38);
+        assert!(is_stable_client_method("thread/section/move"));
+        assert!(!requires_experimental_api("thread/section/move"));
+        assert!(requires_experimental_api("process/spawn"));
+        assert!(requires_experimental_api("thread/realtime/start"));
+        assert!(!requires_experimental_api("not/a/real/method"));
+        for method in stable {
+            assert!(
+                is_known_client_method(&method),
+                "stable method missing: {method}"
+            );
+            assert!(is_stable_client_method(&method));
+        }
     }
 }
