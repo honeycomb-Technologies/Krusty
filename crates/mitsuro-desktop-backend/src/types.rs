@@ -677,6 +677,12 @@ pub enum TurnStreamEvent {
     },
     /// Server→client approval request (exec / patch). Stream may pause until answered.
     ApprovalRequested(PendingApproval),
+    /// Server→client structured user question. A blocking request pauses the turn.
+    UserInputRequested(crate::server_requests::PendingUserInput),
+    /// MCP server elicitation requiring an accept/decline/cancel response.
+    McpElicitationRequested(crate::server_requests::PendingMcpElicitation),
+    /// Known non-transcript notification normalized into an explicit lifecycle event.
+    Lifecycle(crate::notifications::LifecycleNotification),
     /// Streaming stdout/stderr chunk for a standalone `process/spawn` session.
     ProcessOutputDelta {
         process_handle: String,
@@ -729,6 +735,9 @@ impl TurnStreamEvent {
             Self::FileChangeOutputDelta { .. } => "item/fileChange/outputDelta",
             Self::FileChangePatchUpdated { .. } => "item/fileChange/patchUpdated",
             Self::ApprovalRequested(p) => p.method.as_str(),
+            Self::UserInputRequested(_) => "item/tool/requestUserInput",
+            Self::McpElicitationRequested(_) => "mcpServer/elicitation/request",
+            Self::Lifecycle(event) => event.method.as_str(),
             Self::ProcessOutputDelta { .. } => "process/outputDelta",
             Self::ProcessExited { .. } => "process/exited",
             Self::DelegatedProgress { .. } => "mitsuro/delegated_progress",
@@ -753,6 +762,9 @@ impl TurnStreamEvent {
             | Self::DelegatedProgress { thread_id, .. }
             | Self::DelegationEvent { thread_id, .. } => Some(thread_id.as_str()),
             Self::ApprovalRequested(p) => p.thread_id.as_deref(),
+            Self::UserInputRequested(p) => Some(p.thread_id.as_str()),
+            Self::McpElicitationRequested(p) => Some(p.thread_id.as_str()),
+            Self::Lifecycle(event) => event.thread_id.as_deref(),
             Self::ProcessOutputDelta { .. } | Self::ProcessExited { .. } | Self::Other { .. } => {
                 None
             }
@@ -770,6 +782,15 @@ impl TurnStreamEvent {
 
     pub fn is_approval(&self) -> bool {
         matches!(self, Self::ApprovalRequested(_))
+    }
+
+    pub fn is_interactive_request(&self) -> bool {
+        matches!(
+            self,
+            Self::ApprovalRequested(_)
+                | Self::UserInputRequested(_)
+                | Self::McpElicitationRequested(_)
+        )
     }
 }
 

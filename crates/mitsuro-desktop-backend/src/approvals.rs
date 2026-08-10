@@ -3,6 +3,7 @@
 //! Matches Codex app-server `ServerRequest` methods:
 //! - Legacy: `execCommandApproval`, `applyPatchApproval`
 //! - Turn-start: `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`
+//! - Additional sandbox access: `item/permissions/requestApproval`
 //!
 //! Shapes are modeled from the Codex app-server approval protocol.
 
@@ -20,6 +21,7 @@ pub const EXEC_COMMAND_APPROVAL: &str = "execCommandApproval";
 pub const APPLY_PATCH_APPROVAL: &str = "applyPatchApproval";
 pub const ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL: &str = "item/commandExecution/requestApproval";
 pub const ITEM_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
+pub const ITEM_PERMISSIONS_REQUEST_APPROVAL: &str = "item/permissions/requestApproval";
 
 /// Returns true when `method` is an approval server-request the client must answer.
 pub fn is_approval_method(method: &str) -> bool {
@@ -29,6 +31,7 @@ pub fn is_approval_method(method: &str) -> bool {
             | APPLY_PATCH_APPROVAL
             | ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL
             | ITEM_FILE_CHANGE_REQUEST_APPROVAL
+            | ITEM_PERMISSIONS_REQUEST_APPROVAL
     )
 }
 
@@ -48,6 +51,8 @@ pub enum ApprovalKind {
     CommandExecution,
     /// `item/fileChange/requestApproval` (FileChangeApprovalDecision).
     FileChange,
+    /// `item/permissions/requestApproval` (exact requested permission profile).
+    Permissions,
 }
 
 impl ApprovalKind {
@@ -57,6 +62,7 @@ impl ApprovalKind {
             APPLY_PATCH_APPROVAL => Some(Self::ApplyPatch),
             ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL => Some(Self::CommandExecution),
             ITEM_FILE_CHANGE_REQUEST_APPROVAL => Some(Self::FileChange),
+            ITEM_PERMISSIONS_REQUEST_APPROVAL => Some(Self::Permissions),
             _ => None,
         }
     }
@@ -67,6 +73,7 @@ impl ApprovalKind {
             Self::ApplyPatch => APPLY_PATCH_APPROVAL,
             Self::CommandExecution => ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
             Self::FileChange => ITEM_FILE_CHANGE_REQUEST_APPROVAL,
+            Self::Permissions => ITEM_PERMISSIONS_REQUEST_APPROVAL,
         }
     }
 
@@ -74,6 +81,7 @@ impl ApprovalKind {
         match self {
             Self::ExecCommand | Self::CommandExecution => "Approve command",
             Self::ApplyPatch | Self::FileChange => "Approve file changes",
+            Self::Permissions => "Approve additional permissions",
         }
     }
 
@@ -81,6 +89,27 @@ impl ApprovalKind {
     pub fn uses_review_decision(self) -> bool {
         matches!(self, Self::ExecCommand | Self::ApplyPatch)
     }
+}
+
+/// Params for `item/permissions/requestApproval`.
+///
+/// `permissions` stays as JSON because the protocol's filesystem/network
+/// profile is intentionally extensible. Approval echoes this exact server
+/// request; the desktop never invents broader permissions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsRequestApprovalParams {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub started_at_ms: i64,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    pub permissions: Value,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub environment_id: Option<String>,
 }
 
 /// Normalized pending approval for UI + response correlation.
@@ -410,7 +439,29 @@ pub fn build_approval_result(kind: ApprovalKind, choice: ApprovalChoice) -> Valu
             serde_json::to_value(ApprovalDecisionResponse { decision })
                 .expect("FileChange response serializes")
         }
+        // This compatibility helper does not have the pending request payload.
+        // The live response path uses `build_pending_approval_result` below.
+        ApprovalKind::Permissions => json!({ "permissions": {}, "scope": "turn" }),
     }
+}
+
+/// Build a response using the pending request payload when the schema requires
+/// it (notably permission grants).
+pub fn build_pending_approval_result(pending: &PendingApproval, choice: ApprovalChoice) -> Value {
+    if pending.kind != ApprovalKind::Permissions {
+        return build_approval_result(pending.kind, choice);
+    }
+
+    let permissions = if matches!(choice, ApprovalChoice::Approve) {
+        pending
+            .raw_params
+            .get("permissions")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    json!({ "permissions": permissions, "scope": "turn" })
 }
 
 /// Full JSON-RPC response line body (object, not yet newline-terminated).
@@ -559,6 +610,38 @@ pub fn parse_approval_request(
             }
             (summary, detail, thread_id, turn_id)
         }
+        ApprovalKind::Permissions => {
+            let parsed: PermissionsRequestApprovalParams =
+                serde_json::from_value(p.clone()).ok()?;
+            let mut requested = Vec::new();
+            if parsed.permissions.get("fileSystem").is_some() {
+                requested.push("filesystem");
+            }
+            if parsed.permissions.get("network").is_some() {
+                requested.push("network");
+            }
+            let summary = if requested.is_empty() {
+                "additional sandbox access".to_owned()
+            } else {
+                requested.join(" and ")
+            };
+            let mut details = Vec::new();
+            if let Some(cwd) = parsed.cwd.filter(|value| !value.is_empty()) {
+                details.push(format!("cwd: {cwd}"));
+            }
+            if let Some(reason) = parsed.reason.filter(|value| !value.is_empty()) {
+                details.push(reason);
+            }
+            if let Some(environment_id) = parsed.environment_id.filter(|value| !value.is_empty()) {
+                details.push(format!("environment: {environment_id}"));
+            }
+            (
+                summary,
+                details.join("\n"),
+                Some(parsed.thread_id),
+                Some(parsed.turn_id),
+            )
+        }
     };
 
     Some(PendingApproval {
@@ -637,6 +720,7 @@ mod tests {
         assert!(is_approval_method(APPLY_PATCH_APPROVAL));
         assert!(is_approval_method(ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL));
         assert!(is_approval_method(ITEM_FILE_CHANGE_REQUEST_APPROVAL));
+        assert!(is_approval_method(ITEM_PERMISSIONS_REQUEST_APPROVAL));
         assert!(!is_approval_method("turn/started"));
         assert!(!is_approval_method("item/tool/call"));
     }
@@ -728,6 +812,35 @@ mod tests {
         assert_eq!(file_accept["decision"], json!("accept"));
         let file_decline = build_approval_result(ApprovalKind::FileChange, ApprovalChoice::Reject);
         assert_eq!(file_decline["decision"], json!("decline"));
+    }
+
+    #[test]
+    fn permission_approval_echoes_only_the_requested_profile() {
+        let params = json!({
+            "threadId": "t1",
+            "turnId": "u1",
+            "itemId": "i1",
+            "startedAtMs": 10,
+            "cwd": "/repo",
+            "permissions": {
+                "fileSystem": { "read": ["/repo/data"] },
+                "network": { "enabled": true }
+            },
+            "reason": "read inputs"
+        });
+        let pending = parse_approval_request(
+            JsonRpcId::Number(12),
+            ITEM_PERMISSIONS_REQUEST_APPROVAL,
+            Some(&params),
+        )
+        .expect("permission approval");
+        assert_eq!(pending.kind, ApprovalKind::Permissions);
+        assert_eq!(pending.summary, "filesystem and network");
+        let approved = build_pending_approval_result(&pending, ApprovalChoice::Approve);
+        assert_eq!(approved["permissions"], params["permissions"]);
+        assert_eq!(approved["scope"], "turn");
+        let rejected = build_pending_approval_result(&pending, ApprovalChoice::Reject);
+        assert_eq!(rejected["permissions"], json!({}));
     }
 
     #[test]

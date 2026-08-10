@@ -20,7 +20,7 @@ use crate::account::{
     GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageResponse,
     LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
 };
-use crate::approvals::{build_approval_result, ApprovalChoice, PendingApproval};
+use crate::approvals::{ApprovalChoice, PendingApproval};
 use crate::backend::AgentBackend;
 use crate::environment::{
     CollaborationModeListParams, CollaborationModeListResponse, EnvironmentAddParams,
@@ -56,6 +56,7 @@ use crate::protocol::{
     ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
     TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
+use crate::server_requests::{automatic_server_response, AutomaticServerResponse};
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -110,6 +111,11 @@ impl Default for CodexAppServerConfig {
                 // explicitly instead of advertising controls that the default
                 // handshake then rejects.
                 experimental_api: Some(true),
+                // We do not currently register client-owned extensions or
+                // OpenAI form elicitations, and never request attestation.
+                extensions: None,
+                mcp_server_openai_form_elicitation: Some(false),
+                request_attestation: Some(false),
                 ..Default::default()
             }),
         }
@@ -277,13 +283,28 @@ impl CodexAppServerBackend {
         self.write_line(&line).await
     }
 
+    /// Answer a server-originated JSON-RPC request with an explicit error.
+    pub async fn respond_to_server_request_error(
+        &self,
+        id: JsonRpcId,
+        error: crate::protocol::JsonRpcErrorBody,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": error,
+        });
+        let line = serde_json::to_string(&body)? + "\n";
+        self.write_line(&line).await
+    }
+
     /// Approve or deny a pending approval (exec / patch) by writing the protocol response.
     pub async fn respond_approval(
         &self,
         pending: &PendingApproval,
         choice: ApprovalChoice,
     ) -> Result<()> {
-        let result = build_approval_result(pending.kind, choice);
+        let result = crate::approvals::build_pending_approval_result(pending, choice);
         self.respond_to_server_request(pending.request_id.clone(), result)
             .await
     }
@@ -621,27 +642,29 @@ impl CodexAppServerBackend {
                 let _ = inner.notify_tx.send(n);
             }
             JsonRpcMessage::ServerRequest { id, method, params } => {
-                if method == "currentTime/read" {
-                    // The experimental protocol asks the client-owned wall clock
-                    // for whole Unix seconds. Answer in the pump so a model turn
-                    // cannot stall while waiting for UI event handling.
-                    let current_time_at = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let response = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": { "currentTimeAt": current_time_at },
-                    });
+                // Non-interactive client requests are answered in the pump. A
+                // turn must not depend on the UI event loop to make progress.
+                let current_time_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if let Some(automatic) = automatic_server_response(&method, current_time_at) {
+                    let response = match automatic {
+                        AutomaticServerResponse::Result(result) => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "result": result,
+                        }),
+                        AutomaticServerResponse::Error(error) => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "error": error,
+                        }),
+                    };
                     match serde_json::to_string(&response) {
                         Ok(mut line) => {
                             line.push('\n');
                             if let Err(error) = Self::write_line_inner(inner, &line).await {
-                                warn!("failed to answer currentTime/read: {error}");
+                                warn!(method, "failed to answer server request: {error}");
                             }
                         }
-                        Err(error) => warn!("failed to encode currentTime/read response: {error}"),
+                        Err(error) => warn!(method, "failed to encode server response: {error}"),
                     }
                     return;
                 }
@@ -1233,6 +1256,43 @@ mod tests {
         let value: Value = serde_json::from_str(line.trim()).expect("valid JSON-RPC response");
         assert_eq!(value["id"], "clock-1");
         assert!(value["result"]["currentTimeAt"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn unsupported_client_owned_requests_cannot_stall_the_turn() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect_with_mock_writer(client_writer).await;
+
+        backend
+            .inject_stdout_line(
+                r#"{"id":"tool-1","method":"item/tool/call","params":{"tool":"missing"}}"#,
+            )
+            .await;
+        backend
+            .inject_stdout_line(
+                r#"{"id":"auth-1","method":"account/chatgptAuthTokens/refresh","params":{"reason":"unauthorized"}}"#,
+            )
+            .await;
+
+        let mut reader = BufReader::new(&mut server_reader);
+        let mut tool_line = String::new();
+        let mut auth_line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut tool_line))
+            .await
+            .expect("dynamic tool response timeout")
+            .expect("dynamic tool response readable");
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut auth_line))
+            .await
+            .expect("auth response timeout")
+            .expect("auth response readable");
+
+        let tool: Value = serde_json::from_str(tool_line.trim()).unwrap();
+        assert_eq!(tool["id"], "tool-1");
+        assert_eq!(tool["result"]["success"], false);
+        let auth: Value = serde_json::from_str(auth_line.trim()).unwrap();
+        assert_eq!(auth["id"], "auth-1");
+        assert_eq!(auth["error"]["code"], -32601);
     }
 
     #[tokio::test]

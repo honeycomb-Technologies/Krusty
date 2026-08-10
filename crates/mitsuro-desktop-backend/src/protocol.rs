@@ -59,7 +59,7 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcErrorBody>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct JsonRpcErrorBody {
     pub code: i64,
     pub message: String,
@@ -159,6 +159,8 @@ pub struct ClientInfo {
 pub struct InitializeCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experimental_api: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_openai_form_elicitation: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1800,6 +1802,16 @@ pub fn map_server_request_to_event(
     if let Some(pending) = crate::approvals::parse_approval_request(id.clone(), method, params) {
         return TurnStreamEvent::ApprovalRequested(pending);
     }
+    if let Some(pending) =
+        crate::server_requests::parse_user_input_request(id.clone(), method, params)
+    {
+        return TurnStreamEvent::UserInputRequested(pending);
+    }
+    if let Some(pending) =
+        crate::server_requests::parse_mcp_elicitation_request(id.clone(), method, params)
+    {
+        return TurnStreamEvent::McpElicitationRequested(pending);
+    }
     // Non-approval server requests still surface for forward-compat.
     TurnStreamEvent::Other {
         method: method.to_string(),
@@ -1818,6 +1830,18 @@ pub fn map_notification_to_event(method: &str, params: Option<&Value>) -> TurnSt
         crate::approvals::pending_from_server_request_notification(method, params)
     {
         return TurnStreamEvent::ApprovalRequested(pending);
+    }
+
+    if let Some(real_method) = method.strip_prefix("serverRequest/") {
+        if let Some(wrapper) = params {
+            if let Some(id) = wrapper
+                .get("id")
+                .cloned()
+                .and_then(|id| serde_json::from_value(id).ok())
+            {
+                return map_server_request_to_event(id, real_method, wrapper.get("params"));
+            }
+        }
     }
 
     let p = params.cloned().unwrap_or(Value::Null);
@@ -1956,10 +1980,14 @@ pub fn map_notification_to_event(method: &str, params: Option<&Value>) -> TurnSt
                 stderr_cap_reached,
             }
         }
-        other => TurnStreamEvent::Other {
+        other => crate::notifications::known_notification_event(
+            other,
+            if p.is_null() { None } else { Some(&p) },
+        )
+        .unwrap_or_else(|| TurnStreamEvent::Other {
             method: other.to_string(),
             params: if p.is_null() { None } else { Some(p) },
-        },
+        }),
     }
 }
 

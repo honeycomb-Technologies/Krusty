@@ -12,9 +12,11 @@ pub mod fs;
 pub mod live_turn;
 pub mod methods;
 pub mod mitsuro;
+pub mod notifications;
 pub mod process;
 pub mod product;
 pub mod protocol;
+pub mod server_requests;
 pub mod types;
 
 pub use account::{
@@ -29,12 +31,14 @@ pub use account::{
     FIXTURE_LOGIN_VERIFICATION_URL,
 };
 pub use approvals::{
-    build_approval_result, build_approval_rpc_response, is_approval_method, parse_approval_request,
-    ApplyPatchApprovalParams, ApprovalChoice, ApprovalKind, CommandExecutionApprovalDecision,
-    CommandExecutionRequestApprovalParams, ExecCommandApprovalParams, FileChange,
-    FileChangeApprovalDecision, FileChangeRequestApprovalParams, PendingApproval, ReviewDecision,
-    ReviewDecisionResponse, APPLY_PATCH_APPROVAL, EXEC_COMMAND_APPROVAL,
+    build_approval_result, build_approval_rpc_response, build_pending_approval_result,
+    is_approval_method, parse_approval_request, ApplyPatchApprovalParams, ApprovalChoice,
+    ApprovalKind, CommandExecutionApprovalDecision, CommandExecutionRequestApprovalParams,
+    ExecCommandApprovalParams, FileChange, FileChangeApprovalDecision,
+    FileChangeRequestApprovalParams, PendingApproval, PermissionsRequestApprovalParams,
+    ReviewDecision, ReviewDecisionResponse, APPLY_PATCH_APPROVAL, EXEC_COMMAND_APPROVAL,
     ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL, ITEM_FILE_CHANGE_REQUEST_APPROVAL,
+    ITEM_PERMISSIONS_REQUEST_APPROVAL,
 };
 pub use backend::AgentBackend;
 pub use codex::{
@@ -87,6 +91,10 @@ pub use methods::{
     EXPERIMENTAL_ONLY_CLIENT_METHOD_COUNT, STABLE_CLIENT_METHODS_TEXT, STABLE_CLIENT_METHOD_COUNT,
 };
 pub use mitsuro::MitsuroServerBackend;
+pub use notifications::{
+    is_known_server_notification, known_notification_event, server_notification_methods,
+    LifecycleNotification, NotificationFamily, NotificationSeverity, SERVER_NOTIFICATIONS_TEXT,
+};
 pub use process::{
     decode_base64, decode_base64_lossy, encode_base64, parse_process_exited,
     parse_process_output_delta, ProcessKillParams, ProcessKillResponse, ProcessOutputStream,
@@ -117,6 +125,13 @@ pub use protocol::{
     ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadSummary,
     ThreadUnarchiveParams, ThreadUnarchiveResponse, TranscriptMessage, TranscriptRole,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+};
+pub use server_requests::{
+    automatic_server_response, is_known_server_request, parse_mcp_elicitation_request,
+    parse_user_input_request, AutomaticServerResponse, McpElicitationMode, PendingMcpElicitation,
+    PendingUserInput, ToolRequestUserInputParams, UserInputOption, UserInputQuestion,
+    ATTESTATION_GENERATE, CHATGPT_AUTH_TOKENS_REFRESH, CURRENT_TIME_READ, DYNAMIC_TOOL_CALL,
+    MCP_SERVER_ELICITATION_REQUEST, SERVER_REQUEST_METHODS, TOOL_REQUEST_USER_INPUT,
 };
 pub use types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,

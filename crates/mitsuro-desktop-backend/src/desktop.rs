@@ -243,6 +243,21 @@ impl DesktopBackend {
         }
     }
 
+    /// Answer an interactive Codex server request. Mitsuro HTTP interactions
+    /// use their own typed endpoints and never carry JSON-RPC ids.
+    pub async fn respond_to_server_request(
+        &self,
+        id: crate::JsonRpcId,
+        result: serde_json::Value,
+    ) -> Result<()> {
+        match self {
+            Self::Codex(backend) => backend.respond_to_server_request(id, result).await,
+            Self::Mitsuro(_) => Err(AgentError::Protocol(
+                "Mitsuro HTTP does not expose Codex JSON-RPC server requests".to_owned(),
+            )),
+        }
+    }
+
     pub fn run_turn_with_bridge_blocking(
         &self,
         params: TurnStartParams,

@@ -175,6 +175,9 @@ fn thread_main(
     let calm = app.is_calm_stage();
     // Open-thread chrome whenever a recent is selected (not calm home).
     let show_title = thread.is_some();
+    let request_input = app.server_request_input(false).clone();
+    let request_secret_input = app.server_request_input(true).clone();
+    let current_mcp_form_field = app.current_mcp_form_field();
 
     div()
         .relative()
@@ -231,6 +234,32 @@ fn thread_main(
                         .when_some(app.pending_approval().cloned(), |this, pending| {
                             this.child(approval_bar::approval_bar(&pending, cx))
                         })
+                        .when_some(
+                            app.pending_user_input()
+                                .map(|(pending, index)| (pending.clone(), index)),
+                            |this, (pending, index)| {
+                                this.child(super::server_request_bar::user_input_bar(
+                                    &pending,
+                                    index,
+                                    &request_input,
+                                    &request_secret_input,
+                                    cx,
+                                ))
+                            },
+                        )
+                        .when_some(
+                            app.pending_mcp_elicitation()
+                                .map(|(pending, index)| (pending.clone(), index)),
+                            |this, (pending, index)| {
+                                this.child(super::server_request_bar::mcp_elicitation_bar(
+                                    &pending,
+                                    index,
+                                    current_mcp_form_field.clone(),
+                                    &request_input,
+                                    cx,
+                                ))
+                            },
+                        )
                         .child(composer::composer(app, composer_input, cx)),
                 ),
         )

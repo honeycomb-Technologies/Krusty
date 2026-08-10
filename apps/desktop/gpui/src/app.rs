@@ -1,5 +1,6 @@
 //! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,16 +24,17 @@ use mitsuro_desktop_backend::{
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
     ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams, PendingApproval,
-    PlanType, PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface,
-    PluginListParams, PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductBackend, ProductExtension, ProductFileMatch,
-    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductSchedule,
-    ProductSkill, ProductTurn, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
-    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo, ModelListParams,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginAuthPolicy,
+    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
+    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
+    TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 #[cfg(not(feature = "browser-native"))]
@@ -931,6 +933,16 @@ pub struct MitsuroApp {
     dismiss_usage_card: bool,
     /// Active server approval request (exec / patch) awaiting user decision.
     pending_approval: Option<PendingApproval>,
+    /// Active structured request_user_input interaction.
+    pending_user_input: Option<PendingUserInput>,
+    user_input_question_index: usize,
+    user_input_answers: BTreeMap<String, Vec<String>>,
+    server_request_input: Entity<InputState>,
+    server_request_secret_input: Entity<InputState>,
+    /// Active MCP elicitation. Standard form fields are answered sequentially.
+    pending_mcp_elicitation: Option<PendingMcpElicitation>,
+    mcp_form_field_index: usize,
+    mcp_form_values: BTreeMap<String, serde_json::Value>,
     /// Remaining fixture events after stream paused on an approval.
     fixture_resume: Option<(String, Vec<TurnStreamEvent>)>,
     /// Live progressive turn: UI submits choice here; runner writes respond_approval.
@@ -1066,6 +1078,13 @@ impl MitsuroApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Fuzzy search file names…"));
         let settings_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        let server_request_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
+        let server_request_secret_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type a private answer…")
+                .masked(true)
+        });
         cx.subscribe_in(
             &files_path_input,
             window,
@@ -1128,6 +1147,14 @@ impl MitsuroApp {
             mode_menu_open: false,
             thread_menu_open: false,
             dismiss_usage_card: false,
+            pending_user_input: None,
+            user_input_question_index: 0,
+            user_input_answers: BTreeMap::new(),
+            server_request_input,
+            server_request_secret_input,
+            pending_mcp_elicitation: None,
+            mcp_form_field_index: 0,
+            mcp_form_values: BTreeMap::new(),
             active_mode: parse_start_mode().unwrap_or(ProductMode::Codex),
             settings_section: SettingsSection::General,
             settings_return_mode: ProductMode::Codex,
@@ -3851,6 +3878,321 @@ impl MitsuroApp {
         self.pending_approval.as_ref()
     }
 
+    pub fn pending_user_input(&self) -> Option<(&PendingUserInput, usize)> {
+        self.pending_user_input
+            .as_ref()
+            .map(|pending| (pending, self.user_input_question_index))
+    }
+
+    pub fn pending_mcp_elicitation(&self) -> Option<(&PendingMcpElicitation, usize)> {
+        self.pending_mcp_elicitation
+            .as_ref()
+            .map(|pending| (pending, self.mcp_form_field_index))
+    }
+
+    pub fn server_request_input(&self, secret: bool) -> &Entity<InputState> {
+        if secret {
+            &self.server_request_secret_input
+        } else {
+            &self.server_request_input
+        }
+    }
+
+    fn clear_server_request_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_request_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.server_request_secret_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+    }
+
+    fn send_codex_server_response(
+        &mut self,
+        request_id: mitsuro_desktop_backend::JsonRpcId,
+        result: serde_json::Value,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.backend.clone() else {
+            self.status_line = "Server response unavailable: no live backend.".into();
+            cx.notify();
+            return;
+        };
+        self.status_line = format!("{label} · sending…").into();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    let response_backend = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        response_backend
+                            .respond_to_server_request(request_id, result)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.status_line = match outcome {
+                    Ok(()) => format!("{label} · sent").into(),
+                    Err(error) => format!("{label} failed · {error}").into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn answer_user_input_option(
+        &mut self,
+        answer: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.advance_user_input(vec![answer], window, cx);
+    }
+
+    pub fn submit_user_input_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let secret = self
+            .pending_user_input()
+            .and_then(|(pending, index)| pending.questions.get(index))
+            .is_some_and(|question| question.is_secret);
+        let answer = self
+            .server_request_input(secret)
+            .read(cx)
+            .value()
+            .to_string();
+        self.advance_user_input(vec![answer], window, cx);
+    }
+
+    fn advance_user_input(
+        &mut self,
+        answers: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((question_id, question_count)) =
+            self.pending_user_input.as_ref().and_then(|pending| {
+                pending
+                    .questions
+                    .get(self.user_input_question_index)
+                    .map(|question| (question.id.clone(), pending.questions.len()))
+            })
+        else {
+            return;
+        };
+        self.user_input_answers.insert(question_id, answers);
+        self.clear_server_request_inputs(window, cx);
+        if self.user_input_question_index + 1 < question_count {
+            self.user_input_question_index += 1;
+            self.status_line = format!(
+                "Input requested · question {} of {}",
+                self.user_input_question_index + 1,
+                question_count
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+        let pending = self.pending_user_input.take().expect("pending checked");
+        self.user_input_question_index = 0;
+        let answers = std::mem::take(&mut self.user_input_answers);
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingUserInput::response(answers),
+            "User input".to_owned(),
+            cx,
+        );
+    }
+
+    pub fn decline_user_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_user_input.take() else {
+            return;
+        };
+        self.clear_server_request_inputs(window, cx);
+        self.user_input_question_index = 0;
+        self.user_input_answers.clear();
+        let answers = pending
+            .questions
+            .iter()
+            .map(|question| (question.id.clone(), Vec::new()))
+            .collect();
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingUserInput::response(answers),
+            "User input declined".to_owned(),
+            cx,
+        );
+    }
+
+    fn mcp_form_fields(pending: &PendingMcpElicitation) -> Vec<(String, serde_json::Value)> {
+        let schema = match &pending.mode {
+            McpElicitationMode::Form { requested_schema }
+            | McpElicitationMode::OpenAiForm { requested_schema } => requested_schema,
+            McpElicitationMode::Url { .. } => return Vec::new(),
+        };
+        schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(name, schema)| (name.clone(), schema.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn current_mcp_form_field(&self) -> Option<(String, serde_json::Value, usize)> {
+        let pending = self.pending_mcp_elicitation.as_ref()?;
+        let fields = Self::mcp_form_fields(pending);
+        fields
+            .get(self.mcp_form_field_index)
+            .cloned()
+            .map(|(name, schema)| (name, schema, fields.len()))
+    }
+
+    pub fn answer_mcp_form_option(
+        &mut self,
+        value: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.advance_mcp_form(value, window, cx);
+    }
+
+    pub fn submit_mcp_form_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, schema, _)) = self.current_mcp_form_field() else {
+            return;
+        };
+        let raw = self
+            .server_request_input(false)
+            .read(cx)
+            .value()
+            .to_string();
+        let value: Result<serde_json::Value, ()> =
+            match schema.get("type").and_then(serde_json::Value::as_str) {
+                Some("integer") => raw
+                    .parse::<i64>()
+                    .map(serde_json::Value::from)
+                    .map_err(|_| ()),
+                Some("number") => raw
+                    .parse::<f64>()
+                    .map(serde_json::Value::from)
+                    .map_err(|_| ()),
+                Some("boolean") => raw
+                    .parse::<bool>()
+                    .map(serde_json::Value::from)
+                    .map_err(|_| ()),
+                Some("array") => Ok(serde_json::Value::Array(
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| serde_json::Value::String(value.to_owned()))
+                        .collect(),
+                )),
+                _ => Ok(serde_json::Value::String(raw)),
+            };
+        match value {
+            Ok(value) => self.advance_mcp_form(value, window, cx),
+            Err(_) => {
+                self.status_line = "MCP form · enter a value matching the requested type.".into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn advance_mcp_form(
+        &mut self,
+        value: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, _, count)) = self.current_mcp_form_field() else {
+            return;
+        };
+        self.mcp_form_values.insert(name, value);
+        self.clear_server_request_inputs(window, cx);
+        if self.mcp_form_field_index + 1 < count {
+            self.mcp_form_field_index += 1;
+            cx.notify();
+            return;
+        }
+        let pending = self
+            .pending_mcp_elicitation
+            .take()
+            .expect("pending checked");
+        self.mcp_form_field_index = 0;
+        let values = std::mem::take(&mut self.mcp_form_values)
+            .into_iter()
+            .collect::<serde_json::Map<_, _>>();
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingMcpElicitation::accept(serde_json::Value::Object(values)),
+            format!("MCP response · {}", pending.server_name),
+            cx,
+        );
+    }
+
+    pub fn decline_mcp_elicitation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_mcp_elicitation.take() else {
+            return;
+        };
+        self.clear_server_request_inputs(window, cx);
+        self.mcp_form_field_index = 0;
+        self.mcp_form_values.clear();
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingMcpElicitation::decline(),
+            format!("MCP request declined · {}", pending.server_name),
+            cx,
+        );
+    }
+
+    pub fn accept_empty_mcp_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_mcp_elicitation.take() else {
+            return;
+        };
+        self.clear_server_request_inputs(window, cx);
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingMcpElicitation::accept(serde_json::json!({})),
+            format!("MCP response · {}", pending.server_name),
+            cx,
+        );
+    }
+
+    pub fn open_mcp_elicitation_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(url) =
+            self.pending_mcp_elicitation
+                .as_ref()
+                .and_then(|pending| match &pending.mode {
+                    McpElicitationMode::Url { url, .. } => Some(url.clone()),
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        self.browser_url_input.update(cx, |state, cx| {
+            state.set_value(url, window, cx);
+        });
+        self.browser_navigate(window, cx);
+        self.browser_open_external(cx);
+    }
+
+    pub fn accept_mcp_url_elicitation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_mcp_elicitation.take() else {
+            return;
+        };
+        self.clear_server_request_inputs(window, cx);
+        self.send_codex_server_response(
+            pending.request_id,
+            PendingMcpElicitation::accept(serde_json::json!({})),
+            format!("MCP authorization accepted · {}", pending.server_name),
+            cx,
+        );
+    }
+
     /// Approve or reject the current pending approval (fixture resume + live respond).
     pub fn resolve_pending_approval(&mut self, choice: ApprovalChoice, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_approval.take() else {
@@ -4776,6 +5118,10 @@ impl MitsuroApp {
         self.active_turn_id = None;
         self.turn_cancel = None;
         self.pending_approval = None;
+        self.pending_user_input = None;
+        self.user_input_answers.clear();
+        self.pending_mcp_elicitation = None;
+        self.mcp_form_values.clear();
         self.status_line = "Turn interrupted.".into();
         cx.notify();
     }
@@ -5814,10 +6160,39 @@ impl MitsuroApp {
                     status_update = Some(format!("Turn {label}."));
                 }
                 TurnStreamEvent::ApprovalRequested(pending) => {
+                    self.pending_user_input = None;
+                    self.pending_mcp_elicitation = None;
                     self.pending_approval = Some(pending.clone());
                     status_update = Some(format!(
                         "Approval required: {}",
                         pending.summary.chars().take(56).collect::<String>()
+                    ));
+                }
+                TurnStreamEvent::UserInputRequested(pending) => {
+                    self.pending_approval = None;
+                    self.pending_mcp_elicitation = None;
+                    self.pending_user_input = Some(pending.clone());
+                    self.user_input_question_index = 0;
+                    self.user_input_answers.clear();
+                    status_update = Some(format!(
+                        "Input requested · {} question{}",
+                        pending.questions.len(),
+                        if pending.questions.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+                TurnStreamEvent::McpElicitationRequested(pending) => {
+                    self.pending_approval = None;
+                    self.pending_user_input = None;
+                    self.pending_mcp_elicitation = Some(pending.clone());
+                    self.mcp_form_field_index = 0;
+                    self.mcp_form_values.clear();
+                    status_update = Some(format!(
+                        "MCP request · {} · {}",
+                        pending.server_name, pending.message
                     ));
                 }
                 // Process notifications (P10): surface in status; full terminal UI later.
@@ -5859,6 +6234,70 @@ impl MitsuroApp {
                         event.group_id,
                         event.kind.label()
                     ));
+                }
+                TurnStreamEvent::Lifecycle(event) => {
+                    if event.method == "serverRequest/resolved" {
+                        self.pending_approval = None;
+                        self.pending_user_input = None;
+                        self.user_input_answers.clear();
+                        self.pending_mcp_elicitation = None;
+                        self.mcp_form_values.clear();
+                    }
+                    match event.method.as_str() {
+                        "thread/name/updated" => {
+                            if let Some(name) = event
+                                .params
+                                .as_ref()
+                                .and_then(|params| params.get("name"))
+                                .and_then(serde_json::Value::as_str)
+                            {
+                                thread.summary.name = Some(name.to_owned());
+                            }
+                        }
+                        "thread/archived" | "thread/deleted" | "thread/closed" => {
+                            thread.summary.archived = Some(true);
+                        }
+                        "thread/unarchived" => {
+                            thread.summary.archived = Some(false);
+                        }
+                        _ => {}
+                    }
+
+                    if event.is_transcript_activity() {
+                        let body = if event.detail.is_empty() {
+                            event.method.clone()
+                        } else {
+                            event.detail.clone()
+                        };
+                        if matches!(
+                            event.severity,
+                            mitsuro_desktop_backend::NotificationSeverity::Error
+                        ) {
+                            thread.messages.push(DemoMessage::error(body));
+                        } else {
+                            thread.messages.push(DemoMessage::activity(
+                                event.method.clone(),
+                                event.title.clone(),
+                                body,
+                                format!("{:?}", event.severity).to_ascii_lowercase(),
+                                event.item_id.clone(),
+                            ));
+                        }
+                    }
+
+                    if event.is_transcript_activity()
+                        || matches!(
+                            event.family,
+                            mitsuro_desktop_backend::NotificationFamily::Account
+                                | mitsuro_desktop_backend::NotificationFamily::RemoteControl
+                        )
+                    {
+                        status_update = Some(if event.detail.is_empty() {
+                            event.title
+                        } else {
+                            format!("{} · {}", event.title, event.detail)
+                        });
+                    }
                 }
                 TurnStreamEvent::Other { .. } => {}
             }
@@ -6048,6 +6487,10 @@ impl MitsuroApp {
         self.terminal = TerminalSession::idle(kind.id());
         self.files = FilesSession::new(kind.id());
         self.pending_approval = None;
+        self.pending_user_input = None;
+        self.user_input_answers.clear();
+        self.pending_mcp_elicitation = None;
+        self.mcp_form_values.clear();
         self.fixture_resume = None;
         self.active_turn_thread_id = None;
         self.active_turn_id = None;

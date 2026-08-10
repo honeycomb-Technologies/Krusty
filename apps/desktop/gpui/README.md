@@ -59,6 +59,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - The composer exposes only implemented behavior: text entry, Send, Stop, and
   backend-scoped model cycling. Attachment, voice, project, and access stubs are not
   presented as controls.
+- Codex server requests cannot disappear into the notification stream. Command, file,
+  and exact-profile permission approvals render above the composer; structured user
+  questions support options, freeform, and secret answers; standard MCP forms and URL
+  elicitations receive explicit user decisions. Client-owned dynamic tools return an
+  honest unsupported result when none were registered, while token refresh and
+  attestation return JSON-RPC errors instead of fabricated credentials.
 - Long transcripts start with a 16-message tail and reveal earlier history in bounded
   pages. Reopened threads preserve structured reasoning, plans, commands, and file
   changes. The current 18-type Codex thread item surface is preserved across hydration
@@ -107,7 +113,9 @@ authenticated backend sends a provider-backed turn when the user presses Send. K
 
 The Codex adapter negotiates experimental APIs because the desktop exposes process,
 environment, realtime, and background-terminal protocol families. The reviewed
-`codex-cli 0.147.0` contract is checked with:
+`codex-cli 0.147.0` contract is checked with generated inventories: all 70
+notifications must map to a typed transcript/lifecycle event, and all 11 server
+requests must have an approval, interaction, or automatic transport disposition.
 
 ```bash
 scripts/gpui-codex-protocol-check.sh

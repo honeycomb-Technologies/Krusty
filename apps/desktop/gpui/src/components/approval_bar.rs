@@ -16,6 +16,7 @@ pub fn approval_bar(pending: &PendingApproval, cx: &mut Context<MitsuroApp>) -> 
     let kind_label = match pending.kind {
         ApprovalKind::ExecCommand | ApprovalKind::CommandExecution => "Command",
         ApprovalKind::ApplyPatch | ApprovalKind::FileChange => "File change",
+        ApprovalKind::Permissions => "Permissions",
     };
     let title = pending.title.clone();
     let summary = pending.summary.clone();

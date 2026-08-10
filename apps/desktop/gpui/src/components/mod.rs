@@ -12,6 +12,7 @@ mod main_column;
 mod markdown;
 mod pull_requests_panel;
 mod scheduled_panel;
+mod server_request_bar;
 mod settings_panel;
 mod sidebar;
 mod sites_panel;

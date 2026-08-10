@@ -49,7 +49,7 @@ backend or are shown as unavailable.
 | Streaming chat | Live SSE | Live JSON-RPC notifications | Sample replay |
 | Models | Live | Live | Typed fixture catalog |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
-| Tool approval | Live | Live | Sample approval |
+| Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
 | Archive/unarchive | Unsupported, capability-gated | Live | Typed fixture |
 | Fork | Unsupported, capability-gated | Live | Typed fixture |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
@@ -59,7 +59,7 @@ backend or are shown as unavailable.
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
-| Computer environments/permissions | Unsupported; no invented rows or grants | Unsupported; no invented rows or grants | Explicit fixture catalog, labeled fixture |
+| Computer environments/permissions | Unsupported; no invented rows or grants | Live environment APIs and exact requested permission grants | Explicit fixture catalog, labeled fixture |
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
@@ -68,9 +68,13 @@ implemented. The committed `codex-cli 0.147.0` baseline contains 95 stable clien
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 server
 requests in the stable contract (11 with experimental APIs), and 18 thread item
 variants. The desktop automatically answers the experimental `currentTime/read` server
-request and negotiates experimental APIs because its process, environment, realtime,
-and background-terminal surfaces require them. Fixture `call_raw` no longer
-manufactures generic success payloads.
+request. Every generated notification is classified as a core transcript event or a
+typed lifecycle event. Every generated server request has an explicit disposition:
+native approval/user-input/MCP interaction, a structured unsupported dynamic-tool
+result, or an honest JSON-RPC error for unadvertised token/attestation capabilities.
+The desktop negotiates experimental APIs because its process, environment, realtime,
+and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
+generic success payloads.
 
 ## Established recovery baseline
 
@@ -81,6 +85,10 @@ manufactures generic success payloads.
 - Reopened and live Codex transcripts preserve every current thread item type. Tool,
   search, image, collaboration, review-mode, compaction, hook, and sleep items render as
   real activity rows; unknown future variants remain visible rather than disappearing.
+- Server-originated requests are modeled separately from notifications because Codex
+  can pause a turn until the client answers. The native interaction strip supports
+  request-user-input options/freeform/secrets, standard MCP forms and URL elicitations,
+  plus command/file/permission approvals without synthetic response data.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
