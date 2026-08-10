@@ -68,6 +68,7 @@ pub struct BackendCapabilities {
     pub processes: bool,
     pub extensions: bool,
     pub plugin_mutations: bool,
+    pub environment_add: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -96,6 +97,7 @@ impl BackendCapabilities {
             processes: true,
             extensions: true,
             plugin_mutations: true,
+            environment_add: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -127,6 +129,7 @@ impl BackendCapabilities {
             processes: false,
             extensions: true,
             plugin_mutations: false,
+            environment_add: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -543,6 +546,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().realtime_voice);
         assert!(BackendCapabilities::codex().plugin_mutations);
         assert!(!BackendCapabilities::mitsuro().plugin_mutations);
+        assert!(BackendCapabilities::codex().environment_add);
+        assert!(!BackendCapabilities::mitsuro().environment_add);
     }
 
     #[tokio::test]

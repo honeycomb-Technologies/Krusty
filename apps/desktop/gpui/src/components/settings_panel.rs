@@ -14,7 +14,8 @@ use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::BackendKind;
 
 use crate::app::{
-    AccountSession, MitsuroApp, SettingsNavGroup, SettingsSection, SurfaceDataState, UiConnection,
+    AccountSession, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection, SurfaceDataState,
+    UiConnection,
 };
 use crate::theme;
 
@@ -2906,13 +2907,18 @@ fn segment_row(
 fn action_row(
     title: &str,
     subtitle: &str,
-    _button: &str,
+    button: &str,
     id: &'static str,
-    _cx: &mut Context<MitsuroApp>,
+    cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let title = title.to_string();
     let subtitle = subtitle.to_string();
+    let button = button.to_string();
+    let wired = matches!(
+        id,
+        "open-plugins" | "plugins-refresh" | "plugins-open-connections" | "env-create"
+    );
     let row_id = format!("action-{id}");
     div()
         .id(SharedId(row_id))
@@ -2956,12 +2962,33 @@ fn action_row(
                 .flex()
                 .items_center()
                 .justify_center()
+                .when(wired, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, window, cx| match id {
+                            "open-plugins" => app.set_mode(ProductMode::Extensions, window, cx),
+                            "plugins-refresh" => app.refresh_extensions(window, cx),
+                            "plugins-open-connections" => {
+                                app.set_settings_section(SettingsSection::Connections, cx)
+                            }
+                            "env-create" => app.set_mode(ProductMode::Computer, window, cx),
+                            _ => {}
+                        }))
+                })
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_tertiary)
-                        .child("Not wired"),
+                        .text_color(if wired {
+                            colors.text_secondary
+                        } else {
+                            colors.text_tertiary
+                        })
+                        .child(if wired {
+                            button
+                        } else {
+                            "Not wired".to_owned()
+                        }),
                 ),
         )
 }

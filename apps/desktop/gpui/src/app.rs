@@ -26,7 +26,7 @@ use mitsuro_desktop_backend::{
     CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
     CollaborationModeMask, ConfigReadParams, ConversationAudio, ConversationImage,
     ConversationReference, ConversationReferenceKind, CreateSession, DesktopBackend,
-    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentAddParams, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
     EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
@@ -990,6 +990,9 @@ pub struct MitsuroApp {
     /// Environments catalog (fixture demo; no protocol list method).
     environments: Vec<EnvironmentSummary>,
     environments_state: SurfaceDataState,
+    environment_id_input: Entity<InputState>,
+    environment_url_input: Entity<InputState>,
+    environment_add_in_progress: bool,
     /// Selected environment id for status/info detail.
     selected_environment_id: Option<String>,
     /// Last `environment/status` response for the selection.
@@ -1219,6 +1222,10 @@ impl MitsuroApp {
             },
         )
         .detach();
+        let environment_id_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Environment id"));
+        let environment_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("wss://exec-server.example.com"));
         let server_request_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
         let server_request_secret_input = cx.new(|cx| {
@@ -1325,6 +1332,9 @@ impl MitsuroApp {
             plugin_mutation_in_progress: None,
             environments: Vec::new(),
             environments_state: SurfaceDataState::Loading,
+            environment_id_input,
+            environment_url_input,
+            environment_add_in_progress: false,
             selected_environment_id: None,
             environment_status_detail: None,
             environment_info_detail: None,
@@ -3625,6 +3635,110 @@ impl MitsuroApp {
     /// Environments for the Computer panel.
     pub fn environments(&self) -> &[EnvironmentSummary] {
         &self.environments
+    }
+
+    pub fn environment_id_input(&self) -> &Entity<InputState> {
+        &self.environment_id_input
+    }
+
+    pub fn environment_url_input(&self) -> &Entity<InputState> {
+        &self.environment_url_input
+    }
+
+    pub fn environment_add_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().environment_add)
+    }
+
+    pub fn environment_add_in_progress(&self) -> bool {
+        self.environment_add_in_progress
+    }
+
+    pub fn add_environment(&mut self, cx: &mut Context<Self>) {
+        if self.environment_add_in_progress {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line =
+                "Computer · environment registration requires Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().environment_add {
+            self.status_line =
+                "Computer · this backend does not expose remote environment registration".into();
+            cx.notify();
+            return;
+        }
+
+        let environment_id = self.environment_id_input.read(cx).value().trim().to_owned();
+        let exec_server_url = self
+            .environment_url_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if environment_id.is_empty() {
+            self.status_line = "Computer · enter an environment id".into();
+            cx.notify();
+            return;
+        }
+        if !valid_exec_server_url(&exec_server_url) {
+            self.status_line = "Computer · exec-server URL must be ws:// or wss://".into();
+            cx.notify();
+            return;
+        }
+
+        let params = EnvironmentAddParams::new(environment_id.clone(), exec_server_url);
+        let summary = mitsuro_desktop_backend::registered_environment_summary(&params);
+        let generation = self.backend_generation;
+        self.environment_add_in_progress = true;
+        self.status_line = format!("Computer · adding {environment_id}…").into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .environment_add(params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.environment_add_in_progress = false;
+                match result {
+                    Ok(_) => {
+                        if let Some(existing) = app
+                            .environments
+                            .iter_mut()
+                            .find(|environment| environment.id == summary.id)
+                        {
+                            *existing = summary.clone();
+                        } else {
+                            app.environments.push(summary.clone());
+                        }
+                        app.selected_environment_id = Some(summary.id.clone());
+                        app.environments_state = SurfaceDataState::Live;
+                        app.status_line =
+                            format!("Computer · added {} · checking status", summary.id).into();
+                        app.refresh_selected_environment_detail(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Computer · could not add {environment_id} · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn selected_environment_id(&self) -> Option<&str> {
@@ -8972,6 +9086,7 @@ impl MitsuroApp {
         self.goals_are_live_hive = false;
         self.hive_snapshot = None;
         self.environments.clear();
+        self.environment_add_in_progress = false;
         self.environments_state = SurfaceDataState::Loading;
         self.selected_environment_id = None;
         self.environment_status_detail = None;
@@ -9607,6 +9722,13 @@ fn model_matches_query(model: &ModelInfo, query: &str) -> bool {
         || model.id.to_ascii_lowercase().contains(&query)
         || model.model.to_ascii_lowercase().contains(&query)
         || model.description.to_ascii_lowercase().contains(&query)
+}
+
+fn valid_exec_server_url(value: &str) -> bool {
+    let target = value
+        .strip_prefix("ws://")
+        .or_else(|| value.strip_prefix("wss://"));
+    target.is_some_and(|target| !target.is_empty() && !target.chars().any(char::is_whitespace))
 }
 
 fn file_match_from_product(file: ProductFileMatch) -> FuzzyFileSearchResult {
@@ -10784,5 +10906,14 @@ mod tests {
             plugin.auth_policy,
             mitsuro_desktop_backend::PluginAuthPolicy::OnInstall
         );
+    }
+
+    #[test]
+    fn remote_environment_urls_fail_closed_before_io() {
+        assert!(valid_exec_server_url("ws://127.0.0.1:4100"));
+        assert!(valid_exec_server_url("wss://exec.example.com/socket"));
+        assert!(!valid_exec_server_url("https://exec.example.com"));
+        assert!(!valid_exec_server_url("wss://"));
+        assert!(!valid_exec_server_url("wss://bad host"));
     }
 }

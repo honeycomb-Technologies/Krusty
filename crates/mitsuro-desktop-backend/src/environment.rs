@@ -369,8 +369,11 @@ pub fn fixture_demo_collaboration_modes() -> CollaborationModeListResponse {
     }
 }
 
-/// Build a summary row for a newly added remote environment (pending).
-pub fn fixture_added_environment_summary(params: &EnvironmentAddParams) -> EnvironmentSummary {
+/// Build the session-local summary for a successfully registered remote environment.
+///
+/// Codex returns an empty object from `environment/add` and exposes no list method, so
+/// the desktop retains the exact submitted identity and URL while status is probed.
+pub fn registered_environment_summary(params: &EnvironmentAddParams) -> EnvironmentSummary {
     EnvironmentSummary {
         id: params.environment_id.clone(),
         name: format!("Remote · {}", params.environment_id),
@@ -385,6 +388,11 @@ pub fn fixture_added_environment_summary(params: &EnvironmentAddParams) -> Envir
         shell: None,
         cwd: None,
     }
+}
+
+/// Backward-compatible fixture helper.
+pub fn fixture_added_environment_summary(params: &EnvironmentAddParams) -> EnvironmentSummary {
+    registered_environment_summary(params)
 }
 
 #[cfg(test)]

@@ -52,6 +52,10 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   exposed until their product interaction and approval semantics are designed.
 - Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio retains
   interactive `process/*`; Mitsuro does not pretend its background-process API is a PTY.
+- Computer can register a real Codex remote exec-server with `environment/add`, then
+  retains the submitted id and URL for the app session and probes typed status/info.
+  The form is hidden for Mitsuro because its HTTP API has no equivalent mutation, and
+  no live registration is performed by automated acceptance.
 - Atlas is an explicit system-browser bridge in the default build. It stores local URL
   history and opens real pages externally; it does not fabricate page content, import
   browser profiles, or claim access to browser-owned cookies and history.

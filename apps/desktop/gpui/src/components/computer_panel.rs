@@ -12,7 +12,7 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
 };
-use gpui_component::{Icon, IconName, Sizable as _};
+use gpui_component::{input::Input, Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{
     CollaborationModeMask, EnvironmentInfoResponse, EnvironmentStatusKind,
     EnvironmentStatusResponse, EnvironmentSummary,
@@ -69,6 +69,7 @@ pub fn computer_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
                 .py(px(20.0))
                 .gap(px(16.0))
                 .child(permissions_card(data_state))
+                .child(environment_add_card(app, cx))
                 .child(section_header(
                     "Environments",
                     &format!("environment/status · {source_note}"),
@@ -90,6 +91,101 @@ pub fn computer_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
                 ))
                 .child(collab_modes_section(&modes)),
         )
+}
+
+fn environment_add_card(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = app.environment_add_available();
+    let busy = app.environment_add_in_progress();
+    let id_input = app.environment_id_input().clone();
+    let url_input = app.environment_url_input().clone();
+
+    div()
+        .id("computer-environment-add")
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .rounded(px(12.0))
+        .bg(colors.bg_elevated)
+        .border_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child("Add remote environment"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(if available {
+                    "Register a Codex exec-server through environment/add. The submitted id is retained for this app session because the protocol has no environment/list method."
+                } else {
+                    "Remote environment registration is unavailable for this backend."
+                }),
+        )
+        .when(available, |this| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(environment_input("computer-environment-id", id_input))
+                    .child(environment_input("computer-environment-url", url_input))
+                    .child(
+                        div()
+                            .id("computer-environment-add-button")
+                            .h(px(34.0))
+                            .px(px(14.0))
+                            .rounded(px(8.0))
+                            .bg(colors.accent_soft)
+                            .border_1()
+                            .border_color(colors.border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(!busy, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.bg_hover))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.add_environment(cx);
+                                    }))
+                            })
+                            .when(busy, |button| button.opacity(0.55))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(colors.accent)
+                                    .child(if busy { "Adding…" } else { "Add" }),
+                            ),
+                    ),
+            )
+        })
+}
+
+fn environment_input(
+    id: &'static str,
+    input: gpui::Entity<gpui_component::input::InputState>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .h(px(34.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .bg(colors.bg_sidebar)
+        .border_1()
+        .border_color(colors.border)
+        .child(Input::new(&input).appearance(false).h(px(30.0)))
 }
 
 /// Permissions / safety card — finished-page density for Computer surface.

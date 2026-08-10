@@ -51,10 +51,10 @@ pub use desktop::{
 };
 pub use environment::{
     fixture_added_environment_summary, fixture_demo_collaboration_modes, fixture_demo_environments,
-    fixture_environment_info, fixture_environment_status, CollaborationModeListParams,
-    CollaborationModeListResponse, CollaborationModeMask, EnvironmentAddParams,
-    EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentKind,
-    EnvironmentShellInfo, EnvironmentStatusKind, EnvironmentStatusParams,
+    fixture_environment_info, fixture_environment_status, registered_environment_summary,
+    CollaborationModeListParams, CollaborationModeListResponse, CollaborationModeMask,
+    EnvironmentAddParams, EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse,
+    EnvironmentKind, EnvironmentShellInfo, EnvironmentStatusKind, EnvironmentStatusParams,
     EnvironmentStatusResponse, EnvironmentSummary, ModeKind,
 };
 pub use extensions::{

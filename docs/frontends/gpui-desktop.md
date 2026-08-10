@@ -68,7 +68,7 @@ backend or are shown as unavailable.
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
-| Computer environments/permissions | Unsupported; no invented rows or grants | Live environment APIs and exact requested permission grants | Explicit fixture catalog, labeled fixture |
+| Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
@@ -99,6 +99,11 @@ work, not as feature completion; the matrix test must change with each typed ada
   catalogs are visibly read-only because neither backend exposes a production mutation
   contract. Search filters the live plugin, skill, and MCP records; expanding a category
   uses its exact hidden-record count and never pads the catalog with decorative totals.
+- Codex remote-environment registration sends exact `environment/add` parameters after
+  local `ws://`/`wss://` validation. Because the protocol returns an empty response and
+  has no list method, GPUI retains only successful submissions for the current app
+  session and immediately probes `environment/status` and `environment/info`. Mitsuro
+  renders the mutation as unsupported.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,
