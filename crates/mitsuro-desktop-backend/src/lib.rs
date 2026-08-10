@@ -29,6 +29,7 @@ pub mod realtime;
 pub mod remote_control;
 pub mod server_requests;
 pub mod skill_config;
+pub mod thread_history;
 pub mod types;
 
 pub use account::{
@@ -240,6 +241,12 @@ pub use server_requests::{
     MCP_SERVER_ELICITATION_REQUEST, SERVER_REQUEST_METHODS, TOOL_REQUEST_USER_INPUT,
 };
 pub use skill_config::{SkillsConfigWriteParams, SkillsConfigWriteResponse};
+pub use thread_history::{
+    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
+    ThreadRollbackResponse, ThreadSearchOccurrence, ThreadSearchOccurrencesParams,
+    ThreadSearchOccurrencesResponse, ThreadSearchTextRange, ThreadTurnItemsView,
+    ThreadTurnsListParams, ThreadTurnsListResponse, ThreadTurnsSortDirection,
+};
 pub use types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
     DelegationGroupProjection, DelegationGroupStatus, DelegationKind,

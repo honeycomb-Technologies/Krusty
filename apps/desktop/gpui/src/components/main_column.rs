@@ -11,7 +11,7 @@ use gpui::{
     div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
 };
-use gpui_component::input::InputState;
+use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, Sizable as _};
 use mitsuro_desktop_backend::{
     DelegationGroupStatus, DelegationTaskStatus, SessionDelegationProjection,
@@ -197,6 +197,9 @@ fn thread_main(
         // Open-thread header: title · optional path chip · overflow
         .when(show_title, |this| {
             this.child(thread_title_bar(&title, project_path.as_deref(), app, cx))
+        })
+        .when(show_title && app.thread_find_open(), |this| {
+            this.child(thread_find_bar(app, cx))
         })
         // Full-bleed stage on calm empty; constrained column once threads exist.
         .child(
@@ -402,6 +405,7 @@ fn thread_title_bar(
         || status.starts_with("Compact")
         || status.starts_with("Compaction")
         || status.starts_with("Review")
+        || status.starts_with("Find")
     {
         Some(status)
     } else {
@@ -460,6 +464,7 @@ fn thread_title_bar(
                             .child(line),
                     )
                 })
+                .child(thread_find_button(app.thread_find_open(), cx))
                 .child(thread_overflow_menu(menu_open, is_archived, cx)),
         )
         .when(menu_open, |this| {
@@ -470,6 +475,192 @@ fn thread_title_bar(
                 cx,
             ))
         })
+}
+
+fn thread_find_button(active: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("thread-find-toggle")
+        .w(px(30.0))
+        .h(px(30.0))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(if active {
+            theme::hex_alpha(0xffffff, 0.06)
+        } else {
+            theme::transparent()
+        })
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(|app, _, window, cx| {
+            if app.thread_find_open() {
+                app.close_thread_find(window, cx);
+            } else {
+                app.open_thread_find(window, cx);
+            }
+        }))
+        .child(
+            Icon::empty()
+                .path("icons/search.svg")
+                .with_size(px(15.0))
+                .text_color(if active {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                }),
+        )
+}
+
+fn thread_find_bar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let input = app.thread_find_input().clone();
+    let matches = app.thread_find_matches();
+    let selected = app.thread_find_selected();
+    let count_label = if app.thread_find_hydrating() {
+        "Loading match…".to_owned()
+    } else if app.thread_find_loading() {
+        "Searching…".to_owned()
+    } else if app.thread_find_error().is_some() {
+        "Unavailable".to_owned()
+    } else if input.read(cx).value().trim().is_empty() {
+        "Type to find".to_owned()
+    } else if matches.is_empty() {
+        "No results".to_owned()
+    } else {
+        format!("{} of {}", selected + 1, matches.len())
+    };
+    let detail = app
+        .thread_find_error()
+        .map(str::to_owned)
+        .or_else(|| matches.get(selected).map(|match_| match_.snippet.clone()));
+
+    div()
+        .id("thread-find-bar")
+        .flex()
+        .flex_col()
+        .w_full()
+        .px(px(20.0))
+        .py(px(7.0))
+        .gap(px(4.0))
+        .bg(colors.bg_sidebar)
+        .border_b_1()
+        .border_color(colors.border_subtle)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id("thread-find-input-wrap")
+                        .flex()
+                        .items_center()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .h(px(30.0))
+                        .px(px(9.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_elevated)
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(Input::new(&input).appearance(false).h(px(26.0))),
+                )
+                .child(
+                    div()
+                        .min_w(px(72.0))
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(count_label),
+                )
+                .child(thread_find_step_button(
+                    "thread-find-previous",
+                    "icons/chevron-up.svg",
+                    -1,
+                    !matches.is_empty(),
+                    cx,
+                ))
+                .child(thread_find_step_button(
+                    "thread-find-next",
+                    "icons/chevron-down.svg",
+                    1,
+                    !matches.is_empty(),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .id("thread-find-close")
+                        .w(px(26.0))
+                        .h(px(26.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.close_thread_find(window, cx);
+                        }))
+                        .child(
+                            Icon::empty()
+                                .path("icons/close.svg")
+                                .with_size(px(13.0))
+                                .text_color(colors.text_tertiary),
+                        ),
+                ),
+        )
+        .when_some(detail, |this, detail| {
+            this.child(
+                div()
+                    .max_w(px(CONTENT_MAX_W))
+                    .text_xs()
+                    .text_color(if app.thread_find_error().is_some() {
+                        colors.status_error
+                    } else {
+                        colors.text_tertiary
+                    })
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(detail.replace('\n', " ")),
+            )
+        })
+}
+
+fn thread_find_step_button(
+    id: &'static str,
+    icon: &'static str,
+    delta: isize,
+    enabled: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .w(px(26.0))
+        .h(px(26.0))
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.select_next_thread_find_match(delta, cx);
+                }))
+        })
+        .child(
+            Icon::empty()
+                .path(icon)
+                .with_size(px(13.0))
+                .text_color(if enabled {
+                    colors.text_tertiary
+                } else {
+                    theme::hex_alpha(0xffffff, 0.18)
+                }),
+        )
 }
 
 fn project_path_chip(path: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -837,12 +1028,16 @@ fn transcript(
                 .unwrap_or_else(|| absolute_index.to_string());
             let message_key = format!("{thread_id}:{message_identity}");
             let expanded = app.transcript_message_is_expanded(&message_key);
+            let highlighted = app
+                .selected_thread_find_item_id()
+                .is_some_and(|item_id| msg.item_id.as_deref() == Some(item_id));
             transcript_block(
                 absolute_index as u64,
                 msg,
                 simple_bubbles,
                 message_key,
                 expanded,
+                highlighted,
                 cx,
             )
         }))
@@ -1025,6 +1220,7 @@ fn transcript_block(
     simple_bubbles: bool,
     message_key: String,
     expanded: bool,
+    highlighted: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     match &msg.kind {
@@ -1045,6 +1241,7 @@ fn transcript_block(
             simple_bubbles,
             message_key,
             expanded,
+            highlighted,
             cx,
         )
         .into_any_element(),
@@ -1060,6 +1257,7 @@ fn transcript_block(
             simple_bubbles,
             message_key,
             expanded,
+            highlighted,
             cx,
         )
         .into_any_element(),
@@ -1078,6 +1276,7 @@ fn transcript_block(
                     true,
                     message_key,
                     expanded,
+                    false,
                     cx,
                 )
                 .into_any_element()
@@ -1099,6 +1298,7 @@ fn transcript_block(
                     true,
                     message_key,
                     expanded,
+                    false,
                     cx,
                 )
                 .into_any_element()
@@ -1126,6 +1326,7 @@ fn transcript_block(
                     true,
                     message_key,
                     expanded,
+                    false,
                     cx,
                 )
                 .into_any_element()
@@ -1151,6 +1352,7 @@ fn transcript_block(
                     true,
                     message_key,
                     expanded,
+                    false,
                     cx,
                 )
                 .into_any_element()
@@ -1321,6 +1523,7 @@ fn chat_bubble(
     _simple: bool,
     message_key: String,
     expanded: bool,
+    highlighted: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -1353,6 +1556,11 @@ fn chat_bubble(
                 .bg(bubble_bg)
                 .when(is_user, |this| {
                     this.border_1().border_color(colors.border_subtle)
+                })
+                .when(highlighted, |this| {
+                    this.border_1()
+                        .border_color(theme::hex_alpha(0x60a5fa, 0.9))
+                        .bg(theme::hex_alpha(0x60a5fa, 0.10))
                 })
                 .flex()
                 .flex_col()

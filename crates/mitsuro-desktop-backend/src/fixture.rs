@@ -63,6 +63,11 @@ use crate::protocol::{
     ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
     TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
+use crate::thread_history::{
+    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
+    ThreadRollbackResponse, ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse,
+    ThreadTurnsListParams, ThreadTurnsListResponse,
+};
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
 /// Active fuzzy search session (roots + last query results for UI drain).
@@ -100,6 +105,9 @@ fn is_fixture_typed_method(method: &str) -> bool {
             | "thread/start"
             | "thread/read"
             | "thread/search"
+            | "thread/searchOccurrences"
+            | "thread/turns/list"
+            | "thread/rollback"
             | "thread/name/set"
             | "thread/archive"
             | "thread/unarchive"
@@ -359,6 +367,31 @@ impl FixtureBackend {
                 let p: ThreadSearchParams =
                     serde_json::from_value(params).unwrap_or_else(|_| ThreadSearchParams::new(""));
                 Ok(Some(serde_json::to_value(self.thread_search(p).await?)?))
+            }
+            "thread/searchOccurrences" => {
+                let Ok(p) = serde_json::from_value::<ThreadSearchOccurrencesParams>(params) else {
+                    return Ok(None);
+                };
+                Ok(Some(serde_json::to_value(
+                    self.thread_search_occurrences(p).await?,
+                )?))
+            }
+            "thread/turns/list" => {
+                let Ok(p) = serde_json::from_value::<ThreadTurnsListParams>(params) else {
+                    return Ok(None);
+                };
+                Ok(Some(serde_json::to_value(
+                    self.thread_turns_list(p).await?,
+                )?))
+            }
+            "thread/rollback" => {
+                let Ok(p) = serde_json::from_value::<ThreadRollbackParams>(params) else {
+                    return Ok(None);
+                };
+                match self.thread_rollback(p).await {
+                    Ok(response) => Ok(Some(serde_json::to_value(response)?)),
+                    Err(_) => Ok(None),
+                }
             }
             "thread/name/set" => {
                 let Ok(p) = serde_json::from_value::<ThreadSetNameParams>(params) else {
@@ -967,6 +1000,98 @@ impl AgentBackend for FixtureBackend {
             data,
             next_cursor: None,
             backwards_cursor: None,
+        })
+    }
+
+    async fn thread_search_occurrences(
+        &self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> Result<ThreadSearchOccurrencesResponse> {
+        if !self.status().is_usable() {
+            return Err(crate::types::AgentError::NotConnected);
+        }
+        let threads = self
+            .threads
+            .read()
+            .map(|threads| threads.clone())
+            .unwrap_or_default();
+        let thread = threads
+            .iter()
+            .find(|thread| {
+                thread.get("id").and_then(Value::as_str) == Some(params.thread_id.as_str())
+            })
+            .ok_or_else(|| {
+                crate::types::AgentError::Protocol(format!(
+                    "fixture thread not found: {}",
+                    params.thread_id
+                ))
+            })?;
+        Ok(search_occurrences_in_thread(thread, &params))
+    }
+
+    async fn thread_turns_list(
+        &self,
+        params: ThreadTurnsListParams,
+    ) -> Result<ThreadTurnsListResponse> {
+        if !self.status().is_usable() {
+            return Err(crate::types::AgentError::NotConnected);
+        }
+        let threads = self
+            .threads
+            .read()
+            .map(|threads| threads.clone())
+            .unwrap_or_default();
+        let thread = threads
+            .iter()
+            .find(|thread| {
+                thread.get("id").and_then(Value::as_str) == Some(params.thread_id.as_str())
+            })
+            .ok_or_else(|| {
+                crate::types::AgentError::Protocol(format!(
+                    "fixture thread not found: {}",
+                    params.thread_id
+                ))
+            })?;
+        Ok(list_turns_in_thread(thread, &params))
+    }
+
+    async fn thread_rollback(
+        &self,
+        params: ThreadRollbackParams,
+    ) -> Result<ThreadRollbackResponse> {
+        if !self.status().is_usable() {
+            return Err(crate::types::AgentError::NotConnected);
+        }
+        if params.num_turns == 0 {
+            return Err(crate::types::AgentError::Protocol(
+                "thread rollback requires numTurns >= 1".to_owned(),
+            ));
+        }
+        let mut threads = self.threads.write().map_err(|_| {
+            crate::types::AgentError::Other("fixture thread store is poisoned".to_owned())
+        })?;
+        let thread = find_thread_mut(&mut threads, &params.thread_id).ok_or_else(|| {
+            crate::types::AgentError::Protocol(format!(
+                "fixture thread not found: {}",
+                params.thread_id
+            ))
+        })?;
+        let turns = thread
+            .get_mut("turns")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                crate::types::AgentError::Protocol("fixture thread has no turn history".to_owned())
+            })?;
+        let remove = params.num_turns as usize;
+        if remove > turns.len() {
+            return Err(crate::types::AgentError::Protocol(format!(
+                "cannot roll back {remove} turns from {} fixture turns",
+                turns.len()
+            )));
+        }
+        turns.truncate(turns.len() - remove);
+        Ok(ThreadRollbackResponse {
+            thread: thread.clone(),
         })
     }
 

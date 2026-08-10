@@ -61,6 +61,9 @@ Verified against the committed `codex-cli 0.147.0` protocol baseline on Linux
 - `thread/list`
 - `thread/start`
 - `thread/read`
+- `thread/searchOccurrences`
+- `thread/turns/list`
+- `thread/rollback`
 - `turn/start` (live; fixture replay requires explicit fixture mode)
 - `account/read` · `account/login/start` · `account/login/cancel` · `account/logout`
 - `account/usage/read` · `account/rateLimits/read` (fixture demo offline; no paid models)
@@ -91,6 +94,18 @@ workspace-spend state, earned reset-credit records, and workspace messages. Rese
 consumption and workspace-owner nudges use exact typed mutations. Mitsuro HTTP exposes
 none of these ChatGPT account contracts, so its capability flags are false and the
 desktop boundary returns `NotImplemented` instead of substituting fixture data.
+
+Conversation find and paged history use the generated Codex wire shapes. The desktop
+hydrates an unloaded occurrence by requesting five full turns in both directions from
+its `turnCursor`, verifies that the persisted item still exists, and deduplicates the
+page against the loaded transcript. Some 0.147.0 app-server builds advertise these
+methods in generated schemas but return JSON-RPC `-32601`; for that exact runtime
+response, Codex projects the same typed result from a real
+`thread/read(includeTurns=true)` payload. Other failures remain failures. Mitsuro
+implements the same read-only product behavior from its real persisted session
+transcript; it returns `NotImplemented` for `thread/rollback` because the HTTP API has
+no destructive tail mutation. Fixture behavior remains explicit and typed for offline
+contract tests.
 
 The generated protocol inventories are committed in `fixtures/`: 95 stable client
 methods, 133 methods with experimental APIs enabled, 70 server notifications, 10 stable

@@ -40,6 +40,7 @@ use crate::{
     ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
     ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
     ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
+    ThreadSearchOccurrence, ThreadTurnItemsView, ThreadTurnsListParams, ThreadTurnsSortDirection,
     TurnStartParams, TurnStreamEvent,
 };
 
@@ -118,6 +119,9 @@ pub struct BackendCapabilities {
     pub sites: bool,
     pub archive: bool,
     pub fork: bool,
+    pub conversation_search: bool,
+    pub paged_history: bool,
+    pub edit_latest_message: bool,
 }
 
 impl BackendCapabilities {
@@ -166,6 +170,9 @@ impl BackendCapabilities {
             sites: false,
             archive: true,
             fork: true,
+            conversation_search: true,
+            paged_history: true,
+            edit_latest_message: true,
         }
     }
 
@@ -217,6 +224,9 @@ impl BackendCapabilities {
             sites: false,
             archive: false,
             fork: false,
+            conversation_search: true,
+            paged_history: true,
+            edit_latest_message: false,
         }
     }
 }
@@ -396,15 +406,118 @@ impl DesktopBackend {
     }
 
     fn ensure_realtime_session_origin(&self, session: &BackendSessionId) -> Result<()> {
-        if session.backend == self.kind() {
-            return Ok(());
+        self.ensure_session_origin(session)
+    }
+
+    /// Search visible user/final-assistant messages in a real backend session.
+    pub async fn search_thread_occurrences(
+        &self,
+        session: &BackendSessionId,
+        search_term: impl Into<String>,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<crate::ThreadSearchOccurrencesResponse> {
+        self.ensure_session_origin(session)?;
+        let params = crate::ThreadSearchOccurrencesParams {
+            thread_id: session.raw.clone(),
+            search_term: search_term.into(),
+            cursor,
+            limit,
+        };
+        match self {
+            Self::Codex(backend) => backend.thread_search_occurrences(params).await,
+            Self::Mitsuro(backend) => backend.thread_search_occurrences(params).await,
         }
-        Err(AgentError::Other(format!(
-            "session {} belongs to {}, but the active backend is {}",
-            session.qualified(),
-            session.backend.id(),
-            self.kind().id()
-        )))
+    }
+
+    /// Read one real page from the backend session's turn history.
+    pub async fn list_thread_turns(
+        &self,
+        session: &BackendSessionId,
+        params: crate::ThreadTurnsListParams,
+    ) -> Result<crate::ThreadTurnsListResponse> {
+        self.ensure_session_origin(session)?;
+        let params = crate::ThreadTurnsListParams {
+            thread_id: session.raw.clone(),
+            ..params
+        };
+        match self {
+            Self::Codex(backend) => backend.thread_turns_list(params).await,
+            Self::Mitsuro(backend) => backend.thread_turns_list(params).await,
+        }
+    }
+
+    /// Hydrate a persisted search match and a small amount of surrounding history.
+    ///
+    /// The Codex reference requests pages in both directions from the occurrence's
+    /// turn cursor. Mitsuro maps the same operation onto its real transcript so the
+    /// GPUI can use one backend-neutral recovery path when a match is outside the
+    /// currently rendered history window.
+    pub async fn hydrate_thread_search_match(
+        &self,
+        session: &BackendSessionId,
+        occurrence: &ThreadSearchOccurrence,
+        page_limit: u32,
+    ) -> Result<Vec<crate::ConversationMessage>> {
+        self.ensure_session_origin(session)?;
+        let params = |sort_direction| ThreadTurnsListParams {
+            thread_id: session.raw.clone(),
+            cursor: Some(occurrence.turn_cursor.clone()),
+            limit: Some(page_limit.clamp(1, 20)),
+            sort_direction: Some(sort_direction),
+            items_view: Some(ThreadTurnItemsView::Full),
+        };
+        let (older, newer) = futures::try_join!(
+            self.list_thread_turns(session, params(ThreadTurnsSortDirection::Desc),),
+            self.list_thread_turns(session, params(ThreadTurnsSortDirection::Asc),)
+        )?;
+
+        let mut turns = older.data;
+        turns.reverse();
+        let mut seen_turn_ids = turns
+            .iter()
+            .filter_map(|turn| turn.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>();
+        for turn in newer.data {
+            let duplicate = turn
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !seen_turn_ids.insert(id.to_owned()));
+            if !duplicate {
+                turns.push(turn);
+            }
+        }
+
+        let messages = crate::product::conversation_messages_from_turn_values(turns);
+        if !messages
+            .iter()
+            .any(|message| message.item_id.as_deref() == Some(occurrence.item_id.as_str()))
+        {
+            return Err(AgentError::Protocol(
+                "persisted conversation search match is no longer available".to_owned(),
+            ));
+        }
+        Ok(messages)
+    }
+
+    /// Remove completed turns from a Codex thread before resubmitting an edit.
+    pub async fn rollback_thread(
+        &self,
+        session: &BackendSessionId,
+        num_turns: u32,
+    ) -> Result<crate::ThreadRollbackResponse> {
+        self.ensure_session_origin(session)?;
+        let params = crate::ThreadRollbackParams {
+            thread_id: session.raw.clone(),
+            num_turns,
+        };
+        match self {
+            Self::Codex(backend) => backend.thread_rollback(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose destructive turn rollback".to_owned(),
+            )),
+        }
     }
 
     pub async fn realtime_list_voices(&self) -> Result<ThreadRealtimeListVoicesResponse> {
@@ -1145,6 +1258,12 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().background_terminals);
         assert!(!BackendCapabilities::codex().tracked_process_kill);
         assert!(BackendCapabilities::mitsuro().tracked_process_kill);
+        assert!(BackendCapabilities::codex().conversation_search);
+        assert!(BackendCapabilities::mitsuro().conversation_search);
+        assert!(BackendCapabilities::codex().paged_history);
+        assert!(BackendCapabilities::mitsuro().paged_history);
+        assert!(BackendCapabilities::codex().edit_latest_message);
+        assert!(!BackendCapabilities::mitsuro().edit_latest_message);
     }
 
     #[tokio::test]

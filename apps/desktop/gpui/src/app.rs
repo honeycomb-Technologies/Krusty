@@ -29,20 +29,20 @@ use mitsuro_desktop_backend::{
     CommandExecOutputStream, CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams,
     ConfigBatchWriteParams, ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
     ConsumeAccountRateLimitResetCreditOutcome, ConsumeAccountRateLimitResetCreditParams,
-    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
-    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
-    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
-    EnvironmentSummary, ExperimentalFeature, ExperimentalFeatureListParams,
-    ExternalAgentConfigDetectParams, ExternalAgentConfigImportCompletedNotification,
-    ExternalAgentConfigImportHistory, ExternalAgentConfigImportParams,
-    ExternalAgentConfigMigrationItem, FixtureBackend, FsChangedNotification, FsCopyParams,
-    FsCreateDirectoryParams, FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams,
-    FsRemoveParams, FsUnwatchParams, FsWatchParams, FsWriteFileParams, FuzzyFileSearchParams,
-    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
-    GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse, HookMetadata, HooksListEntry,
-    HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
-    LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpElicitationMode,
-    McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
+    ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
+    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, ExperimentalFeature,
+    ExperimentalFeatureListParams, ExternalAgentConfigDetectParams,
+    ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistory,
+    ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FixtureBackend,
+    FsChangedNotification, FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams,
+    FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
+    HookMetadata, HooksListEntry, HooksListParams, InstalledApp, LifecycleNotification,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
+    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
     McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
     MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
     ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
@@ -63,10 +63,11 @@ use mitsuro_desktop_backend::{
     ThreadBackgroundTerminalsTerminateParams, ThreadDeleteParams, ThreadForkParams,
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
     ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
-    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, WorkspaceMessage,
-    CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
+    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSearchOccurrence,
+    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
+    TurnStreamEvent, WorkspaceMessage, CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE,
+    DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID,
+    WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -1031,6 +1032,16 @@ pub struct MitsuroApp {
     /// backend-qualified UI thread id and stable item id (or message index).
     expanded_transcript_messages: std::collections::HashSet<String>,
     transcript_scroll_handle: ScrollHandle,
+    /// Reference-desktop find-in-conversation state backed by
+    /// `thread/searchOccurrences` (or Mitsuro's real transcript projection).
+    thread_find_input: Entity<InputState>,
+    thread_find_open: bool,
+    thread_find_matches: Vec<ThreadSearchOccurrence>,
+    thread_find_selected: usize,
+    thread_find_loading: bool,
+    thread_find_hydrating: bool,
+    thread_find_error: Option<String>,
+    thread_find_generation: u64,
     selected_thread: Option<String>,
     status_line: SharedString,
     /// Active product shell mode (rail selection).
@@ -1299,6 +1310,18 @@ impl MitsuroApp {
         )
         .detach();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let thread_find_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
+        cx.subscribe_in(
+            &thread_find_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => app.search_selected_thread_occurrences(cx),
+                InputEvent::PressEnter { .. } => app.select_next_thread_find_match(1, cx),
+                _ => {}
+            },
+        )
+        .detach();
         let composer_model_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search models…"));
         cx.subscribe_in(
@@ -1467,6 +1490,14 @@ impl MitsuroApp {
             transcript_visible_limits: std::collections::HashMap::new(),
             expanded_transcript_messages: std::collections::HashSet::new(),
             transcript_scroll_handle: ScrollHandle::new(),
+            thread_find_input,
+            thread_find_open: false,
+            thread_find_matches: Vec::new(),
+            thread_find_selected: 0,
+            thread_find_loading: false,
+            thread_find_hydrating: false,
+            thread_find_error: None,
+            thread_find_generation: 0,
             selected_thread: None,
             selected_chat_thread: None,
             selected_codex_thread: None,
@@ -6580,6 +6611,286 @@ impl MitsuroApp {
         &self.transcript_scroll_handle
     }
 
+    pub fn thread_find_input(&self) -> &Entity<InputState> {
+        &self.thread_find_input
+    }
+
+    pub fn thread_find_open(&self) -> bool {
+        self.thread_find_open
+    }
+
+    pub fn thread_find_matches(&self) -> &[ThreadSearchOccurrence] {
+        &self.thread_find_matches
+    }
+
+    pub fn thread_find_selected(&self) -> usize {
+        self.thread_find_selected
+    }
+
+    pub fn thread_find_loading(&self) -> bool {
+        self.thread_find_loading
+    }
+
+    pub fn thread_find_hydrating(&self) -> bool {
+        self.thread_find_hydrating
+    }
+
+    pub fn thread_find_error(&self) -> Option<&str> {
+        self.thread_find_error.as_deref()
+    }
+
+    pub fn selected_thread_find_item_id(&self) -> Option<&str> {
+        self.thread_find_matches
+            .get(self.thread_find_selected)
+            .map(|occurrence| occurrence.item_id.as_str())
+    }
+
+    pub fn open_thread_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_thread.is_none() {
+            self.status_line = "Find unavailable · select a conversation first.".into();
+            cx.notify();
+            return;
+        }
+        self.thread_menu_open = false;
+        self.thread_find_open = true;
+        self.thread_find_input.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
+        self.search_selected_thread_occurrences(cx);
+        cx.notify();
+    }
+
+    pub fn close_thread_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread_find_open = false;
+        self.thread_find_matches.clear();
+        self.thread_find_selected = 0;
+        self.thread_find_loading = false;
+        self.thread_find_hydrating = false;
+        self.thread_find_error = None;
+        self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
+        self.thread_find_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn search_selected_thread_occurrences(&mut self, cx: &mut Context<Self>) {
+        if !self.thread_find_open {
+            return;
+        }
+        let query = self.thread_find_input.read(cx).value().trim().to_owned();
+        self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
+        let find_generation = self.thread_find_generation;
+        self.thread_find_selected = 0;
+        self.thread_find_hydrating = false;
+        self.thread_find_error = None;
+        if query.is_empty() {
+            self.thread_find_matches.clear();
+            self.thread_find_loading = false;
+            self.thread_find_hydrating = false;
+            cx.notify();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            self.thread_find_matches.clear();
+            self.thread_find_loading = false;
+            self.thread_find_hydrating = false;
+            self.thread_find_error = Some("Select a conversation first".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.thread_find_matches.clear();
+            self.thread_find_loading = false;
+            self.thread_find_hydrating = false;
+            self.thread_find_error =
+                Some("This conversation has no live backend identity".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.thread_find_matches.clear();
+            self.thread_find_loading = false;
+            self.thread_find_hydrating = false;
+            self.thread_find_error = Some("The conversation backend is not ready".to_owned());
+            cx.notify();
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        self.thread_find_loading = true;
+        cx.spawn(async move |this, cx| {
+            let search_backend = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        search_backend
+                            .search_thread_occurrences(&session_id, query, None, Some(100))
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.thread_find_generation != find_generation
+                    || app.selected_thread.as_deref() != Some(thread_id.as_str())
+                {
+                    return;
+                }
+                app.thread_find_loading = false;
+                match result {
+                    Ok(response) => {
+                        app.thread_find_matches = response.data;
+                        app.thread_find_error = None;
+                        app.reveal_selected_thread_find_match(cx);
+                    }
+                    Err(error) => {
+                        app.thread_find_matches.clear();
+                        app.thread_find_error = Some(error.clone());
+                        app.status_line = format!("Find failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn select_next_thread_find_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.thread_find_matches.is_empty() {
+            return;
+        }
+        let count = self.thread_find_matches.len() as isize;
+        self.thread_find_selected =
+            (self.thread_find_selected as isize + delta).rem_euclid(count) as usize;
+        self.reveal_selected_thread_find_match(cx);
+        cx.notify();
+    }
+
+    fn reveal_selected_thread_find_match(&mut self, cx: &mut Context<Self>) {
+        let Some(occurrence) = self
+            .thread_find_matches
+            .get(self.thread_find_selected)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let Some(thread) = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == thread_id)
+        else {
+            return;
+        };
+        let message_index = thread
+            .messages
+            .iter()
+            .position(|message| message.item_id.as_deref() == Some(occurrence.item_id.as_str()));
+        let total = thread.messages.len();
+        if let Some(message_index) = message_index {
+            self.thread_find_hydrating = false;
+            self.transcript_visible_limits.insert(thread_id, total);
+            self.scroll_thread_find_match_after_layout(message_index, cx);
+            self.status_line = format!(
+                "Find · {} of {}",
+                self.thread_find_selected + 1,
+                self.thread_find_matches.len()
+            )
+            .into();
+        } else {
+            self.hydrate_selected_thread_find_match(thread_id, occurrence, cx);
+        }
+        cx.notify();
+    }
+
+    fn scroll_thread_find_match_after_layout(&self, message_index: usize, cx: &mut Context<Self>) {
+        self.transcript_scroll_handle
+            .scroll_to_top_of_item(message_index);
+        let handle = self.transcript_scroll_handle.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(Duration::from_millis(16));
+            })
+            .await;
+            handle.scroll_to_top_of_item(message_index);
+            let _ = this.update(cx, |_app, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    fn hydrate_selected_thread_find_match(
+        &mut self,
+        thread_id: String,
+        occurrence: ThreadSearchOccurrence,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.thread_find_error =
+                Some("This conversation has no live backend identity".to_owned());
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.thread_find_error = Some("The conversation backend is not ready".to_owned());
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        let find_generation = self.thread_find_generation;
+        let item_id = occurrence.item_id.clone();
+        self.thread_find_hydrating = true;
+        self.status_line = format!(
+            "Find · loading match {} of {}",
+            self.thread_find_selected + 1,
+            self.thread_find_matches.len()
+        )
+        .into();
+        cx.spawn(async move |this, cx| {
+            let hydration_backend = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        hydration_backend
+                            .hydrate_thread_search_match(&session_id, &occurrence, 5)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.thread_find_generation != find_generation
+                    || app.selected_thread.as_deref() != Some(thread_id.as_str())
+                    || app.selected_thread_find_item_id() != Some(item_id.as_str())
+                {
+                    return;
+                }
+                app.thread_find_hydrating = false;
+                match result {
+                    Ok(messages) => {
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == thread_id)
+                        {
+                            prepend_hydrated_messages(&mut thread.messages, messages);
+                        }
+                        app.thread_find_error = None;
+                        app.reveal_selected_thread_find_match(cx);
+                    }
+                    Err(error) => {
+                        app.thread_find_error = Some(error.clone());
+                        app.status_line = format!("Find hydration failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn toggle_transcript_message_expanded(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.expanded_transcript_messages.remove(&key) {
             self.expanded_transcript_messages.insert(key);
@@ -7831,6 +8142,12 @@ impl MitsuroApp {
     }
 
     pub fn select_thread(&mut self, id: String, cx: &mut Context<Self>) {
+        self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
+        self.thread_find_matches.clear();
+        self.thread_find_selected = 0;
+        self.thread_find_loading = false;
+        self.thread_find_hydrating = false;
+        self.thread_find_error = None;
         self.selected_thread = Some(id.clone());
         self.thread_menu_open = false;
         self.composer_access_menu_open = false;
@@ -7896,6 +8213,9 @@ impl MitsuroApp {
         }
         if self.active_mode == ProductMode::Terminal {
             self.refresh_terminal_backgrounds(cx);
+        }
+        if self.thread_find_open {
+            self.search_selected_thread_occurrences(cx);
         }
         self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
@@ -12373,65 +12693,7 @@ impl MitsuroApp {
                                 let n_chat = msgs.len();
                                 let ui: Vec<DemoMessage> = msgs
                                     .into_iter()
-                                    .map(|m| {
-                                        let mut msg = match m.role {
-                                            MessageRole::User => {
-                                                DemoMessage::user_with_attachments(
-                                                    m.body,
-                                                    demo_image_attachments(m.images),
-                                                    demo_audio_attachments(m.audio),
-                                                    demo_reference_attachments(m.references),
-                                                )
-                                            }
-                                            MessageRole::Assistant => {
-                                                DemoMessage::assistant(m.body)
-                                            }
-                                            MessageRole::Activity => {
-                                                let fields = m.activity.unwrap_or(ActivityFields {
-                                                    kind: "activity".to_owned(),
-                                                    title: "Activity".to_owned(),
-                                                    summary: m.body,
-                                                    status: String::new(),
-                                                });
-                                                DemoMessage::activity(
-                                                    fields.kind,
-                                                    fields.title,
-                                                    fields.summary,
-                                                    fields.status,
-                                                    m.item_id.clone(),
-                                                )
-                                            }
-                                            MessageRole::Reasoning => {
-                                                DemoMessage::reasoning(m.body, m.item_id.clone())
-                                            }
-                                            MessageRole::Plan => {
-                                                DemoMessage::plan(m.body, m.item_id.clone())
-                                            }
-                                            MessageRole::CommandExecution => {
-                                                let fields = m.command.unwrap_or_default();
-                                                DemoMessage::command_execution(
-                                                    fields.command,
-                                                    fields.cwd,
-                                                    fields.status,
-                                                    fields.output,
-                                                    m.item_id.clone(),
-                                                )
-                                            }
-                                            MessageRole::FileChange => {
-                                                let fields = m.file_change.unwrap_or_default();
-                                                DemoMessage::file_change(
-                                                    fields.paths_summary,
-                                                    fields.patch_preview,
-                                                    fields.status,
-                                                    m.item_id.clone(),
-                                                )
-                                            }
-                                        };
-                                        if msg.item_id.is_none() {
-                                            msg.item_id = m.item_id;
-                                        }
-                                        msg
-                                    })
+                                    .map(demo_message_from_conversation)
                                     .collect();
                                 eprintln!(
                                     "[mitsuro] thread/read prepared id={} scanned={} ui={}",
@@ -13224,6 +13486,77 @@ async fn replay_fixture_events(
         }
         cx.notify();
     });
+}
+
+fn demo_message_from_conversation(message: ConversationMessage) -> DemoMessage {
+    let mut demo = match message.role {
+        MessageRole::User => DemoMessage::user_with_attachments(
+            message.body,
+            demo_image_attachments(message.images),
+            demo_audio_attachments(message.audio),
+            demo_reference_attachments(message.references),
+        ),
+        MessageRole::Assistant => DemoMessage::assistant(message.body),
+        MessageRole::Activity => {
+            let fields = message.activity.unwrap_or(ActivityFields {
+                kind: "activity".to_owned(),
+                title: "Activity".to_owned(),
+                summary: message.body,
+                status: String::new(),
+            });
+            DemoMessage::activity(
+                fields.kind,
+                fields.title,
+                fields.summary,
+                fields.status,
+                message.item_id.clone(),
+            )
+        }
+        MessageRole::Reasoning => DemoMessage::reasoning(message.body, message.item_id.clone()),
+        MessageRole::Plan => DemoMessage::plan(message.body, message.item_id.clone()),
+        MessageRole::CommandExecution => {
+            let fields = message.command.unwrap_or_default();
+            DemoMessage::command_execution(
+                fields.command,
+                fields.cwd,
+                fields.status,
+                fields.output,
+                message.item_id.clone(),
+            )
+        }
+        MessageRole::FileChange => {
+            let fields = message.file_change.unwrap_or_default();
+            DemoMessage::file_change(
+                fields.paths_summary,
+                fields.patch_preview,
+                fields.status,
+                message.item_id.clone(),
+            )
+        }
+    };
+    if demo.item_id.is_none() {
+        demo.item_id = message.item_id;
+    }
+    demo
+}
+
+fn prepend_hydrated_messages(current: &mut Vec<DemoMessage>, hydrated: Vec<ConversationMessage>) {
+    let existing_ids = current
+        .iter()
+        .filter_map(|message| message.item_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut prefix = hydrated
+        .into_iter()
+        .map(demo_message_from_conversation)
+        .filter(|message| {
+            message
+                .item_id
+                .as_ref()
+                .is_some_and(|id| !existing_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    prefix.append(current);
+    *current = prefix;
 }
 
 fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttachment> {
@@ -14039,6 +14372,35 @@ mod tests {
             DemoImageSource::Url(url) if url == "https://example.com/remote.webp"
         ));
         assert!(matches!(&images[2].source, DemoImageSource::Decoded(_)));
+    }
+
+    #[test]
+    fn hydrated_search_history_is_prepended_without_duplicate_items() {
+        let mut current = vec![DemoMessage::assistant("newest")];
+        current[0].item_id = Some("item-new".to_owned());
+        let message = |role, body: &str, item_id: &str| ConversationMessage {
+            role,
+            body: body.to_owned(),
+            item_id: Some(item_id.to_owned()),
+            command: None,
+            file_change: None,
+            activity: None,
+            images: Vec::new(),
+            audio: Vec::new(),
+            references: Vec::new(),
+        };
+
+        prepend_hydrated_messages(
+            &mut current,
+            vec![
+                message(MessageRole::User, "older", "item-old"),
+                message(MessageRole::Assistant, "newest", "item-new"),
+            ],
+        );
+
+        assert_eq!(current.len(), 2);
+        assert_eq!(current[0].item_id.as_deref(), Some("item-old"));
+        assert_eq!(current[1].item_id.as_deref(), Some("item-new"));
     }
 
     #[test]

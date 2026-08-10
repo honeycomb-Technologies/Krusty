@@ -94,6 +94,11 @@ use crate::remote_control::{
     RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse,
 };
 use crate::server_requests::{automatic_server_response, AutomaticServerResponse};
+use crate::thread_history::{
+    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
+    ThreadRollbackResponse, ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse,
+    ThreadTurnsListParams, ThreadTurnsListResponse,
+};
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -514,6 +519,64 @@ impl CodexAppServerBackend {
     pub async fn search_threads(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("thread/search", Some(value)).await
+    }
+
+    /// Find visible user/final-assistant message occurrences in one thread.
+    pub async fn search_thread_occurrences(
+        &self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> Result<ThreadSearchOccurrencesResponse> {
+        let value = serde_json::to_value(&params)?;
+        match self
+            .request_typed("thread/searchOccurrences", Some(value))
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(AgentError::Rpc { code: -32601, .. }) => {
+                warn!(
+                    "Codex app-server rejected thread/searchOccurrences; projecting real thread/read history"
+                );
+                let thread = self.read_history_fallback(&params.thread_id).await?;
+                Ok(search_occurrences_in_thread(&thread.thread, &params))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read one bounded page from a thread's durable turn history.
+    pub async fn list_thread_turns(
+        &self,
+        params: ThreadTurnsListParams,
+    ) -> Result<ThreadTurnsListResponse> {
+        let value = serde_json::to_value(&params)?;
+        match self.request_typed("thread/turns/list", Some(value)).await {
+            Ok(response) => Ok(response),
+            Err(AgentError::Rpc { code: -32601, .. }) => {
+                warn!(
+                    "Codex app-server rejected thread/turns/list; projecting real thread/read history"
+                );
+                let thread = self.read_history_fallback(&params.thread_id).await?;
+                Ok(list_turns_in_thread(&thread.thread, &params))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn read_history_fallback(&self, thread_id: &str) -> Result<ThreadReadResponse> {
+        let value = serde_json::to_value(ThreadReadParams {
+            thread_id: thread_id.to_owned(),
+            include_turns: Some(true),
+        })?;
+        self.request_typed("thread/read", Some(value)).await
+    }
+
+    /// Remove completed turns from the end of a thread.
+    pub async fn rollback_thread(
+        &self,
+        params: ThreadRollbackParams,
+    ) -> Result<ThreadRollbackResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/rollback", Some(value)).await
     }
 
     /// Set user-facing thread title via `thread/name/set`.
@@ -1166,6 +1229,27 @@ impl AgentBackend for CodexAppServerBackend {
 
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         self.search_threads(params).await
+    }
+
+    async fn thread_search_occurrences(
+        &self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> Result<ThreadSearchOccurrencesResponse> {
+        self.search_thread_occurrences(params).await
+    }
+
+    async fn thread_turns_list(
+        &self,
+        params: ThreadTurnsListParams,
+    ) -> Result<ThreadTurnsListResponse> {
+        self.list_thread_turns(params).await
+    }
+
+    async fn thread_rollback(
+        &self,
+        params: ThreadRollbackParams,
+    ) -> Result<ThreadRollbackResponse> {
+        self.rollback_thread(params).await
     }
 
     async fn thread_name_set(&self, params: ThreadSetNameParams) -> Result<ThreadSetNameResponse> {
@@ -3792,6 +3876,187 @@ mod integration_tests {
             }
         }
         let _ = backend.disconnect().await;
+    }
+
+    /// Exact request and response shapes for the conversation-history family.
+    #[tokio::test]
+    async fn thread_history_family_matches_generated_contract() {
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "thread/searchOccurrences",
+                "thread/turns/list",
+                "thread/rollback",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "thread/searchOccurrences" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-1",
+                                "searchTerm": "layout",
+                                "limit": 25
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [{
+                                "turnId": "turn-1",
+                                "turnCursor": "turn-cursor-1",
+                                "itemId": "item-1",
+                                "snippet": "layout plan",
+                                "snippetMatchRange": {"start": 0, "end": 6}
+                            }],
+                            "nextCursor": null
+                        })
+                    }
+                    "thread/turns/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-1",
+                                "limit": 5,
+                                "sortDirection": "desc",
+                                "itemsView": "full"
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [{"id":"turn-1","status":"completed","items":[]}],
+                            "nextCursor": null,
+                            "backwardsCursor": "turn-cursor-1"
+                        })
+                    }
+                    "thread/rollback" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"threadId": "thread-1", "numTurns": 1})
+                        );
+                        serde_json::json!({"thread":{"id":"thread-1","turns":[]}})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let occurrences = backend
+            .search_thread_occurrences(ThreadSearchOccurrencesParams {
+                thread_id: "thread-1".into(),
+                search_term: "layout".into(),
+                cursor: None,
+                limit: Some(25),
+            })
+            .await
+            .unwrap();
+        assert_eq!(occurrences.data[0].item_id, "item-1");
+        let turns = backend
+            .list_thread_turns(ThreadTurnsListParams::newest("thread-1", 5))
+            .await
+            .unwrap();
+        assert_eq!(turns.data[0]["id"], "turn-1");
+        let rolled_back = backend
+            .rollback_thread(ThreadRollbackParams::one("thread-1"))
+            .await
+            .unwrap();
+        assert!(rolled_back.thread["turns"].as_array().unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thread_history_uses_real_read_fallback_when_runtime_rejects_new_methods() {
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "thread/searchOccurrences",
+                "thread/read",
+                "thread/turns/list",
+                "thread/read",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                if matches!(expected, "thread/searchOccurrences" | "thread/turns/list") {
+                    responder
+                        .inject_stdout_line(
+                            &serde_json::json!({
+                                "id": request["id"],
+                                "error": {
+                                    "code": -32601,
+                                    "message": format!("{expected} is not supported yet")
+                                }
+                            })
+                            .to_string(),
+                        )
+                        .await;
+                } else {
+                    assert_eq!(
+                        request["params"],
+                        serde_json::json!({"threadId":"thread-1","includeTurns":true})
+                    );
+                    responder
+                        .inject_stdout_line(
+                            &serde_json::json!({
+                                "id": request["id"],
+                                "result": {"thread": {
+                                    "id": "thread-1",
+                                    "turns": [{
+                                        "id": "turn-1",
+                                        "items": [{
+                                            "id": "item-1",
+                                            "type": "agentMessage",
+                                            "text": "real layout result"
+                                        }]
+                                    }]
+                                }}
+                            })
+                            .to_string(),
+                        )
+                        .await;
+                }
+            }
+        });
+
+        let occurrences = backend
+            .search_thread_occurrences(ThreadSearchOccurrencesParams::new("thread-1", "layout"))
+            .await
+            .unwrap();
+        assert_eq!(occurrences.data[0].item_id, "item-1");
+        let turns = backend
+            .list_thread_turns(ThreadTurnsListParams::newest("thread-1", 5))
+            .await
+            .unwrap();
+        assert_eq!(turns.data[0]["id"], "turn-1");
+        server.await.unwrap();
     }
 
     /// Strict paid acceptance: a real Codex turn must stream text and complete.

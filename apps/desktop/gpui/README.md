@@ -152,13 +152,18 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   honest unsupported result when none were registered, while token refresh and
   attestation return JSON-RPC errors instead of fabricated credentials.
 - Long transcripts start with a 16-message tail and reveal earlier history in bounded
-  pages. Reopened threads preserve structured reasoning, plans, commands, and file
-  changes. The current 18-type Codex thread item surface is preserved across hydration
-  and live updates: non-chat tool/search/image/collaboration/review lifecycle records
-  render as real, cardless activity rows rather than being dropped or converted into
-  assistant prose. Assistant Markdown, fenced code, visible errors, and bounded
-  full-response expansion render while the composer remains pinned outside the
-  transcript scroll.
+  pages. Find in conversation queries the selected live backend rather than filtering a
+  local fixture: Codex uses `thread/searchOccurrences`, Mitsuro searches its persisted
+  transcript, and an unloaded result hydrates bounded real turn pages around the exact
+  returned cursor before scrolling to the item. Codex runtimes that advertise the
+  methods but return JSON-RPC `-32601` use a real `thread/read(includeTurns)` projection;
+  no fixture or local sample text is substituted. Reopened threads preserve structured
+  reasoning, plans, commands, and file changes. The current 18-type Codex thread item
+  surface is preserved across hydration and live updates: non-chat
+  tool/search/image/collaboration/review lifecycle records render as real, cardless
+  activity rows rather than being dropped or converted into assistant prose. Assistant
+  Markdown, fenced code, visible errors, and bounded full-response expansion render
+  while the composer remains pinned outside the transcript scroll.
 
 ## Parity status
 

@@ -91,6 +91,10 @@ use crate::remote_control::{
     RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
     RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse,
 };
+use crate::thread_history::{
+    ThreadRollbackParams, ThreadRollbackResponse, ThreadSearchOccurrencesParams,
+    ThreadSearchOccurrencesResponse, ThreadTurnsListParams, ThreadTurnsListResponse,
+};
 use crate::types::{ConnectionStatus, Result};
 use crate::{
     HooksListParams, HooksListResponse, SkillsConfigWriteParams, SkillsConfigWriteResponse,
@@ -256,6 +260,29 @@ pub trait AgentBackend: Send + Sync {
     /// Full-text / substring thread search via `thread/search`.
     /// UI may also filter locally; this is the server method when available.
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse>;
+
+    /// Search visible user/final-assistant messages within one thread.
+    async fn thread_search_occurrences(
+        &self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> Result<ThreadSearchOccurrencesResponse>;
+
+    /// Read one bounded page of turns from a thread's durable history.
+    async fn thread_turns_list(
+        &self,
+        params: ThreadTurnsListParams,
+    ) -> Result<ThreadTurnsListResponse>;
+
+    /// Remove completed turns from the tail of a Codex thread. The Codex method
+    /// is deprecated but still underpins reference-desktop message editing.
+    async fn thread_rollback(
+        &self,
+        _params: ThreadRollbackParams,
+    ) -> Result<ThreadRollbackResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread rollback is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Set a user-facing thread title via `thread/name/set`.
     async fn thread_name_set(&self, params: ThreadSetNameParams) -> Result<ThreadSetNameResponse>;

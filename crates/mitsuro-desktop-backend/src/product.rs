@@ -136,6 +136,16 @@ fn conversation_message_from_transcript(message: TranscriptMessage) -> Conversat
     }
 }
 
+pub(crate) fn conversation_messages_from_turn_values(
+    turns: Vec<serde_json::Value>,
+) -> Vec<ConversationMessage> {
+    let thread = serde_json::json!({ "turns": turns });
+    crate::extract_transcript_from_thread(&thread)
+        .into_iter()
+        .map(conversation_message_from_transcript)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConversation {
     pub session: SessionSummary,

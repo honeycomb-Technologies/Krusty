@@ -47,6 +47,7 @@ backend or are shown as unavailable.
 | Health/connect | Live | Live | Explicit fixture |
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
+| Conversation find/history | Live search over the real persisted transcript plus bounded turn pages | Live `thread/searchOccurrences` plus bidirectional `thread/turns/list`; runtimes returning `-32601` fall back to a real `thread/read(includeTurns)` projection | Typed fixture transcript; no invented matches |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |
 | Audio-file attachments | Unsupported, hidden and rejected before I/O | Live schema-exact `localAudio`, selected-model gated | Unsupported, hidden |
 | Skill references | Unsupported, hidden and rejected before I/O | Live schema-exact `skill { name, path }` from enabled server skills | Unsupported, hidden |
@@ -89,8 +90,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 97 typed adapters
-and 36 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 100 typed adapters
+and 33 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -220,6 +221,16 @@ work, not as feature completion; the matrix test must change with each typed ada
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
+- Find in conversation searches only backend-owned user/final-assistant text. Selecting
+  an unloaded match hydrates five real turns in both directions from the returned turn
+  cursor, deduplicates already loaded item ids, and scrolls to the exact persisted item.
+  Codex uses `thread/searchOccurrences` and `thread/turns/list` when the live runtime
+  implements them. The 0.147.0 schema advertises both while some app-server builds still
+  return JSON-RPC `-32601`; only for that exact response the adapter projects the same
+  contracts from a real `thread/read(includeTurns)` payload. Mitsuro derives its
+  read-only contract from its persisted transcript. Codex `thread/rollback` is typed for
+  the reference edit/retry workflow, while Mitsuro explicitly rejects destructive
+  rollback because its HTTP API has no equivalent mutation.
 - Backend session IDs are namespaced (`BackendSessionId`) and are stored on every
   live GPUI thread. Session/model/turn flows use the transport-neutral
   `ProductBackend` contract, and mutations reject a session whose origin differs

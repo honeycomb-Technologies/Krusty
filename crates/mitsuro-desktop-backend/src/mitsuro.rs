@@ -60,6 +60,11 @@ use crate::protocol::{
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
     TurnSteerParams, TurnSteerResponse,
 };
+use crate::thread_history::{
+    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
+    ThreadRollbackResponse, ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse,
+    ThreadTurnsListParams, ThreadTurnsListResponse,
+};
 use crate::types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
     DelegationGroupProjection, DelegationGroupStatus, DelegationKind,
@@ -961,6 +966,41 @@ impl AgentBackend for MitsuroServerBackend {
     async fn thread_search(&self, _params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         Err(AgentError::NotImplemented(
             "MitsuroServerBackend::thread_search — not implemented".into(),
+        ))
+    }
+
+    async fn thread_search_occurrences(
+        &self,
+        params: ThreadSearchOccurrencesParams,
+    ) -> Result<ThreadSearchOccurrencesResponse> {
+        let response = self
+            .thread_read(ThreadReadParams {
+                thread_id: params.thread_id.clone(),
+                include_turns: Some(true),
+            })
+            .await?;
+        Ok(search_occurrences_in_thread(&response.thread, &params))
+    }
+
+    async fn thread_turns_list(
+        &self,
+        params: ThreadTurnsListParams,
+    ) -> Result<ThreadTurnsListResponse> {
+        let response = self
+            .thread_read(ThreadReadParams {
+                thread_id: params.thread_id.clone(),
+                include_turns: Some(true),
+            })
+            .await?;
+        Ok(list_turns_in_thread(&response.thread, &params))
+    }
+
+    async fn thread_rollback(
+        &self,
+        _params: ThreadRollbackParams,
+    ) -> Result<ThreadRollbackResponse> {
+        Err(AgentError::NotImplemented(
+            "Mitsuro HTTP does not expose destructive turn rollback".to_owned(),
         ))
     }
 
