@@ -25,6 +25,20 @@ are not canonical product evidence.
 A Ready, authenticated product backend sends a provider-backed turn by default.
 Use `MITSURO_NO_LIVE_TURN=1` for read-only UI review or an explicit fixture backend for
 deterministic replay. Merely connecting and discovering auth does not itself send a turn.
+`MITSURO_NO_LIVE_TURN` disables Send; it does not select fixture replay.
+
+## Production data invariant
+
+Fixture records are allowed only when both the UI connection and active backend are
+explicitly `fixture`. Mitsuro HTTP, Codex stdio/WebSocket, connecting, and error states
+cannot use fixture catalogs or fixture process/file/session operations. Backend errors
+clear the affected projection and render a typed loading, empty, unsupported, or error
+state. They never substitute sample success.
+
+Desktop preferences, current mode, local browser URL history, and transient composer UI
+remain local application state. Server-owned sessions, transcripts, models, files,
+processes, extensions, Hive runs/schedules, and account usage come from the selected
+backend or are shown as unavailable.
 
 ## Truth matrix
 
@@ -44,7 +58,8 @@ deterministic replay. Merely connecting and discovering auth does not itself sen
 | Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
-| Browser/computer use | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Explicit fixture catalog |
+| Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
+| Computer environments/permissions | Unsupported; no invented rows or grants | Unsupported; no invented rows or grants | Explicit fixture catalog, labeled fixture |
 | Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
@@ -73,6 +88,9 @@ success payloads.
 
 - The fixture/live visual matrix, dual-provider acceptance gauntlet, full workspace
   gates, optimized GPUI build, and isolated runtime provenance check are complete.
+- The production-data purity matrix was revalidated on both live transports for Work,
+  Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids
+  fixture records for every product backend connection state.
 - Codex WebSocket stays explicitly unsupported unless attaching to an already-running
   app-server becomes a required deployment mode; managed stdio is the supported path.
 - Installation and deployment are separate operator actions. A built GPUI artifact is

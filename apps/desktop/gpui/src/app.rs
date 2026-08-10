@@ -14,18 +14,18 @@ use mitsuro_desktop_backend::{
     command_execution_fields, file_change_fields, fixture_demo_account_response,
     fixture_demo_collaboration_modes, fixture_demo_config, fixture_demo_environments,
     fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins, fixture_demo_rate_limits,
-    fixture_demo_skills, fixture_demo_usage, fixture_login_device_code_response, join_abs,
-    load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, AgentBackend,
-    ApprovalChoice, BackendKind, BackendSelection, BackendSessionId, CollaborationModeListParams,
-    CollaborationModeMask, ConfigReadParams, CreateSession, DesktopBackend, EnvironmentInfoParams,
-    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
-    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, ListMcpServerStatusParams,
-    LiveApprovalBridge, LoginAccountParams, McpAuthStatus, McpServerInfo, McpServerStatus,
-    MessageRole, ModelInfo, ModelListParams, PendingApproval, PlanType, PluginAuthPolicy,
-    PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource,
-    PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
+    fixture_demo_skills, fixture_demo_usage, join_abs, load_sample_turn_events, normalize_abs_path,
+    summarize_file_changes, Account, AgentBackend, ApprovalChoice, BackendKind, BackendSelection,
+    BackendSessionId, CollaborationModeListParams, CollaborationModeMask, ConfigReadParams,
+    CreateSession, DesktopBackend, EnvironmentInfoParams, EnvironmentInfoResponse,
+    EnvironmentStatusParams, EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend,
+    FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams,
+    FuzzyFileSearchResult, GetAccountParams, GetAccountRateLimitsResponse,
+    GetAccountTokenUsageResponse, ListMcpServerStatusParams, LiveApprovalBridge,
+    LoginAccountParams, McpAuthStatus, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
+    ModelListParams, PendingApproval, PlanType, PluginAuthPolicy, PluginAvailability,
+    PluginInstallPolicy, PluginInterface, PluginListParams, PluginSource, PluginSummary,
+    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductBackend,
     ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
     ProductProcess, ProductSchedule, ProductSkill, ProductTurn, ReasoningEffortOption,
     SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
@@ -525,7 +525,7 @@ pub struct FilesSession {
 impl FilesSession {
     fn new(backend_label: impl Into<SharedString>) -> Self {
         Self {
-            cwd: FIXTURE_PROJECT_ROOT.into(),
+            cwd: String::new().into(),
             entries: Vec::new(),
             selected_path: None,
             preview: SharedString::from(""),
@@ -673,6 +673,31 @@ impl UiConnection {
     }
 }
 
+/// Provenance for data rendered by a product surface.
+///
+/// Live modes must never transition to `Fixture`; that state is reserved for an
+/// explicitly selected fixture backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceDataState {
+    Loading,
+    Live,
+    Fixture,
+    Unsupported,
+    Error,
+}
+
+impl SurfaceDataState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading",
+            Self::Live => "Live",
+            Self::Fixture => "Fixture",
+            Self::Unsupported => "Unsupported",
+            Self::Error => "Error",
+        }
+    }
+}
+
 /// How Send should produce an assistant reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendMode {
@@ -690,13 +715,20 @@ fn decide_send_mode(
     backend_present: bool,
     force_fixture: bool,
 ) -> SendMode {
-    if force_fixture || backend_kind == Some(BackendKind::Fixture) {
+    if force_fixture || fixture_records_allowed(connection, backend_kind) {
         return SendMode::Fixture;
+    }
+    if backend_kind == Some(BackendKind::Fixture) {
+        return SendMode::Unavailable;
     }
     match connection {
         UiConnection::Ready { has_auth: true, .. } if backend_present => SendMode::Live,
         _ => SendMode::Unavailable,
     }
+}
+
+fn fixture_records_allowed(connection: &UiConnection, backend_kind: Option<BackendKind>) -> bool {
+    matches!(connection, UiConnection::Fixture) && backend_kind == Some(BackendKind::Fixture)
 }
 
 /// Account / usage surface for Settings (offline fixture demo + live probe).
@@ -826,9 +858,9 @@ pub struct MitsuroApp {
     settings_search_query: String,
     /// Settings search input entity.
     settings_search_input: Entity<InputState>,
-    /// Local fixture toggles / segment choices (density UI; no paid backends).
+    /// Desktop-local toggles. Persistence does not imply a server configuration write.
     settings_toggles: std::collections::HashMap<String, bool>,
-    /// Local fixture string choices (e.g. "Bottom"/"Right", "Fast").
+    /// Desktop-local string choices (e.g. "Bottom"/"Right", "Fast").
     settings_choices: std::collections::HashMap<String, String>,
     /// Last selected Chat-surface thread (restored when re-entering Chat).
     selected_chat_thread: Option<String>,
@@ -853,8 +885,10 @@ pub struct MitsuroApp {
     mcp_servers: Vec<McpServerStatus>,
     /// Plugins from `plugin/list` (flattened marketplace entries).
     plugins: Vec<PluginSummary>,
+    extensions_state: SurfaceDataState,
     /// Environments catalog (fixture demo; no protocol list method).
     environments: Vec<EnvironmentSummary>,
+    environments_state: SurfaceDataState,
     /// Selected environment id for status/info detail.
     selected_environment_id: Option<String>,
     /// Last `environment/status` response for the selection.
@@ -865,6 +899,7 @@ pub struct MitsuroApp {
     collaboration_modes: Vec<CollaborationModeMask>,
     /// Account / usage session for Settings Account section.
     account: AccountSession,
+    account_state: SurfaceDataState,
     composer_input: Entity<InputState>,
     search_input: Entity<InputState>,
     search_query: String,
@@ -925,7 +960,7 @@ pub struct MitsuroApp {
     files_path_input: Entity<InputState>,
     /// Fuzzy search query input.
     files_search_input: Entity<InputState>,
-    /// Scheduled: show fixture task rows (vs empty + suggestions only).
+    /// Scheduled: show explicit-fixture task rows (vs suggestions only).
     scheduled_show_tasks: bool,
     /// Scheduled fixture row enabled toggles.
     scheduled_enabled: Vec<bool>,
@@ -1024,8 +1059,8 @@ impl MitsuroApp {
 
         let files_path_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("/fixture-project")
-                .default_value(FIXTURE_PROJECT_ROOT)
+                .placeholder("/workspace")
+                .default_value(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
         });
         let files_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Fuzzy search file names…"));
@@ -1054,28 +1089,6 @@ impl MitsuroApp {
 
         let fixture = Arc::new(FixtureBackend::new().with_stream_delay(Duration::from_millis(35)));
 
-        let demo_models = fixture_demo_models();
-        let default_model_id = demo_models
-            .iter()
-            .find(|m| m.is_default)
-            .or_else(|| demo_models.first())
-            .map(|m| m.id.clone());
-        let demo_skills = fixture_demo_skills()
-            .data
-            .into_iter()
-            .flat_map(|e| e.skills)
-            .collect::<Vec<_>>();
-        let demo_mcp = fixture_demo_mcp_servers().data;
-        let demo_plugins = fixture_demo_plugins()
-            .marketplaces
-            .into_iter()
-            .flat_map(|m| m.plugins)
-            .collect::<Vec<_>>();
-        let demo_envs = fixture_demo_environments();
-        let selected_env = demo_envs.first().map(|e| e.id.clone());
-        let demo_collab = fixture_demo_collaboration_modes().data;
-        let demo_config_snippet = fixture_demo_config().settings_snippet();
-
         #[cfg(feature = "browser-native")]
         let native_host = NativeWebViewHost::new();
         #[cfg(feature = "browser-native")]
@@ -1099,14 +1112,10 @@ impl MitsuroApp {
             host_kind_override,
         );
 
-        let goals = demo::demo_goals();
-        let selected_goal = goals.first().map(|g| g.id.clone());
-        // Bar home first paint: Recents populated, no selection → hero "What should we build?"
-        let demo_seed = demo::demo_threads();
         let mut app = Self {
             focus_handle: cx.focus_handle(),
             connection: UiConnection::Connecting,
-            threads: demo_seed,
+            threads: Vec::new(),
             delegations: std::collections::HashMap::new(),
             transcript_visible_limits: std::collections::HashMap::new(),
             expanded_transcript_messages: std::collections::HashSet::new(),
@@ -1115,7 +1124,7 @@ impl MitsuroApp {
             selected_chat_thread: None,
             selected_codex_thread: None,
             status_line: SharedString::from(""),
-            samples_loaded: true,
+            samples_loaded: false,
             mode_menu_open: false,
             thread_menu_open: false,
             dismiss_usage_card: false,
@@ -1126,22 +1135,25 @@ impl MitsuroApp {
             settings_search_input,
             settings_toggles,
             settings_choices,
-            goals,
-            selected_goal,
+            goals: Vec::new(),
+            selected_goal: None,
             goals_are_live_hive: false,
             hive_snapshot: None,
-            models: demo_models,
-            selected_model_id: default_model_id,
-            config_snippet: demo_config_snippet.into(),
-            skills: demo_skills,
-            mcp_servers: demo_mcp,
-            plugins: demo_plugins,
-            environments: demo_envs,
-            selected_environment_id: selected_env,
+            models: Vec::new(),
+            selected_model_id: None,
+            config_snippet: SharedString::from(""),
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            plugins: Vec::new(),
+            extensions_state: SurfaceDataState::Loading,
+            environments: Vec::new(),
+            environments_state: SurfaceDataState::Loading,
+            selected_environment_id: None,
             environment_status_detail: None,
             environment_info_detail: None,
-            collaboration_modes: demo_collab,
-            account: AccountSession::fixture_demo(),
+            collaboration_modes: Vec::new(),
+            account: AccountSession::empty("loading"),
+            account_state: SurfaceDataState::Loading,
             composer_input,
             search_input,
             search_query: String::new(),
@@ -1163,12 +1175,12 @@ impl MitsuroApp {
             browser_url_input,
             #[cfg(feature = "browser-native")]
             native_host,
-            terminal: TerminalSession::idle("fixture"),
+            terminal: TerminalSession::idle("loading"),
             terminal_cmd_input,
             terminal_stdin_input,
             terminal_handle_seq: 1,
             background_processes: Vec::new(),
-            files: FilesSession::new("fixture"),
+            files: FilesSession::new("loading"),
             files_path_input,
             files_search_input,
             // Suggestions-first like bar; Create / suggestion pick reveals Your tasks.
@@ -1188,14 +1200,15 @@ impl MitsuroApp {
             },
         };
 
-        // Soft probe of local codex app-server; never blocks first paint.
-        // Default offline path uses fixtures for turns (no paid models).
-        // Set MITSURO_SKIP_APPSERVER=1 to stay fully offline.
-        // Set MITSURO_FORCE_FIXTURE=1 to skip app-server and mark Fixture mode.
-        if std::env::var_os("MITSURO_FORCE_FIXTURE").is_some()
-            || std::env::var_os("MITSURO_SKIP_APPSERVER").is_some()
-        {
+        // Connect the selected backend without blocking first paint. Fixture data
+        // is reachable only through an explicit fixture selection.
+        if std::env::var_os("MITSURO_FORCE_FIXTURE").is_some() {
             app.bootstrap_fixture(cx);
+        } else if std::env::var_os("MITSURO_SKIP_APPSERVER").is_some() {
+            app.connection = UiConnection::Error {
+                message: "backend startup disabled by MITSURO_SKIP_APPSERVER".into(),
+            };
+            app.status_line = "Backend startup disabled; no fixture data loaded.".into();
         } else {
             app.bootstrap_backend(cx);
         }
@@ -1238,6 +1251,46 @@ impl MitsuroApp {
             .as_ref()
             .map(|backend| backend.kind())
             .or(self.preferences.selected_backend)
+    }
+
+    pub fn is_explicit_fixture(&self) -> bool {
+        fixture_records_allowed(&self.connection, self.active_backend_kind())
+    }
+
+    pub fn extensions_state(&self) -> SurfaceDataState {
+        self.extensions_state
+    }
+
+    pub fn environments_state(&self) -> SurfaceDataState {
+        self.environments_state
+    }
+
+    pub fn account_state(&self) -> SurfaceDataState {
+        self.account_state
+    }
+
+    pub fn work_state(&self) -> SurfaceDataState {
+        if self.is_explicit_fixture() {
+            return SurfaceDataState::Fixture;
+        }
+        match (&self.connection, self.active_backend_kind()) {
+            (UiConnection::Connecting, _) => SurfaceDataState::Loading,
+            (UiConnection::Error { .. }, _) => SurfaceDataState::Error,
+            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => SurfaceDataState::Live,
+            _ => SurfaceDataState::Unsupported,
+        }
+    }
+
+    pub fn scheduled_state(&self) -> SurfaceDataState {
+        if self.is_explicit_fixture() {
+            return SurfaceDataState::Fixture;
+        }
+        match (&self.connection, self.active_backend_kind()) {
+            (UiConnection::Connecting, _) => SurfaceDataState::Loading,
+            (UiConnection::Error { .. }, _) => SurfaceDataState::Error,
+            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => SurfaceDataState::Live,
+            _ => SurfaceDataState::Unsupported,
+        }
     }
 
     pub fn backend_display_name(kind: BackendKind) -> &'static str {
@@ -1413,15 +1466,18 @@ impl MitsuroApp {
                 format!("Pull requests · unavailable · {backend}").into()
             }
             ProductMode::Sites => "Sites · unavailable on selected backend".into(),
-            ProductMode::Scheduled => {
-                if let Some(tasks) = self.scheduled_tasks.as_ref() {
-                    format!("Hive schedules · {} task(s) · read-only", tasks.len()).into()
-                } else if self.scheduled_show_tasks {
-                    "Scheduled · fixture demo tasks".into()
-                } else {
-                    "Scheduled · suggestions (no schedule protocol)".into()
+            ProductMode::Scheduled => match self.scheduled_state() {
+                SurfaceDataState::Live => format!(
+                    "Hive schedules · {} task(s) · read-only",
+                    self.scheduled_tasks.as_ref().map_or(0, Vec::len)
+                )
+                .into(),
+                SurfaceDataState::Fixture if self.scheduled_show_tasks => {
+                    "Scheduled · explicit fixture tasks".into()
                 }
-            }
+                SurfaceDataState::Fixture => "Scheduled · explicit fixture suggestions".into(),
+                state => format!("Scheduled · {}", state.label()).into(),
+            },
         };
 
         if matches!(mode, ProductMode::Files) {
@@ -1435,7 +1491,7 @@ impl MitsuroApp {
                 } else if self.files.entries.is_empty() {
                     self.files_refresh_directory(window, cx);
                 }
-            } else if self.files.entries.is_empty() {
+            } else if self.is_explicit_fixture() && self.files.entries.is_empty() {
                 self.files_refresh_directory(window, cx);
             }
         }
@@ -1446,8 +1502,8 @@ impl MitsuroApp {
                 self.refresh_selected_environment_detail(cx);
             }
         }
-        // Always re-hit plugin/list + mcpServerStatus/list + skills/list when Ready so
-        // first-paint demo seed is replaced by live (or honest empty) catalog.
+        // Re-hit plugin/list + mcpServerStatus/list + skills/list when Ready so
+        // the panel reflects the latest live (or honestly empty) catalog.
         if matches!(mode, ProductMode::Extensions)
             && (matches!(self.connection, UiConnection::Ready { .. })
                 || self.mcp_servers.is_empty()
@@ -1548,10 +1604,6 @@ impl MitsuroApp {
         self.goals.iter().find(|g| &g.id == id)
     }
 
-    pub fn work_is_live_hive(&self) -> bool {
-        self.goals_are_live_hive
-    }
-
     pub fn select_goal(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_goal = Some(id.clone());
         let thread_id = self
@@ -1571,10 +1623,16 @@ impl MitsuroApp {
 
     /// CTA: create a fixture goal with plan steps; also `thread/goal/set` when linked.
     pub fn start_new_goal(&mut self, cx: &mut Context<Self>) {
-        if self.goals_are_live_hive {
-            self.status_line =
-                "Hive dispatch is not wired from the GPUI client yet; this view is read-only."
-                    .into();
+        if !self.is_explicit_fixture() {
+            self.status_line = match self.work_state() {
+                SurfaceDataState::Live => {
+                    "Hive dispatch is not wired from the GPUI client yet; this view is read-only."
+                }
+                SurfaceDataState::Loading => "Work data is still loading.",
+                SurfaceDataState::Error => "Work is unavailable while the backend is in error.",
+                _ => "Work goals are not exposed by this backend.",
+            }
+            .into();
             cx.notify();
             return;
         }
@@ -1600,9 +1658,9 @@ impl MitsuroApp {
 
     /// Clear selected goal via `thread/goal/clear` (and drop from local list).
     pub fn clear_selected_goal(&mut self, cx: &mut Context<Self>) {
-        if self.goals_are_live_hive {
+        if !self.is_explicit_fixture() {
             self.status_line =
-                "Hive run deletion is intentionally unavailable in this read-only client.".into();
+                "Work mutations are unavailable outside explicit fixture mode.".into();
             cx.notify();
             return;
         }
@@ -1629,8 +1687,9 @@ impl MitsuroApp {
 
     /// Toggle a plan item done flag on the selected goal (local/fixture).
     pub fn toggle_goal_plan_item(&mut self, goal_id: &str, item_id: &str, cx: &mut Context<Self>) {
-        if self.goals_are_live_hive {
-            self.status_line = "Hive task mutation is not wired from the GPUI client yet.".into();
+        if !self.is_explicit_fixture() {
+            self.status_line =
+                "Work plan mutations are unavailable outside explicit fixture mode.".into();
             cx.notify();
             return;
         }
@@ -1670,7 +1729,7 @@ impl MitsuroApp {
                     .await;
             })
             .detach();
-        } else if let Some(fixture) = self.fixture.clone() {
+        } else if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -1709,7 +1768,7 @@ impl MitsuroApp {
                     .await;
             })
             .detach();
-        } else if let Some(fixture) = self.fixture.clone() {
+        } else if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -1747,7 +1806,7 @@ impl MitsuroApp {
                     .await;
             })
             .detach();
-        } else if let Some(fixture) = self.fixture.clone() {
+        } else if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -1809,7 +1868,7 @@ impl MitsuroApp {
         self.backend
             .as_ref()
             .map(|backend| backend.capabilities().processes)
-            .unwrap_or(true)
+            .unwrap_or_else(|| self.is_explicit_fixture())
     }
 
     pub fn terminal_cmd_input(&self) -> &Entity<InputState> {
@@ -1835,16 +1894,20 @@ impl MitsuroApp {
     fn files_backend_label(&self) -> SharedString {
         if self.live_backend().is_some() {
             "app-server".into()
-        } else {
+        } else if self.is_explicit_fixture() {
             "fixture".into()
+        } else {
+            "unavailable".into()
         }
     }
 
     fn terminal_backend_label(&self) -> SharedString {
         if self.live_backend().is_some() {
             "app-server".into()
-        } else {
+        } else if self.is_explicit_fixture() {
             "fixture".into()
+        } else {
+            "unavailable".into()
         }
     }
 
@@ -1891,16 +1954,20 @@ impl MitsuroApp {
         self.files.cwd = path.clone().into();
         self.files.search_query.clear();
         self.files.fuzzy_results.clear();
-        let path_for_input = path.clone();
         self.files_path_input.update(cx, |state, cx| {
-            state.set_value(path_for_input, window, cx);
+            state.set_value(path, window, cx);
         });
         self.files_search_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
 
-        let params = FsReadDirectoryParams::new(path);
-        let result = self.files_call_read_directory(params, cx);
+        self.files_refresh_directory_data(cx);
+    }
+
+    fn files_refresh_directory_data(&mut self, cx: &mut Context<Self>) {
+        let path = normalize_abs_path(self.files.cwd.as_ref());
+        self.files.cwd = path.clone().into();
+        let result = self.files_call_read_directory(FsReadDirectoryParams::new(path), cx);
         match result {
             Ok(entries) => {
                 self.files.entries = entries;
@@ -2037,8 +2104,9 @@ impl MitsuroApp {
     ) -> Result<Vec<FsReadDirectoryEntry>, String> {
         // Prefer live app-server when Ready — fixture is always present for turns offline.
         if let Some(backend) = self.live_backend() {
-            return cx.background_executor().block(async {
-                backend
+            let runner = Arc::clone(&backend);
+            return backend.block_on(async move {
+                runner
                     .browse_directory(params.path)
                     .await
                     .map(|entries| {
@@ -2054,7 +2122,10 @@ impl MitsuroApp {
                     .map_err(|e| e.to_string())
             });
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if self.is_explicit_fixture() {
+            let Some(fixture) = self.fixture.clone() else {
+                return Err("fixture backend is unavailable".into());
+            };
             return cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
                     let _ = fixture.connect().await;
@@ -2075,15 +2146,19 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         if let Some(backend) = self.live_backend() {
-            return cx.background_executor().block(async {
-                backend
+            let runner = Arc::clone(&backend);
+            return backend.block_on(async move {
+                runner
                     .read_text_file(params.path)
                     .await
                     .map(|file| file.text)
                     .map_err(|e| e.to_string())
             });
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if self.is_explicit_fixture() {
+            let Some(fixture) = self.fixture.clone() else {
+                return Err("fixture backend is unavailable".into());
+            };
             return cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
                     let _ = fixture.connect().await;
@@ -2104,15 +2179,19 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) -> Result<Vec<FuzzyFileSearchResult>, String> {
         if let Some(backend) = self.live_backend() {
-            return cx.background_executor().block(async {
-                backend
+            let runner = Arc::clone(&backend);
+            return backend.block_on(async move {
+                runner
                     .search_files(params.query, params.roots)
                     .await
                     .map(|files| files.into_iter().map(file_match_from_product).collect())
                     .map_err(|e| e.to_string())
             });
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if self.is_explicit_fixture() {
+            let Some(fixture) = self.fixture.clone() else {
+                return Err("fixture backend is unavailable".into());
+            };
             return cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
                     let _ = fixture.connect().await;
@@ -2167,7 +2246,7 @@ impl MitsuroApp {
         }
     }
 
-    /// Start a process via live `process/spawn` when Ready, else fixture mock.
+    /// Start a process via the selected live backend or explicit fixture backend.
     pub fn terminal_spawn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.running {
             self.status_line = "Terminal · already running".into();
@@ -2179,6 +2258,13 @@ impl MitsuroApp {
             .is_some_and(|backend| !backend.capabilities().processes)
         {
             self.status_line = "Terminal spawn is not supported by the selected backend.".into();
+            self.terminal.status = TerminalSessionStatus::Error;
+            cx.notify();
+            return;
+        }
+        if self.live_backend().is_none() && !self.is_explicit_fixture() {
+            self.status_line =
+                "Terminal is unavailable until a process-capable backend is ready.".into();
             self.terminal.status = TerminalSessionStatus::Error;
             cx.notify();
             return;
@@ -2214,12 +2300,11 @@ impl MitsuroApp {
         self.status_line = format!("Terminal · spawning {handle}").into();
         cx.notify();
 
-        // Prefer live app-server when Ready (no env gate). Fixture remains offline fallback.
+        // Live failures remain live failures; production never substitutes a fixture process.
         if let Some(backend) = self.live_backend() {
-            let live_params = params.clone();
             let result = cx
                 .background_executor()
-                .block(async move { backend.process_spawn(live_params).await });
+                .block(async move { backend.process_spawn(params).await });
             match result {
                 Ok(resp) => {
                     if let Some(h) = resp.process_handle {
@@ -2235,51 +2320,12 @@ impl MitsuroApp {
                     self.status_line = "Terminal · process/spawn (app-server)".into();
                 }
                 Err(e) => {
-                    // Soft-fallback to fixture mock so the panel stays usable offline-ish.
-                    if let Some(fixture) = self.fixture.clone() {
-                        let fix_for_connect = Arc::clone(&fixture);
-                        cx.background_executor().block(async move {
-                            if !fix_for_connect.status().is_usable() {
-                                let _ = fix_for_connect.connect().await;
-                            }
-                        });
-                        let fix_params = params;
-                        let fix_for_spawn = Arc::clone(&fixture);
-                        let result = cx
-                            .background_executor()
-                            .block(async move { fix_for_spawn.process_spawn(fix_params).await });
-                        match result {
-                            Ok(resp) => {
-                                if let Some(h) = resp.process_handle {
-                                    self.terminal.process_handle = Some(h);
-                                }
-                                let events = fixture.take_process_events();
-                                self.apply_process_events(&events);
-                                self.terminal.backend_label = "fixture".into();
-                                let mut out = self.terminal.output.to_string();
-                                out.push_str(&format!("[live spawn failed: {e}; fixture mock]\n"));
-                                self.terminal.output = out.into();
-                                self.status_line =
-                                    format!("Terminal · live spawn failed ({e}); fixture mock")
-                                        .into();
-                            }
-                            Err(fe) => {
-                                self.terminal.running = false;
-                                self.terminal.status = TerminalSessionStatus::Error;
-                                let mut out = self.terminal.output.to_string();
-                                out.push_str(&format!("[error] live: {e}; fixture: {fe}\n"));
-                                self.terminal.output = out.into();
-                                self.status_line = format!("Terminal · spawn failed: {e}").into();
-                            }
-                        }
-                    } else {
-                        self.terminal.running = false;
-                        self.terminal.status = TerminalSessionStatus::Error;
-                        let mut out = self.terminal.output.to_string();
-                        out.push_str(&format!("[error] {e}\n"));
-                        self.terminal.output = out.into();
-                        self.status_line = format!("Terminal · spawn failed: {e}").into();
-                    }
+                    self.terminal.running = false;
+                    self.terminal.status = TerminalSessionStatus::Error;
+                    let mut out = self.terminal.output.to_string();
+                    out.push_str(&format!("[error] {e}\n"));
+                    self.terminal.output = out.into();
+                    self.status_line = format!("Terminal · spawn failed: {e}").into();
                 }
             }
             let _ = window;
@@ -2287,7 +2333,14 @@ impl MitsuroApp {
             return;
         }
 
-        if let Some(fixture) = self.fixture.clone() {
+        if self.is_explicit_fixture() {
+            let Some(fixture) = self.fixture.clone() else {
+                self.terminal.running = false;
+                self.terminal.status = TerminalSessionStatus::Error;
+                self.status_line = "Terminal · fixture backend unavailable".into();
+                cx.notify();
+                return;
+            };
             // Ensure fixture is connected.
             cx.background_executor().block(async {
                 if !fixture.status().is_usable() {
@@ -2379,24 +2432,26 @@ impl MitsuroApp {
             }
         }
 
-        if let Some(fixture) = self.fixture.clone() {
-            let result = cx
-                .background_executor()
-                .block(async { fixture.process_write_stdin(params).await });
-            match result {
-                Ok(_) => {
-                    let events = fixture.take_process_events();
-                    self.apply_process_events(&events);
-                    self.terminal_stdin_input.update(cx, |state, cx| {
-                        state.set_value("", window, cx);
-                    });
-                    self.status_line = "Terminal · writeStdin (fixture)".into();
-                }
-                Err(e) => {
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(&format!("[stdin error] {e}\n"));
-                    self.terminal.output = out.into();
-                    self.status_line = format!("Terminal · writeStdin failed: {e}").into();
+        if self.is_explicit_fixture() && self.terminal.backend_label.as_ref() == "fixture" {
+            if let Some(fixture) = self.fixture.clone() {
+                let result = cx
+                    .background_executor()
+                    .block(async { fixture.process_write_stdin(params).await });
+                match result {
+                    Ok(_) => {
+                        let events = fixture.take_process_events();
+                        self.apply_process_events(&events);
+                        self.terminal_stdin_input.update(cx, |state, cx| {
+                            state.set_value("", window, cx);
+                        });
+                        self.status_line = "Terminal · writeStdin (fixture)".into();
+                    }
+                    Err(e) => {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("[stdin error] {e}\n"));
+                        self.terminal.output = out.into();
+                        self.status_line = format!("Terminal · writeStdin failed: {e}").into();
+                    }
                 }
             }
         }
@@ -2443,21 +2498,23 @@ impl MitsuroApp {
             }
         }
 
-        if let Some(fixture) = self.fixture.clone() {
-            let result = cx
-                .background_executor()
-                .block(async { fixture.process_kill(ProcessKillParams::new(handle)).await });
-            match result {
-                Ok(_) => {
-                    let events = fixture.take_process_events();
-                    self.apply_process_events(&events);
-                    self.status_line = "Terminal · killed (fixture)".into();
-                }
-                Err(e) => {
-                    let mut out = self.terminal.output.to_string();
-                    out.push_str(&format!("[kill error] {e}\n"));
-                    self.terminal.output = out.into();
-                    self.status_line = format!("Terminal · kill failed: {e}").into();
+        if self.is_explicit_fixture() && self.terminal.backend_label.as_ref() == "fixture" {
+            if let Some(fixture) = self.fixture.clone() {
+                let result = cx
+                    .background_executor()
+                    .block(async { fixture.process_kill(ProcessKillParams::new(handle)).await });
+                match result {
+                    Ok(_) => {
+                        let events = fixture.take_process_events();
+                        self.apply_process_events(&events);
+                        self.status_line = "Terminal · killed (fixture)".into();
+                    }
+                    Err(e) => {
+                        let mut out = self.terminal.output.to_string();
+                        out.push_str(&format!("[kill error] {e}\n"));
+                        self.terminal.output = out.into();
+                        self.status_line = format!("Terminal · kill failed: {e}").into();
+                    }
                 }
             }
         }
@@ -2501,10 +2558,9 @@ impl MitsuroApp {
     }
 
     pub fn set_scheduled_show_tasks(&mut self, show: bool, cx: &mut Context<Self>) {
-        if self.scheduled_tasks.is_some() {
+        if !self.is_explicit_fixture() {
             self.status_line =
-                "Hive schedule creation is not wired from the GPUI client yet; catalog is read-only."
-                    .into();
+                "Scheduled tasks are read-only or unsupported by this backend.".into();
             cx.notify();
             return;
         }
@@ -2518,16 +2574,14 @@ impl MitsuroApp {
     }
 
     pub fn request_schedule_creation(&mut self, suggestion: Option<&str>, cx: &mut Context<Self>) {
-        if self.scheduled_tasks.is_some() {
-            self.status_line =
-                "Hive schedule creation is not wired from the GPUI client yet; catalog is read-only."
-                    .into();
-        } else {
+        if self.is_explicit_fixture() {
             self.scheduled_show_tasks = true;
             self.status_line = suggestion.map_or_else(
                 || "Scheduled · fixture demo tasks".into(),
                 |name| format!("Scheduled · added fixture suggestion “{name}”").into(),
             );
+        } else {
+            self.status_line = "Schedule creation is unavailable for this backend.".into();
         }
         cx.notify();
     }
@@ -2537,10 +2591,9 @@ impl MitsuroApp {
     }
 
     pub fn toggle_scheduled_enabled(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.scheduled_tasks.is_some() {
+        if !self.is_explicit_fixture() {
             self.status_line =
-                "Hive schedule mutations are intentionally unavailable in this read-only client."
-                    .into();
+                "Schedule mutations are unavailable outside explicit fixture mode.".into();
             cx.notify();
             return;
         }
@@ -2715,21 +2768,15 @@ impl MitsuroApp {
     }
 
     fn apply_skills(&mut self, skills: Vec<SkillMetadata>) {
-        if !skills.is_empty() {
-            self.skills = skills;
-        }
+        self.skills = skills;
     }
 
     fn apply_mcp_servers(&mut self, servers: Vec<McpServerStatus>) {
-        if !servers.is_empty() {
-            self.mcp_servers = servers;
-        }
+        self.mcp_servers = servers;
     }
 
     fn apply_plugins(&mut self, plugins: Vec<PluginSummary>) {
-        if !plugins.is_empty() {
-            self.plugins = plugins;
-        }
+        self.plugins = plugins;
     }
 
     /// MCP servers for the Extensions panel.
@@ -2776,6 +2823,7 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
         self.status_line = "Computer · refreshing environments…".into();
         cx.notify();
 
@@ -2784,8 +2832,8 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            // No environment/list on live protocol — keep fixture catalog
-                            // and best-effort collaboration modes + selected status/info.
+                            // Neither live transport exposes environment/list. Keep the
+                            // catalog empty and refresh only the independently typed modes.
                             let modes = match backend
                                 .collaboration_mode_list(CollaborationModeListParams::default())
                                 .await
@@ -2793,14 +2841,18 @@ impl MitsuroApp {
                                 Ok(r) => r.data,
                                 Err(_) => Vec::new(),
                             };
-                            let catalog = backend.environment_catalog();
-                            let catalog = if catalog.is_empty() {
-                                fixture_demo_environments()
-                            } else {
-                                catalog
-                            };
-                            return Ok::<_, String>((catalog, modes, "app-server"));
+                            return Ok::<_, String>((
+                                Vec::new(),
+                                modes,
+                                "app-server",
+                                SurfaceDataState::Unsupported,
+                            ));
                         }
+                    }
+                    if !use_fixture {
+                        return Err(
+                            "environment catalog is unavailable for this backend state".into()
+                        );
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -2812,23 +2864,16 @@ impl MitsuroApp {
                         .await
                         .map_err(|e| e.to_string())?
                         .data;
-                    Ok((catalog, modes, "fixture"))
+                    Ok((catalog, modes, "fixture", SurfaceDataState::Fixture))
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((envs, modes, label)) => {
-                        if envs.is_empty() {
-                            app.environments = fixture_demo_environments();
-                        } else {
-                            app.environments = envs;
-                        }
-                        if modes.is_empty() {
-                            app.collaboration_modes = fixture_demo_collaboration_modes().data;
-                        } else {
-                            app.collaboration_modes = modes;
-                        }
+                    Ok((envs, modes, label, state)) => {
+                        app.environments = envs;
+                        app.environments_state = state;
+                        app.collaboration_modes = modes;
                         if app
                             .selected_environment_id
                             .as_ref()
@@ -2846,15 +2891,11 @@ impl MitsuroApp {
                                 .into();
                     }
                     Err(message) => {
-                        app.environments = fixture_demo_environments();
-                        app.collaboration_modes = fixture_demo_collaboration_modes().data;
-                        if app.selected_environment_id.is_none() {
-                            app.selected_environment_id =
-                                app.environments.first().map(|e| e.id.clone());
-                        }
-                        app.status_line =
-                            format!("Computer refresh failed ({message}); fixture catalog loaded.")
-                                .into();
+                        app.environments.clear();
+                        app.collaboration_modes.clear();
+                        app.selected_environment_id = None;
+                        app.environments_state = SurfaceDataState::Error;
+                        app.status_line = format!("Computer refresh failed · {message}").into();
                     }
                 }
                 app.environment_status_detail = None;
@@ -2874,6 +2915,7 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -2890,6 +2932,11 @@ impl MitsuroApp {
                                 .ok();
                             return Ok::<_, String>((status, info, "app-server"));
                         }
+                    }
+                    if !use_fixture {
+                        return Err(
+                            "environment detail is unavailable for this backend state".into()
+                        );
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -2944,7 +2991,8 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.live_backend();
         let use_live = backend.is_some();
-        let densify = densify_extensions();
+        let use_fixture = self.is_explicit_fixture();
+        let was_live = use_live;
         self.status_line = "Extensions · refreshing…".into();
         cx.notify();
 
@@ -2953,28 +3001,43 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
+                            let mut errors = Vec::new();
                             let mcp = match backend.list_product_mcp_servers().await {
                                 Ok(servers) => {
                                     servers.into_iter().map(mcp_status_from_product).collect()
                                 }
-                                Err(_) => Vec::new(),
+                                Err(error) => {
+                                    errors.push(format!("MCP: {error}"));
+                                    Vec::new()
+                                }
                             };
                             let plugins = match backend.list_product_extensions().await {
                                 Ok(extensions) => extensions
                                     .into_iter()
                                     .map(plugin_summary_from_product)
                                     .collect(),
-                                Err(_) => Vec::new(),
+                                Err(error) => {
+                                    errors.push(format!("plugins: {error}"));
+                                    Vec::new()
+                                }
                             };
                             let skills = match backend.list_product_skills().await {
                                 Ok(skills) => skills
                                     .into_iter()
                                     .map(skill_metadata_from_product)
                                     .collect(),
-                                Err(_) => Vec::new(),
+                                Err(error) => {
+                                    errors.push(format!("skills: {error}"));
+                                    Vec::new()
+                                }
                             };
-                            return Ok::<_, String>((mcp, plugins, skills, "app-server"));
+                            return Ok::<_, String>((mcp, plugins, skills, "app-server", errors));
                         }
+                    }
+                    if !use_fixture {
+                        return Err(
+                            "extension catalog is unavailable for this backend state".into()
+                        );
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -3001,54 +3064,32 @@ impl MitsuroApp {
                         .into_iter()
                         .flat_map(|e| e.skills)
                         .collect::<Vec<_>>();
-                    Ok((mcp, plugins, skills, "fixture"))
+                    Ok((mcp, plugins, skills, "fixture", Vec::new()))
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((mcp, plugins, skills, label)) => {
+                    Ok((mcp, plugins, skills, label, errors)) => {
                         let mcp_empty = mcp.is_empty();
                         let plugins_empty = plugins.is_empty();
-                        let skills_empty = skills.is_empty();
-                        // Live empty: keep product empty unless MITSURO_EXTENSIONS_DENSE densifies.
-                        // Always keep status source as the real path ("app-server"), never silent fixture.
-                        let use_demo = densify || label == "fixture";
-                        if mcp_empty && use_demo {
-                            app.apply_mcp_servers(fixture_demo_mcp_servers().data);
+                        app.apply_mcp_servers(mcp);
+                        app.apply_plugins(plugins);
+                        app.apply_skills(skills);
+                        app.extensions_state = if label == "fixture" {
+                            SurfaceDataState::Fixture
+                        } else if errors.is_empty() {
+                            SurfaceDataState::Live
                         } else {
-                            app.apply_mcp_servers(mcp);
-                        }
-                        if plugins_empty && use_demo {
-                            app.apply_plugins(
-                                fixture_demo_plugins()
-                                    .marketplaces
-                                    .into_iter()
-                                    .flat_map(|m| m.plugins)
-                                    .collect(),
-                            );
+                            SurfaceDataState::Error
+                        };
+                        let empty_note = if !errors.is_empty() {
+                            format!("app-server partial · {}", errors.join("; "))
+                        } else if label == "app-server" && mcp_empty && plugins_empty {
+                            "app-server · empty catalog".to_string()
                         } else {
-                            app.apply_plugins(plugins);
-                        }
-                        if skills_empty && use_demo {
-                            app.apply_skills(
-                                fixture_demo_skills()
-                                    .data
-                                    .into_iter()
-                                    .flat_map(|e| e.skills)
-                                    .collect(),
-                            );
-                        } else {
-                            app.apply_skills(skills);
-                        }
-                        let empty_note =
-                            if label == "app-server" && mcp_empty && plugins_empty && densify {
-                                "app-server empty · densified"
-                            } else if label == "app-server" && mcp_empty && plugins_empty {
-                                "app-server · empty catalog"
-                            } else {
-                                label
-                            };
+                            label.to_string()
+                        };
                         app.status_line = format!(
                             "Extensions · {empty_note} · {} MCP · {} plugin(s) · {} skill(s)",
                             app.mcp_servers.len(),
@@ -3058,25 +3099,15 @@ impl MitsuroApp {
                         .into();
                     }
                     Err(message) => {
-                        app.apply_mcp_servers(fixture_demo_mcp_servers().data);
-                        app.apply_plugins(
-                            fixture_demo_plugins()
-                                .marketplaces
-                                .into_iter()
-                                .flat_map(|m| m.plugins)
-                                .collect(),
-                        );
-                        app.apply_skills(
-                            fixture_demo_skills()
-                                .data
-                                .into_iter()
-                                .flat_map(|e| e.skills)
-                                .collect(),
-                        );
-                        app.status_line = format!(
-                            "Extensions refresh failed ({message}); fixture catalog loaded."
-                        )
-                        .into();
+                        app.apply_mcp_servers(Vec::new());
+                        app.apply_plugins(Vec::new());
+                        app.apply_skills(Vec::new());
+                        app.extensions_state = if was_live {
+                            SurfaceDataState::Error
+                        } else {
+                            SurfaceDataState::Fixture
+                        };
+                        app.status_line = format!("Extensions refresh failed · {message}").into();
                     }
                 }
                 cx.notify();
@@ -3399,6 +3430,7 @@ impl MitsuroApp {
         let backend = self.backend.clone();
         let generation = self.backend_generation;
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -3411,27 +3443,32 @@ impl MitsuroApp {
                                     empty.usage,
                                     empty.rate_limits,
                                     "mitsuro-http",
+                                    SurfaceDataState::Unsupported,
                                 ));
                             }
-                            let acc = backend.account_read(GetAccountParams::default()).await.ok();
+                            let acc = backend
+                                .account_read(GetAccountParams::default())
+                                .await
+                                .map_err(|error| format!("account/read: {error}"))?;
                             let usage = backend
                                 .account_usage_read()
                                 .await
-                                .unwrap_or_else(|_| AccountSession::empty("app-server").usage);
-                            let limits =
-                                backend
-                                    .account_rate_limits_read()
-                                    .await
-                                    .unwrap_or_else(|_| {
-                                        AccountSession::empty("app-server").rate_limits
-                                    });
+                                .map_err(|error| format!("account/usage/read: {error}"))?;
+                            let limits = backend
+                                .account_rate_limits_read()
+                                .await
+                                .map_err(|error| format!("account/rateLimits/read: {error}"))?;
                             return Ok::<_, String>((
-                                acc.and_then(|r| r.account),
+                                acc.account,
                                 usage,
                                 limits,
                                 "app-server",
+                                SurfaceDataState::Live,
                             ));
                         }
+                    }
+                    if !use_fixture {
+                        return Err("account data is unavailable for this backend state".into());
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -3449,7 +3486,13 @@ impl MitsuroApp {
                         .account_rate_limits_read()
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok((acc.account, usage, limits, "fixture"))
+                    Ok((
+                        acc.account,
+                        usage,
+                        limits,
+                        "fixture",
+                        SurfaceDataState::Fixture,
+                    ))
                 })
                 .await;
 
@@ -3457,8 +3500,19 @@ impl MitsuroApp {
                 if app.backend_generation != generation {
                     return;
                 }
-                if let Ok((account, usage, limits, source)) = result {
-                    app.apply_account_snapshot(account, usage, limits, source, None);
+                match result {
+                    Ok((account, usage, limits, source, state)) => {
+                        app.apply_account_snapshot(account, usage, limits, source, None);
+                        app.account_state = state;
+                    }
+                    Err(_) => {
+                        let source = app
+                            .active_backend_kind()
+                            .map(BackendKind::id)
+                            .unwrap_or("unavailable");
+                        app.account = AccountSession::empty(source);
+                        app.account_state = SurfaceDataState::Error;
+                    }
                 }
                 cx.notify();
             });
@@ -3473,27 +3527,45 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            let acc = backend.account_read(GetAccountParams::default()).await.ok();
+                            if backend.kind() == BackendKind::MitsuroHttp {
+                                let empty = AccountSession::empty("mitsuro-http");
+                                return Ok::<_, String>((
+                                    None,
+                                    empty.usage,
+                                    empty.rate_limits,
+                                    "mitsuro-http",
+                                    SurfaceDataState::Unsupported,
+                                ));
+                            }
+                            let acc = backend
+                                .account_read(GetAccountParams::default())
+                                .await
+                                .map_err(|error| format!("account/read: {error}"))?;
                             let usage = backend
                                 .account_usage_read()
                                 .await
-                                .unwrap_or_else(|_| fixture_demo_usage());
+                                .map_err(|error| format!("account/usage/read: {error}"))?;
                             let limits = backend
                                 .account_rate_limits_read()
                                 .await
-                                .unwrap_or_else(|_| fixture_demo_rate_limits());
+                                .map_err(|error| format!("account/rateLimits/read: {error}"))?;
                             return Ok::<_, String>((
-                                acc.and_then(|r| r.account),
+                                acc.account,
                                 usage,
                                 limits,
                                 "app-server",
+                                SurfaceDataState::Live,
                             ));
                         }
+                    }
+                    if !use_fixture {
+                        return Err("account data is unavailable for this backend state".into());
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -3511,14 +3583,21 @@ impl MitsuroApp {
                         .account_rate_limits_read()
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok((acc.account, usage, limits, "fixture"))
+                    Ok((
+                        acc.account,
+                        usage,
+                        limits,
+                        "fixture",
+                        SurfaceDataState::Fixture,
+                    ))
                 })
                 .await;
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((account, usage, limits, source)) => {
+                    Ok((account, usage, limits, source, state)) => {
                         app.apply_account_snapshot(account, usage, limits, source, None);
+                        app.account_state = state;
                         app.status_line = format!(
                             "Account · {} · {}",
                             source,
@@ -3531,16 +3610,13 @@ impl MitsuroApp {
                         .into();
                     }
                     Err(message) => {
-                        app.apply_account_snapshot(
-                            fixture_demo_account_response().account,
-                            fixture_demo_usage(),
-                            fixture_demo_rate_limits(),
-                            "fixture",
-                            None,
-                        );
-                        app.status_line =
-                            format!("Account refresh failed ({message}); fixture demo loaded.")
-                                .into();
+                        let source = app
+                            .active_backend_kind()
+                            .map(BackendKind::id)
+                            .unwrap_or("unavailable");
+                        app.account = AccountSession::empty(source);
+                        app.account_state = SurfaceDataState::Error;
+                        app.status_line = format!("Account refresh failed · {message}").into();
                     }
                 }
                 cx.notify();
@@ -3554,6 +3630,8 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
+        let was_live = use_live;
         self.status_line = "Account · sign in (stub)…".into();
         cx.notify();
 
@@ -3562,6 +3640,11 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
+                            if backend.kind() == BackendKind::MitsuroHttp {
+                                return Err(
+                                    "account login is not exposed by the Mitsuro server".into()
+                                );
+                            }
                             match backend
                                 .account_login_start(LoginAccountParams::device_code())
                                 .await
@@ -3581,11 +3664,10 @@ impl MitsuroApp {
                                     let usage = backend
                                         .account_usage_read()
                                         .await
-                                        .unwrap_or_else(|_| fixture_demo_usage());
-                                    let limits = backend
-                                        .account_rate_limits_read()
-                                        .await
-                                        .unwrap_or_else(|_| fixture_demo_rate_limits());
+                                        .map_err(|error| format!("account/usage/read: {error}"))?;
+                                    let limits = backend.account_rate_limits_read().await.map_err(
+                                        |error| format!("account/rateLimits/read: {error}"),
+                                    )?;
                                     return Ok((acc, usage, limits, "app-server", Some(detail)));
                                 }
                                 Err(e) => {
@@ -3593,6 +3675,9 @@ impl MitsuroApp {
                                 }
                             }
                         }
+                    }
+                    if !use_fixture {
+                        return Err("account login is unavailable for this backend state".into());
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -3632,6 +3717,11 @@ impl MitsuroApp {
                 match result {
                     Ok((account, usage, limits, source, stub)) => {
                         app.apply_account_snapshot(account, usage, limits, source, stub.clone());
+                        app.account_state = if source == "fixture" {
+                            SurfaceDataState::Fixture
+                        } else {
+                            SurfaceDataState::Live
+                        };
                         app.status_line = format!(
                             "Account · signed in · {}",
                             stub.as_deref().unwrap_or(source)
@@ -3639,23 +3729,20 @@ impl MitsuroApp {
                         .into();
                     }
                     Err(message) => {
-                        // Offline-safe fallback: apply fixture login stub without network.
-                        let login = fixture_login_device_code_response();
-                        let detail = format!(
-                            "stub · {} · code {}",
-                            login.device_url().unwrap_or("—"),
-                            login.user_code().unwrap_or("—")
-                        );
-                        app.apply_account_snapshot(
-                            fixture_demo_account_response().account,
-                            fixture_demo_usage(),
-                            fixture_demo_rate_limits(),
-                            "fixture",
-                            Some(detail),
-                        );
-                        app.status_line =
-                            format!("Account sign-in stub ({message}); fixture demo applied.")
-                                .into();
+                        let source = if was_live {
+                            "app-server"
+                        } else if use_fixture {
+                            "fixture"
+                        } else {
+                            "unavailable"
+                        };
+                        app.account = AccountSession::empty(source);
+                        app.account_state = if use_fixture {
+                            SurfaceDataState::Fixture
+                        } else {
+                            SurfaceDataState::Error
+                        };
+                        app.status_line = format!("Account sign-in failed · {message}").into();
                     }
                 }
                 cx.notify();
@@ -3670,6 +3757,7 @@ impl MitsuroApp {
         let fixture = self.fixture.clone();
         let backend = self.backend.clone();
         let use_live = matches!(self.connection, UiConnection::Ready { .. }) && backend.is_some();
+        let use_fixture = self.is_explicit_fixture();
         self.status_line = "Account · sign out…".into();
         cx.notify();
 
@@ -3678,6 +3766,11 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
+                            if backend.kind() == BackendKind::MitsuroHttp {
+                                return Err(
+                                    "account logout is not exposed by the Mitsuro server".into()
+                                );
+                            }
                             let _ = backend.account_logout().await;
                             let acc = backend
                                 .account_read(GetAccountParams::default())
@@ -3686,6 +3779,9 @@ impl MitsuroApp {
                                 .and_then(|r| r.account);
                             return Ok::<_, String>((acc, "app-server"));
                         }
+                    }
+                    if !use_fixture {
+                        return Err("account logout is unavailable for this backend state".into());
                     }
                     let fixture = fixture.unwrap_or_else(|| Arc::new(FixtureBackend::new()));
                     if !fixture.status().is_usable() {
@@ -3704,13 +3800,19 @@ impl MitsuroApp {
             let _ = this.update(cx, |app, cx| {
                 match result {
                     Ok((account, source)) => {
+                        let empty = AccountSession::empty(source);
                         app.apply_account_snapshot(
                             account,
-                            fixture_demo_usage(),
-                            fixture_demo_rate_limits(),
+                            empty.usage,
+                            empty.rate_limits,
                             source,
                             None,
                         );
+                        app.account_state = if source == "fixture" {
+                            SurfaceDataState::Fixture
+                        } else {
+                            SurfaceDataState::Live
+                        };
                         app.account.login_stub_detail = None;
                         app.status_line = format!("Account · signed out · {source}").into();
                     }
@@ -3719,6 +3821,7 @@ impl MitsuroApp {
                         app.account.email_display = None;
                         app.account.plan_label = None;
                         app.account.login_stub_detail = None;
+                        app.account_state = SurfaceDataState::Error;
                         app.status_line =
                             format!("Account sign-out stub ({message}); local cleared.").into();
                     }
@@ -4106,9 +4209,8 @@ impl MitsuroApp {
                             cx.notify();
                         }
                         Err(e) => {
-                            app.status_line =
-                                format!("thread/start failed ({e}); local shell thread.").into();
-                            app.new_thread_local(surface, cx);
+                            app.status_line = format!("thread/start failed · {e}").into();
+                            cx.notify();
                         }
                     });
                 })
@@ -4116,22 +4218,25 @@ impl MitsuroApp {
                 return;
             }
         }
-        self.new_thread_local(surface, cx);
+        if self.is_explicit_fixture() {
+            self.new_thread_local(surface, cx);
+        } else {
+            self.status_line = "New thread is unavailable until a backend is ready.".into();
+            cx.notify();
+        }
     }
 
     /// Offline / fallback thread (local id only — not on app-server).
     fn new_thread_local(&mut self, surface: ThreadSurface, cx: &mut Context<Self>) {
         let id = format!("local-{}", self.threads.len() + 1);
         let (name, preview, cwd) = match surface {
-            ThreadSurface::Chat => (
-                "New chat".into(),
-                "Empty · ready for a message".into(),
-                None,
-            ),
+            ThreadSurface::Chat => ("New chat".into(), "Local fixture draft".into(), None),
             ThreadSurface::Codex => (
                 "New thread".into(),
-                "Empty · ready for a prompt".into(),
-                Some("~/Work/Mitsuro".into()),
+                "Local fixture draft".into(),
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.display().to_string()),
             ),
         };
         let thread = DemoThread {
@@ -4213,6 +4318,11 @@ impl MitsuroApp {
     /// Archive the selected thread (or toggle unarchive when already archived).
     pub fn archive_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
+        if self.live_backend().is_none() && !self.is_explicit_fixture() {
+            self.status_line = "Archive is unavailable until a backend is ready.".into();
+            cx.notify();
+            return;
+        }
         if self
             .live_backend()
             .is_some_and(|backend| !backend.capabilities().archive)
@@ -4291,7 +4401,7 @@ impl MitsuroApp {
                 return;
             }
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             let tid = id;
             cx.spawn(async move |_this, cx| {
                 let _ = cx
@@ -4351,7 +4461,7 @@ impl MitsuroApp {
                 return;
             }
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             let tid = id;
             cx.spawn(async move |_this, cx| {
                 let _ = cx
@@ -4372,6 +4482,11 @@ impl MitsuroApp {
     /// Delete the selected thread (backend + local list).
     pub fn delete_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
+        if self.live_backend().is_none() && !self.is_explicit_fixture() {
+            self.status_line = "Delete is unavailable until a backend is ready.".into();
+            cx.notify();
+            return;
+        }
         let Some(id) = self.selected_thread.clone() else {
             self.status_line = "Delete · no thread selected".into();
             cx.notify();
@@ -4418,7 +4533,7 @@ impl MitsuroApp {
                 return;
             }
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             let tid = id;
             cx.spawn(async move |_this, cx| {
                 let _ = cx
@@ -4439,6 +4554,11 @@ impl MitsuroApp {
     /// Fork the selected thread into a new local (and backend) thread.
     pub fn fork_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
+        if self.live_backend().is_none() && !self.is_explicit_fixture() {
+            self.status_line = "Fork is unavailable until a backend is ready.".into();
+            cx.notify();
+            return;
+        }
         if self
             .live_backend()
             .is_some_and(|backend| !backend.capabilities().fork)
@@ -4477,7 +4597,8 @@ impl MitsuroApp {
         // Live thread/fork when Ready + real source id.
         if is_app_server_thread_id(&id) {
             if let Some(backend) = self.live_backend() {
-                let tid = id;
+                let tid = id.clone();
+                let source_id = id;
                 let local_id = fork_id;
                 cx.spawn(async move |this, cx| {
                     let result = cx
@@ -4525,8 +4646,9 @@ impl MitsuroApp {
                                 }
                             }
                             Err(e) => {
-                                app.status_line =
-                                    format!("thread/fork failed · {e} · local {local_id}").into();
+                                app.threads.retain(|thread| thread.summary.id != local_id);
+                                app.selected_thread = Some(source_id.clone());
+                                app.status_line = format!("thread/fork failed · {e}").into();
                             }
                         }
                         cx.notify();
@@ -4537,7 +4659,10 @@ impl MitsuroApp {
                 return;
             }
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if self.is_explicit_fixture() {
+            let Some(fixture) = self.fixture.clone() else {
+                return;
+            };
             let tid = id;
             let local_id = fork_id;
             cx.spawn(async move |this, cx| {
@@ -4618,9 +4743,11 @@ impl MitsuroApp {
                     .await;
             })
             .detach();
-        } else if let (Some(fixture), Some(tid), Some(turn)) =
-            (self.fixture.clone(), thread_id.clone(), turn_id)
-        {
+        } else if let (Some(fixture), Some(tid), Some(turn)) = (
+            self.fixture.clone().filter(|_| self.is_explicit_fixture()),
+            thread_id.clone(),
+            turn_id,
+        ) {
             // Fixture: no-op success path for parity.
             cx.spawn(async move |_this, cx| {
                 let _ = cx
@@ -5000,7 +5127,7 @@ impl MitsuroApp {
                 return;
             }
         }
-        if let Some(fixture) = self.fixture.clone() {
+        if let Some(fixture) = self.fixture.clone().filter(|_| self.is_explicit_fixture()) {
             cx.spawn(async move |_this, cx| {
                 let _ = cx
                     .background_spawn(async move {
@@ -5018,8 +5145,10 @@ impl MitsuroApp {
     fn resolve_send_mode(&self) -> SendMode {
         // Fixture replay is an explicit development mode. A user pressing Send on a
         // Ready/authenticated product backend starts a real turn on that backend.
-        let force_fixture = std::env::var_os("MITSURO_FORCE_FIXTURE").is_some()
-            || std::env::var_os("MITSURO_NO_LIVE_TURN").is_some();
+        if std::env::var_os("MITSURO_NO_LIVE_TURN").is_some() {
+            return SendMode::Unavailable;
+        }
+        let force_fixture = std::env::var_os("MITSURO_FORCE_FIXTURE").is_some();
         decide_send_mode(
             &self.connection,
             self.active_backend_kind(),
@@ -5796,6 +5925,8 @@ impl MitsuroApp {
                     app.apply_mcp_servers(mcp);
                     app.apply_plugins(plugins);
                     app.apply_account_snapshot(account, usage, rate_limits, "fixture", None);
+                    app.extensions_state = SurfaceDataState::Fixture;
+                    app.account_state = SurfaceDataState::Fixture;
                 } else {
                     // Seed demo catalog even if connect path failed.
                     app.apply_models(fixture_demo_models());
@@ -5816,7 +5947,19 @@ impl MitsuroApp {
                             .collect(),
                     );
                     app.account = AccountSession::fixture_demo();
+                    app.extensions_state = SurfaceDataState::Fixture;
+                    app.account_state = SurfaceDataState::Fixture;
                 }
+                app.goals = demo::demo_goals();
+                app.selected_goal = app.goals.first().map(|goal| goal.id.clone());
+                app.environments = fixture_demo_environments();
+                app.environments_state = SurfaceDataState::Fixture;
+                app.selected_environment_id = app
+                    .environments
+                    .first()
+                    .map(|environment| environment.id.clone());
+                app.collaboration_modes = fixture_demo_collaboration_modes().data;
+                app.files.cwd = FIXTURE_PROJECT_ROOT.into();
                 app.connection = UiConnection::Fixture;
                 // Single quiet status; counts live in Settings, not title chrome.
                 app.status_line = SharedString::from("");
@@ -5845,10 +5988,17 @@ impl MitsuroApp {
         self.skills.clear();
         self.mcp_servers.clear();
         self.plugins.clear();
+        self.extensions_state = SurfaceDataState::Loading;
         self.goals.clear();
         self.selected_goal = None;
         self.goals_are_live_hive = false;
         self.hive_snapshot = None;
+        self.environments.clear();
+        self.environments_state = SurfaceDataState::Loading;
+        self.selected_environment_id = None;
+        self.environment_status_detail = None;
+        self.environment_info_detail = None;
+        self.collaboration_modes.clear();
         self.scheduled_tasks = None;
         self.background_processes.clear();
         self.terminal = TerminalSession::idle(kind.id());
@@ -5859,13 +6009,17 @@ impl MitsuroApp {
         self.active_turn_id = None;
         self.turn_in_progress = false;
         self.account = AccountSession::empty(kind.id());
+        self.account_state = SurfaceDataState::Loading;
     }
 
     fn bootstrap_backend(&mut self, cx: &mut Context<Self>) {
         let selection = match self.preferred_backend_selection() {
             Ok(selection) => selection,
             Err(error) => {
-                self.connection = UiConnection::Fixture;
+                self.clear_live_backend_state(BackendKind::MitsuroHttp);
+                self.connection = UiConnection::Error {
+                    message: error.to_string(),
+                };
                 self.status_line = format!("Backend configuration error: {error}").into();
                 return;
             }
@@ -5903,6 +6057,7 @@ impl MitsuroApp {
                 match DesktopBackend::mitsuro_from_env() {
                     Ok(backend) => backend,
                     Err(error) => {
+                        self.clear_live_backend_state(BackendKind::MitsuroHttp);
                         self.connection = UiConnection::Error {
                             message: error.to_string(),
                         };
@@ -5977,67 +6132,31 @@ impl MitsuroApp {
                             app.preferences.remember_backend(backend_kind);
                             app.save_preferences_best_effort();
                         }
-                        if !remote.is_empty() {
-                            app.threads = remote
-                                .into_iter()
-                                .map(|session| DemoThread {
-                                    backend_session_id: Some(session.id.clone()),
-                                    summary: thread_summary_from_session(session),
-                                    surface: ThreadSurface::Codex,
-                                    messages: vec![],
-                                })
-                                .collect();
-                            // Default: leave selected_thread None → calm home hero.
-                            // Override via MITSURO_START_THREAD / START_MODE=thread-open.
-                        }
+                        app.threads = remote
+                            .into_iter()
+                            .map(|session| DemoThread {
+                                backend_session_id: Some(session.id.clone()),
+                                summary: thread_summary_from_session(session),
+                                surface: ThreadSurface::Codex,
+                                messages: vec![],
+                            })
+                            .collect();
+                        // Default: leave selected_thread None → calm home hero.
+                        // Override via MITSURO_START_THREAD / START_MODE=thread-open.
                         app.apply_models(
                             models.into_iter().map(model_info_from_product).collect(),
                         );
                         if let Some(snip) = config_snip {
                             app.apply_config_snippet(snip);
                         }
-                        // Live empty catalogs: keep product empty unless MITSURO_EXTENSIONS_DENSE.
-                        // Never silent-swap fixture while status implies app-server.
-                        let densify = densify_extensions();
-                        if skills.is_empty() {
-                            if densify {
-                                app.apply_skills(
-                                    fixture_demo_skills()
-                                        .data
-                                        .into_iter()
-                                        .flat_map(|e| e.skills)
-                                        .collect(),
-                                );
-                            } else {
-                                app.apply_skills(Vec::new());
-                            }
-                        } else {
-                            app.apply_skills(skills);
-                        }
-                        if mcp.is_empty() {
-                            if densify {
-                                app.apply_mcp_servers(fixture_demo_mcp_servers().data);
-                            } else {
-                                app.apply_mcp_servers(Vec::new());
-                            }
-                        } else {
-                            app.apply_mcp_servers(mcp);
-                        }
-                        if plugins.is_empty() {
-                            if densify {
-                                app.apply_plugins(
-                                    fixture_demo_plugins()
-                                        .marketplaces
-                                        .into_iter()
-                                        .flat_map(|m| m.plugins)
-                                        .collect(),
-                                );
-                            } else {
-                                app.apply_plugins(Vec::new());
-                            }
-                        } else {
-                            app.apply_plugins(plugins);
-                        }
+                        app.apply_skills(skills);
+                        app.apply_mcp_servers(mcp);
+                        app.apply_plugins(plugins);
+                        app.extensions_state = SurfaceDataState::Live;
+                        // Neither live transport exposes environment/list. Do not invent rows.
+                        app.environments.clear();
+                        app.environments_state = SurfaceDataState::Unsupported;
+                        app.selected_environment_id = None;
                         let is_mitsuro = app
                             .backend
                             .as_ref()
@@ -6073,6 +6192,8 @@ impl MitsuroApp {
                             app.scheduled_tasks = Some(schedules.unwrap_or_default());
                         } else {
                             app.background_processes.clear();
+                            app.goals.clear();
+                            app.selected_goal = None;
                             app.goals_are_live_hive = false;
                             app.hive_snapshot = None;
                             app.scheduled_tasks = None;
@@ -6082,6 +6203,11 @@ impl MitsuroApp {
                         app.status_line =
                             format!("Connected · {} threads · {auth_note}", app.threads.len(),)
                                 .into();
+                        if app.active_mode == ProductMode::Files {
+                            app.files.cwd = app.preferred_workspace_cwd().into();
+                            app.files.backend_label = app.files_backend_label();
+                            app.files_refresh_directory_data(cx);
+                        }
                         // Best-effort account snapshot from app-server (needs Window for public API —
                         // use internal spawn path via refresh_account with a no-op when possible).
                         app.kick_account_refresh(cx);
@@ -6107,6 +6233,9 @@ impl MitsuroApp {
                             message: message.clone(),
                         };
                         app.account = AccountSession::empty("unavailable");
+                        app.account_state = SurfaceDataState::Error;
+                        app.extensions_state = SurfaceDataState::Error;
+                        app.environments_state = SurfaceDataState::Error;
                         app.status_line = format!("Backend unavailable · {message}").into();
                     }
                 }
@@ -6539,11 +6668,6 @@ fn hive_goals_from_snapshot(snapshot: &ProductHiveSnapshot) -> Vec<DemoGoal> {
             }
         })
         .collect()
-}
-
-/// When set, empty live plugin/MCP/skills catalogs densify with offline demo data.
-fn densify_extensions() -> bool {
-    std::env::var_os("MITSURO_EXTENSIONS_DENSE").is_some()
 }
 
 /// Normalize thread `cwd` fields (`file:///path` or absolute path) for fs/* roots.
@@ -7022,13 +7146,51 @@ mod tests {
     #[test]
     fn fixture_replay_must_be_explicit() {
         assert_eq!(
-            decide_send_mode(&ready(), Some(BackendKind::Fixture), true, false),
+            decide_send_mode(
+                &UiConnection::Fixture,
+                Some(BackendKind::Fixture),
+                false,
+                false,
+            ),
             SendMode::Fixture
         );
         assert_eq!(
             decide_send_mode(&ready(), Some(BackendKind::MitsuroHttp), true, true),
             SendMode::Fixture
         );
+        assert_eq!(
+            decide_send_mode(&ready(), Some(BackendKind::Fixture), true, false),
+            SendMode::Unavailable
+        );
+    }
+
+    #[test]
+    fn fixture_records_are_forbidden_for_every_product_backend_state() {
+        for kind in [
+            BackendKind::MitsuroHttp,
+            BackendKind::CodexStdio,
+            BackendKind::CodexWebSocket,
+        ] {
+            assert!(!fixture_records_allowed(&ready(), Some(kind)));
+            assert!(!fixture_records_allowed(
+                &UiConnection::Connecting,
+                Some(kind)
+            ));
+            assert!(!fixture_records_allowed(
+                &UiConnection::Error {
+                    message: "test".into(),
+                },
+                Some(kind)
+            ));
+        }
+        assert!(!fixture_records_allowed(
+            &UiConnection::Fixture,
+            Some(BackendKind::MitsuroHttp)
+        ));
+        assert!(fixture_records_allowed(
+            &UiConnection::Fixture,
+            Some(BackendKind::Fixture)
+        ));
     }
 
     #[test]

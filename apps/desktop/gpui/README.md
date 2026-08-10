@@ -15,7 +15,10 @@ The desktop must support two explicit transports through normalized product conc
 - Codex app-server over managed stdio, with WebSocket support tracked separately.
 
 Fixture mode is for deterministic development and tests. A generic fixture success is
-not evidence that a product feature works.
+not evidence that a product feature works. Production connections never seed, densify,
+or fall back to fixture records: loading, empty, unsupported, and error are distinct UI
+states. `MITSURO_SKIP_APPSERVER` now leaves an explicit backend-disabled error instead of
+quietly entering fixture mode.
 
 The selected transport, backend-qualified session, backend-scoped model, and
 privacy-safe desktop preferences are persisted in
@@ -32,6 +35,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 - Sessions, models, turns, files, skills, MCP servers, and extensions use the
   transport-neutral `ProductBackend` contract.
+- Live terminal, file, account, environment, extension, Work, and Scheduled failures
+  remain attached to their originating backend. They never retry against the fixture
+  backend, and a backend switch clears the previous backend's projection immediately.
 - An authenticated Ready Mitsuro or Codex backend sends a real turn by default.
   Fixture turns require an explicit fixture backend or fixture environment flag, and
   session/turn failures remain visible errors instead of replaying synthetic success.
@@ -47,6 +53,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Secondary Settings actions without an implementation are non-interactive and labeled
   `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
   separate live implementations.
+- Account and Usage render protocol data only when the connected backend supplies a
+  complete snapshot. Mitsuro HTTP shows an explicit unsupported state; it does not show
+  sample identities, plans, credits, limits, or billing history.
 - The composer exposes only implemented behavior: text entry, Send, Stop, and
   backend-scoped model cycling. Attachment, voice, project, and access stubs are not
   presented as controls.
@@ -65,9 +74,10 @@ the native client does not show sample repositories, sample deployments, or inac
 create/review controls. Atlas/browser, the composer, live-turn failure handling, and
 secondary Settings actions follow the same honest capability treatment. Desktop-only
 Settings values are durable and explicitly distinguished from live server configuration.
-The release candidate has passed the complete surface matrix, dual-provider live
-acceptance, full workspace gates, optimized build, and isolated runtime provenance
-check. Installation and deployment remain separate operator actions.
+The release candidate has passed the complete surface matrix and strict dual-provider
+live acceptance. The production-data purity slice adds a source-level fixture gate and
+fresh live captures for Work, Scheduled, Computer, Extensions, Settings, and Files on
+both transports. Installation and deployment remain separate operator actions.
 
 ## Build
 

@@ -1,7 +1,7 @@
 //! Computer-use / environment status panel.
 //!
 //! Data sources:
-//! - Environment catalog — offline demo when no `environment/list` protocol method
+//! - Environment catalog — explicit fixtures only; live transports do not expose a list
 //! - Status / info — `environment/status`, `environment/info`
 //! - Optional — `collaborationMode/list`
 //!
@@ -18,7 +18,7 @@ use mitsuro_desktop_backend::{
     EnvironmentStatusResponse, EnvironmentSummary,
 };
 
-use crate::app::{MitsuroApp, UiConnection};
+use crate::app::{MitsuroApp, SurfaceDataState};
 use crate::theme;
 
 /// Full-height Computer panel for the Computer rail item.
@@ -30,10 +30,13 @@ pub fn computer_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
     let info = app.environment_info_detail().cloned();
     let modes = app.collaboration_modes().to_vec();
     let chip = app.connection().chip_label();
-    let source_note = if matches!(app.connection(), UiConnection::Fixture | UiConnection::Demo) {
-        "local catalog"
-    } else {
-        "app-server · best-effort"
+    let data_state = app.environments_state();
+    let source_note = match data_state {
+        SurfaceDataState::Fixture => "explicit fixture catalog",
+        SurfaceDataState::Live => "live backend",
+        SurfaceDataState::Loading => "loading",
+        SurfaceDataState::Unsupported => "environment/list unsupported",
+        SurfaceDataState::Error => "backend error",
     };
     let connected = envs.iter().filter(|e| e.is_connected()).count();
     let n = envs.len();
@@ -65,7 +68,7 @@ pub fn computer_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
                 .px(px(24.0))
                 .py(px(20.0))
                 .gap(px(16.0))
-                .child(permissions_card())
+                .child(permissions_card(data_state))
                 .child(section_header(
                     "Environments",
                     &format!("environment/status · {source_note}"),
@@ -90,7 +93,7 @@ pub fn computer_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
 }
 
 /// Permissions / safety card — finished-page density for Computer surface.
-fn permissions_card() -> impl IntoElement {
+fn permissions_card(state: SurfaceDataState) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("computer-permissions")
@@ -123,19 +126,19 @@ fn permissions_card() -> impl IntoElement {
                         .child("Permissions"),
                 ),
         )
-        .child(div().text_xs().text_color(colors.text_secondary).child(
-            "Computer Use can view the screen, move the pointer, and type when enabled. \
-                     Elevated actions still require confirmation.",
-        ))
+        .child(div().text_xs().text_color(colors.text_secondary).child(match state {
+            SurfaceDataState::Fixture => "Explicit fixture capabilities; no operating-system permission grant is implied.",
+            _ => "Screen, pointer, keyboard, shell, and network grants are not reported by the connected backend.",
+        }))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .flex_wrap()
                 .gap(px(8.0))
-                .child(perm_chip("Screen", true))
-                .child(perm_chip("Pointer", true))
-                .child(perm_chip("Keyboard", true))
+                .child(perm_chip("Screen", false))
+                .child(perm_chip("Pointer", false))
+                .child(perm_chip("Keyboard", false))
                 .child(perm_chip("Shell", false))
                 .child(perm_chip("Network", false)),
         )

@@ -1,12 +1,13 @@
 //! Work mode — long-running goals / plans (fixture + optional thread/goal/* later).
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::MitsuroApp;
+use crate::app::{MitsuroApp, SurfaceDataState};
 use crate::components::codex_button;
 use crate::demo::{DemoGoal, DemoGoalStatus, DemoPlanItem};
 use crate::theme;
@@ -18,7 +19,7 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
     let selected = app.selected_goal_id().map(str::to_string);
     let selected_goal = app.selected_goal().cloned();
     let empty = goals.is_empty();
-    let live_hive = app.work_is_live_hive();
+    let state = app.work_state();
     let active = goals
         .iter()
         .filter(|g| g.status == DemoGoalStatus::Active)
@@ -35,20 +36,20 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
         .child(work_title_bar(
             goals.len(),
             active,
-            live_hive,
+            state,
             app.status_line().as_ref(),
             cx,
         ))
         .child(if empty {
-            work_empty_state(live_hive, cx).into_any_element()
+            work_empty_state(state, cx).into_any_element()
         } else {
             div()
                 .flex()
                 .flex_row()
                 .flex_1()
                 .min_h_0()
-                .child(goal_list(&goals, selected.as_deref(), cx))
-                .child(goal_detail(selected_goal.as_ref(), cx))
+                .child(goal_list(&goals, selected.as_deref(), state, cx))
+                .child(goal_detail(selected_goal.as_ref(), state, cx))
                 .into_any_element()
         })
 }
@@ -56,7 +57,7 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
 fn work_title_bar(
     count: usize,
     active: usize,
-    live_hive: bool,
+    state: SurfaceDataState,
     status: &str,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
@@ -96,10 +97,10 @@ fn work_title_bar(
                                 .child("Work"),
                         )
                         .child(div().text_xs().text_color(colors.text_tertiary).child(
-                            if live_hive {
+                            if state == SurfaceDataState::Live {
                                 format!("{count} Hive run(s) · {active} active · read-only")
                             } else {
-                                format!("{count} goal(s) · {active} active · long-running plans")
+                                format!("{count} goal(s) · {active} active · {}", state.label())
                             },
                         )),
                 ),
@@ -122,17 +123,23 @@ fn work_title_bar(
                 .child(
                     codex_button::primary_with_icon(
                         "work-header-create",
-                        if live_hive { "Read-only" } else { "New goal" },
+                        if state == SurfaceDataState::Fixture {
+                            "New goal"
+                        } else {
+                            "Unavailable"
+                        },
                         Icon::new(IconName::Plus).with_size(px(12.0)),
                         cx,
                     )
                     .rounded(px(8.0))
-                    .on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx))),
+                    .when(state == SurfaceDataState::Fixture, |this| {
+                        this.on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx)))
+                    }),
                 ),
         )
 }
 
-fn work_empty_state(live_hive: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn work_empty_state(state: SurfaceDataState, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .flex()
@@ -158,10 +165,12 @@ fn work_empty_state(live_hive: bool, cx: &mut Context<MitsuroApp>) -> impl IntoE
                         .text_xl()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(colors.text)
-                        .child(if live_hive {
-                            "No Hive runs"
-                        } else {
-                            "No goals yet"
+                        .child(match state {
+                            SurfaceDataState::Live => "No Hive runs",
+                            SurfaceDataState::Fixture => "No fixture goals yet",
+                            SurfaceDataState::Loading => "Loading Work",
+                            SurfaceDataState::Error => "Work unavailable",
+                            SurfaceDataState::Unsupported => "Work is not supported",
                         }),
                 )
                 .child(
@@ -169,21 +178,25 @@ fn work_empty_state(live_hive: bool, cx: &mut Context<MitsuroApp>) -> impl IntoE
                         .text_sm()
                         .text_color(colors.text_tertiary)
                         .text_center()
-                        .child(if live_hive {
-                            "No Mitsuro Hive runs are currently available in this view. Dispatch remains intentionally unavailable from this client."
-                        } else {
-                            "Work mode tracks long-running goals with a plan tracker. Create a goal to get a checklist of steps; selecting a goal loads plan items and wires thread/goal/* offline."
+                        .child(match state {
+                            SurfaceDataState::Live => "No Mitsuro Hive runs are currently available. This live catalog is read-only.",
+                            SurfaceDataState::Fixture => "Explicit fixture mode can create local sample goals and plan items.",
+                            SurfaceDataState::Loading => "Waiting for the selected backend to finish connecting.",
+                            SurfaceDataState::Error => "The selected backend could not provide Work data.",
+                            SurfaceDataState::Unsupported => "The ChatGPT / Codex app-server does not expose Mitsuro Hive goals.",
                         }),
                 )
                 .child(
                     codex_button::primary_with_icon(
                         "start-goal",
-                        if live_hive { "Read-only" } else { "Create goal" },
+                        if state == SurfaceDataState::Fixture { "Create goal" } else { "Unavailable" },
                         Icon::new(IconName::Plus).with_size(px(14.0)),
                         cx,
                     )
                     .rounded(px(10.0))
-                    .on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx))),
+                    .when(state == SurfaceDataState::Fixture, |this| {
+                        this.on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx)))
+                    }),
                 ),
         )
 }
@@ -191,6 +204,7 @@ fn work_empty_state(live_hive: bool, cx: &mut Context<MitsuroApp>) -> impl IntoE
 fn goal_list(
     goals: &[DemoGoal],
     selected: Option<&str>,
+    state: SurfaceDataState,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -223,12 +237,18 @@ fn goal_list(
                 .child(
                     codex_button::primary_with_icon(
                         "work-new-goal",
-                        "Create",
+                        if state == SurfaceDataState::Fixture {
+                            "Create"
+                        } else {
+                            "Read-only"
+                        },
                         Icon::new(IconName::Plus).with_size(px(12.0)),
                         cx,
                     )
                     .rounded(px(8.0))
-                    .on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx))),
+                    .when(state == SurfaceDataState::Fixture, |this| {
+                        this.on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx)))
+                    }),
                 ),
         )
         .child(
@@ -333,7 +353,11 @@ fn goal_list(
         )
 }
 
-fn goal_detail(goal: Option<&DemoGoal>, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn goal_detail(
+    goal: Option<&DemoGoal>,
+    state: SurfaceDataState,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("work-goal-detail")
@@ -344,7 +368,7 @@ fn goal_detail(goal: Option<&DemoGoal>, cx: &mut Context<MitsuroApp>) -> impl In
         .h_full()
         .bg(colors.bg_main)
         .child(match goal {
-            Some(g) => goal_detail_body(g, cx).into_any_element(),
+            Some(g) => goal_detail_body(g, state, cx).into_any_element(),
             None => div()
                 .flex()
                 .flex_1()
@@ -357,7 +381,11 @@ fn goal_detail(goal: Option<&DemoGoal>, cx: &mut Context<MitsuroApp>) -> impl In
         })
 }
 
-fn goal_detail_body(goal: &DemoGoal, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn goal_detail_body(
+    goal: &DemoGoal,
+    state: SurfaceDataState,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let goal_id = goal.id.clone();
     let plan = goal.plan_items.clone();
@@ -448,12 +476,18 @@ fn goal_detail_body(goal: &DemoGoal, cx: &mut Context<MitsuroApp>) -> impl IntoE
                 .child(
                     codex_button::primary_with_icon(
                         "work-clear-goal",
-                        "Clear goal",
+                        if state == SurfaceDataState::Fixture {
+                            "Clear goal"
+                        } else {
+                            "Read-only"
+                        },
                         Icon::new(IconName::Delete).with_size(px(12.0)),
                         cx,
                     )
                     .rounded(px(8.0))
-                    .on_click(cx.listener(|app, _, _, cx| app.clear_selected_goal(cx))),
+                    .when(state == SurfaceDataState::Fixture, |this| {
+                        this.on_click(cx.listener(|app, _, _, cx| app.clear_selected_goal(cx)))
+                    }),
                 )
                 .child(
                     div()

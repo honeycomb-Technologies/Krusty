@@ -9,7 +9,7 @@
 //! - Featured 2-col grid + Productivity / Creativity sections
 //!
 //! Data: `plugin/list` / `mcpServerStatus/list` / `skills/list` when Ready;
-//! fixture catalog offline. Empty live catalogs stay empty unless densified.
+//! explicit fixture catalog offline. Empty live catalogs remain honestly empty.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -19,7 +19,7 @@ use gpui::{
 use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{McpServerStatus, PluginSummary, SkillMetadata};
 
-use crate::app::{MitsuroApp, PluginsFilter, PluginsSurfaceTab, UiConnection};
+use crate::app::{MitsuroApp, PluginsFilter, PluginsSurfaceTab, SurfaceDataState};
 use crate::theme;
 
 /// Full-height Plugins panel (sidebar "Plugins" → ProductMode::Extensions).
@@ -31,8 +31,8 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let filter = app.plugins_filter();
     let tab = app.plugins_surface_tab();
     let chip = app.connection().chip_label();
-    let live = matches!(app.connection(), UiConnection::Ready { .. });
-    let source = if live { "app-server" } else { "fixture" };
+    let data_state = app.extensions_state();
+    let source = data_state.label();
 
     let installed: Vec<PluginSummary> = plugins.iter().filter(|p| p.installed).cloned().collect();
 
@@ -68,7 +68,7 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                 .gap(px(18.0))
                 .child(match tab {
                     PluginsSurfaceTab::Plugins => {
-                        plugins_body(&plugins, &installed, &mcp, filter, live, cx)
+                        plugins_body(&plugins, &installed, &mcp, filter, data_state, cx)
                             .into_any_element()
                     }
                     PluginsSurfaceTab::Skills => skills_body(&skills, source).into_any_element(),
@@ -148,31 +148,6 @@ fn header(
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
                                 .child("Refresh"),
-                        ),
-                )
-                // Create-like primary pill (bar chrome parity; fixture status only).
-                .child(
-                    div()
-                        .id("plugins-create")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .h(px(32.0))
-                        .px(px(14.0))
-                        .rounded(px(999.0))
-                        .bg(colors.bg_button_primary)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(colors.bg_button_primary_hover))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.set_status_line("Plugins · Create (fixture)", cx);
-                        }))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.fg_button_primary)
-                                .child("Create"),
                         ),
                 )
                 .when(
@@ -302,7 +277,7 @@ fn plugins_body(
     installed: &[PluginSummary],
     mcp: &[McpServerStatus],
     filter: PluginsFilter,
-    live: bool,
+    data_state: SurfaceDataState,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     // Marketplace chrome: hide internal `tools` fixtures (still available via plugin/read).
@@ -346,7 +321,7 @@ fn plugins_body(
         .gap(px(20.0))
         .child(installed_strip(&strip))
         .child(scope_chips(filter, cx))
-        .when(market_empty && live, |this| {
+        .when(market_empty && data_state != SurfaceDataState::Fixture, |this| {
             this.child(
                 div()
                     .px(px(14.0))
@@ -357,10 +332,13 @@ fn plugins_body(
                     .border_color(theme::colors().border)
                     .text_sm()
                     .text_color(theme::colors().text_tertiary)
-                    .child(
-                        "app-server · empty catalog (plugin/list + mcpServerStatus/list). \
-                         Set MITSURO_EXTENSIONS_DENSE=1 to densify fixture marketplace.",
-                    ),
+                    .child(match data_state {
+                        SurfaceDataState::Live => "The connected backend returned no plugin or MCP records. Skills are listed separately.",
+                        SurfaceDataState::Loading => "Loading extensions from the connected backend.",
+                        SurfaceDataState::Unsupported => "Extensions are not exposed by the connected backend.",
+                        SurfaceDataState::Error => "The extension catalog could not be loaded from the connected backend.",
+                        SurfaceDataState::Fixture => unreachable!(),
+                    }),
             )
         })
         .child(if filter == PluginsFilter::Mcp {

@@ -7,7 +7,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::MitsuroApp;
+use crate::app::{MitsuroApp, SurfaceDataState};
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -63,7 +63,7 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
     let enabled = app.scheduled_enabled().to_vec();
     let show_tasks = app.scheduled_show_tasks();
     let live_tasks = app.scheduled_tasks().map(|tasks| tasks.to_vec());
-    let live = live_tasks.is_some();
+    let state = app.scheduled_state();
 
     div()
         .id("scheduled-panel")
@@ -73,8 +73,7 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
         .min_w_0()
         .h_full()
         .bg(colors.bg_main)
-        .child(header(show_tasks, live, cx))
-        .child(search_placeholder())
+        .child(header(show_tasks, state, cx))
         .child(
             div()
                 .id("scheduled-body")
@@ -86,28 +85,46 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                 .px(px(28.0))
                 .pb(px(28.0))
                 .gap(px(18.0))
-                .when_some(live_tasks, |this, tasks| {
-                    this.child(live_tasks_section(&tasks).into_any_element())
-                })
-                .when(show_tasks && !live, |this| {
-                    this.child(tasks_section(&enabled, cx).into_any_element())
-                })
-                .child(suggestions_section(live, cx)),
+                .child(match state {
+                    SurfaceDataState::Live => {
+                        live_tasks_section(live_tasks.as_deref().unwrap_or(&[])).into_any_element()
+                    }
+                    SurfaceDataState::Fixture if show_tasks => {
+                        tasks_section(&enabled, cx).into_any_element()
+                    }
+                    SurfaceDataState::Fixture => suggestions_section(false, cx).into_any_element(),
+                    SurfaceDataState::Loading => state_notice(
+                        "Loading scheduled tasks",
+                        "Waiting for the selected backend to finish connecting.",
+                    )
+                    .into_any_element(),
+                    SurfaceDataState::Unsupported => state_notice(
+                        "Scheduled tasks are not supported",
+                        "The ChatGPT / Codex app-server does not expose Mitsuro Hive schedules.",
+                    )
+                    .into_any_element(),
+                    SurfaceDataState::Error => state_notice(
+                        "Scheduled tasks unavailable",
+                        "The selected backend could not provide a schedule catalog.",
+                    )
+                    .into_any_element(),
+                }),
         )
 }
 
-fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn header(
+    show_tasks: bool,
+    state: SurfaceDataState,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
-    let subtitle = if show_tasks {
-        if live {
-            "Mitsuro Hive schedules · read-only in this client"
-        } else {
-            "Fixture demo tasks"
-        }
-    } else if live {
-        "Mitsuro Hive schedules · no schedules currently visible · read-only"
-    } else {
-        "Ask Mitsuro to schedule tasks, set reminders, or monitor for updates"
+    let subtitle = match state {
+        SurfaceDataState::Live => "Mitsuro Hive schedules · live catalog · read-only",
+        SurfaceDataState::Fixture if show_tasks => "Explicit fixture tasks",
+        SurfaceDataState::Fixture => "Explicit fixture suggestions",
+        SurfaceDataState::Loading => "Waiting for backend data",
+        SurfaceDataState::Unsupported => "Unavailable from this backend",
+        SurfaceDataState::Error => "Backend error",
     };
     div()
         .id("scheduled-header")
@@ -136,7 +153,7 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
                                 .text_color(colors.text)
                                 .child("Scheduled tasks"),
                         )
-                        .when(show_tasks && !live, |this| {
+                        .when(state == SurfaceDataState::Fixture, |this| {
                             this.child(
                                 div()
                                     .px(px(8.0))
@@ -169,12 +186,12 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
                 .h(px(32.0))
                 .px(px(14.0))
                 .rounded(px(999.0))
-                .bg(if live {
-                    colors.bg_button_secondary
-                } else {
+                .bg(if state == SurfaceDataState::Fixture {
                     colors.bg_button_primary
+                } else {
+                    colors.bg_button_secondary
                 })
-                .when(!live, |this| {
+                .when(state == SurfaceDataState::Fixture, |this| {
                     this.cursor_pointer()
                         .hover(|s| s.bg(colors.bg_button_primary_hover))
                         .on_click(cx.listener(|app, _, _, cx| {
@@ -185,12 +202,16 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(if live {
-                            colors.text_tertiary
-                        } else {
+                        .text_color(if state == SurfaceDataState::Fixture {
                             colors.fg_button_primary
+                        } else {
+                            colors.text_tertiary
                         })
-                        .child(if live { "Read-only" } else { "Create" }),
+                        .child(if state == SurfaceDataState::Fixture {
+                            "Create"
+                        } else {
+                            "Unavailable"
+                        }),
                 )
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -200,32 +221,30 @@ fn header(show_tasks: bool, live: bool, cx: &mut Context<MitsuroApp>) -> impl In
         )
 }
 
-fn search_placeholder() -> impl IntoElement {
+fn state_notice(title: &str, detail: &str) -> impl IntoElement {
     let colors = theme::colors();
     div()
-        .id("scheduled-search")
-        .mx(px(28.0))
-        .mb(px(4.0))
-        .h(px(36.0))
-        .px(px(12.0))
-        .rounded(px(10.0))
-        .bg(theme::hex_alpha(0xffffff, 0.04))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .px(px(16.0))
+        .py(px(18.0))
+        .rounded(px(12.0))
+        .bg(colors.bg_elevated)
         .border_1()
         .border_color(colors.border)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
         .child(
-            Icon::new(IconName::Search)
-                .with_size(px(14.0))
-                .text_color(colors.text_tertiary),
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child(title.to_string()),
         )
         .child(
             div()
                 .text_sm()
                 .text_color(colors.text_tertiary)
-                .child("Search scheduled tasks"),
+                .child(detail.to_string()),
         )
 }
 

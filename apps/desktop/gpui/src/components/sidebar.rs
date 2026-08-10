@@ -123,10 +123,16 @@ pub fn sidebar(
                         cx,
                         |app, _, _, cx| {
                             app.close_mode_menu(cx);
-                            app.set_status_line("Projects · fixture · no projects yet", cx);
+                            app.set_status_line(
+                                "Projects are not exposed by the selected backend.",
+                                cx,
+                            );
                         },
                         |app, _, _, cx| {
-                            app.set_status_line("New project · stub", cx);
+                            app.set_status_line(
+                                "Project creation is unavailable for the selected backend.",
+                                cx,
+                            );
                         },
                     ))
                 })
@@ -213,11 +219,6 @@ pub fn sidebar(
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(colors.bg_hover))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.set_status_line("New project · stub", cx);
-                                    }))
                                     .child(
                                         Icon::new(IconName::Plus)
                                             .with_size(px(12.0))
@@ -229,7 +230,7 @@ pub fn sidebar(
                         div()
                             .text_xs()
                             .text_color(colors.text_tertiary)
-                            .child("No projects"),
+                            .child("Unavailable from backend"),
                     ),
             )
         })

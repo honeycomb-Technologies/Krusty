@@ -182,7 +182,6 @@ fn thread_main(
         .flex_col()
         .size_full()
         // Bar: quiet panel-toggle pair pinned top-right of the main stage.
-        .child(stage_panel_toggles(cx))
         // Chat home: Chat | Work segmented control top-center.
         .when(chat_mode && calm, |this| {
             this.child(chat_work_segment(ProductMode::Chat, cx))
@@ -341,62 +340,6 @@ fn segment_btn(
                     colors.text_tertiary
                 })
                 .child(label),
-        )
-}
-
-/// Quiet top-right chrome: two panel-layout toggle icons (no-op stubs, bar density).
-fn stage_panel_toggles(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .id("stage-panel-toggles")
-        .absolute()
-        .top(px(10.0))
-        .right(px(14.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(2.0))
-        .child(stage_icon_btn(
-            "stage-panel-left",
-            "icons/panel-left.svg",
-            "Panel layout · stub",
-            colors,
-            cx,
-        ))
-        .child(stage_icon_btn(
-            "stage-panel-right",
-            "icons/panel-right.svg",
-            "Side panel · stub",
-            colors,
-            cx,
-        ))
-}
-
-fn stage_icon_btn(
-    id: &'static str,
-    path: &'static str,
-    status: &'static str,
-    colors: theme::CodexColors,
-    cx: &mut Context<MitsuroApp>,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(28.0))
-        .h(px(28.0))
-        .rounded(px(8.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.set_status_line(status, cx);
-        }))
-        .child(
-            Icon::empty()
-                .path(path)
-                .with_size(px(15.0))
-                .text_color(colors.text_tertiary),
         )
 }
 

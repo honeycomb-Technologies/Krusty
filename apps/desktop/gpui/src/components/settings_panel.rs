@@ -13,7 +13,9 @@ use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::BackendKind;
 
-use crate::app::{AccountSession, MitsuroApp, SettingsNavGroup, SettingsSection, UiConnection};
+use crate::app::{
+    AccountSession, MitsuroApp, SettingsNavGroup, SettingsSection, SurfaceDataState, UiConnection,
+};
 use crate::theme;
 
 /// Settings left column width (bar ~240–280).
@@ -590,6 +592,19 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
 // ─── Linux desktop ──────────────────────────────────────────────────────────
 
 fn linux_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let build = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let app_label = format!("Mitsuro Desktop {} ({build})", env!("CARGO_PKG_VERSION"));
+    let binary = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "Unavailable".into());
+    let protocol = app
+        .active_backend_kind()
+        .map(MitsuroApp::backend_display_name)
+        .unwrap_or("No backend selected");
     div()
         .id("settings-linux")
         .flex()
@@ -638,15 +653,11 @@ fn linux_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
         .child(group_label("Build info"))
         .child(
             settings_card()
-                .child(info_row("App", "Mitsuro Desktop (debug)"))
+                .child(info_row("App", &app_label))
                 .child(card_divider())
-                .child(info_row("Config dir", "~/.config/mitsuro"))
+                .child(info_row("Binary", &binary))
                 .child(card_divider())
-                .child(info_row("Data dir", "~/.local/share/mitsuro"))
-                .child(card_divider())
-                .child(info_row("Binary", "target/debug/mitsuro-desktop"))
-                .child(card_divider())
-                .child(info_row("Protocol", "app-server / fixture")),
+                .child(info_row("Backend", protocol)),
         )
 }
 
@@ -704,12 +715,12 @@ fn profile_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
         .account_session()
         .email_display
         .clone()
-        .unwrap_or_else(|| "d***@example.com".into());
+        .unwrap_or_else(|| "Not reported".into());
     let plan = app
         .account_session()
         .plan_label
         .clone()
-        .unwrap_or_else(|| "Pro".into());
+        .unwrap_or_else(|| "Not reported".into());
     div()
         .id("settings-profile")
         .flex()
@@ -1662,88 +1673,58 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
         )
 }
 
-fn usage_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
-    // Reverse usage-settings: Current plan, Credits balance, Usage limits, history.
+fn usage_body(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let account = app.account_session();
+    let state = app.account_state();
+    if !matches!(state, SurfaceDataState::Live | SurfaceDataState::Fixture) {
+        let detail = match state {
+            SurfaceDataState::Loading => {
+                "Waiting for account/usage/read and account/rateLimits/read."
+            }
+            SurfaceDataState::Unsupported => {
+                "The Mitsuro server does not expose ChatGPT account or usage data."
+            }
+            SurfaceDataState::Error => {
+                "The connected backend did not return a complete account usage snapshot."
+            }
+            _ => "Account usage is unavailable.",
+        };
+        return div()
+            .id("settings-usage")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .max_w(px(720.0))
+            .child(group_label("Usage"))
+            .child(settings_card().child(empty_list_message(
+                &format!("Usage · {}", state.label()),
+                detail,
+            )));
+    }
+
     let primary = account.primary_used_percent().clamp(0, 100) as f32;
     let secondary = account.secondary_used_percent().clamp(0, 100) as f32;
     let lifetime = format_token_count(account.lifetime_tokens());
-    let plan = account.plan_label.clone().unwrap_or_else(|| "Pro".into());
-    let colors = theme::colors();
+    let plan = account
+        .plan_label
+        .clone()
+        .unwrap_or_else(|| "Not reported".into());
     div()
         .id("settings-usage")
         .flex()
         .flex_col()
         .gap(px(22.0))
         .max_w(px(720.0))
-        .child(group_label("Current plan"))
+        .child(group_label("Backend account snapshot"))
         .child(
             settings_card()
-                .child(info_row("Plan", &format!("{plan} plan")))
+                .child(info_row("Source", account.source))
                 .child(card_divider())
-                .child(action_row(
-                    "Change plan",
-                    "Open plan selection for this workspace",
-                    "Upgrade",
-                    "change-plan",
-                    cx,
-                ))
+                .child(info_row("Plan", &plan))
                 .child(card_divider())
-                .child(action_row(
-                    "Manage billing",
-                    "To view invoices, change your payment method, and take other actions",
-                    "Manage",
-                    "manage-billing",
-                    cx,
-                )),
+                .child(info_row("Lifetime tokens", &lifetime)),
         )
-        .child(group_label("Credits balance"))
-        .child(
-            settings_card()
-                .child(info_row("Current balance", "0 credits"))
-                .child(card_divider())
-                .child(
-                    div()
-                        .px(px(14.0))
-                        .py(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_tertiary)
-                                .child(
-                                    "Buy credits or turn on auto-reload to continue using Mitsuro if you hit a limit."
-                                        .to_string(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.accent)
-                                .child("Learn more".to_string()),
-                        ),
-                )
-                .child(card_divider())
-                .child(action_row(
-                    "Buy credits",
-                    "Credits power Mitsuro. Valid for 12 months",
-                    "Buy",
-                    "add-credits",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Set up auto-reload",
-                    "Automatically add credits when your balance runs low",
-                    "Set up",
-                    "auto-reload",
-                    cx,
-                )),
-        )
-        .child(group_label("Usage limits"))
+        .child(group_label("Rate limits"))
         .child(
             settings_card().child(
                 div()
@@ -1753,49 +1734,49 @@ fn usage_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
                     .flex_col()
                     .gap(px(10.0))
                     .child(usage_bar_row(
-                        "5 hour usage limit",
+                        "Primary window",
                         primary,
-                        format!("{:.0}% remaining", (100.0 - primary).max(0.0)),
+                        format!("{primary:.0}% used"),
                     ))
                     .child(usage_bar_row(
-                        "Weekly usage limit",
+                        "Secondary window",
                         secondary,
-                        format!("{:.0}% remaining", (100.0 - secondary).max(0.0)),
-                    ))
-                    .child(usage_bar_row(
-                        "Monthly usage limit",
-                        (primary * 0.6 + secondary * 0.4).min(100.0),
-                        format!("Lifetime tokens · {lifetime}"),
+                        format!("{secondary:.0}% used"),
                     )),
             ),
-        )
-        .child(group_label("Daily usage"))
-        .child(
-            settings_card().child(empty_list_message(
-                "No daily usage recorded yet",
-                "Usage data is approximate and may be delayed by up to 6 hours",
-            )),
-        )
-        .child(group_label("Credit usage history"))
-        .child(
-            settings_card().child(empty_list_message(
-                "No credit usage recorded yet",
-                "Purchases and spend events will appear here",
-            )),
-        )
-        .child(group_label("Cancel plan"))
-        .child(
-            settings_card().child(action_row(
-                "Cancel plan",
-                "Your subscription is managed through ChatGPT. Go to billing to cancel your plan",
-                "Billing",
-                "cancel-plan",
-                cx,
-            )),
         )
 }
 
 fn account_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let data_state = app.account_state();
+    if !matches!(
+        data_state,
+        SurfaceDataState::Live | SurfaceDataState::Fixture
+    ) {
+        let detail = match data_state {
+            SurfaceDataState::Loading => {
+                "Waiting for the connected backend to return account data."
+            }
+            SurfaceDataState::Unsupported => {
+                "The Mitsuro server does not expose ChatGPT account operations."
+            }
+            SurfaceDataState::Error => {
+                "The connected backend could not return a complete account snapshot."
+            }
+            _ => "Account data is unavailable.",
+        };
+        return div()
+            .id("settings-account")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .max_w(px(720.0))
+            .child(group_label("Account"))
+            .child(settings_card().child(empty_list_message(
+                &format!("Account · {}", data_state.label()),
+                detail,
+            )));
+    }
     let account = app.account_session().clone();
     let status = app.account_status_label();
     let conn = app.connection();
