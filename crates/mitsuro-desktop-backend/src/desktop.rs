@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
     LiveApprovalBridge, LiveTurnOutcome, MitsuroServerBackend, PendingApproval, Result,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
+    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
+    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
+    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
+    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
     TurnStartParams, TurnStreamEvent,
 };
 
@@ -48,6 +53,7 @@ pub struct BackendCapabilities {
     pub streaming_chat: bool,
     pub image_attachments: bool,
     pub audio_attachments: bool,
+    pub realtime_voice: bool,
     pub skill_inputs: bool,
     pub mention_inputs: bool,
     pub workspace_selection: bool,
@@ -74,6 +80,7 @@ impl BackendCapabilities {
             streaming_chat: true,
             image_attachments: true,
             audio_attachments: true,
+            realtime_voice: true,
             skill_inputs: true,
             mention_inputs: true,
             workspace_selection: true,
@@ -100,6 +107,7 @@ impl BackendCapabilities {
             streaming_chat: true,
             image_attachments: true,
             audio_attachments: false,
+            realtime_voice: false,
             skill_inputs: false,
             mention_inputs: false,
             workspace_selection: true,
@@ -298,6 +306,106 @@ impl DesktopBackend {
         }
     }
 
+    fn ensure_realtime_session_origin(&self, session: &BackendSessionId) -> Result<()> {
+        if session.backend == self.kind() {
+            return Ok(());
+        }
+        Err(AgentError::Other(format!(
+            "session {} belongs to {}, but the active backend is {}",
+            session.qualified(),
+            session.backend.id(),
+            self.kind().id()
+        )))
+    }
+
+    pub async fn realtime_list_voices(&self) -> Result<ThreadRealtimeListVoicesResponse> {
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .realtime_list_voices(ThreadRealtimeListVoicesParams::default())
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn realtime_start(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadRealtimeStartParams,
+    ) -> Result<ThreadRealtimeStartResponse> {
+        self.ensure_realtime_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.realtime_start(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn realtime_append_audio(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadRealtimeAppendAudioParams,
+    ) -> Result<ThreadRealtimeAppendAudioResponse> {
+        self.ensure_realtime_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.realtime_append_audio(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn realtime_append_text(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadRealtimeAppendTextParams,
+    ) -> Result<ThreadRealtimeAppendTextResponse> {
+        self.ensure_realtime_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.realtime_append_text(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn realtime_append_speech(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadRealtimeAppendSpeechParams,
+    ) -> Result<ThreadRealtimeAppendSpeechResponse> {
+        self.ensure_realtime_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.realtime_append_speech(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn realtime_stop(
+        &self,
+        session: &BackendSessionId,
+        mut params: ThreadRealtimeStopParams,
+    ) -> Result<ThreadRealtimeStopResponse> {
+        self.ensure_realtime_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.realtime_stop(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose realtime voice sessions".to_owned(),
+            )),
+        }
+    }
+
     pub fn run_turn_with_bridge_blocking(
         &self,
         params: TurnStartParams,
@@ -403,5 +511,36 @@ mod tests {
         assert!(BackendCapabilities::codex().manual_compaction);
         assert!(!BackendCapabilities::mitsuro().review);
         assert!(BackendCapabilities::codex().review);
+        assert!(BackendCapabilities::codex().realtime_voice);
+        assert!(!BackendCapabilities::mitsuro().realtime_voice);
+    }
+
+    #[tokio::test]
+    async fn realtime_rejects_mitsuro_and_cross_backend_sessions_before_io() {
+        let mitsuro = DesktopBackend::Mitsuro(Arc::new(MitsuroServerBackend::new()));
+        let own_session = BackendSessionId::new(BackendKind::MitsuroHttp, "mitsuro-thread");
+        let error = mitsuro
+            .realtime_start(
+                &own_session,
+                ThreadRealtimeStartParams::websocket(
+                    "ignored",
+                    crate::RealtimeOutputModality::Audio,
+                ),
+            )
+            .await
+            .expect_err("Mitsuro realtime must be rejected");
+        assert!(matches!(error, AgentError::NotImplemented(_)));
+
+        let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
+        let error = codex
+            .realtime_stop(
+                &own_session,
+                ThreadRealtimeStopParams {
+                    thread_id: "ignored".to_owned(),
+                },
+            )
+            .await
+            .expect_err("cross-backend session must be rejected before transport");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
     }
 }

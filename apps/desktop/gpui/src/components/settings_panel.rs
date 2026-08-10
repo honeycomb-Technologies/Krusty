@@ -1064,7 +1064,35 @@ fn accent_swatch_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
 }
 
 fn voice_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
-    // Reverse: voice-settings / settings.general.realtimeVoice + dictation.
+    let state = app.realtime_voices_state();
+    if state != SurfaceDataState::Live {
+        let detail = match state {
+            SurfaceDataState::Loading => {
+                "Waiting for thread/realtime/listVoices from the Codex app-server."
+            }
+            SurfaceDataState::Unsupported => {
+                "Realtime voice is a Codex app-server capability. Mitsuro HTTP does not currently expose an equivalent audio transport."
+            }
+            SurfaceDataState::Error => {
+                "The Codex app-server did not return its realtime voice catalog."
+            }
+            _ => "Realtime voice is unavailable for this backend.",
+        };
+        return div()
+            .id("settings-voice")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .max_w(px(720.0))
+            .child(group_label("Voice"))
+            .child(settings_card().child(empty_list_message(
+                &format!("Realtime voice · {}", state.label()),
+                detail,
+            )));
+    }
+
+    let options = app.realtime_voice_options();
+    let selected = app.selected_realtime_voice_label();
     div()
         .id("settings-voice")
         .flex()
@@ -1074,116 +1102,77 @@ fn voice_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElemen
         .child(group_label("General"))
         .child(
             settings_card()
-                .child(select_row(
-                    "Voice",
-                    "Choose the voice Mitsuro uses for new voice chats",
-                    "voice_output",
-                    &[
-                        "Arbor", "Breeze", "Cove", "Ember", "Juniper", "Maple", "Sol", "Spruce",
-                        "Vale",
-                    ],
-                    "Sol",
-                    app,
-                    cx,
-                ))
+                .child(realtime_voice_row(options, selected, cx))
                 .child(card_divider())
-                .child(select_row(
-                    "Microphone",
-                    "Used for voice chat and dictation",
-                    "voice_input",
-                    &["System default", "Built-in Mic"],
-                    "System default",
-                    app,
-                    cx,
-                ))
+                .child(info_row("Microphone", "System default via PipeWire"))
                 .child(card_divider())
-                .child(hotkey_row(
-                    "Voice chat hotkey",
-                    "Start voice chat from anywhere on desktop",
-                    "Off",
-                    "voice-chat-hotkey",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Screen context",
-                    "Let Mitsuro inspect the foreground app when you refer to what's on screen",
-                    "voice_screen_context",
-                    false,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Push to talk",
-                    "Hold to dictate or double-tap to keep recording",
-                    "voice_push_to_talk",
-                    true,
-                    app,
-                    cx,
+                .child(info_row(
+                    "Availability",
+                    "Voice chat starts from the conversation composer",
                 )),
         )
-        .child(group_label("Dictation"))
+        .child(group_label("Current support"))
+        .child(settings_card().child(empty_list_message(
+            "Codex realtime v3",
+            "Audio is captured and played through PipeWire. Global hotkeys, screen context, and standalone dictation remain unavailable until their native contracts are implemented.",
+        )))
+}
+
+fn realtime_voice_row(
+    options: Vec<String>,
+    selected: String,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .px(px(14.0))
+        .py(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
         .child(
-            settings_card()
-                .child(toggle_row(
-                    "Keep dictation bar visible",
-                    "Show a small shortcut reminder when dictation isn't recording",
-                    "dictation_keep_visible",
-                    false,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(hotkey_row(
-                    "Hold-to-dictate hotkey",
-                    "Hold anywhere on desktop to dictate where your cursor is",
-                    "Off",
-                    "voice-hold-hotkey",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(hotkey_row(
-                    "Toggle dictation hotkey",
-                    "Press once anywhere on desktop to dictate, then press again to stop",
-                    "Off",
-                    "voice-toggle-dictation",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Dictation dictionary",
-                    "Words or phrases dictation should recognize",
-                    "Edit",
-                    "voice-dictionary",
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Noise suppression",
-                    "Filter keyboard and ambient noise",
-                    "voice_noise_suppression",
-                    true,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Auto-send after silence",
-                    "Send the transcript when you stop speaking",
-                    "voice_auto_send",
-                    true,
-                    app,
-                    cx,
-                )),
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.text)
+                .child("Voice"),
         )
-        .child(group_label("Recent dictations"))
         .child(
-            settings_card().child(empty_list_message(
-                "Recent dictations",
-                "Your recent dictations will appear here so you can recover text if it does not land where you expected",
-            )),
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child("Choose from the catalog returned by the connected Codex app-server"),
         )
+        .child(div().flex().flex_row().flex_wrap().gap(px(7.0)).children(
+            options.into_iter().enumerate().map(|(index, label)| {
+                let active = label == selected;
+                let click_label = label.clone();
+                div()
+                    .id(("realtime-voice-option", index))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if active { colors.accent } else { colors.border })
+                    .bg(if active {
+                        theme::hex_alpha(0x2f6df6, 0.18)
+                    } else {
+                        colors.bg_button_secondary
+                    })
+                    .text_xs()
+                    .text_color(if active {
+                        colors.text
+                    } else {
+                        colors.text_secondary
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.bg_hover))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.select_realtime_voice(click_label.clone(), cx);
+                    }))
+                    .child(label)
+            }),
+        ))
 }
 
 fn configuration_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {

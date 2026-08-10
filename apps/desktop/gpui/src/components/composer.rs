@@ -4,7 +4,8 @@
 //! explicit model and reasoning-effort pickers, real model-gated image and audio file
 //! attachments, Codex skill and file-mention inputs, native project selection,
 //! backend-specific access and response-speed controls, Send, and Stop.
-//! Microphone recording remains absent until its backend contract exists.
+//! Codex realtime voice uses the app-server contract and PipeWire; unsupported
+//! backends do not render a microphone control.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -138,6 +139,13 @@ fn codex_composer(
                                 "icons/audio-lines.svg",
                                 cx,
                                 |app, _, _, cx| app.select_composer_audio(cx),
+                            ))
+                        })
+                        .when(app.realtime_voice_available(), |this| {
+                            this.child(realtime_voice_action(
+                                "composer-realtime-voice",
+                                app.realtime_voice_active(),
+                                cx,
                             ))
                         })
                         .when(app.show_composer_workspace_control(), |this| {
@@ -277,6 +285,13 @@ fn chat_slim_composer(
                         |app, _, _, cx| app.select_composer_audio(cx),
                     ))
                 })
+                .when(app.realtime_voice_available(), |this| {
+                    this.child(realtime_voice_action(
+                        "chat-realtime-voice",
+                        app.realtime_voice_active(),
+                        cx,
+                    ))
+                })
                 .child(if streaming {
                     streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
                         .into_any_element()
@@ -374,6 +389,13 @@ fn chat_thread_composer(
                                 "icons/audio-lines.svg",
                                 cx,
                                 |app, _, _, cx| app.select_composer_audio(cx),
+                            ))
+                        })
+                        .when(app.realtime_voice_available(), |this| {
+                            this.child(realtime_voice_action(
+                                "chat-thread-realtime-voice",
+                                app.realtime_voice_active(),
+                                cx,
                             ))
                         })
                         .when_some(reasoning, |this, label| {
@@ -1270,6 +1292,46 @@ fn round_path_action(
                 .path(icon_path)
                 .with_size(px(15.0))
                 .text_color(colors.fg_button_primary),
+        )
+}
+
+fn realtime_voice_action(
+    id: &'static str,
+    active: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .w(px(32.0))
+        .h(px(32.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(if active {
+            theme::hex_alpha(0xfa423e, 0.9)
+        } else {
+            colors.bg_button_primary
+        })
+        .hover(|style| {
+            if active {
+                style.bg(theme::hex_alpha(0xfa423e, 0.75))
+            } else {
+                style.bg(colors.bg_button_primary_hover)
+            }
+        })
+        .on_click(cx.listener(|app, _, _, cx| app.toggle_realtime_voice(cx)))
+        .child(
+            Icon::empty()
+                .path("icons/mic.svg")
+                .with_size(px(15.0))
+                .text_color(if active {
+                    colors.text
+                } else {
+                    colors.fg_button_primary
+                }),
         )
 }
 

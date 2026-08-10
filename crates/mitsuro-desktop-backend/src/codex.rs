@@ -56,6 +56,13 @@ use crate::protocol::{
     ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
     TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
+use crate::realtime::{
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
+    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
+    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
+    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
+    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
+};
 use crate::server_requests::{automatic_server_response, AutomaticServerResponse};
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
@@ -440,6 +447,66 @@ impl CodexAppServerBackend {
     pub async fn list_skills(&self, params: SkillsListParams) -> Result<SkillsListResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("skills/list", Some(value)).await
+    }
+
+    /// List the voices available to the experimental thread realtime service.
+    pub async fn realtime_list_voices(
+        &self,
+        params: ThreadRealtimeListVoicesParams,
+    ) -> Result<ThreadRealtimeListVoicesResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/listVoices", Some(value))
+            .await
+    }
+
+    /// Start an experimental thread-scoped realtime session.
+    pub async fn realtime_start(
+        &self,
+        params: ThreadRealtimeStartParams,
+    ) -> Result<ThreadRealtimeStartResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/start", Some(value))
+            .await
+    }
+
+    /// Append PCM audio to an active realtime session.
+    pub async fn realtime_append_audio(
+        &self,
+        params: ThreadRealtimeAppendAudioParams,
+    ) -> Result<ThreadRealtimeAppendAudioResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/appendAudio", Some(value))
+            .await
+    }
+
+    /// Append role-bearing text to an active realtime session.
+    pub async fn realtime_append_text(
+        &self,
+        params: ThreadRealtimeAppendTextParams,
+    ) -> Result<ThreadRealtimeAppendTextResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/appendText", Some(value))
+            .await
+    }
+
+    /// Append text that should be spoken by an active realtime session.
+    pub async fn realtime_append_speech(
+        &self,
+        params: ThreadRealtimeAppendSpeechParams,
+    ) -> Result<ThreadRealtimeAppendSpeechResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/appendSpeech", Some(value))
+            .await
+    }
+
+    /// Stop a thread-scoped realtime session.
+    pub async fn realtime_stop(
+        &self,
+        params: ThreadRealtimeStopParams,
+    ) -> Result<ThreadRealtimeStopResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/realtime/stop", Some(value))
+            .await
     }
 
     /// Archive a thread via `thread/archive`.
@@ -1339,6 +1406,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.turn_id, "turn-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn realtime_methods_use_the_generated_experimental_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "thread/realtime/listVoices",
+                "thread/realtime/start",
+                "thread/realtime/appendAudio",
+                "thread/realtime/stop",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                match expected {
+                    "thread/realtime/start" => {
+                        assert_eq!(request["params"]["threadId"], "thread-live");
+                        assert_eq!(request["params"]["outputModality"], "audio");
+                        assert_eq!(request["params"]["transport"]["type"], "websocket");
+                        assert_eq!(request["params"]["version"], "v3");
+                        assert_eq!(request["params"]["voice"], "sol");
+                    }
+                    "thread/realtime/appendAudio" => {
+                        assert_eq!(request["params"]["threadId"], "thread-live");
+                        assert_eq!(request["params"]["audio"]["data"], "AQI=");
+                        assert_eq!(request["params"]["audio"]["numChannels"], 1);
+                        assert_eq!(request["params"]["audio"]["sampleRate"], 24_000);
+                    }
+                    _ => {}
+                }
+                let result = if expected == "thread/realtime/listVoices" {
+                    serde_json::json!({
+                        "voices": {
+                            "defaultV1": "alloy",
+                            "defaultV2": "sol",
+                            "v1": ["alloy"],
+                            "v2": ["sol", "marin"]
+                        }
+                    })
+                } else {
+                    serde_json::json!({})
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({
+                            "id": request["id"],
+                            "result": result
+                        })
+                        .to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let voices = backend
+            .realtime_list_voices(ThreadRealtimeListVoicesParams::default())
+            .await
+            .unwrap();
+        assert_eq!(voices.voices.default_v2, crate::RealtimeVoice::Sol);
+
+        let mut start = ThreadRealtimeStartParams::websocket(
+            "thread-live",
+            crate::RealtimeOutputModality::Audio,
+        );
+        start.voice = Some(crate::RealtimeVoice::Sol);
+        backend.realtime_start(start).await.unwrap();
+        backend
+            .realtime_append_audio(ThreadRealtimeAppendAudioParams {
+                thread_id: "thread-live".to_owned(),
+                audio: crate::ThreadRealtimeAudioChunk {
+                    data: "AQI=".to_owned(),
+                    num_channels: 1,
+                    sample_rate: 24_000,
+                    samples_per_channel: Some(1),
+                    item_id: None,
+                },
+            })
+            .await
+            .unwrap();
+        backend
+            .realtime_stop(ThreadRealtimeStopParams {
+                thread_id: "thread-live".to_owned(),
+            })
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 

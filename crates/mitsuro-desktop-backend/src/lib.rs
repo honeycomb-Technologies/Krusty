@@ -16,6 +16,7 @@ pub mod notifications;
 pub mod process;
 pub mod product;
 pub mod protocol;
+pub mod realtime;
 pub mod server_requests;
 pub mod types;
 
@@ -136,6 +137,16 @@ pub use protocol::{
     TranscriptMessage, TranscriptReference, TranscriptReferenceKind, TranscriptRole,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
     TurnSteerParams, TurnSteerResponse,
+};
+pub use realtime::{
+    CodexResponseHandoffMode, ConversationTextRole, RealtimeConversationVersion, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ThreadRealtimeAppendAudioParams,
+    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
+    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
+    ThreadRealtimeAppendTextResponse, ThreadRealtimeAudioChunk, ThreadRealtimeInitialItem,
+    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
+    ThreadRealtimeStartResponse, ThreadRealtimeStartTransport, ThreadRealtimeStopParams,
+    ThreadRealtimeStopResponse,
 };
 pub use server_requests::{
     automatic_server_response, is_known_server_request, parse_mcp_elicitation_request,

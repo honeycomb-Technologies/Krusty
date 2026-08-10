@@ -1,9 +1,11 @@
 //! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -36,11 +38,13 @@ use mitsuro_desktop_backend::{
     ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
     ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
     ProductModel, ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule,
-    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
-    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
-    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
+    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
     TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
@@ -893,6 +897,27 @@ fn account_login_completion(event: &LifecycleNotification) -> Option<AccountLogi
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RealtimeVoicePhase {
+    Starting,
+    Active,
+    Stopping,
+}
+
+struct RealtimePlayback {
+    sample_rate: u32,
+    channels: u16,
+    audio_tx: mpsc::Sender<Vec<u8>>,
+}
+
+struct RealtimeVoiceRuntime {
+    session_id: BackendSessionId,
+    ui_thread_id: String,
+    capture_stop: Arc<AtomicBool>,
+    phase: RealtimeVoicePhase,
+    playback: Option<RealtimePlayback>,
+}
+
 pub struct MitsuroApp {
     focus_handle: FocusHandle,
     connection: UiConnection,
@@ -940,6 +965,11 @@ pub struct MitsuroApp {
     selected_model_id: Option<String>,
     /// Backend/model-scoped effort chosen from the live model capability list.
     selected_reasoning_effort: Option<String>,
+    /// Live Codex realtime voice catalog. Mitsuro deliberately leaves this empty.
+    realtime_voices: Option<RealtimeVoicesList>,
+    realtime_voices_state: SurfaceDataState,
+    realtime_voice_runtime: Option<RealtimeVoiceRuntime>,
+    realtime_voice_generation: u64,
     /// Whether the selected model's advertised accelerated response mode is active.
     selected_fast_mode: bool,
     /// Short config snippet from `config/read` (Settings).
@@ -1261,6 +1291,10 @@ impl MitsuroApp {
             models: Vec::new(),
             selected_model_id: None,
             selected_reasoning_effort: None,
+            realtime_voices: None,
+            realtime_voices_state: SurfaceDataState::Loading,
+            realtime_voice_runtime: None,
+            realtime_voice_generation: 0,
             selected_fast_mode: false,
             config_snippet: SharedString::from(""),
             skills: Vec::new(),
@@ -2812,6 +2846,373 @@ impl MitsuroApp {
             .get(key)
             .cloned()
             .unwrap_or_else(|| default.to_string())
+    }
+
+    pub fn realtime_voices_state(&self) -> SurfaceDataState {
+        self.realtime_voices_state
+    }
+
+    pub fn realtime_voice_options(&self) -> Vec<String> {
+        let Some(voices) = self.realtime_voices.as_ref() else {
+            return Vec::new();
+        };
+        voices.v2.iter().map(|voice| voice.label()).collect()
+    }
+
+    pub fn selected_realtime_voice_label(&self) -> String {
+        let default = self
+            .realtime_voices
+            .as_ref()
+            .map(|voices| voices.default_v2.label())
+            .unwrap_or_else(|| "Unavailable".to_owned());
+        self.settings_choice("voice_output", &default)
+    }
+
+    pub fn select_realtime_voice(&mut self, label: String, cx: &mut Context<Self>) {
+        let is_live_choice = self.realtime_voices.as_ref().is_some_and(|voices| {
+            voices
+                .v2
+                .iter()
+                .any(|voice| voice.label().eq_ignore_ascii_case(&label))
+        });
+        if !is_live_choice {
+            self.status_line = "That voice is not in the connected Codex catalog.".into();
+            cx.notify();
+            return;
+        }
+        self.settings_choices
+            .insert("voice_output".to_owned(), label.clone());
+        self.preferences
+            .settings_choices
+            .insert("voice_output".to_owned(), label.clone());
+        self.save_preferences_best_effort();
+        self.status_line = format!("Voice · {label} · used for new realtime sessions").into();
+        cx.notify();
+    }
+
+    fn apply_realtime_voices(&mut self, voices: RealtimeVoicesList) {
+        let selected = self.settings_choice("voice_output", "");
+        let selected_is_valid = voices
+            .v2
+            .iter()
+            .any(|voice| voice.label().eq_ignore_ascii_case(&selected));
+        if !selected_is_valid {
+            let label = voices.default_v2.label();
+            self.settings_choices
+                .insert("voice_output".to_owned(), label.clone());
+            self.preferences
+                .settings_choices
+                .insert("voice_output".to_owned(), label);
+            self.save_preferences_best_effort();
+        }
+        self.realtime_voices = Some(voices);
+        self.realtime_voices_state = SurfaceDataState::Live;
+    }
+
+    pub fn selected_realtime_voice(&self) -> Option<RealtimeVoice> {
+        let selected = self.selected_realtime_voice_label();
+        self.realtime_voices
+            .as_ref()?
+            .v2
+            .iter()
+            .copied()
+            .find(|voice| voice.label().eq_ignore_ascii_case(&selected))
+    }
+
+    pub fn realtime_voice_active(&self) -> bool {
+        self.realtime_voice_runtime.is_some()
+    }
+
+    pub fn realtime_voice_available(&self) -> bool {
+        if self.realtime_voice_active() {
+            return true;
+        }
+        !self.turn_in_progress
+            && matches!(self.connection, UiConnection::Ready { has_auth: true, .. })
+            && self
+                .live_backend()
+                .is_some_and(|backend| backend.capabilities().realtime_voice)
+            && self.realtime_voices_state == SurfaceDataState::Live
+            && self.selected_realtime_voice().is_some()
+            && command_available("pw-record")
+    }
+
+    pub fn toggle_realtime_voice(&mut self, cx: &mut Context<Self>) {
+        if self.realtime_voice_runtime.is_some() {
+            self.stop_realtime_voice(cx);
+        } else {
+            self.start_realtime_voice(cx);
+        }
+    }
+
+    fn start_realtime_voice(&mut self, cx: &mut Context<Self>) {
+        if !self.realtime_voice_available() {
+            self.status_line = if !command_available("pw-record") {
+                "Voice chat requires PipeWire's pw-record command.".into()
+            } else {
+                "Voice chat is unavailable for the current backend or account state.".into()
+            };
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        let Some(voice) = self.selected_realtime_voice() else {
+            return;
+        };
+        if self.selected_thread.is_none() {
+            self.new_thread_local(self.active_thread_surface(), cx);
+        }
+        let Some(ui_thread_id) = self.selected_thread.clone() else {
+            self.status_line = "Voice chat could not create a conversation.".into();
+            cx.notify();
+            return;
+        };
+
+        self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
+        let generation = self.realtime_voice_generation;
+        if ui_thread_id.starts_with("local-") {
+            self.status_line = "Creating a server conversation for voice chat…".into();
+            self.promote_local_then_realtime(ui_thread_id, backend, voice, generation, cx);
+        } else if let Some(session_id) = self.live_session_id(&ui_thread_id) {
+            self.begin_realtime_voice(backend, session_id, ui_thread_id, voice, generation, cx);
+        } else {
+            self.status_line =
+                "Voice chat refused: this conversation has no backend session identity.".into();
+        }
+        cx.notify();
+    }
+
+    fn promote_local_then_realtime(
+        &mut self,
+        local_id: String,
+        backend: Arc<DesktopBackend>,
+        voice: RealtimeVoice,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let backend_generation = self.backend_generation;
+        let cwd = self.composer_workspace_dir().map(ToOwned::to_owned);
+        let model = self.selected_model_slug();
+        let access_mode = self.composer_access_mode();
+        let speed_mode = self.selected_speed_mode();
+        cx.spawn(async move |this, cx| {
+            let create_backend = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    create_backend
+                        .create_session(CreateSession {
+                            working_dir: cwd,
+                            model,
+                            ephemeral: false,
+                            access_mode,
+                            speed_mode,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.realtime_voice_generation != generation
+                {
+                    if let Ok(session) = result {
+                        delete_session_best_effort(backend, session.id, cx);
+                    }
+                    return;
+                }
+                match result {
+                    Ok(session) => {
+                        let backend_session_id = session.id.clone();
+                        let summary = thread_summary_from_session(session);
+                        let new_id = summary.id.clone();
+                        if let Some(index) = app
+                            .threads
+                            .iter()
+                            .position(|thread| thread.summary.id == local_id)
+                        {
+                            let mut thread = app.threads.remove(index);
+                            thread.summary = summary;
+                            thread.backend_session_id = Some(backend_session_id.clone());
+                            app.threads.insert(0, thread);
+                        }
+                        if let Some(mode) = app.composer_access_modes.remove(&local_id) {
+                            app.composer_access_modes.insert(new_id.clone(), mode);
+                        }
+                        app.selected_thread = Some(new_id.clone());
+                        match app.active_thread_surface() {
+                            ThreadSurface::Chat => app.selected_chat_thread = Some(new_id.clone()),
+                            ThreadSurface::Codex => {
+                                app.selected_codex_thread = Some(new_id.clone())
+                            }
+                        }
+                        app.begin_realtime_voice(
+                            backend,
+                            backend_session_id,
+                            new_id,
+                            voice,
+                            generation,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Voice chat session creation failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_realtime_voice(
+        &mut self,
+        backend: Arc<DesktopBackend>,
+        session_id: BackendSessionId,
+        ui_thread_id: String,
+        voice: RealtimeVoice,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let capture_stop = Arc::new(AtomicBool::new(false));
+        self.realtime_voice_runtime = Some(RealtimeVoiceRuntime {
+            session_id: session_id.clone(),
+            ui_thread_id,
+            capture_stop: Arc::clone(&capture_stop),
+            phase: RealtimeVoicePhase::Starting,
+            playback: None,
+        });
+        self.status_line = format!("Starting {} voice chat…", voice.label()).into();
+
+        let backend_generation = self.backend_generation;
+        let mut params = ThreadRealtimeStartParams::websocket(
+            session_id.raw.clone(),
+            RealtimeOutputModality::Audio,
+        );
+        params.voice = Some(voice);
+        let request_backend = Arc::clone(&backend);
+        let request_session = session_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    request_backend
+                        .realtime_start(&request_session, params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.realtime_voice_generation != generation
+                {
+                    return;
+                }
+                match result {
+                    Ok(_) => {
+                        if let Some(runtime) = app.realtime_voice_runtime.as_mut() {
+                            runtime.phase = RealtimeVoicePhase::Active;
+                        }
+                        app.status_line =
+                            format!("Voice chat active · {} · system microphone", voice.label())
+                                .into();
+                        app.spawn_realtime_capture(
+                            backend,
+                            session_id,
+                            capture_stop,
+                            generation,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        app.realtime_voice_runtime = None;
+                        app.status_line = format!("Voice chat failed to start · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn spawn_realtime_capture(
+        &mut self,
+        backend: Arc<DesktopBackend>,
+        session_id: BackendSessionId,
+        capture_stop: Arc<AtomicBool>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    stream_pipewire_microphone(backend, session_id, capture_stop)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.realtime_voice_generation != generation {
+                    return;
+                }
+                let stopping = app
+                    .realtime_voice_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.phase == RealtimeVoicePhase::Stopping);
+                if !stopping {
+                    app.realtime_voice_runtime = None;
+                    app.status_line = match result {
+                        Ok(()) => "Voice microphone stream ended.".into(),
+                        Err(error) => format!("Voice microphone failed · {error}").into(),
+                    };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn stop_realtime_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(runtime) = self.realtime_voice_runtime.as_mut() else {
+            return;
+        };
+        runtime.phase = RealtimeVoicePhase::Stopping;
+        runtime.capture_stop.store(true, Ordering::SeqCst);
+        let session_id = runtime.session_id.clone();
+        let Some(backend) = self.backend.clone() else {
+            self.realtime_voice_runtime = None;
+            return;
+        };
+        self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
+        let generation = self.realtime_voice_generation;
+        self.status_line = "Ending voice chat…".into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .realtime_stop(
+                            &session_id,
+                            ThreadRealtimeStopParams {
+                                thread_id: session_id.raw.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.realtime_voice_generation != generation {
+                    return;
+                }
+                app.realtime_voice_runtime = None;
+                app.status_line = match result {
+                    Ok(_) => "Voice chat ended.".into(),
+                    Err(error) => format!("Voice chat stop failed · {error}").into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn set_settings_choice(
@@ -7910,6 +8311,11 @@ impl MitsuroApp {
         event: LifecycleNotification,
         cx: &mut Context<Self>,
     ) {
+        if let Some(realtime) = RealtimeEvent::from_lifecycle(&event) {
+            self.apply_realtime_event(realtime);
+            cx.notify();
+            return;
+        }
         if event.method == "serverRequest/resolved" {
             self.pending_approval = None;
             self.pending_user_input = None;
@@ -8038,6 +8444,151 @@ impl MitsuroApp {
         }
     }
 
+    fn apply_realtime_event(&mut self, event: RealtimeEvent) {
+        match event {
+            RealtimeEvent::Started { thread_id, .. } => {
+                if let Some(runtime) = self
+                    .realtime_voice_runtime
+                    .as_mut()
+                    .filter(|runtime| runtime.session_id.raw == thread_id)
+                {
+                    runtime.phase = RealtimeVoicePhase::Active;
+                    self.status_line = "Voice chat active · listening".into();
+                }
+            }
+            RealtimeEvent::TranscriptDelta {
+                thread_id, delta, ..
+            } => {
+                if self
+                    .realtime_voice_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.session_id.raw == thread_id)
+                {
+                    let preview: String = delta.chars().take(48).collect();
+                    self.status_line = format!("Voice transcript · {preview}").into();
+                }
+            }
+            RealtimeEvent::TranscriptDone {
+                thread_id,
+                role,
+                text,
+            } => {
+                if text.trim().is_empty() {
+                    return;
+                }
+                let ui_thread_id = self
+                    .realtime_voice_runtime
+                    .as_ref()
+                    .filter(|runtime| runtime.session_id.raw == thread_id)
+                    .map(|runtime| runtime.ui_thread_id.clone())
+                    .or_else(|| {
+                        self.threads
+                            .iter()
+                            .find(|thread| {
+                                thread
+                                    .backend_session_id
+                                    .as_ref()
+                                    .is_some_and(|session| session.raw == thread_id)
+                            })
+                            .map(|thread| thread.summary.id.clone())
+                    });
+                if let Some(thread) = ui_thread_id.and_then(|ui_id| {
+                    self.threads
+                        .iter_mut()
+                        .find(|thread| thread.summary.id == ui_id)
+                }) {
+                    if role.eq_ignore_ascii_case("user") {
+                        thread.messages.push(DemoMessage::user(&text));
+                        thread.summary.preview = Some(text.chars().take(64).collect());
+                    } else {
+                        thread.messages.push(DemoMessage::assistant(&text));
+                    }
+                }
+                self.status_line = format!("Voice transcript · {role}").into();
+                self.transcript_scroll_handle.scroll_to_bottom();
+            }
+            RealtimeEvent::OutputAudio { thread_id, audio } => {
+                let Some(runtime) = self
+                    .realtime_voice_runtime
+                    .as_mut()
+                    .filter(|runtime| runtime.session_id.raw == thread_id)
+                else {
+                    return;
+                };
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&audio.data) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.status_line =
+                            format!("Voice playback data was invalid · {error}").into();
+                        return;
+                    }
+                };
+                let needs_player = runtime.playback.as_ref().is_none_or(|playback| {
+                    playback.sample_rate != audio.sample_rate
+                        || playback.channels != audio.num_channels
+                });
+                if needs_player {
+                    match start_pipewire_playback(audio.sample_rate, audio.num_channels) {
+                        Ok(audio_tx) => {
+                            runtime.playback = Some(RealtimePlayback {
+                                sample_rate: audio.sample_rate,
+                                channels: audio.num_channels,
+                                audio_tx,
+                            });
+                        }
+                        Err(error) => {
+                            self.status_line = error.into();
+                            return;
+                        }
+                    }
+                }
+                if let Some(playback) = runtime.playback.as_ref() {
+                    if playback.audio_tx.send(bytes).is_err() {
+                        runtime.playback = None;
+                        self.status_line = "Voice playback stream ended unexpectedly.".into();
+                    }
+                }
+            }
+            RealtimeEvent::Error { thread_id, message } => {
+                let ui_thread_id = self
+                    .realtime_voice_runtime
+                    .as_ref()
+                    .filter(|runtime| runtime.session_id.raw == thread_id)
+                    .map(|runtime| runtime.ui_thread_id.clone());
+                if let Some(runtime) = self.realtime_voice_runtime.take() {
+                    runtime.capture_stop.store(true, Ordering::SeqCst);
+                }
+                if let Some(thread) = ui_thread_id.and_then(|ui_id| {
+                    self.threads
+                        .iter_mut()
+                        .find(|thread| thread.summary.id == ui_id)
+                }) {
+                    thread
+                        .messages
+                        .push(DemoMessage::error(format!("Voice chat failed: {message}")));
+                }
+                self.status_line = format!("Voice chat error · {message}").into();
+            }
+            RealtimeEvent::Closed { thread_id, reason } => {
+                if self
+                    .realtime_voice_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.session_id.raw == thread_id)
+                {
+                    if let Some(runtime) = self.realtime_voice_runtime.take() {
+                        runtime.capture_stop.store(true, Ordering::SeqCst);
+                    }
+                    self.status_line = reason
+                        .filter(|reason| !reason.is_empty())
+                        .map(|reason| format!("Voice chat closed · {reason}"))
+                        .unwrap_or_else(|| "Voice chat ended.".to_owned())
+                        .into();
+                }
+            }
+            RealtimeEvent::Sdp { .. } | RealtimeEvent::ItemAdded { .. } => {}
+        }
+    }
+
     fn kick_thread_list_refresh(&mut self, cx: &mut Context<Self>) {
         let Some(backend) = self.live_backend() else {
             return;
@@ -8096,6 +8647,10 @@ impl MitsuroApp {
         self.connection = UiConnection::Fixture;
         // Quiet status — connection chip carries "Local"; no fixture pill wall.
         self.status_line = SharedString::from("");
+        self.realtime_voices = None;
+        self.realtime_voices_state = SurfaceDataState::Unsupported;
+        self.realtime_voices = None;
+        self.realtime_voices_state = SurfaceDataState::Unsupported;
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -8261,6 +8816,16 @@ impl MitsuroApp {
         self.environment_info_detail = None;
         self.collaboration_modes.clear();
         self.composer_plan_mode = false;
+        self.realtime_voices = None;
+        self.realtime_voices_state = if kind == BackendKind::MitsuroHttp {
+            SurfaceDataState::Unsupported
+        } else {
+            SurfaceDataState::Loading
+        };
+        if let Some(runtime) = self.realtime_voice_runtime.take() {
+            runtime.capture_stop.store(true, Ordering::SeqCst);
+        }
+        self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
         self.scheduled_tasks = None;
         self.background_processes.clear();
         self.terminal = TerminalSession::idle(kind.id());
@@ -8381,6 +8946,7 @@ impl MitsuroApp {
                             has_auth,
                             models,
                             collaboration_modes,
+                            realtime_voices,
                             config_snip,
                             skills,
                             mcp,
@@ -8425,6 +8991,17 @@ impl MitsuroApp {
                             models.into_iter().map(model_info_from_product).collect(),
                         );
                         app.collaboration_modes = collaboration_modes;
+                        match realtime_voices {
+                            Ok(Some(voices)) => app.apply_realtime_voices(voices),
+                            Ok(None) => {
+                                app.realtime_voices = None;
+                                app.realtime_voices_state = SurfaceDataState::Unsupported;
+                            }
+                            Err(_) => {
+                                app.realtime_voices = None;
+                                app.realtime_voices_state = SurfaceDataState::Error;
+                            }
+                        }
                         if let Some(backend) = app.active_backend_kind() {
                             app.composer_plan_mode = app.preferences.plan_mode_for(backend);
                         }
@@ -9257,6 +9834,125 @@ fn turn_update_is_current(
     active_generation == candidate_generation && active_thread_id == Some(candidate_thread_id)
 }
 
+fn command_available(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(name).is_file())
+    })
+}
+
+fn stream_pipewire_microphone(
+    backend: Arc<DesktopBackend>,
+    session_id: BackendSessionId,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    const SAMPLE_RATE: u32 = 24_000;
+    const CHANNELS: u16 = 1;
+    // 100 ms of signed 16-bit mono PCM.
+    const CHUNK_BYTES: usize = 4_800;
+
+    let mut child = Command::new("pw-record")
+        .args([
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            "24000",
+            "--channels",
+            "1",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not launch pw-record: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "pw-record did not expose an audio stream".to_owned())?;
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    let result = loop {
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        let count = match stdout.read_exact(&mut buffer) {
+            Ok(()) => CHUNK_BYTES,
+            Err(error) => break Err(format!("could not read microphone audio: {error}")),
+        };
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        let params = ThreadRealtimeAppendAudioParams {
+            thread_id: session_id.raw.clone(),
+            audio: ThreadRealtimeAudioChunk {
+                data: base64::engine::general_purpose::STANDARD.encode(&buffer[..count]),
+                num_channels: CHANNELS,
+                sample_rate: SAMPLE_RATE,
+                samples_per_channel: Some((count / 2) as u32),
+                item_id: None,
+            },
+        };
+        let runtime = Arc::clone(&backend);
+        let runner = Arc::clone(&backend);
+        let request_session = session_id.clone();
+        if let Err(error) = runtime
+            .block_on(async move { runner.realtime_append_audio(&request_session, params).await })
+        {
+            break Err(format!("realtime audio append failed: {error}"));
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn start_pipewire_playback(
+    sample_rate: u32,
+    channels: u16,
+) -> Result<mpsc::Sender<Vec<u8>>, String> {
+    if !command_available("pw-play") {
+        return Err("Voice playback requires PipeWire's pw-play command".to_owned());
+    }
+    let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("mitsuro-realtime-playback".to_owned())
+        .spawn(move || {
+            let mut child = match Command::new("pw-play")
+                .args([
+                    "--raw",
+                    "--format",
+                    "s16",
+                    "--rate",
+                    &sample_rate.to_string(),
+                    "--channels",
+                    &channels.to_string(),
+                    "-",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    eprintln!("[mitsuro] could not launch pw-play: {error}");
+                    return;
+                }
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                while let Ok(audio) = audio_rx.recv() {
+                    if stdin.write_all(&audio).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        })
+        .map_err(|error| format!("could not start voice playback worker: {error}"))?;
+    Ok(audio_tx)
+}
+
 /// Replay fixture events with delay; pause when an approval is requested.
 /// Honors `cancel` so Stop / `turn/interrupt` ends the stream early.
 async fn replay_fixture_events(
@@ -9506,6 +10202,7 @@ struct BackendBootstrap {
     has_auth: bool,
     models: Vec<ProductModel>,
     collaboration_modes: Vec<CollaborationModeMask>,
+    realtime_voices: Result<Option<RealtimeVoicesList>, String>,
     config_snip: Option<String>,
     skills: Vec<SkillMetadata>,
     mcp: Vec<McpServerStatus>,
@@ -9533,6 +10230,14 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             .await
             .map(|response| response.data)
             .unwrap_or_default();
+        let realtime_voices = if b.capabilities().realtime_voice {
+            b.realtime_list_voices()
+                .await
+                .map(|response| Some(response.voices))
+                .map_err(|error| error.to_string())
+        } else {
+            Ok(None)
+        };
         // config/read best-effort for Settings snippet.
         let config_snip = match b
             .config_read(ConfigReadParams {
@@ -9573,6 +10278,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             has_auth,
             models,
             collaboration_modes,
+            realtime_voices,
             config_snip,
             skills,
             mcp,
