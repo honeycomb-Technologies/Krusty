@@ -90,6 +90,16 @@ fn turn_budget_landing_due(
         })
 }
 
+fn completed_report_at_turn_budget(
+    task: &SubAgentTask,
+    evidence: &DelegatedEvidenceSummary,
+    output: &str,
+) -> bool {
+    delegated_is_explore(task)
+        && evidence.has_canonical_evidence()
+        && parse_explore_report(output).is_some()
+}
+
 fn evidence_completion_decision(
     evidence: &DelegatedEvidenceSummary,
     correction_requested: bool,
@@ -586,6 +596,43 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         if loop_guard_landing.is_none() && !max_tokens_landing_pending {
             if let Some(max_turns) = max_turns_budget {
                 if turns >= max_turns {
+                    if completed_report_at_turn_budget(task, &evidence, &final_output) {
+                        preserve_terminal_mailbox!();
+                        let result = enforce_canonical_evidence(normalize_explorer_result(
+                            SubAgentResult {
+                                task_id: task_id.clone(),
+                                agent_name: task_name.clone(),
+                                delegated_run_id: task.delegated_run_id.clone(),
+                                success: true,
+                                output: final_output,
+                                files_examined: files_examined.clone(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                turns_used: turns,
+                                error: None,
+                                termination: SubAgentTermination::Completed,
+                                policy_violations: policy_violations.clone(),
+                                evidence: evidence.clone(),
+                                background_processes: background_processes.clone(),
+                            },
+                            task,
+                        ));
+                        info!(
+                            task_id = %result.task_id,
+                            turns,
+                            max_turns,
+                            "Accepted canonical delegated report at exact turn boundary"
+                        );
+                        send_progress(
+                            AgentProgressStatus::Complete,
+                            "complete at turn boundary",
+                            total_tool_calls,
+                            estimated_tokens,
+                            completion_summary_preview(&result.output),
+                            config,
+                        );
+                        config.cleanup();
+                        return result;
+                    }
                     preserve_terminal_mailbox!();
                     warn!(
                         task_id = %task_id,
@@ -1812,6 +1859,23 @@ mod tests {
         assert!(!turn_budget_landing_due(5, Some(6), true, true));
         assert!(!turn_budget_landing_due(6, Some(6), true, false));
         assert!(!turn_budget_landing_due(99, None, true, false));
+    }
+
+    #[test]
+    fn exact_turn_boundary_accepts_a_canonical_read_only_report() {
+        let policy = DelegationPolicy::for_subagent_verify(PermissionMode::Supervised, Some(4));
+        let task = SubAgentTask::new("report", "inspect").with_delegation_policy(policy);
+        let mut evidence = DelegatedEvidenceSummary::default();
+        evidence.record_attempt();
+        evidence.record_success(DelegatedEvidenceKind::Observation);
+        let output = r#"<explore_report>{"summary":"verified","paths_examined":["."],"files_examined":[],"evidence":"directory inspected","changes":"none"}</explore_report>"#;
+
+        assert!(completed_report_at_turn_budget(&task, &evidence, output));
+        assert!(!completed_report_at_turn_budget(
+            &task,
+            &evidence,
+            "unstructured partial prose"
+        ));
     }
 
     #[test]

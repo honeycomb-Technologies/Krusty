@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
-    build_context::SharedBuildContext, AgentCapability, AgentProgress, BackpressureSignal,
-    BuildIsolationMaterializationGuard, BuildIsolationSet, DelegatedProcessArtifact, SubAgentPool,
-    SubAgentResult, SubAgentTask, SubAgentTermination,
+    build_context::SharedBuildContext, AgentCapability, AgentIdentity, AgentProgress,
+    BackpressureSignal, BuildIsolationMaterializationGuard, BuildIsolationSet,
+    DelegatedProcessArtifact, SubAgentPool, SubAgentResult, SubAgentTask, SubAgentTermination,
 };
 use crate::agent::DelegationCoordinator;
 use crate::agent::{AgentCancellation, DelegatedRunStage};
@@ -735,6 +735,16 @@ impl AgentTool {
                 );
                 let mut task = SubAgentTask::new(structured.id.clone(), task_prompt)
                     .with_name(name.clone())
+                    .with_identity(AgentIdentity::child(
+                        structured.id.clone(),
+                        "/root",
+                        name.clone(),
+                        match evidence_kind {
+                            AggregateEvidenceKind::Build => "builder",
+                            AggregateEvidenceKind::Report => "verifier",
+                        },
+                        index,
+                    ))
                     .with_working_dir(task_working_dir)
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(task_policy.clone())
