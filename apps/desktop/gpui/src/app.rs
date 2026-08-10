@@ -22,33 +22,33 @@ use mitsuro_desktop_backend::{
     fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
     fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
     load_sample_turn_events, normalize_abs_path, summarize_file_changes, valid_mcp_server_name,
-    Account, ActivityFields, AgentBackend, ApprovalChoice, BackendKind, BackendSelection,
-    BackendSessionId, CancelLoginAccountParams, CancelLoginAccountStatus,
-    CollaborationModeListParams, CollaborationModeMask, ConfigReadParams, ConfigWriteStatus,
-    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
-    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
-    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
-    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
-    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata, HooksListEntry,
-    HooksListParams, LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge,
-    LoginAccountParams, McpAuthStatus, McpElicitationMode, McpServerConfigAddParams, McpServerInfo,
-    McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
-    McpServerTransportConfig, MessageRole, ModeKind, ModelInfo, ModelListParams, ModelServiceTier,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType, PluginInstallParams,
-    PluginInterface, PluginListParams, PluginSource, PluginSummary, PluginUninstallParams,
-    ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode,
-    ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
-    ProductMcpServer, ProductModel, ProductProcess, ProductReview, ProductReviewTarget,
-    ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
-    RealtimeEvent, RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList,
-    ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
-    SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
-    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT,
+    Account, ActivityFields, AgentBackend, AppInfo, ApprovalChoice, AppsInstalledParams,
+    AppsListParams, BackendKind, BackendSelection, BackendSessionId, CancelLoginAccountParams,
+    CancelLoginAccountStatus, CollaborationModeListParams, CollaborationModeMask, ConfigReadParams,
+    ConfigWriteStatus, ConversationAudio, ConversationImage, ConversationReference,
+    ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
+    EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
+    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
+    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
+    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, HookMetadata,
+    HooksListEntry, HooksListParams, InstalledApp, LifecycleNotification,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
+    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
+    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
+    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
+    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -1002,6 +1002,11 @@ pub struct MitsuroApp {
     /// Exact per-workspace catalog returned by Codex `hooks/list`.
     hooks: Vec<HooksListEntry>,
     hooks_state: SurfaceDataState,
+    /// Codex apps/connectors returned by `app/list`.
+    connector_apps: Vec<AppInfo>,
+    /// Installed runtime snapshot returned by `app/installed`.
+    installed_apps: Vec<InstalledApp>,
+    connector_apps_state: SurfaceDataState,
     /// MCP servers from `mcpServerStatus/list` (or fixture demo).
     mcp_servers: Vec<McpServerStatus>,
     pending_mcp_oauth: std::collections::HashSet<String>,
@@ -1362,6 +1367,9 @@ impl MitsuroApp {
             skills: Vec::new(),
             hooks: Vec::new(),
             hooks_state: SurfaceDataState::Loading,
+            connector_apps: Vec::new(),
+            installed_apps: Vec::new(),
+            connector_apps_state: SurfaceDataState::Loading,
             mcp_servers: Vec::new(),
             pending_mcp_oauth: std::collections::HashSet::new(),
             mcp_add_transport: McpAddTransport::Http,
@@ -3512,6 +3520,43 @@ impl MitsuroApp {
             .collect()
     }
 
+    pub fn connector_apps(&self) -> &[AppInfo] {
+        &self.connector_apps
+    }
+
+    pub fn installed_app(&self, id: &str) -> Option<&InstalledApp> {
+        self.installed_apps.iter().find(|app| app.id == id)
+    }
+
+    pub fn installed_apps_count(&self) -> usize {
+        self.installed_apps.len()
+    }
+
+    pub fn connector_apps_state(&self) -> SurfaceDataState {
+        self.connector_apps_state
+    }
+
+    pub fn open_connector_install(&mut self, app: AppInfo, cx: &mut Context<Self>) {
+        let Some(raw_url) = app.install_url.as_deref() else {
+            self.status_line = format!("Apps · {} has no connection URL", app.name).into();
+            cx.notify();
+            return;
+        };
+        let valid = url::Url::parse(raw_url).ok().is_some_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some_and(|host| !host.is_empty())
+        });
+        if !valid {
+            self.status_line =
+                format!("Apps · {} returned an invalid connection URL", app.name).into();
+            cx.notify();
+            return;
+        }
+        let opened = open_system_browser(raw_url);
+        self.status_line = format!("Apps · {} · {}", app.name, opened.summary()).into();
+        cx.notify();
+    }
+
     #[allow(dead_code)]
     pub fn skills_enabled_count(&self) -> usize {
         self.skills.iter().filter(|s| s.enabled).count()
@@ -4367,12 +4412,47 @@ impl MitsuroApp {
                             } else {
                                 (Vec::new(), SurfaceDataState::Unsupported)
                             };
+                            let (connector_apps, installed_apps, connector_apps_state) =
+                                if backend.capabilities().apps {
+                                    let connector_apps =
+                                        match backend.list_apps(AppsListParams::default()).await {
+                                            Ok(response) => response.data,
+                                            Err(error) => {
+                                                errors.push(format!("apps: {error}"));
+                                                Vec::new()
+                                            }
+                                        };
+                                    let installed_apps = match backend
+                                        .list_installed_apps(AppsInstalledParams::default())
+                                        .await
+                                    {
+                                        Ok(response) => response.apps,
+                                        Err(error) => {
+                                            errors.push(format!("installed apps: {error}"));
+                                            Vec::new()
+                                        }
+                                    };
+                                    let state = if errors.iter().any(|error| {
+                                        error.starts_with("apps:")
+                                            || error.starts_with("installed apps:")
+                                    }) {
+                                        SurfaceDataState::Error
+                                    } else {
+                                        SurfaceDataState::Live
+                                    };
+                                    (connector_apps, installed_apps, state)
+                                } else {
+                                    (Vec::new(), Vec::new(), SurfaceDataState::Unsupported)
+                                };
                             return Ok::<_, String>((
                                 mcp,
                                 plugins,
                                 skills,
                                 hooks,
                                 hooks_state,
+                                connector_apps,
+                                installed_apps,
+                                connector_apps_state,
                                 "app-server",
                                 errors,
                             ));
@@ -4414,6 +4494,9 @@ impl MitsuroApp {
                         skills,
                         Vec::new(),
                         SurfaceDataState::Fixture,
+                        Vec::new(),
+                        Vec::new(),
+                        SurfaceDataState::Fixture,
                         "fixture",
                         Vec::new(),
                     ))
@@ -4422,7 +4505,18 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((mcp, plugins, skills, hooks, hooks_state, label, errors)) => {
+                    Ok((
+                        mcp,
+                        plugins,
+                        skills,
+                        hooks,
+                        hooks_state,
+                        connector_apps,
+                        installed_apps,
+                        connector_apps_state,
+                        label,
+                        errors,
+                    )) => {
                         let mcp_empty = mcp.is_empty();
                         let plugins_empty = plugins.is_empty();
                         app.apply_mcp_servers(mcp);
@@ -4430,6 +4524,9 @@ impl MitsuroApp {
                         app.apply_skills(skills);
                         app.hooks = hooks;
                         app.hooks_state = hooks_state;
+                        app.connector_apps = connector_apps;
+                        app.installed_apps = installed_apps;
+                        app.connector_apps_state = connector_apps_state;
                         app.extensions_state = if label == "fixture" {
                             SurfaceDataState::Fixture
                         } else if errors.is_empty() {
@@ -4465,6 +4562,13 @@ impl MitsuroApp {
                             SurfaceDataState::Fixture
                         };
                         app.extensions_state = if was_live {
+                            SurfaceDataState::Error
+                        } else {
+                            SurfaceDataState::Fixture
+                        };
+                        app.connector_apps.clear();
+                        app.installed_apps.clear();
+                        app.connector_apps_state = if was_live {
                             SurfaceDataState::Error
                         } else {
                             SurfaceDataState::Fixture
@@ -9357,6 +9461,9 @@ impl MitsuroApp {
                     app.apply_plugins(plugins);
                     app.hooks.clear();
                     app.hooks_state = SurfaceDataState::Fixture;
+                    app.connector_apps.clear();
+                    app.installed_apps.clear();
+                    app.connector_apps_state = SurfaceDataState::Fixture;
                     app.apply_account_snapshot(account, usage, rate_limits, "fixture", None);
                     app.extensions_state = SurfaceDataState::Fixture;
                     app.account_state = SurfaceDataState::Fixture;
@@ -9381,6 +9488,9 @@ impl MitsuroApp {
                     );
                     app.hooks.clear();
                     app.hooks_state = SurfaceDataState::Fixture;
+                    app.connector_apps.clear();
+                    app.installed_apps.clear();
+                    app.connector_apps_state = SurfaceDataState::Fixture;
                     app.account = AccountSession::fixture_demo();
                     app.extensions_state = SurfaceDataState::Fixture;
                     app.account_state = SurfaceDataState::Fixture;
@@ -9425,6 +9535,13 @@ impl MitsuroApp {
         self.skills.clear();
         self.hooks.clear();
         self.hooks_state = SurfaceDataState::Loading;
+        self.connector_apps.clear();
+        self.installed_apps.clear();
+        self.connector_apps_state = if kind == BackendKind::MitsuroHttp {
+            SurfaceDataState::Unsupported
+        } else {
+            SurfaceDataState::Loading
+        };
         self.mcp_servers.clear();
         self.pending_mcp_oauth.clear();
         self.mcp_add_in_progress = false;
@@ -9578,6 +9695,7 @@ impl MitsuroApp {
                             config_snip,
                             skills,
                             hooks,
+                            connector_apps,
                             mcp,
                             plugins,
                             processes,
@@ -9650,6 +9768,23 @@ impl MitsuroApp {
                             Err(_) => {
                                 app.hooks.clear();
                                 app.hooks_state = SurfaceDataState::Error;
+                            }
+                        }
+                        match connector_apps {
+                            Ok(Some((apps, installed))) => {
+                                app.connector_apps = apps;
+                                app.installed_apps = installed;
+                                app.connector_apps_state = SurfaceDataState::Live;
+                            }
+                            Ok(None) => {
+                                app.connector_apps.clear();
+                                app.installed_apps.clear();
+                                app.connector_apps_state = SurfaceDataState::Unsupported;
+                            }
+                            Err(_) => {
+                                app.connector_apps.clear();
+                                app.installed_apps.clear();
+                                app.connector_apps_state = SurfaceDataState::Error;
                             }
                         }
                         app.apply_mcp_servers(mcp);
@@ -9739,6 +9874,9 @@ impl MitsuroApp {
                         app.extensions_state = SurfaceDataState::Error;
                         app.hooks.clear();
                         app.hooks_state = SurfaceDataState::Error;
+                        app.connector_apps.clear();
+                        app.installed_apps.clear();
+                        app.connector_apps_state = SurfaceDataState::Error;
                         app.environments_state = SurfaceDataState::Error;
                         app.status_line = format!("Backend unavailable · {message}").into();
                     }
@@ -10872,6 +11010,7 @@ struct BackendBootstrap {
     config_snip: Option<String>,
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
+    connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
     mcp: Vec<McpServerStatus>,
     plugins: Vec<PluginSummary>,
     processes: Option<Vec<ProductProcess>>,
@@ -10932,6 +11071,24 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         } else {
             Ok(None)
         };
+        let connector_apps = if b.capabilities().apps {
+            async {
+                let apps = b
+                    .list_apps(AppsListParams::default())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .data;
+                let installed = b
+                    .list_installed_apps(AppsInstalledParams::default())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .apps;
+                Ok(Some((apps, installed)))
+            }
+            .await
+        } else {
+            Ok(None)
+        };
         // Product catalogs are best-effort for the Extensions panel.
         let mcp = match b.list_product_mcp_servers().await {
             Ok(servers) => servers.into_iter().map(mcp_status_from_product).collect(),
@@ -10957,6 +11114,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             config_snip,
             skills,
             hooks,
+            connector_apps,
             mcp,
             plugins,
             processes,

@@ -85,8 +85,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 60 typed adapters
-and 73 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 63 typed adapters
+and 70 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -116,6 +116,12 @@ work, not as feature completion; the matrix test must change with each typed ada
   It preserves hook event, handler, source path/source, enabled/managed state, trust,
   warnings, and errors. The previous local toggle and hard-coded Mitsuro paths were
   removed because they were not connected to either backend.
+- Settings Connections hydrates the real Codex app/connector catalog through typed
+  `app/list` and `app/installed` adapters, with `app/read` available for exact detail
+  reads. Rows derive connected, installed, disabled, accessible, and unavailable states
+  only from server fields. Connect actions validate and open the exact server-returned
+  HTTP(S) install URL. Mitsuro renders this Codex-only capability as unsupported, and
+  explicit fixture mode does not invent connector account state.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,

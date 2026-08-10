@@ -1055,6 +1055,24 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("hooks/list", Some(value)).await
     }
 
+    async fn apps_list(&self, params: crate::AppsListParams) -> Result<crate::AppsListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("app/list", Some(value)).await
+    }
+
+    async fn apps_installed(
+        &self,
+        params: crate::AppsInstalledParams,
+    ) -> Result<crate::AppsInstalledResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("app/installed", Some(value)).await
+    }
+
+    async fn apps_read(&self, params: crate::AppsReadParams) -> Result<crate::AppsReadResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("app/read", Some(value)).await
+    }
+
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         // Live model turn — callers must opt in; default UI path uses fixtures.
         // `params.model` is serialized as camelCase `model` when set (UI selected model).
@@ -1786,6 +1804,145 @@ mod tests {
         assert_eq!(
             response.data[0].hooks[0].event_name,
             crate::HookEventName::PreToolUse
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn app_catalog_methods_use_current_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in ["app/list", "app/installed", "app/read"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "app/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "cursor": null,
+                                "limit": 25,
+                                "threadId": "thread-1",
+                                "forceRefetch": true
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [{
+                                "id": "calendar",
+                                "name": "Calendar",
+                                "description": "Schedule and inspect events",
+                                "logoUrl": null,
+                                "logoUrlDark": null,
+                                "iconAssets": null,
+                                "iconDarkAssets": null,
+                                "distributionChannel": "first_party",
+                                "branding": null,
+                                "appMetadata": null,
+                                "labels": null,
+                                "installUrl": "https://example.test/connect/calendar",
+                                "isAccessible": true,
+                                "isEnabled": true,
+                                "pluginDisplayNames": []
+                            }],
+                            "nextCursor": null
+                        })
+                    }
+                    "app/installed" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-1",
+                                "forceRefresh": true
+                            })
+                        );
+                        serde_json::json!({
+                            "apps": [{
+                                "id": "calendar",
+                                "runtimeName": "Calendar",
+                                "enabled": true,
+                                "callable": true
+                            }]
+                        })
+                    }
+                    "app/read" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "appIds": ["calendar"],
+                                "includeTools": true
+                            })
+                        );
+                        serde_json::json!({
+                            "apps": [{
+                                "id": "calendar",
+                                "name": "Calendar",
+                                "description": "Schedule and inspect events",
+                                "iconUrl": null,
+                                "iconUrlDark": null,
+                                "distributionChannel": "first_party",
+                                "installUrl": "https://example.test/connect/calendar",
+                                "pluginDisplayNames": [],
+                                "toolSummaries": [{
+                                    "name": "list_events",
+                                    "title": "List events",
+                                    "description": "Lists calendar events"
+                                }]
+                            }],
+                            "missingAppIds": []
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let listed = backend
+            .apps_list(crate::AppsListParams {
+                cursor: None,
+                limit: Some(25),
+                thread_id: Some("thread-1".to_owned()),
+                force_refetch: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.data[0].name, "Calendar");
+
+        let installed = backend
+            .apps_installed(crate::AppsInstalledParams {
+                thread_id: Some("thread-1".to_owned()),
+                force_refresh: true,
+            })
+            .await
+            .unwrap();
+        assert!(installed.apps[0].callable);
+
+        let details = backend
+            .apps_read(crate::AppsReadParams {
+                app_ids: vec!["calendar".to_owned()],
+                include_tools: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            details.apps[0].tool_summaries.as_ref().unwrap()[0].name,
+            "list_events"
         );
         server.await.unwrap();
     }

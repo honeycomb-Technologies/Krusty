@@ -8,6 +8,10 @@ use crate::account::{
     GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageResponse,
     LoginAccountParams, LoginAccountResponse, LogoutAccountResponse,
 };
+use crate::apps::{
+    AppsInstalledParams, AppsInstalledResponse, AppsListParams, AppsListResponse, AppsReadParams,
+    AppsReadResponse,
+};
 use crate::environment::{
     CollaborationModeListParams, CollaborationModeListResponse, EnvironmentAddParams,
     EnvironmentAddResponse, EnvironmentInfoParams, EnvironmentInfoResponse,
@@ -175,6 +179,27 @@ pub trait AgentBackend: Send + Sync {
     async fn hooks_list(&self, _params: HooksListParams) -> Result<HooksListResponse> {
         Err(crate::AgentError::NotImplemented(
             "hook catalog is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// List apps/connectors available to the current Codex account.
+    async fn apps_list(&self, _params: AppsListParams) -> Result<AppsListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "app catalog is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read the committed installed connector runtime snapshot.
+    async fn apps_installed(&self, _params: AppsInstalledParams) -> Result<AppsInstalledResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "installed app snapshot is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read detailed metadata for specific apps/connectors.
+    async fn apps_read(&self, _params: AppsReadParams) -> Result<AppsReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "app metadata is not implemented by this backend".to_owned(),
         ))
     }
 

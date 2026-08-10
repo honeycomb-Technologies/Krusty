@@ -73,6 +73,7 @@ pub struct BackendCapabilities {
     pub mcp_oauth: bool,
     pub mcp_config_write: bool,
     pub hooks: bool,
+    pub apps: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -105,6 +106,7 @@ impl BackendCapabilities {
             mcp_oauth: true,
             mcp_config_write: true,
             hooks: true,
+            apps: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -140,6 +142,7 @@ impl BackendCapabilities {
             mcp_oauth: false,
             mcp_config_write: false,
             hooks: false,
+            apps: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -402,6 +405,42 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn list_apps(
+        &self,
+        params: crate::AppsListParams,
+    ) -> Result<crate::AppsListResponse> {
+        match self {
+            Self::Codex(backend) => backend.apps_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex app catalog".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_installed_apps(
+        &self,
+        params: crate::AppsInstalledParams,
+    ) -> Result<crate::AppsInstalledResponse> {
+        match self {
+            Self::Codex(backend) => backend.apps_installed(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex installed app snapshot".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_apps(
+        &self,
+        params: crate::AppsReadParams,
+    ) -> Result<crate::AppsReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.apps_read(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex app metadata catalog".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -606,6 +645,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().mcp_config_write);
         assert!(BackendCapabilities::codex().hooks);
         assert!(!BackendCapabilities::mitsuro().hooks);
+        assert!(BackendCapabilities::codex().apps);
+        assert!(!BackendCapabilities::mitsuro().apps);
     }
 
     #[tokio::test]

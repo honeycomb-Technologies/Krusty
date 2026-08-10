@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
-use mitsuro_desktop_backend::{BackendKind, HookMetadata};
+use mitsuro_desktop_backend::{AppInfo, BackendKind, HookMetadata, InstalledApp};
 
 use crate::app::{
     AccountSession, McpAddTransport, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection,
@@ -2092,6 +2092,30 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
         .to_string();
     let active = app.active_backend_kind();
     let servers: Vec<_> = app.mcp_servers().to_vec();
+    const CONNECTOR_PREVIEW_LIMIT: usize = 16;
+    let connector_total = app.connector_apps().len();
+    let connector_apps: Vec<_> = app
+        .connector_apps()
+        .iter()
+        .take(CONNECTOR_PREVIEW_LIMIT)
+        .cloned()
+        .map(|connector| {
+            let installed = app.installed_app(&connector.id).cloned();
+            (connector, installed)
+        })
+        .collect();
+    let connector_state = app.connector_apps_state();
+    let connector_status = match connector_state {
+        SurfaceDataState::Live => format!(
+            "Live Codex catalog · {} available · {} installed",
+            connector_total,
+            app.installed_apps_count()
+        ),
+        SurfaceDataState::Fixture => "Explicit fixture · no connector catalog".to_owned(),
+        SurfaceDataState::Loading => "Loading connector catalog".to_owned(),
+        SurfaceDataState::Unsupported => "Unsupported by active backend".to_owned(),
+        SurfaceDataState::Error => "Connector catalog error".to_owned(),
+    };
     div()
         .id("settings-connections")
         .flex()
@@ -2160,6 +2184,61 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                 })
                 .child(card_divider())
                 .child(mcp_add_form(app, cx)),
+        )
+        .child(group_label("Apps and connectors"))
+        .child(
+            settings_card()
+                .child(info_row("Source", "app/list · app/installed"))
+                .child(card_divider())
+                .child(info_row("Status", &connector_status))
+                .child(card_divider())
+                .children(connector_apps.iter().enumerate().flat_map(
+                    |(index, (connector, installed))| {
+                        let mut rows = Vec::new();
+                        if index > 0 {
+                            rows.push(card_divider().into_any_element());
+                        }
+                        rows.push(
+                            connector_app_row(connector, installed.as_ref(), cx)
+                                .into_any_element(),
+                        );
+                        rows
+                    },
+                ))
+                .when(connector_total > connector_apps.len(), |this| {
+                    this.child(card_divider()).child(info_row(
+                        "Catalog preview",
+                        &format!(
+                            "Showing first {} of {} server-returned apps",
+                            connector_apps.len(),
+                            connector_total
+                        ),
+                    ))
+                })
+                .when(connector_apps.is_empty(), |this| {
+                    this.child(match connector_state {
+                        SurfaceDataState::Unsupported => empty_list_message(
+                            "Apps unavailable",
+                            "The active backend does not expose the Codex app and connector catalog.",
+                        ),
+                        SurfaceDataState::Error => empty_list_message(
+                            "Could not load apps",
+                            "The Codex app catalog request failed; reconnect to retry.",
+                        ),
+                        SurfaceDataState::Loading => empty_list_message(
+                            "Loading apps",
+                            "Reading the live Codex connector catalog…",
+                        ),
+                        SurfaceDataState::Fixture => empty_list_message(
+                            "No fixture apps",
+                            "Fixture mode does not invent connector account state.",
+                        ),
+                        SurfaceDataState::Live => empty_list_message(
+                            "No apps available",
+                            "Codex returned an empty app catalog for this account.",
+                        ),
+                    })
+                }),
         )
 }
 
@@ -2878,6 +2957,89 @@ fn mcp_server_row(
                 } else {
                     status
                 }),
+        )
+}
+
+fn connector_app_row(
+    connector: &AppInfo,
+    installed: Option<&InstalledApp>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let title = connector.name.clone();
+    let id = connector.id.clone();
+    let detail = connector
+        .description
+        .clone()
+        .or_else(|| connector.category())
+        .or_else(|| connector.distribution_channel.clone())
+        .unwrap_or_else(|| "No description provided".to_owned());
+    let (label, can_connect) = if !connector.is_enabled {
+        ("Disabled", false)
+    } else if installed.is_some_and(|app| app.callable) {
+        ("Connected", false)
+    } else if installed.is_some_and(|app| app.enabled) {
+        ("Installed", false)
+    } else if connector.install_url.is_some() {
+        ("Connect", true)
+    } else if connector.is_accessible {
+        ("Accessible", false)
+    } else {
+        ("Unavailable", false)
+    };
+    let connector_for_action = connector.clone();
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .overflow_hidden()
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .id(SharedId(format!("connector-app-{id}")))
+                .px(px(9.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(colors.bg_button_secondary)
+                .text_xs()
+                .text_color(if can_connect {
+                    colors.accent
+                } else {
+                    colors.text_secondary
+                })
+                .when(can_connect, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.open_connector_install(connector_for_action.clone(), cx);
+                        }))
+                })
+                .child(label),
         )
 }
 

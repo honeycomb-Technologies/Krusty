@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod approvals;
+pub mod apps;
 pub mod backend;
 pub mod codex;
 pub mod desktop;
@@ -44,6 +45,11 @@ pub use approvals::{
     ReviewDecision, ReviewDecisionResponse, APPLY_PATCH_APPROVAL, EXEC_COMMAND_APPROVAL,
     ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL, ITEM_FILE_CHANGE_REQUEST_APPROVAL,
     ITEM_PERMISSIONS_REQUEST_APPROVAL,
+};
+pub use apps::{
+    AppBranding, AppInfo, AppMetadata, AppReview, AppScreenshot, AppToolSummary,
+    AppsInstalledParams, AppsInstalledResponse, AppsListParams, AppsListResponse, AppsReadParams,
+    AppsReadResponse, ConnectorMetadata, InstalledApp,
 };
 pub use backend::AgentBackend;
 pub use codex::{
