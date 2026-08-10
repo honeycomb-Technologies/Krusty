@@ -1403,4 +1403,79 @@ mod tests {
             .expect("Hive schedules");
         backend.disconnect().await.expect("disconnect");
     }
+
+    /// Strict paid acceptance: a real Mitsuro SSE turn must stream text and complete.
+    #[tokio::test]
+    async fn live_server_streaming_turn() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        if std::env::var_os("MITSURO_RUN_LIVE_ACCEPTANCE").is_none() {
+            eprintln!(
+                "skip: set MITSURO_RUN_LIVE_ACCEPTANCE=1 to require a completed live Mitsuro turn"
+            );
+            return;
+        }
+
+        let backend = MitsuroServerBackend::from_env().expect("backend configuration");
+        backend.connect().await.expect("health/connect");
+        let started = backend
+            .thread_start(ThreadStartParams {
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .display()
+                        .to_string(),
+                ),
+                ephemeral: Some(false),
+                ..Default::default()
+            })
+            .await
+            .expect("session create");
+        let thread_id = started.summary().id;
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let bridge = Arc::new(LiveApprovalBridge::new());
+        let responder_bridge = Arc::clone(&bridge);
+        let responder_stop = Arc::new(AtomicBool::new(false));
+        let responder_stop_thread = Arc::clone(&responder_stop);
+        let responder = std::thread::spawn(move || {
+            while !responder_stop_thread.load(AtomicOrdering::Acquire) {
+                if responder_bridge.is_waiting() {
+                    responder_bridge.submit(ApprovalChoice::Reject);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let outcome = backend
+            .run_turn_streaming(
+                TurnStartParams::text(
+                    thread_id.clone(),
+                    "Reply with exactly MITSURO_DESKTOP_ACCEPTANCE_OK. Do not use tools.",
+                ),
+                event_tx,
+                bridge,
+                Duration::from_secs(120),
+            )
+            .await;
+        responder_stop.store(true, AtomicOrdering::Release);
+        responder.join().expect("approval responder join");
+        let cleanup = backend
+            .thread_delete(ThreadDeleteParams::new(thread_id))
+            .await;
+        backend.disconnect().await.expect("disconnect");
+
+        let outcome = outcome.expect("completed Mitsuro streaming turn");
+        cleanup.expect("delete acceptance session");
+        assert!(
+            outcome.completed,
+            "Mitsuro turn did not emit a finish event"
+        );
+        assert!(
+            event_rx.try_iter().any(|event| matches!(
+                event,
+                TurnStreamEvent::AgentMessageDelta { delta, .. } if !delta.is_empty()
+            )),
+            "Mitsuro turn emitted no assistant text delta"
+        );
+    }
 }

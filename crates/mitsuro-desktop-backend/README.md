@@ -108,6 +108,12 @@ MITSURO_RUN_SERVER_IT=1 cargo test -p mitsuro-desktop-backend \
 
 # Live turn/start only with explicit opt-in (may use paid models):
 MITSURO_ALLOW_LIVE_TURN=1 cargo test -p mitsuro-desktop-backend real_app_server_turn_start
+
+# Reproducible GPUI acceptance across both real transports (safe contracts by default):
+scripts/gpui-dual-backend-acceptance.sh
+
+# Require completed provider-backed streaming turns from Mitsuro and Codex (may use credits):
+MITSURO_RUN_LIVE_ACCEPTANCE=1 scripts/gpui-dual-backend-acceptance.sh
 ```
 
 ## Contract sources

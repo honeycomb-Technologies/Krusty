@@ -1451,4 +1451,62 @@ mod integration_tests {
         }
         let _ = backend.disconnect().await;
     }
+
+    /// Strict paid acceptance: a real Codex turn must stream text and complete.
+    #[tokio::test]
+    async fn real_app_server_streaming_turn() {
+        if std::env::var_os("MITSURO_RUN_LIVE_ACCEPTANCE").is_none() {
+            eprintln!(
+                "skip: set MITSURO_RUN_LIVE_ACCEPTANCE=1 to require a completed live Codex turn"
+            );
+            return;
+        }
+        assert!(
+            should_run_integration(),
+            "MITSURO_RUN_LIVE_ACCEPTANCE requires an available Codex binary"
+        );
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect");
+        assert!(
+            backend.has_usable_auth().await,
+            "live Codex acceptance requires usable authentication"
+        );
+
+        let started = backend
+            .thread_start(ThreadStartParams {
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .display()
+                        .to_string(),
+                ),
+                ephemeral: Some(true),
+                ..Default::default()
+            })
+            .await
+            .expect("ephemeral thread/start");
+        let thread_id = started.summary().id;
+        let mut events = Vec::new();
+        let outcome = crate::live_turn::run_live_turn_with_policy(
+            &backend,
+            thread_id,
+            "Reply with exactly CODEX_DESKTOP_ACCEPTANCE_OK. Do not use tools.".to_owned(),
+            |event| events.push(event),
+            crate::live_turn::LiveApprovalPolicy::AutoReject,
+            Duration::from_secs(120),
+        )
+        .await;
+        backend.disconnect().await.expect("disconnect");
+
+        let outcome = outcome.expect("completed Codex streaming turn");
+        assert!(outcome.completed, "Codex turn did not emit turn/completed");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnStreamEvent::AgentMessageDelta { delta, .. } if !delta.is_empty()
+            )),
+            "Codex turn emitted no assistant text delta"
+        );
+    }
 }

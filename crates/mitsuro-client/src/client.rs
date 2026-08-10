@@ -173,7 +173,16 @@ impl MitsuroClient {
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<SimpleOkResponse> {
-        self.delete_json(&format!("/sessions/{session_id}")).await
+        let url = self.api_url(&format!("/sessions/{session_id}"));
+        let response = self
+            .http
+            .delete(&url)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        ensure_success(response).await?;
+        Ok(SimpleOkResponse { ok: true })
     }
 
     pub async fn cancel_session(&self, session_id: &str) -> Result<SimpleOkResponse> {
@@ -449,6 +458,32 @@ async fn ensure_success(response: Response) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delete_session_accepts_successful_empty_response() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 2048];
+            let size = socket.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("DELETE /api/sessions/session-1 "));
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("write response");
+        });
+
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        let response = client
+            .delete_session("session-1")
+            .await
+            .expect("empty successful delete response");
+        assert!(response.ok);
+        server.join().expect("test server join");
+    }
 
     #[test]
     fn normalizes_blank_base_url_to_local_server() {
