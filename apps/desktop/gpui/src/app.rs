@@ -870,6 +870,11 @@ pub struct MitsuroApp {
     preferences: DesktopPreferences,
     fixture: Option<Arc<FixtureBackend>>,
     turn_in_progress: bool,
+    /// Monotonic identity for the active turn. Incrementing invalidates late
+    /// producer events after Stop, backend replacement, or failed promotion.
+    turn_generation: u64,
+    /// UI thread id that owns the active turn, independent from sidebar selection.
+    active_turn_thread_id: Option<String>,
     /// Active turn id for `turn/interrupt` (from TurnStarted).
     active_turn_id: Option<String>,
     /// Cancel flag for fixture stream replay (Stop → set true).
@@ -1135,6 +1140,8 @@ impl MitsuroApp {
             preferences: preferences.clone(),
             fixture: Some(Arc::clone(&fixture)),
             turn_in_progress: false,
+            turn_generation: 0,
+            active_turn_thread_id: None,
             active_turn_id: None,
             turn_cancel: None,
             show_archived: false,
@@ -4539,11 +4546,11 @@ impl MitsuroApp {
         // Drop pending fixture resume so approvals don't continue after stop.
         self.fixture_resume = None;
         // Unblock live approval waiters with Abort so the runner can wind down.
-        if let Some(bridge) = self.live_approval_bridge.as_ref() {
+        if let Some(bridge) = self.live_approval_bridge.take() {
             let _ = bridge.submit(ApprovalChoice::Abort);
         }
 
-        let thread_id = self.selected_thread.clone();
+        let thread_id = self.active_turn_thread_id.clone();
         let turn_id = self.active_turn_id.clone();
         let live_session_id = thread_id.as_deref().and_then(|id| self.live_session_id(id));
 
@@ -4569,7 +4576,7 @@ impl MitsuroApp {
             })
             .detach();
         } else if let (Some(fixture), Some(tid), Some(turn)) =
-            (self.fixture.clone(), self.selected_thread.clone(), turn_id)
+            (self.fixture.clone(), thread_id.clone(), turn_id)
         {
             // Fixture: no-op success path for parity.
             cx.spawn(async move |_this, cx| {
@@ -4586,7 +4593,7 @@ impl MitsuroApp {
         }
 
         // Immediately clear streaming UI state.
-        if let Some(id) = self.selected_thread.clone() {
+        if let Some(id) = thread_id {
             if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == id) {
                 for m in &mut thread.messages {
                     m.streaming = false;
@@ -4594,6 +4601,8 @@ impl MitsuroApp {
             }
         }
         self.turn_in_progress = false;
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.active_turn_thread_id = None;
         self.active_turn_id = None;
         self.turn_cancel = None;
         self.pending_approval = None;
@@ -4736,6 +4745,8 @@ impl MitsuroApp {
                 "Live Send · rate limit 100% / no credits — server may refuse.".into();
         }
         self.turn_in_progress = true;
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.active_turn_thread_id = Some(thread_id.clone());
         match mode {
             SendMode::Live => {
                 let model_note = model_slug
@@ -4774,8 +4785,10 @@ impl MitsuroApp {
         model: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let turn_generation = self.turn_generation;
         let Some(backend) = self.backend.clone() else {
             self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
             self.status_line = "Session creation failed · no connected backend.".into();
             cx.notify();
             return;
@@ -4792,6 +4805,7 @@ impl MitsuroApp {
             });
         let model_for_start = model.clone();
         cx.spawn(async move |this, cx| {
+            let create_backend = Arc::clone(&backend);
             let result = cx
                 .background_spawn(async move {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -4799,7 +4813,7 @@ impl MitsuroApp {
                         .build()
                         .map_err(|e| e.to_string())?;
                     rt.block_on(async {
-                        backend
+                        create_backend
                             .create_session(CreateSession {
                                 working_dir: cwd,
                                 model: model_for_start,
@@ -4812,6 +4826,10 @@ impl MitsuroApp {
                 .await;
             let _ = this.update(cx, |app, cx| match result {
                 Ok(session) => {
+                    if app.turn_generation != turn_generation {
+                        delete_session_best_effort(backend, session.id, cx);
+                        return;
+                    }
                     let backend_session_id = session.id.clone();
                     let summary = thread_summary_from_session(session);
                     let new_id = summary.id.clone();
@@ -4824,6 +4842,7 @@ impl MitsuroApp {
                         app.threads.insert(0, t);
                     }
                     app.selected_thread = Some(new_id.clone());
+                    app.active_turn_thread_id = Some(new_id.clone());
                     match app.active_thread_surface() {
                         ThreadSurface::Chat => app.selected_chat_thread = Some(new_id.clone()),
                         ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
@@ -4833,8 +4852,12 @@ impl MitsuroApp {
                     cx.notify();
                 }
                 Err(e) => {
+                    if app.turn_generation != turn_generation {
+                        return;
+                    }
                     app.turn_in_progress = false;
                     app.turn_cancel = None;
+                    app.active_turn_thread_id = None;
                     app.active_turn_id = None;
                     app.status_line = format!("Session creation failed: {e}").into();
                     cx.notify();
@@ -4941,6 +4964,8 @@ impl MitsuroApp {
     }
 
     fn start_fixture_turn(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let turn_generation = self.turn_generation;
+        self.active_turn_thread_id = Some(thread_id.clone());
         let delay = self
             .fixture
             .as_ref()
@@ -4956,8 +4981,12 @@ impl MitsuroApp {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = this.update(cx, |app, cx| {
+                        if !app.is_current_turn(turn_generation, &thread_id) {
+                            return;
+                        }
                         app.turn_in_progress = false;
                         app.turn_cancel = None;
+                        app.active_turn_thread_id = None;
                         app.active_turn_id = None;
                         app.status_line = format!("Fixture load error: {e}").into();
                         cx.notify();
@@ -4971,7 +5000,8 @@ impl MitsuroApp {
                 .map(|ev| rebind_thread_id(ev, &thread_id))
                 .collect();
 
-            replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
+            replay_fixture_events(this, cx, thread_id, turn_generation, events, delay, cancel)
+                .await;
         })
         .detach();
     }
@@ -4989,13 +5019,15 @@ impl MitsuroApp {
             .map(|f| f.stream_delay())
             .unwrap_or(Duration::from_millis(35));
         self.turn_in_progress = true;
+        let turn_generation = self.turn_generation;
         let cancel = self
             .turn_cancel
             .clone()
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         self.turn_cancel = Some(Arc::clone(&cancel));
         cx.spawn(async move |this, cx| {
-            replay_fixture_events(this, cx, thread_id, events, delay, cancel).await;
+            replay_fixture_events(this, cx, thread_id, turn_generation, events, delay, cancel)
+                .await;
         })
         .detach();
     }
@@ -5007,14 +5039,18 @@ impl MitsuroApp {
         model: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let turn_generation = self.turn_generation;
+        self.active_turn_thread_id = Some(thread_id.clone());
         let Some(backend) = self.backend.clone() else {
             self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
             self.status_line = "Live turn failed · backend disconnected.".into();
             cx.notify();
             return;
         };
         let Some(session_id) = self.live_session_id(&thread_id) else {
             self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
             self.status_line =
                 "Live turn refused: the selected thread has no backend-qualified session id."
                     .into();
@@ -5095,6 +5131,9 @@ impl MitsuroApp {
                         let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
                         let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
                         let _ = this.update(cx, |app, cx| {
+                            if !app.is_current_turn(turn_generation, &thread_id) {
+                                return;
+                            }
                             app.apply_stream_event(&thread_id, ev);
                             if is_approval {
                                 app.turn_in_progress = true;
@@ -5116,11 +5155,15 @@ impl MitsuroApp {
 
             let outcome = outcome.unwrap_or_else(|| Err("live turn channel closed".into()));
             let _ = this.update(cx, |app, cx| {
+                if !app.is_current_turn(turn_generation, &thread_id) {
+                    return;
+                }
                 app.live_approval_bridge = None;
                 match &outcome {
                     Ok(o) if o.completed || saw_completed => {
                         if app.pending_approval.is_none() {
                             app.turn_in_progress = false;
+                            app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
                             app.status_line = "Live turn complete.".into();
@@ -5129,6 +5172,7 @@ impl MitsuroApp {
                     Ok(_) => {
                         if app.pending_approval.is_none() {
                             app.turn_in_progress = false;
+                            app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
                             app.status_line = "Live turn ended (timeout or closed).".into();
@@ -5136,6 +5180,7 @@ impl MitsuroApp {
                     }
                     Err(e) => {
                         app.turn_in_progress = false;
+                        app.active_turn_thread_id = None;
                         app.active_turn_id = None;
                         app.turn_cancel = None;
                         app.status_line = format!("Live turn failed: {e}").into();
@@ -5145,6 +5190,15 @@ impl MitsuroApp {
             });
         })
         .detach();
+    }
+
+    fn is_current_turn(&self, generation: u64, thread_id: &str) -> bool {
+        turn_update_is_current(
+            self.turn_generation,
+            self.active_turn_thread_id.as_deref(),
+            generation,
+            thread_id,
+        )
     }
 
     fn apply_stream_event(&mut self, thread_id: &str, event: TurnStreamEvent) {
@@ -5681,6 +5735,13 @@ impl MitsuroApp {
     }
 
     fn clear_live_backend_state(&mut self, kind: BackendKind) {
+        if let Some(cancel) = self.turn_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if let Some(bridge) = self.live_approval_bridge.take() {
+            let _ = bridge.submit(ApprovalChoice::Abort);
+        }
+        self.turn_generation = self.turn_generation.wrapping_add(1);
         self.threads.clear();
         self.selected_thread = None;
         self.selected_chat_thread = None;
@@ -5701,8 +5762,8 @@ impl MitsuroApp {
         self.files = FilesSession::new(kind.id());
         self.pending_approval = None;
         self.fixture_resume = None;
+        self.active_turn_thread_id = None;
         self.active_turn_id = None;
-        self.turn_cancel = None;
         self.turn_in_progress = false;
         self.account = AccountSession::empty(kind.id());
     }
@@ -5721,19 +5782,25 @@ impl MitsuroApp {
 
     fn connect_backend_selection(&mut self, selection: BackendSelection, cx: &mut Context<Self>) {
         if matches!(selection, BackendSelection::Fixture) {
-            self.backend = None;
+            let previous_backend = self.backend.take();
+            self.backend_generation = self.backend_generation.wrapping_add(1);
+            self.clear_live_backend_state(BackendKind::Fixture);
             self.connection = UiConnection::Fixture;
             self.status_line = "Fixture backend selected explicitly.".into();
             self.bootstrap_fixture(cx);
+            disconnect_backend_best_effort(previous_backend, cx);
             return;
         }
         if matches!(selection, BackendSelection::CodexWebSocket) {
-            self.backend = None;
+            let previous_backend = self.backend.take();
+            self.backend_generation = self.backend_generation.wrapping_add(1);
+            self.clear_live_backend_state(BackendKind::CodexWebSocket);
             self.connection = UiConnection::Error {
                 message: "codex-ws is not implemented".to_owned(),
             };
             self.status_line =
                 "codex-ws is not implemented yet; use codex-stdio or mitsuro-http.".into();
+            disconnect_backend_best_effort(previous_backend, cx);
             cx.notify();
             return;
         }
@@ -6558,12 +6625,22 @@ fn rebind_thread_id(event: TurnStreamEvent, thread_id: &str) -> TurnStreamEvent 
     }
 }
 
+fn turn_update_is_current(
+    active_generation: u64,
+    active_thread_id: Option<&str>,
+    candidate_generation: u64,
+    candidate_thread_id: &str,
+) -> bool {
+    active_generation == candidate_generation && active_thread_id == Some(candidate_thread_id)
+}
+
 /// Replay fixture events with delay; pause when an approval is requested.
 /// Honors `cancel` so Stop / `turn/interrupt` ends the stream early.
 async fn replay_fixture_events(
     this: gpui::WeakEntity<MitsuroApp>,
     cx: &mut gpui::AsyncApp,
     thread_id: String,
+    turn_generation: u64,
     events: Vec<TurnStreamEvent>,
     delay: Duration,
     cancel: Arc<AtomicBool>,
@@ -6572,6 +6649,9 @@ async fn replay_fixture_events(
     while let Some(ev) = iter.next() {
         if cancel.load(Ordering::SeqCst) {
             let _ = this.update(cx, |app, cx| {
+                if !app.is_current_turn(turn_generation, &thread_id) {
+                    return;
+                }
                 if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == thread_id) {
                     for m in &mut thread.messages {
                         m.streaming = false;
@@ -6579,6 +6659,7 @@ async fn replay_fixture_events(
                 }
                 app.turn_in_progress = false;
                 app.fixture_resume = None;
+                app.active_turn_thread_id = None;
                 app.active_turn_id = None;
                 app.turn_cancel = None;
                 if app.status_line.as_ref() != "Turn interrupted." {
@@ -6591,6 +6672,9 @@ async fn replay_fixture_events(
         let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
         let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
         let _ = this.update(cx, |app, cx| {
+            if !app.is_current_turn(turn_generation, &thread_id) {
+                return;
+            }
             app.apply_stream_event(&thread_id, ev);
             cx.notify();
         });
@@ -6598,6 +6682,9 @@ async fn replay_fixture_events(
             // Stash remaining events; user must Approve/Reject to continue.
             let rest: Vec<TurnStreamEvent> = iter.collect();
             let _ = this.update(cx, |app, cx| {
+                if !app.is_current_turn(turn_generation, &thread_id) {
+                    return;
+                }
                 app.fixture_resume = Some((thread_id.clone(), rest));
                 // Keep turn_in_progress true while waiting so Send is blocked.
                 app.turn_in_progress = true;
@@ -6617,8 +6704,12 @@ async fn replay_fixture_events(
             .await;
     }
     let _ = this.update(cx, |app, cx| {
+        if !app.is_current_turn(turn_generation, &thread_id) {
+            return;
+        }
         app.turn_in_progress = false;
         app.fixture_resume = None;
+        app.active_turn_thread_id = None;
         app.active_turn_id = None;
         app.turn_cancel = None;
         if app.pending_approval.is_none() && !cancel.load(Ordering::SeqCst) {
@@ -6626,6 +6717,40 @@ async fn replay_fixture_events(
         }
         cx.notify();
     });
+}
+
+fn disconnect_backend_best_effort(
+    backend: Option<Arc<DesktopBackend>>,
+    cx: &mut Context<MitsuroApp>,
+) {
+    let Some(backend) = backend else {
+        return;
+    };
+    cx.spawn(async move |_this, cx| {
+        let _ = cx
+            .background_spawn(async move {
+                let runner = Arc::clone(&backend);
+                backend.block_on(async move { runner.disconnect().await })
+            })
+            .await;
+    })
+    .detach();
+}
+
+fn delete_session_best_effort(
+    backend: Arc<DesktopBackend>,
+    session_id: BackendSessionId,
+    cx: &mut Context<MitsuroApp>,
+) {
+    cx.spawn(async move |_this, cx| {
+        let _ = cx
+            .background_spawn(async move {
+                let runner = Arc::clone(&backend);
+                backend.block_on(async move { runner.delete_session(&session_id).await })
+            })
+            .await;
+    })
+    .detach();
 }
 
 struct BackendBootstrap {
@@ -6811,5 +6936,13 @@ mod tests {
             ),
             SendMode::Unavailable
         );
+    }
+
+    #[test]
+    fn turn_updates_are_scoped_to_the_originating_thread_and_generation() {
+        assert!(turn_update_is_current(7, Some("thread-a"), 7, "thread-a"));
+        assert!(!turn_update_is_current(7, Some("thread-a"), 7, "thread-b"));
+        assert!(!turn_update_is_current(8, Some("thread-a"), 7, "thread-a"));
+        assert!(!turn_update_is_current(7, None, 7, "thread-a"));
     }
 }
