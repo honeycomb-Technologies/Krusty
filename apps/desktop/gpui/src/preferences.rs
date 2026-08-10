@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 4;
+const CURRENT_VERSION: u32 = 5;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +33,12 @@ pub struct DesktopPreferences {
     /// only from that model's live advertised capability list.
     #[serde(default)]
     pub reasoning_by_model: HashMap<String, String>,
+    /// Fast is remembered only for an exact backend/model capability identity.
+    #[serde(default)]
+    pub fast_by_model: HashMap<String, bool>,
+    /// Plan/Default(Build) selection is scoped to the active backend.
+    #[serde(default)]
+    pub plan_by_backend: HashMap<BackendKind, bool>,
 }
 
 impl Default for DesktopPreferences {
@@ -46,6 +52,8 @@ impl Default for DesktopPreferences {
             settings_choices: HashMap::new(),
             models_by_backend: HashMap::new(),
             reasoning_by_model: HashMap::new(),
+            fast_by_model: HashMap::new(),
+            plan_by_backend: HashMap::new(),
         }
     }
 }
@@ -122,6 +130,25 @@ impl DesktopPreferences {
         self.reasoning_by_model
             .get(&reasoning_key(backend, model_id))
             .map(String::as_str)
+    }
+
+    pub fn remember_fast(&mut self, backend: BackendKind, model_id: &str, enabled: bool) {
+        self.fast_by_model
+            .insert(reasoning_key(backend, model_id), enabled);
+    }
+
+    pub fn fast_for(&self, backend: BackendKind, model_id: &str) -> Option<bool> {
+        self.fast_by_model
+            .get(&reasoning_key(backend, model_id))
+            .copied()
+    }
+
+    pub fn remember_plan_mode(&mut self, backend: BackendKind, enabled: bool) {
+        self.plan_by_backend.insert(backend, enabled);
+    }
+
+    pub fn plan_mode_for(&self, backend: BackendKind) -> bool {
+        self.plan_by_backend.get(&backend).copied().unwrap_or(false)
     }
 }
 
@@ -210,6 +237,25 @@ mod tests {
             state.reasoning_for(BackendKind::CodexStdio, "grok-4.5"),
             None
         );
+    }
+
+    #[test]
+    fn speed_and_plan_selections_are_scoped_to_their_contract_identity() {
+        let mut state = DesktopPreferences::default();
+        state.remember_fast(BackendKind::MitsuroHttp, "gpt-5.6-luna", true);
+        state.remember_fast(BackendKind::CodexStdio, "gpt-5.6-luna", false);
+        state.remember_plan_mode(BackendKind::MitsuroHttp, true);
+
+        assert_eq!(
+            state.fast_for(BackendKind::MitsuroHttp, "gpt-5.6-luna"),
+            Some(true)
+        );
+        assert_eq!(
+            state.fast_for(BackendKind::CodexStdio, "gpt-5.6-luna"),
+            Some(false)
+        );
+        assert!(state.plan_mode_for(BackendKind::MitsuroHttp));
+        assert!(!state.plan_mode_for(BackendKind::CodexStdio));
     }
 
     #[test]

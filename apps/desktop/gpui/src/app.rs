@@ -29,13 +29,14 @@ use mitsuro_desktop_backend::{
     FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
     LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
-    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModelInfo,
-    ModelListParams, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
-    PluginAuthPolicy, PluginAvailability, PluginInstallPolicy, PluginInterface, PluginListParams,
-    PluginSource, PluginSummary, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
-    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
-    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSteer, ProductTurn,
+    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerStatus, MessageRole, ModeKind,
+    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
+    PendingUserInput, PlanType, PluginAuthPolicy, PluginAvailability, PluginInstallPolicy,
+    PluginInterface, PluginListParams, PluginSource, PluginSummary, ProcessKillParams,
+    ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
+    ProductBackend, ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer,
+    ProductModel, ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule,
+    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode,
     ReasoningEffortOption, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
@@ -939,6 +940,8 @@ pub struct MitsuroApp {
     selected_model_id: Option<String>,
     /// Backend/model-scoped effort chosen from the live model capability list.
     selected_reasoning_effort: Option<String>,
+    /// Whether the selected model's advertised accelerated response mode is active.
+    selected_fast_mode: bool,
     /// Short config snippet from `config/read` (Settings).
     config_snippet: SharedString,
     /// Skills from `skills/list` (or fixture demo).
@@ -959,6 +962,8 @@ pub struct MitsuroApp {
     environment_info_detail: Option<EnvironmentInfoResponse>,
     /// Collaboration mode presets (`collaborationMode/list`).
     collaboration_modes: Vec<CollaborationModeMask>,
+    /// False is Codex Default / Mitsuro Build; true is Plan for either backend.
+    composer_plan_mode: bool,
     /// Account / usage session for Settings Account section.
     account: AccountSession,
     account_state: SurfaceDataState,
@@ -1238,6 +1243,7 @@ impl MitsuroApp {
             models: Vec::new(),
             selected_model_id: None,
             selected_reasoning_effort: None,
+            selected_fast_mode: false,
             config_snippet: SharedString::from(""),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
@@ -1249,6 +1255,7 @@ impl MitsuroApp {
             environment_status_detail: None,
             environment_info_detail: None,
             collaboration_modes: Vec::new(),
+            composer_plan_mode: false,
             account: AccountSession::empty("loading"),
             account_state: SurfaceDataState::Loading,
             composer_input,
@@ -2846,6 +2853,66 @@ impl MitsuroApp {
         self.reasoning_options_for_selected_model().len() > 1
     }
 
+    pub fn fast_mode_available(&self) -> bool {
+        self.selected_model()
+            .is_some_and(|model| !model.service_tiers.is_empty())
+    }
+
+    pub fn fast_mode_enabled(&self) -> bool {
+        self.fast_mode_available() && self.selected_fast_mode
+    }
+
+    pub fn fast_mode_label(&self) -> String {
+        self.selected_model()
+            .and_then(|model| model.service_tiers.first())
+            .map(|tier| tier.name.clone())
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| "Fast".to_owned())
+    }
+
+    pub fn toggle_fast_mode(&mut self, cx: &mut Context<Self>) {
+        if !self.fast_mode_available() {
+            self.status_line = "The selected model does not advertise a fast service tier.".into();
+            cx.notify();
+            return;
+        }
+        self.selected_fast_mode = !self.selected_fast_mode;
+        if let (Some(backend), Some(model_id)) =
+            (self.active_backend_kind(), self.selected_model_id.clone())
+        {
+            self.preferences
+                .remember_fast(backend, &model_id, self.selected_fast_mode);
+            self.save_preferences_best_effort();
+        }
+        self.status_line = if self.selected_fast_mode {
+            format!("{} mode enabled.", self.fast_mode_label()).into()
+        } else {
+            "Standard response speed selected.".into()
+        };
+        cx.notify();
+    }
+
+    fn selected_speed_mode(&self) -> Option<ProductSpeedMode> {
+        let backend = self.active_backend_kind()?;
+        Some(match backend {
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture => {
+                if self.fast_mode_enabled() {
+                    let tier = self.selected_model()?.service_tiers.first()?.id.clone();
+                    ProductSpeedMode::CodexServiceTier(tier)
+                } else {
+                    ProductSpeedMode::CodexStandard
+                }
+            }
+            BackendKind::MitsuroHttp => {
+                if self.fast_mode_enabled() {
+                    ProductSpeedMode::MitsuroFast
+                } else {
+                    ProductSpeedMode::MitsuroStandard
+                }
+            }
+        })
+    }
+
     fn reasoning_options_for_selected_model(&self) -> Vec<String> {
         let Some(model) = self.selected_model() else {
             return Vec::new();
@@ -2882,6 +2949,19 @@ impl MitsuroApp {
             .map(str::to_owned);
         self.selected_reasoning_effort =
             remembered.or(default).or_else(|| options.first().cloned());
+    }
+
+    fn restore_speed_for_selected_model(&mut self) {
+        let available = self.fast_mode_available();
+        let default_enabled = self
+            .selected_model()
+            .and_then(|model| model.default_service_tier.as_ref())
+            .is_some();
+        let remembered = self
+            .active_backend_kind()
+            .zip(self.selected_model_id.as_deref())
+            .and_then(|(backend, model_id)| self.preferences.fast_for(backend, model_id));
+        self.selected_fast_mode = available && remembered.unwrap_or(default_enabled);
     }
 
     fn remember_selected_reasoning(&mut self) {
@@ -2954,6 +3034,7 @@ impl MitsuroApp {
         self.selected_model_id = remembered.or(keep).or(default_id);
         self.models = models;
         self.restore_reasoning_for_selected_model();
+        self.restore_speed_for_selected_model();
     }
 
     fn apply_skills(&mut self, skills: Vec<SkillMetadata>) {
@@ -2997,6 +3078,85 @@ impl MitsuroApp {
 
     pub fn collaboration_modes(&self) -> &[CollaborationModeMask] {
         &self.collaboration_modes
+    }
+
+    pub fn work_mode_available(&self) -> bool {
+        match self.active_backend_kind() {
+            Some(BackendKind::MitsuroHttp) => true,
+            Some(BackendKind::CodexStdio)
+            | Some(BackendKind::CodexWebSocket)
+            | Some(BackendKind::Fixture) => {
+                self.collaboration_modes
+                    .iter()
+                    .any(|preset| preset.mode == Some(ModeKind::Plan))
+                    && self
+                        .collaboration_modes
+                        .iter()
+                        .any(|preset| preset.mode == Some(ModeKind::Default))
+            }
+            None => false,
+        }
+    }
+
+    pub fn work_mode_label(&self) -> &'static str {
+        if self.composer_plan_mode {
+            "Plan"
+        } else if self.active_backend_kind() == Some(BackendKind::MitsuroHttp) {
+            "Build"
+        } else {
+            "Default"
+        }
+    }
+
+    pub fn toggle_work_mode(&mut self, cx: &mut Context<Self>) {
+        if !self.work_mode_available() {
+            self.status_line = "The active backend did not advertise Plan/Default modes.".into();
+            cx.notify();
+            return;
+        }
+        self.composer_plan_mode = !self.composer_plan_mode;
+        if let Some(backend) = self.active_backend_kind() {
+            self.preferences
+                .remember_plan_mode(backend, self.composer_plan_mode);
+            self.save_preferences_best_effort();
+        }
+        self.status_line = format!("Work mode: {}", self.work_mode_label()).into();
+        cx.notify();
+    }
+
+    fn selected_work_mode(&self) -> Option<ProductWorkMode> {
+        match self.active_backend_kind()? {
+            BackendKind::MitsuroHttp => Some(if self.composer_plan_mode {
+                ProductWorkMode::MitsuroPlan
+            } else {
+                ProductWorkMode::MitsuroBuild
+            }),
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture => {
+                let mode = if self.composer_plan_mode {
+                    ModeKind::Plan
+                } else {
+                    ModeKind::Default
+                };
+                let preset = self
+                    .collaboration_modes
+                    .iter()
+                    .find(|preset| preset.mode == Some(mode))?;
+                let model = preset
+                    .model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| self.selected_model_slug())?;
+                Some(ProductWorkMode::Codex {
+                    mode,
+                    model,
+                    reasoning_effort: preset
+                        .reasoning_effort
+                        .clone()
+                        .or_else(|| self.selected_reasoning_effort.clone()),
+                })
+            }
+        }
     }
 
     pub fn select_environment(&mut self, id: String, cx: &mut Context<Self>) {
@@ -6077,6 +6237,7 @@ impl MitsuroApp {
         if self.models.iter().any(|m| m.id == id) {
             self.selected_model_id = Some(id);
             self.restore_reasoning_for_selected_model();
+            self.restore_speed_for_selected_model();
             self.remember_selected_model();
             let label = self.model_label();
             self.status_line = format!("Model: {label}").into();
@@ -6100,6 +6261,7 @@ impl MitsuroApp {
         let next = (idx + 1) % self.models.len();
         self.selected_model_id = Some(self.models[next].id.clone());
         self.restore_reasoning_for_selected_model();
+        self.restore_speed_for_selected_model();
         self.remember_selected_model();
         let label = self.model_label();
         self.status_line = format!("Model: {label}").into();
@@ -6284,6 +6446,8 @@ impl MitsuroApp {
 
         let model_slug = self.selected_model_slug();
         let reasoning_effort = self.selected_reasoning_effort.clone();
+        let speed_mode = self.selected_speed_mode();
+        let work_mode = self.selected_work_mode();
         let working_dir = self.composer_workspace_dir().map(ToOwned::to_owned);
         let access_mode = self.composer_access_mode();
         if matches!(mode, SendMode::Live) && self.account.is_rate_limited_out() {
@@ -6309,6 +6473,8 @@ impl MitsuroApp {
                         trimmed.to_string(),
                         model_slug,
                         reasoning_effort,
+                        speed_mode,
+                        work_mode,
                         working_dir,
                         access_mode,
                         attachments,
@@ -6321,6 +6487,8 @@ impl MitsuroApp {
                         trimmed.to_string(),
                         model_slug,
                         reasoning_effort,
+                        speed_mode,
+                        work_mode,
                         working_dir,
                         access_mode,
                         attachments,
@@ -6426,6 +6594,8 @@ impl MitsuroApp {
         text: String,
         model: Option<String>,
         reasoning_effort: Option<String>,
+        speed_mode: Option<ProductSpeedMode>,
+        work_mode: Option<ProductWorkMode>,
         working_dir: Option<String>,
         access_mode: Option<ProductAccessMode>,
         attachments: Vec<ProductAttachment>,
@@ -6446,6 +6616,7 @@ impl MitsuroApp {
                 .and_then(|t| t.summary.cwd.clone())
         });
         let model_for_start = model.clone();
+        let speed_for_start = speed_mode.clone();
         cx.spawn(async move |this, cx| {
             let create_backend = Arc::clone(&backend);
             let result = cx
@@ -6461,6 +6632,7 @@ impl MitsuroApp {
                                 model: model_for_start,
                                 ephemeral: false,
                                 access_mode,
+                                speed_mode: speed_for_start,
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -6499,6 +6671,8 @@ impl MitsuroApp {
                         text,
                         model,
                         reasoning_effort,
+                        speed_mode,
+                        work_mode,
                         app.composer_workspace_dir().map(ToOwned::to_owned),
                         access_mode,
                         attachments,
@@ -6724,6 +6898,8 @@ impl MitsuroApp {
         text: String,
         model: Option<String>,
         reasoning_effort: Option<String>,
+        speed_mode: Option<ProductSpeedMode>,
+        work_mode: Option<ProductWorkMode>,
         working_dir: Option<String>,
         access_mode: Option<ProductAccessMode>,
         attachments: Vec<ProductAttachment>,
@@ -6771,6 +6947,8 @@ impl MitsuroApp {
                 let text = text.clone();
                 let model = model.clone();
                 let reasoning_effort = reasoning_effort.clone();
+                let speed_mode = speed_mode.clone();
+                let work_mode = work_mode.clone();
                 let attachments = attachments.clone();
                 let msg_tx = msg_tx;
                 async move {
@@ -6792,6 +6970,8 @@ impl MitsuroApp {
                                 text,
                                 model,
                                 reasoning_effort,
+                                speed_mode,
+                                work_mode,
                                 working_dir,
                                 access_mode,
                                 attachments,
@@ -7990,6 +8170,7 @@ impl MitsuroApp {
         self.models.clear();
         self.selected_model_id = None;
         self.selected_reasoning_effort = None;
+        self.selected_fast_mode = false;
         self.config_snippet = SharedString::from("");
         self.skills.clear();
         self.mcp_servers.clear();
@@ -8005,6 +8186,7 @@ impl MitsuroApp {
         self.environment_status_detail = None;
         self.environment_info_detail = None;
         self.collaboration_modes.clear();
+        self.composer_plan_mode = false;
         self.scheduled_tasks = None;
         self.background_processes.clear();
         self.terminal = TerminalSession::idle(kind.id());
@@ -8122,6 +8304,7 @@ impl MitsuroApp {
                             sessions: remote,
                             has_auth,
                             models,
+                            collaboration_modes,
                             config_snip,
                             skills,
                             mcp,
@@ -8165,6 +8348,10 @@ impl MitsuroApp {
                         app.apply_models(
                             models.into_iter().map(model_info_from_product).collect(),
                         );
+                        app.collaboration_modes = collaboration_modes;
+                        if let Some(backend) = app.active_backend_kind() {
+                            app.composer_plan_mode = app.preferences.plan_mode_for(backend);
+                        }
                         if let Some(snip) = config_snip {
                             app.apply_config_snippet(snip);
                         }
@@ -8536,6 +8723,12 @@ fn thread_summary_from_session(session: SessionSummary) -> ThreadSummary {
 }
 
 fn model_info_from_product(model: ProductModel) -> ModelInfo {
+    let default_service_tier = match &model.default_speed_mode {
+        ProductSpeedMode::CodexServiceTier(tier) => Some(tier.clone()),
+        ProductSpeedMode::CodexStandard
+        | ProductSpeedMode::MitsuroStandard
+        | ProductSpeedMode::MitsuroFast => None,
+    };
     ModelInfo {
         id: model.id,
         model: model.model,
@@ -8552,6 +8745,25 @@ fn model_info_from_product(model: ProductModel) -> ModelInfo {
                 description: effort.description,
             })
             .collect(),
+        service_tiers: model
+            .speed_options
+            .into_iter()
+            .filter_map(|option| {
+                let id = match option.mode {
+                    ProductSpeedMode::CodexServiceTier(tier) => tier,
+                    ProductSpeedMode::MitsuroFast => "priority".to_owned(),
+                    ProductSpeedMode::CodexStandard | ProductSpeedMode::MitsuroStandard => {
+                        return None;
+                    }
+                };
+                Some(ModelServiceTier {
+                    id,
+                    name: option.label,
+                    description: option.description,
+                })
+            })
+            .collect(),
+        default_service_tier,
         input_modalities: model.input_modalities,
         upgrade: model.upgrade,
     }
@@ -9208,6 +9420,7 @@ struct BackendBootstrap {
     sessions: Vec<SessionSummary>,
     has_auth: bool,
     models: Vec<ProductModel>,
+    collaboration_modes: Vec<CollaborationModeMask>,
     config_snip: Option<String>,
     skills: Vec<SkillMetadata>,
     mcp: Vec<McpServerStatus>,
@@ -9230,6 +9443,11 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         // model/list is best-effort — missing method or error falls back to empty
         // (UI seeds fixture demo models).
         let models = b.list_product_models(100).await.unwrap_or_default();
+        let collaboration_modes = b
+            .collaboration_mode_list(CollaborationModeListParams::default())
+            .await
+            .map(|response| response.data)
+            .unwrap_or_default();
         // config/read best-effort for Settings snippet.
         let config_snip = match b
             .config_read(ConfigReadParams {
@@ -9269,6 +9487,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             sessions,
             has_auth,
             models,
+            collaboration_modes,
             config_snip,
             skills,
             mcp,

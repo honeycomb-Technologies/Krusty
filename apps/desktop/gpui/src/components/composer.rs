@@ -3,8 +3,8 @@
 //! Implemented controls are interactive: text entry, backend-scoped model and
 //! advertised reasoning-effort cycling, real model-gated image and audio file
 //! attachments, Codex skill and file-mention inputs, native project selection,
-//! backend-specific access presets, Send, and Stop. Microphone recording and
-//! speed presets remain absent until their backend contracts exist.
+//! backend-specific access and response-speed controls, Send, and Stop.
+//! Microphone recording remains absent until its backend contract exists.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -140,9 +140,19 @@ fn codex_composer(
                         .when(app.show_composer_access_control(), |this| {
                             this.child(access_chip(app, cx))
                         })
+                        .when(app.work_mode_available(), |this| {
+                            this.child(work_mode_chip(app.work_mode_label(), cx))
+                        })
                         .child(model_chip(&model, cx))
                         .when_some(reasoning, |this, label| {
                             this.child(reasoning_chip(&label, cx))
+                        })
+                        .when(app.fast_mode_available(), |this| {
+                            this.child(fast_chip(
+                                &app.fast_mode_label(),
+                                app.fast_mode_enabled(),
+                                cx,
+                            ))
                         })
                         .child(div().flex_1())
                         .child(if streaming {
@@ -239,6 +249,16 @@ fn chat_slim_composer(
                 )
                 .when_some(reasoning, |this, label| {
                     this.child(reasoning_chip(&label, cx))
+                })
+                .when(app.fast_mode_available(), |this| {
+                    this.child(fast_chip(
+                        &app.fast_mode_label(),
+                        app.fast_mode_enabled(),
+                        cx,
+                    ))
+                })
+                .when(app.work_mode_available(), |this| {
+                    this.child(work_mode_chip(app.work_mode_label(), cx))
                 })
                 .when(app.can_attach_audio(), |this| {
                     this.child(round_path_action(
@@ -346,6 +366,16 @@ fn chat_thread_composer(
                         })
                         .when_some(reasoning, |this, label| {
                             this.child(reasoning_chip(&label, cx))
+                        })
+                        .when(app.fast_mode_available(), |this| {
+                            this.child(fast_chip(
+                                &app.fast_mode_label(),
+                                app.fast_mode_enabled(),
+                                cx,
+                            ))
+                        })
+                        .when(app.work_mode_available(), |this| {
+                            this.child(work_mode_chip(app.work_mode_label(), cx))
                         })
                         .child(div().flex_1())
                         .child(if streaming {
@@ -874,6 +904,63 @@ fn reasoning_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
             Icon::new(IconName::ChevronDown)
                 .with_size(px(11.0))
                 .text_color(colors.text_tertiary),
+        )
+}
+
+fn fast_chip(label: &str, enabled: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let label = label.to_string();
+    div()
+        .id("fast-mode-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .when(enabled, |this| this.bg(colors.bg_hover))
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(|app, _, _, cx| app.toggle_fast_mode(cx)))
+        .child(
+            div()
+                .text_xs()
+                .text_color(if enabled {
+                    colors.text
+                } else {
+                    colors.text_tertiary
+                })
+                .child(label),
+        )
+}
+
+fn work_mode_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let label = label.to_string();
+    div()
+        .id("work-mode-chip")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(|app, _, _, cx| app.toggle_work_mode(cx)))
+        .child(
+            Icon::empty()
+                .path("icons/book-open.svg")
+                .with_size(px(11.0))
+                .text_color(colors.text_tertiary),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label),
         )
 }
 

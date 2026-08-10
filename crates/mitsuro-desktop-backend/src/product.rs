@@ -9,15 +9,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    ActivityFields, AgentError, BackendKind, BackendSessionId, CommandExecutionFields,
-    DesktopBackend, FileChangeFields, FsReadDirectoryParams, FsReadFileParams,
-    FuzzyFileSearchParams, ListMcpServerStatusParams, LiveApprovalBridge, LiveReviewOutcome,
-    LiveTurnOutcome, ModelListParams, PluginListParams, Result, ReviewDelivery, ReviewStartParams,
-    ReviewTarget, SandboxPolicy, SessionDelegationProjection, SkillsListParams,
-    ThreadCompactStartParams, ThreadDeleteParams, ThreadListParams, ThreadReadParams,
-    ThreadSetNameParams, ThreadStartParams, TranscriptAudioSource, TranscriptImageSource,
-    TranscriptMessage, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
-    TurnStartParams, TurnSteerParams, TurnStreamEvent,
+    ActivityFields, AgentError, BackendKind, BackendSessionId, CollaborationMode,
+    CollaborationModeSettings, CommandExecutionFields, DesktopBackend, FileChangeFields,
+    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, ListMcpServerStatusParams,
+    LiveApprovalBridge, LiveReviewOutcome, LiveTurnOutcome, ModelListParams, PluginListParams,
+    Result, ReviewDelivery, ReviewStartParams, ReviewTarget, SandboxPolicy,
+    SessionDelegationProjection, SkillsListParams, ThreadCompactStartParams, ThreadDeleteParams,
+    ThreadListParams, ThreadReadParams, ThreadSetNameParams, ThreadStartParams,
+    TranscriptAudioSource, TranscriptImageSource, TranscriptMessage, TranscriptReferenceKind,
+    TranscriptRole, TurnInterruptParams, TurnStartParams, TurnSteerParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +155,8 @@ pub struct ProductModel {
     pub is_default: bool,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ProductReasoningEffort>,
+    pub speed_options: Vec<ProductSpeedOption>,
+    pub default_speed_mode: ProductSpeedMode,
     pub input_modalities: Vec<String>,
     pub upgrade: Option<String>,
 }
@@ -165,12 +167,42 @@ pub struct ProductReasoningEffort {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductSpeedOption {
+    pub mode: ProductSpeedMode,
+    pub label: String,
+    pub description: String,
+}
+
+/// Backend-specific response-speed controls shown in one product slot.
+/// Codex service tiers and Mitsuro fast mode intentionally remain distinct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductSpeedMode {
+    CodexStandard,
+    CodexServiceTier(String),
+    MitsuroStandard,
+    MitsuroFast,
+}
+
+/// Backend-specific collaboration/workflow choices shown in one product slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductWorkMode {
+    Codex {
+        mode: crate::environment::ModeKind,
+        model: String,
+        reasoning_effort: Option<String>,
+    },
+    MitsuroBuild,
+    MitsuroPlan,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateSession {
     pub working_dir: Option<String>,
     pub model: Option<String>,
     pub ephemeral: bool,
     pub access_mode: Option<ProductAccessMode>,
+    pub speed_mode: Option<ProductSpeedMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +213,8 @@ pub struct ProductTurn {
     pub reasoning_effort: Option<String>,
     pub working_dir: Option<String>,
     pub access_mode: Option<ProductAccessMode>,
+    pub speed_mode: Option<ProductSpeedMode>,
+    pub work_mode: Option<ProductWorkMode>,
     pub attachments: Vec<ProductAttachment>,
 }
 
@@ -420,6 +454,8 @@ impl DesktopBackend {
     ) -> Result<LiveTurnOutcome> {
         self.ensure_session_origin(&request.session_id)?;
         validate_access_mode(self.kind(), request.access_mode)?;
+        validate_speed_mode(self.kind(), request.speed_mode.as_ref())?;
+        validate_work_mode(self.kind(), request.work_mode.as_ref())?;
         if request
             .attachments
             .iter()
@@ -500,6 +536,8 @@ fn product_turn_params(request: ProductTurn, backend: BackendKind) -> TurnStartP
     params.effort = request.reasoning_effort;
     params.cwd = request.working_dir;
     apply_access_to_turn_params(&mut params, backend, request.access_mode);
+    apply_speed_to_turn_params(&mut params, backend, request.speed_mode);
+    apply_work_to_turn_params(&mut params, backend, request.work_mode);
     for attachment in request.attachments {
         match attachment {
             ProductAttachment::LocalImage { path } => params.push_local_image(path),
@@ -509,6 +547,135 @@ fn product_turn_params(request: ProductTurn, backend: BackendKind) -> TurnStartP
         }
     }
     params
+}
+
+fn validate_speed_mode(backend: BackendKind, mode: Option<&ProductSpeedMode>) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let valid = matches!(
+        (backend, mode),
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket,
+            ProductSpeedMode::CodexStandard | ProductSpeedMode::CodexServiceTier(_)
+        ) | (
+            BackendKind::MitsuroHttp,
+            ProductSpeedMode::MitsuroStandard | ProductSpeedMode::MitsuroFast
+        ) | (
+            BackendKind::Fixture,
+            ProductSpeedMode::CodexStandard | ProductSpeedMode::CodexServiceTier(_)
+        )
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(AgentError::NotImplemented(format!(
+            "{} does not accept the selected speed mode",
+            backend.id()
+        )))
+    }
+}
+
+fn validate_work_mode(backend: BackendKind, mode: Option<&ProductWorkMode>) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let valid = matches!(
+        (backend, mode),
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            ProductWorkMode::Codex { .. }
+        ) | (
+            BackendKind::MitsuroHttp,
+            ProductWorkMode::MitsuroBuild | ProductWorkMode::MitsuroPlan
+        )
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(AgentError::NotImplemented(format!(
+            "{} does not accept the selected work mode",
+            backend.id()
+        )))
+    }
+}
+
+fn apply_work_to_turn_params(
+    params: &mut TurnStartParams,
+    backend: BackendKind,
+    mode: Option<ProductWorkMode>,
+) {
+    match (backend, mode) {
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            Some(ProductWorkMode::Codex {
+                mode,
+                model,
+                reasoning_effort,
+            }),
+        ) => {
+            // Codex collaboration settings own model and effort whenever present.
+            params.model = None;
+            params.effort = None;
+            params.collaboration_mode = Some(CollaborationMode {
+                mode,
+                settings: CollaborationModeSettings {
+                    model,
+                    reasoning_effort,
+                    developer_instructions: None,
+                },
+            });
+        }
+        (BackendKind::MitsuroHttp, Some(ProductWorkMode::MitsuroBuild)) => {
+            params.mitsuro_work_mode = Some("build".to_owned());
+        }
+        (BackendKind::MitsuroHttp, Some(ProductWorkMode::MitsuroPlan)) => {
+            params.mitsuro_work_mode = Some("plan".to_owned());
+        }
+        _ => {}
+    }
+}
+
+fn apply_speed_to_turn_params(
+    params: &mut TurnStartParams,
+    backend: BackendKind,
+    mode: Option<ProductSpeedMode>,
+) {
+    match (backend, mode) {
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            Some(ProductSpeedMode::CodexServiceTier(tier)),
+        ) => params.service_tier = Some(tier),
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            Some(ProductSpeedMode::CodexStandard),
+        ) => params.service_tier = None,
+        (BackendKind::MitsuroHttp, Some(ProductSpeedMode::MitsuroFast)) => {
+            params.mitsuro_fast_mode = Some(true);
+        }
+        (BackendKind::MitsuroHttp, Some(ProductSpeedMode::MitsuroStandard)) => {
+            params.mitsuro_fast_mode = Some(false);
+        }
+        _ => {}
+    }
+}
+
+fn apply_speed_to_thread_params(
+    params: &mut ThreadStartParams,
+    backend: BackendKind,
+    mode: Option<ProductSpeedMode>,
+) {
+    match (backend, mode) {
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            Some(ProductSpeedMode::CodexServiceTier(tier)),
+        ) => params.service_tier = Some(tier),
+        (
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture,
+            Some(ProductSpeedMode::CodexStandard),
+        ) => params.service_tier = None,
+        _ => {}
+    }
 }
 
 fn validate_access_mode(backend: BackendKind, mode: Option<ProductAccessMode>) -> Result<()> {
@@ -687,6 +854,7 @@ impl ProductBackend for DesktopBackend {
 
     async fn create_session(&self, request: CreateSession) -> Result<SessionSummary> {
         validate_access_mode(self.kind(), request.access_mode)?;
+        validate_speed_mode(self.kind(), request.speed_mode.as_ref())?;
         let mut params = ThreadStartParams {
             cwd: request.working_dir,
             model: request.model,
@@ -694,6 +862,7 @@ impl ProductBackend for DesktopBackend {
             ..Default::default()
         };
         apply_access_to_thread_params(&mut params, self.kind(), request.access_mode);
+        apply_speed_to_thread_params(&mut params, self.kind(), request.speed_mode);
         let response = self.thread_start(params).await?;
         let thread = response.summary();
         Ok(SessionSummary {
@@ -767,27 +936,55 @@ impl ProductBackend for DesktopBackend {
                 ..Default::default()
             })
             .await?;
+        let backend = self.kind();
         Ok(response
             .data
             .into_iter()
-            .map(|model| ProductModel {
-                id: model.id,
-                model: model.model,
-                display_name: model.display_name,
-                description: model.description,
-                hidden: model.hidden,
-                is_default: model.is_default,
-                default_reasoning_effort: model.default_reasoning_effort,
-                supported_reasoning_efforts: model
-                    .supported_reasoning_efforts
+            .map(|model| {
+                let speed_options = model
+                    .service_tiers
                     .into_iter()
-                    .map(|effort| ProductReasoningEffort {
-                        effort: effort.reasoning_effort,
-                        description: effort.description,
+                    .map(|tier| ProductSpeedOption {
+                        mode: match backend {
+                            BackendKind::CodexStdio
+                            | BackendKind::CodexWebSocket
+                            | BackendKind::Fixture => ProductSpeedMode::CodexServiceTier(tier.id),
+                            BackendKind::MitsuroHttp => ProductSpeedMode::MitsuroFast,
+                        },
+                        label: tier.name,
+                        description: tier.description,
                     })
-                    .collect(),
-                input_modalities: model.input_modalities,
-                upgrade: model.upgrade,
+                    .collect();
+                let default_speed_mode = match backend {
+                    BackendKind::CodexStdio
+                    | BackendKind::CodexWebSocket
+                    | BackendKind::Fixture => model
+                        .default_service_tier
+                        .map(ProductSpeedMode::CodexServiceTier)
+                        .unwrap_or(ProductSpeedMode::CodexStandard),
+                    BackendKind::MitsuroHttp => ProductSpeedMode::MitsuroStandard,
+                };
+                ProductModel {
+                    id: model.id,
+                    model: model.model,
+                    display_name: model.display_name,
+                    description: model.description,
+                    hidden: model.hidden,
+                    is_default: model.is_default,
+                    default_reasoning_effort: model.default_reasoning_effort,
+                    supported_reasoning_efforts: model
+                        .supported_reasoning_efforts
+                        .into_iter()
+                        .map(|effort| ProductReasoningEffort {
+                            effort: effort.reasoning_effort,
+                            description: effort.description,
+                        })
+                        .collect(),
+                    speed_options,
+                    default_speed_mode,
+                    input_modalities: model.input_modalities,
+                    upgrade: model.upgrade,
+                }
             })
             .collect())
     }
@@ -1073,6 +1270,8 @@ mod tests {
             reasoning_effort: None,
             working_dir: None,
             access_mode: None,
+            speed_mode: None,
+            work_mode: None,
             attachments: Vec::new(),
         };
         assert_eq!(request.session_id.qualified(), "mitsuro-http:session-7");
@@ -1088,6 +1287,8 @@ mod tests {
                 reasoning_effort: Some("high".to_owned()),
                 working_dir: None,
                 access_mode: None,
+                speed_mode: None,
+                work_mode: None,
                 attachments: vec![ProductAttachment::LocalImage {
                     path: "/tmp/capture.png".to_owned(),
                 }],
@@ -1112,6 +1313,8 @@ mod tests {
                 reasoning_effort: None,
                 working_dir: None,
                 access_mode: None,
+                speed_mode: None,
+                work_mode: None,
                 attachments: vec![ProductAttachment::LocalAudio {
                     path: "/tmp/recording.wav".to_owned(),
                 }],
@@ -1133,6 +1336,8 @@ mod tests {
                 reasoning_effort: None,
                 working_dir: None,
                 access_mode: None,
+                speed_mode: None,
+                work_mode: None,
                 attachments: vec![
                     ProductAttachment::Skill {
                         name: "release".to_owned(),
@@ -1175,6 +1380,8 @@ mod tests {
                 reasoning_effort: None,
                 working_dir: Some("/workspace/project".to_owned()),
                 access_mode: Some(ProductAccessMode::CodexAuto),
+                speed_mode: None,
+                work_mode: None,
                 attachments: Vec::new(),
             },
             BackendKind::CodexStdio,
@@ -1255,6 +1462,8 @@ mod tests {
                 reasoning_effort: None,
                 working_dir: Some("/workspace/project".to_owned()),
                 access_mode: Some(ProductAccessMode::MitsuroSupervised),
+                speed_mode: None,
+                work_mode: None,
                 attachments: Vec::new(),
             },
             BackendKind::MitsuroHttp,
@@ -1270,6 +1479,124 @@ mod tests {
     }
 
     #[test]
+    fn backend_speed_modes_keep_their_exact_wire_semantics() {
+        let codex = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "go faster".to_owned(),
+                model: Some("gpt-5.6-sol".to_owned()),
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                speed_mode: Some(ProductSpeedMode::CodexServiceTier("priority".to_owned())),
+                work_mode: None,
+                attachments: Vec::new(),
+            },
+            BackendKind::CodexStdio,
+        );
+        let value = serde_json::to_value(codex).unwrap();
+        assert_eq!(value["serviceTier"], "priority");
+        assert!(value.get("mitsuroFastMode").is_none());
+
+        let mitsuro = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                text: "go faster".to_owned(),
+                model: Some("grok-4.5".to_owned()),
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                speed_mode: Some(ProductSpeedMode::MitsuroFast),
+                work_mode: None,
+                attachments: Vec::new(),
+            },
+            BackendKind::MitsuroHttp,
+        );
+        assert_eq!(mitsuro.mitsuro_fast_mode, Some(true));
+        let value = serde_json::to_value(mitsuro).unwrap();
+        assert_eq!(value["serviceTier"], serde_json::Value::Null);
+        assert!(value.get("mitsuroFastMode").is_none());
+    }
+
+    #[test]
+    fn standard_codex_speed_explicitly_clears_a_sticky_service_tier() {
+        let params = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "standard speed".to_owned(),
+                model: None,
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                speed_mode: Some(ProductSpeedMode::CodexStandard),
+                work_mode: None,
+                attachments: Vec::new(),
+            },
+            BackendKind::CodexStdio,
+        );
+        assert_eq!(
+            serde_json::to_value(params).unwrap()["serviceTier"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn backend_work_modes_keep_their_exact_wire_semantics() {
+        let codex = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                text: "make a plan".to_owned(),
+                model: Some("gpt-5.6-sol".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                working_dir: None,
+                access_mode: None,
+                speed_mode: Some(ProductSpeedMode::CodexStandard),
+                work_mode: Some(ProductWorkMode::Codex {
+                    mode: crate::environment::ModeKind::Plan,
+                    model: "gpt-5.6-sol".to_owned(),
+                    reasoning_effort: Some("medium".to_owned()),
+                }),
+                attachments: Vec::new(),
+            },
+            BackendKind::CodexStdio,
+        );
+        let value = serde_json::to_value(codex).unwrap();
+        assert!(value.get("model").is_none());
+        assert!(value.get("effort").is_none());
+        assert_eq!(value["collaborationMode"]["mode"], "plan");
+        assert_eq!(
+            value["collaborationMode"]["settings"]["model"],
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            value["collaborationMode"]["settings"]["reasoning_effort"],
+            "medium"
+        );
+        assert!(value["collaborationMode"]["settings"]
+            .get("developer_instructions")
+            .is_none());
+
+        let mitsuro = product_turn_params(
+            ProductTurn {
+                session_id: BackendSessionId::new(BackendKind::MitsuroHttp, "session-7"),
+                text: "make a plan".to_owned(),
+                model: Some("grok-4.5".to_owned()),
+                reasoning_effort: None,
+                working_dir: None,
+                access_mode: None,
+                speed_mode: Some(ProductSpeedMode::MitsuroStandard),
+                work_mode: Some(ProductWorkMode::MitsuroPlan),
+                attachments: Vec::new(),
+            },
+            BackendKind::MitsuroHttp,
+        );
+        assert_eq!(mitsuro.mitsuro_work_mode.as_deref(), Some("plan"));
+        let value = serde_json::to_value(mitsuro).unwrap();
+        assert!(value.get("mitsuroWorkMode").is_none());
+        assert!(value.get("collaborationMode").is_none());
+    }
+
+    #[test]
     fn access_mode_for_another_backend_is_rejected_before_io() {
         let backend = DesktopBackend::codex_stdio();
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
@@ -1282,6 +1609,8 @@ mod tests {
                     reasoning_effort: None,
                     working_dir: None,
                     access_mode: Some(ProductAccessMode::MitsuroAutonomous),
+                    speed_mode: None,
+                    work_mode: None,
                     attachments: Vec::new(),
                 },
                 event_tx,
@@ -1292,6 +1621,60 @@ mod tests {
         assert!(error
             .to_string()
             .contains("does not accept the selected access mode"));
+    }
+
+    #[test]
+    fn speed_mode_for_another_backend_is_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let error = backend
+            .run_product_turn_with_bridge_blocking(
+                ProductTurn {
+                    session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                    text: "hello".to_owned(),
+                    model: None,
+                    reasoning_effort: None,
+                    working_dir: None,
+                    access_mode: None,
+                    speed_mode: Some(ProductSpeedMode::MitsuroFast),
+                    work_mode: None,
+                    attachments: Vec::new(),
+                },
+                event_tx,
+                Arc::new(LiveApprovalBridge::new()),
+                Duration::from_secs(1),
+            )
+            .expect_err("mismatched speed mode must fail before process I/O");
+        assert!(error
+            .to_string()
+            .contains("does not accept the selected speed mode"));
+    }
+
+    #[test]
+    fn work_mode_for_another_backend_is_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let error = backend
+            .run_product_turn_with_bridge_blocking(
+                ProductTurn {
+                    session_id: BackendSessionId::new(BackendKind::CodexStdio, "thread-7"),
+                    text: "hello".to_owned(),
+                    model: None,
+                    reasoning_effort: None,
+                    working_dir: None,
+                    access_mode: None,
+                    speed_mode: Some(ProductSpeedMode::CodexStandard),
+                    work_mode: Some(ProductWorkMode::MitsuroPlan),
+                    attachments: Vec::new(),
+                },
+                event_tx,
+                Arc::new(LiveApprovalBridge::new()),
+                Duration::from_secs(1),
+            )
+            .expect_err("mismatched work mode must fail before process I/O");
+        assert!(error
+            .to_string()
+            .contains("does not accept the selected work mode"));
     }
 
     #[test]
@@ -1307,6 +1690,8 @@ mod tests {
                     reasoning_effort: None,
                     working_dir: None,
                     access_mode: None,
+                    speed_mode: None,
+                    work_mode: None,
                     attachments: vec![ProductAttachment::LocalAudio {
                         path: "/tmp/recording.wav".to_owned(),
                     }],
@@ -1350,6 +1735,8 @@ mod tests {
                         reasoning_effort: None,
                         working_dir: None,
                         access_mode: None,
+                        speed_mode: None,
+                        work_mode: None,
                         attachments: vec![attachment],
                     },
                     event_tx,
@@ -1374,6 +1761,8 @@ mod tests {
                     reasoning_effort: None,
                     working_dir: None,
                     access_mode: None,
+                    speed_mode: None,
+                    work_mode: None,
                     attachments: Vec::new(),
                 },
                 event_tx,

@@ -61,11 +61,17 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   login. Fixture device codes remain confined to explicit fixture mode.
 - The composer exposes only implemented behavior: text entry, real model-gated image
   and audio-file attachments, Codex skill references and local-file mentions, Send,
-  Stop, native project selection, backend-specific access presets, backend-scoped model cycling, and
-  model-advertised reasoning-effort
-  cycling. The selected effort is stored per backend/model; Codex receives the exact
+  Stop, native project selection, backend-specific access presets, backend-scoped model
+  cycling, model-advertised reasoning-effort cycling, model-advertised Fast mode, and
+  backend-native Default/Build and Plan modes. The selected effort is stored per
+  backend/model; Codex receives the exact
   `turn/start.effort` value and Mitsuro receives the equivalent `thinking_enabled`
-  value. GPUI's native path prompt supplies
+  value. Codex Fast sends the advertised `serviceTier` id (`priority` in the current
+  live catalog), while standard speed explicitly sends `null` to clear sticky state;
+  Mitsuro sends its typed `fast_mode` boolean. Codex work modes send the exact
+  `collaborationMode` preset resolved from `collaborationMode/list`; Mitsuro sends its
+  typed `mode` as `build` or `plan`. Cross-backend variants are rejected before I/O.
+  GPUI's native path prompt supplies
   absolute image paths; Codex receives `localImage` input and Mitsuro receives encoded
   image content. Reopened threads restore local-path, remote, and embedded image inputs
   as real transcript thumbnails; missing or unsafe image data remains visible as an

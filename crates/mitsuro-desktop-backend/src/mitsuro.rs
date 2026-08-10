@@ -5,7 +5,7 @@ use base64::Engine as _;
 use futures::StreamExt as _;
 use mitsuro_client::{
     ChatRequest, ChatStreamEvent, ContentBlock, CreateSessionRequest, ImageSource, MitsuroClient,
-    PermissionMode, SessionType, SteerRequest, UpdateSessionRequest,
+    PermissionMode, SessionType, SteerRequest, UpdateSessionRequest, WorkMode,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -47,15 +47,16 @@ use crate::process::{
 };
 use crate::protocol::{
     ConfigReadParams, ConfigReadResponse, InitializeResponse, ModelInfo, ModelListParams,
-    ModelListResponse, ReasoningEffortOption, SkillMetadata, SkillsListEntry, SkillsListParams,
-    SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams,
-    ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams,
-    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
-    ThreadGoalSetResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
-    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ModelListResponse, ModelServiceTier, ReasoningEffortOption, SkillMetadata, SkillsListEntry,
+    SkillsListParams, SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse,
+    ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams, ThreadListResponse,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse,
+    ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnSteerParams, TurnSteerResponse,
 };
 use crate::types::{
     AgentError, ConnectionStatus, DelegatedProgressProjection, DelegationExecution,
@@ -175,9 +176,9 @@ impl MitsuroServerBackend {
             model: params.model,
             model_key: None,
             thinking_enabled: params.effort,
-            fast_mode: None,
+            fast_mode: params.mitsuro_fast_mode,
             permission_mode: mitsuro_permission_mode(params.mitsuro_permission_mode.as_deref())?,
-            mode: None,
+            mode: mitsuro_work_mode(params.mitsuro_work_mode.as_deref())?,
             research_enabled: None,
         };
 
@@ -918,6 +919,15 @@ impl AgentBackend for MitsuroServerBackend {
                         })
                     })
                     .collect();
+                let service_tiers = if model.supports_fast_mode {
+                    vec![ModelServiceTier {
+                        id: "priority".to_owned(),
+                        name: "Fast".to_owned(),
+                        description: "Faster responses with increased Mitsuro usage".to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
                 ModelInfo {
                     id: model.id.clone(),
                     model: model.id.clone(),
@@ -927,6 +937,8 @@ impl AgentBackend for MitsuroServerBackend {
                     is_default: default.as_deref() == Some(model.id.as_str()),
                     default_reasoning_effort,
                     supported_reasoning_efforts,
+                    service_tiers,
+                    default_service_tier: None,
                     input_modalities,
                     upgrade: None,
                 }
@@ -1410,6 +1422,17 @@ fn mitsuro_permission_mode(value: Option<&str>) -> Result<Option<PermissionMode>
     }
 }
 
+fn mitsuro_work_mode(value: Option<&str>) -> Result<Option<WorkMode>> {
+    match value {
+        None => Ok(None),
+        Some("build") => Ok(Some(WorkMode::Build)),
+        Some("plan") => Ok(Some(WorkMode::Plan)),
+        Some(other) => Err(AgentError::NotImplemented(format!(
+            "Mitsuro HTTP does not accept work mode {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1426,6 +1449,19 @@ mod tests {
         );
         assert_eq!(mitsuro_permission_mode(None).unwrap(), None);
         assert!(mitsuro_permission_mode(Some("danger-full-access")).is_err());
+    }
+
+    #[test]
+    fn product_work_modes_map_to_exact_mitsuro_contract() {
+        assert_eq!(
+            mitsuro_work_mode(Some("build")).unwrap(),
+            Some(WorkMode::Build)
+        );
+        assert_eq!(
+            mitsuro_work_mode(Some("plan")).unwrap(),
+            Some(WorkMode::Plan)
+        );
+        assert_eq!(mitsuro_work_mode(None).unwrap(), None);
     }
 
     #[test]

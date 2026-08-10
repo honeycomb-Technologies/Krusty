@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::environment::ModeKind;
+
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope
 // ---------------------------------------------------------------------------
@@ -320,6 +322,9 @@ pub struct ThreadStartParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
+    /// Model-advertised Codex service tier. `None` selects the standard tier.
+    #[serde(default)]
+    pub service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -978,6 +983,13 @@ pub struct TurnStartParams {
     pub input: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Model-advertised Codex service tier. This intentionally serializes as
+    /// `null` when standard is selected so a prior sticky fast tier is cleared.
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    /// Exact Codex collaboration preset for this turn and subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode: Option<CollaborationMode>,
     /// Reasoning effort advertised by the selected model. Codex app-server
     /// persists this override for this turn and subsequent turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1001,6 +1013,12 @@ pub struct TurnStartParams {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_user_message_id: Option<String>,
+    /// Transport-neutral product metadata consumed only by the Mitsuro adapter.
+    #[serde(skip)]
+    pub mitsuro_fast_mode: Option<bool>,
+    /// Transport-neutral product metadata consumed only by the Mitsuro adapter.
+    #[serde(skip)]
+    pub mitsuro_work_mode: Option<String>,
     /// Transport-neutral product metadata consumed only by the Mitsuro adapter.
     #[serde(skip)]
     pub mitsuro_permission_mode: Option<String>,
@@ -1036,6 +1054,8 @@ impl TurnStartParams {
             thread_id: thread_id.into(),
             input: vec![user_input_text_value(text)],
             model: None,
+            service_tier: None,
+            collaboration_mode: None,
             effort: None,
             approval_policy: None,
             approvals_reviewer: None,
@@ -1044,6 +1064,8 @@ impl TurnStartParams {
             runtime_workspace_roots: None,
             cwd: None,
             client_user_message_id: None,
+            mitsuro_fast_mode: None,
+            mitsuro_work_mode: None,
             mitsuro_permission_mode: None,
         }
     }
@@ -1094,6 +1116,23 @@ impl TurnStartParams {
             "path": path.into()
         }));
     }
+}
+
+/// Schema-exact Codex collaboration mode object accepted by `turn/start`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationMode {
+    pub mode: ModeKind,
+    pub settings: CollaborationModeSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollaborationModeSettings {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1241,6 +1280,15 @@ pub struct ReasoningEffortOption {
     pub description: String,
 }
 
+/// One model-advertised service tier (for example Codex `priority` / Fast).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
 /// Model catalog entry from `model/list` (UI-facing subset of protocol `Model`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1256,6 +1304,12 @@ pub struct ModelInfo {
     pub default_reasoning_effort: String,
     #[serde(default)]
     pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Optional accelerated service tiers advertised by this exact model.
+    #[serde(default)]
+    pub service_tiers: Vec<ModelServiceTier>,
+    /// Catalog default tier. `None` means the standard service tier.
+    #[serde(default)]
+    pub default_service_tier: Option<String>,
     /// Canonical input modality tags advertised by the model.
     #[serde(default = "default_model_input_modalities")]
     pub input_modalities: Vec<String>,
@@ -1310,6 +1364,26 @@ impl ModelInfo {
                     .collect()
             })
             .unwrap_or_else(default_model_input_modalities);
+        let service_tiers = value
+            .get("serviceTiers")
+            .and_then(Value::as_array)
+            .map(|tiers| {
+                tiers
+                    .iter()
+                    .filter_map(|tier| {
+                        Some(ModelServiceTier {
+                            id: tier.get("id")?.as_str()?.to_owned(),
+                            name: tier.get("name")?.as_str()?.to_owned(),
+                            description: tier
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             id: value
                 .get("id")
@@ -1345,6 +1419,11 @@ impl ModelInfo {
                 .unwrap_or("")
                 .to_string(),
             supported_reasoning_efforts: efforts,
+            service_tiers,
+            default_service_tier: value
+                .get("defaultServiceTier")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             input_modalities,
             upgrade: value
                 .get("upgrade")
@@ -1408,6 +1487,12 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                     description: "Deeper reasoning".into(),
                 },
             ],
+            service_tiers: vec![ModelServiceTier {
+                id: "priority".into(),
+                name: "Fast".into(),
+                description: "Faster fixture streaming".into(),
+            }],
+            default_service_tier: None,
             input_modalities: vec!["text".into(), "image".into()],
             upgrade: None,
         },
@@ -1423,6 +1508,8 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                 reasoning_effort: "high".into(),
                 description: "Deep reasoning".into(),
             }],
+            service_tiers: Vec::new(),
+            default_service_tier: None,
             input_modalities: vec!["text".into(), "image".into()],
             upgrade: None,
         },
@@ -1438,6 +1525,8 @@ pub fn fixture_demo_models() -> Vec<ModelInfo> {
                 reasoning_effort: "medium".into(),
                 description: "Default".into(),
             }],
+            service_tiers: Vec::new(),
+            default_service_tier: None,
             input_modalities: vec!["text".into()],
             upgrade: None,
         },
@@ -3041,7 +3130,12 @@ mod model_list_tests {
                 "upgrade": null,
                 "inputModalities": ["text", "image"],
                 "supportsPersonality": false,
-                "serviceTiers": []
+                "serviceTiers": [{
+                    "id": "priority",
+                    "name": "Fast",
+                    "description": "1.5x speed, increased usage"
+                }],
+                "defaultServiceTier": null
             }],
             "nextCursor": null
         });
@@ -3050,6 +3144,8 @@ mod model_list_tests {
         assert_eq!(resp.data[0].display_name, "GPT-5");
         assert!(resp.data[0].is_default);
         assert_eq!(resp.data[0].input_modalities, ["text", "image"]);
+        assert_eq!(resp.data[0].service_tiers[0].id, "priority");
+        assert_eq!(resp.data[0].service_tiers[0].name, "Fast");
         assert_eq!(resp.default_model().unwrap().id, "gpt-5");
     }
 
