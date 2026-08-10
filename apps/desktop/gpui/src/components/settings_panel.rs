@@ -14,8 +14,8 @@ use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::BackendKind;
 
 use crate::app::{
-    AccountSession, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection, SurfaceDataState,
-    UiConnection,
+    AccountSession, McpAddTransport, MitsuroApp, ProductMode, SettingsNavGroup, SettingsSection,
+    SurfaceDataState, UiConnection,
 };
 use crate::theme;
 
@@ -2075,12 +2075,162 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                     ))
                 })
                 .child(card_divider())
-                .child(unavailable_action_row(
-                    "Add server",
-                    "Connect to a custom MCP (stdio or HTTP)",
-                    "Not wired",
-                )),
+                .child(mcp_add_form(app, cx)),
         )
+}
+
+fn mcp_add_form(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let available = app.mcp_add_available();
+    let busy = app.mcp_add_in_progress();
+    let transport = app.mcp_add_transport();
+    let name_input = app.mcp_add_name_input().clone();
+    let target_input = app.mcp_add_target_input().clone();
+    let args_input = app.mcp_add_args_input().clone();
+
+    div()
+        .id("settings-mcp-add")
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text)
+                                .child("Add server"),
+                        )
+                        .child(div().text_xs().text_color(colors.text_tertiary).child(
+                            if available {
+                                "Writes the Codex user config, then reloads MCP servers"
+                            } else {
+                                "MCP configuration writes are unavailable for this backend"
+                            },
+                        )),
+                )
+                .when(available, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(2.0))
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(colors.bg_button_secondary)
+                            .children([McpAddTransport::Http, McpAddTransport::Stdio].map(
+                                |option| {
+                                    let selected = option == transport;
+                                    div()
+                                        .id(SharedId(format!(
+                                            "mcp-add-transport-{}",
+                                            option.label().to_ascii_lowercase()
+                                        )))
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .when(selected, |style| style.bg(colors.bg_elevated))
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.set_mcp_add_transport(option, window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(if selected {
+                                                    gpui::FontWeight::SEMIBOLD
+                                                } else {
+                                                    gpui::FontWeight::NORMAL
+                                                })
+                                                .text_color(if selected {
+                                                    colors.text
+                                                } else {
+                                                    colors.text_tertiary
+                                                })
+                                                .child(option.label()),
+                                        )
+                                },
+                            )),
+                    )
+                }),
+        )
+        .when(available, |this| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(mcp_add_input("mcp-add-name", name_input))
+                    .child(mcp_add_input("mcp-add-target", target_input)),
+            )
+            .when(transport == McpAddTransport::Stdio, |this| {
+                this.child(mcp_add_input("mcp-add-args", args_input))
+            })
+            .child(
+                div().flex().flex_row().justify_end().child(
+                    div()
+                        .id("mcp-add-submit")
+                        .h(px(32.0))
+                        .px(px(14.0))
+                        .rounded(px(8.0))
+                        .bg(colors.accent_soft)
+                        .border_1()
+                        .border_color(colors.border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(!busy, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.add_mcp_server(cx);
+                                }))
+                        })
+                        .when(busy, |button| button.opacity(0.55))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.accent)
+                                .child(if busy { "Adding…" } else { "Add server" }),
+                        ),
+                ),
+            )
+        })
+}
+
+fn mcp_add_input(
+    id: &'static str,
+    input: gpui::Entity<gpui_component::input::InputState>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .h(px(34.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .bg(colors.bg_sidebar)
+        .border_1()
+        .border_color(colors.border)
+        .child(Input::new(&input).appearance(false).h(px(30.0)))
 }
 
 fn backend_choice_row(

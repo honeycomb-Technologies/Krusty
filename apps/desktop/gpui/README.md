@@ -43,6 +43,10 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - MCP rows requiring authentication can start the typed Codex OAuth flow, open the
   returned authorization URL in the system browser, wait for the matching completion
   notification, and refresh live connector status. Mitsuro remains read-only here.
+- Settings → Connections can add real Codex HTTP or stdio MCP servers through typed
+  `config/value/write` followed by `config/mcpServer/reload`. The form validates names,
+  URLs, executable-only command fields, and JSON string-array arguments before I/O.
+  Mitsuro does not expose the mutation, so the form is replaced by an unsupported note.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.

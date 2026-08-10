@@ -26,6 +26,9 @@ use crate::fs::{
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse,
 };
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
+use crate::mcp_config::{
+    ConfigMcpServerReloadResponse, ConfigValueWriteParams, ConfigWriteResponse,
+};
 use crate::methods::is_known_client_method;
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
@@ -92,6 +95,23 @@ pub trait AgentBackend: Send + Sync {
 
     /// Effective config via `config/read` (fixture returns demo config offline).
     async fn config_read(&self, params: ConfigReadParams) -> Result<ConfigReadResponse>;
+
+    /// Persist one value through Codex `config/value/write`.
+    async fn config_value_write(
+        &self,
+        _params: ConfigValueWriteParams,
+    ) -> Result<ConfigWriteResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "configuration writes are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Reload configured MCP servers after a successful config write.
+    async fn config_mcp_server_reload(&self) -> Result<ConfigMcpServerReloadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "MCP configuration reload is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Full-text / substring thread search via `thread/search`.
     /// UI may also filter locally; this is the server method when available.

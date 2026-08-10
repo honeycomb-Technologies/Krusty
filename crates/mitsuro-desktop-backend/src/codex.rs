@@ -968,6 +968,18 @@ impl AgentBackend for CodexAppServerBackend {
         self.read_config(params).await
     }
 
+    async fn config_value_write(
+        &self,
+        params: crate::ConfigValueWriteParams,
+    ) -> Result<crate::ConfigWriteResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("config/value/write", Some(value)).await
+    }
+
+    async fn config_mcp_server_reload(&self) -> Result<crate::ConfigMcpServerReloadResponse> {
+        self.request_typed("config/mcpServer/reload", None).await
+    }
+
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         self.search_threads(params).await
     }
@@ -1639,6 +1651,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.authorization_url, "https://auth.example.test");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_config_add_uses_write_then_reload_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in ["config/value/write", "config/mcpServer/reload"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = if expected == "config/value/write" {
+                    assert_eq!(
+                        request["params"],
+                        serde_json::json!({
+                            "keyPath": "mcp_servers.github",
+                            "value": {"url": "https://mcp.example.test"},
+                            "mergeStrategy": "upsert"
+                        })
+                    );
+                    serde_json::json!({
+                        "status": "ok",
+                        "version": "sha256:test",
+                        "filePath": "/tmp/config.toml",
+                        "overriddenMetadata": null
+                    })
+                } else {
+                    assert!(request.get("params").is_none());
+                    serde_json::json!({})
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let desktop = crate::DesktopBackend::Codex(Arc::clone(&backend));
+        let response = desktop
+            .add_mcp_server(crate::McpServerConfigAddParams {
+                name: "github".to_owned(),
+                transport: crate::McpServerTransportConfig::StreamableHttp {
+                    url: "https://mcp.example.test".to_owned(),
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status, crate::ConfigWriteStatus::Ok);
         server.await.unwrap();
     }
 

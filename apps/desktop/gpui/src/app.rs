@@ -21,32 +21,33 @@ use mitsuro_desktop_backend::{
     fixture_demo_account_response, fixture_demo_collaboration_modes, fixture_demo_config,
     fixture_demo_environments, fixture_demo_mcp_servers, fixture_demo_models, fixture_demo_plugins,
     fixture_demo_rate_limits, fixture_demo_skills, fixture_demo_usage, join_abs,
-    load_sample_turn_events, normalize_abs_path, summarize_file_changes, Account, ActivityFields,
-    AgentBackend, ApprovalChoice, BackendKind, BackendSelection, BackendSessionId,
-    CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
-    CollaborationModeMask, ConfigReadParams, ConversationAudio, ConversationImage,
-    ConversationReference, ConversationReferenceKind, CreateSession, DesktopBackend,
-    EnvironmentAddParams, EnvironmentInfoParams, EnvironmentInfoResponse, EnvironmentStatusParams,
-    EnvironmentStatusResponse, EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry,
-    FsReadDirectoryParams, FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
-    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
-    LifecycleNotification, ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams,
-    McpAuthStatus, McpElicitationMode, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, MessageRole, ModeKind, ModelInfo, ModelListParams,
-    ModelServiceTier, PendingApproval, PendingMcpElicitation, PendingUserInput, PlanType,
-    PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
-    PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
-    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
-    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer,
-    ProductTurn, ProductWorkMode, RealtimeEvent, RealtimeOutputModality, RealtimeVoice,
-    RealtimeVoicesList, ReasoningEffortOption, SessionDelegationProjection, SessionSummary,
-    SkillMetadata, SkillsListParams, ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
-    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary,
-    ThreadUnarchiveParams, TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT,
-    FIXTURE_PROJECT_ROOT,
+    load_sample_turn_events, normalize_abs_path, summarize_file_changes, valid_mcp_server_name,
+    Account, ActivityFields, AgentBackend, ApprovalChoice, BackendKind, BackendSelection,
+    BackendSessionId, CancelLoginAccountParams, CancelLoginAccountStatus,
+    CollaborationModeListParams, CollaborationModeMask, ConfigReadParams, ConfigWriteStatus,
+    ConversationAudio, ConversationImage, ConversationReference, ConversationReferenceKind,
+    CreateSession, DesktopBackend, EnvironmentAddParams, EnvironmentInfoParams,
+    EnvironmentInfoResponse, EnvironmentStatusParams, EnvironmentStatusResponse,
+    EnvironmentSummary, FixtureBackend, FsReadDirectoryEntry, FsReadDirectoryParams,
+    FsReadFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, LifecycleNotification,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
+    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MessageRole, ModeKind,
+    ModelInfo, ModelListParams, ModelServiceTier, PendingApproval, PendingMcpElicitation,
+    PendingUserInput, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductExtension, ProductFileMatch, ProductHiveSnapshot, ProductMcpServer, ProductModel,
+    ProductProcess, ProductReview, ProductReviewTarget, ProductSchedule, ProductSkill,
+    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
+    SessionDelegationProjection, SessionSummary, SkillMetadata, SkillsListParams,
+    ThreadArchiveParams, ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams,
+    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk, ThreadRealtimeStartParams,
+    ThreadRealtimeStopParams, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
 };
 
 use crate::browser::open_system_browser;
@@ -700,6 +701,22 @@ pub enum SurfaceDataState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum McpAddTransport {
+    #[default]
+    Http,
+    Stdio,
+}
+
+impl McpAddTransport {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Http => "HTTP",
+            Self::Stdio => "Command",
+        }
+    }
+}
+
 impl SurfaceDataState {
     pub fn label(self) -> &'static str {
         match self {
@@ -984,6 +1001,11 @@ pub struct MitsuroApp {
     /// MCP servers from `mcpServerStatus/list` (or fixture demo).
     mcp_servers: Vec<McpServerStatus>,
     pending_mcp_oauth: std::collections::HashSet<String>,
+    mcp_add_transport: McpAddTransport,
+    mcp_add_name_input: Entity<InputState>,
+    mcp_add_target_input: Entity<InputState>,
+    mcp_add_args_input: Entity<InputState>,
+    mcp_add_in_progress: bool,
     /// Plugins from `plugin/list` (flattened marketplace entries).
     plugins: Vec<PluginSummary>,
     extensions_state: SurfaceDataState,
@@ -1228,6 +1250,12 @@ impl MitsuroApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Environment id"));
         let environment_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("wss://exec-server.example.com"));
+        let mcp_add_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
+        let mcp_add_target_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://mcp.example.com"));
+        let mcp_add_args_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Arguments as JSON, e.g. [\"-y\"]"));
         let server_request_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
         let server_request_secret_input = cx.new(|cx| {
@@ -1330,6 +1358,11 @@ impl MitsuroApp {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             pending_mcp_oauth: std::collections::HashSet::new(),
+            mcp_add_transport: McpAddTransport::Http,
+            mcp_add_name_input,
+            mcp_add_target_input,
+            mcp_add_args_input,
+            mcp_add_in_progress: false,
             plugins: Vec::new(),
             extensions_state: SurfaceDataState::Loading,
             plugin_mutation_in_progress: None,
@@ -3504,6 +3537,163 @@ impl MitsuroApp {
     /// MCP servers for the Extensions panel.
     pub fn mcp_servers(&self) -> &[McpServerStatus] {
         &self.mcp_servers
+    }
+
+    pub fn mcp_add_transport(&self) -> McpAddTransport {
+        self.mcp_add_transport
+    }
+
+    pub fn set_mcp_add_transport(
+        &mut self,
+        transport: McpAddTransport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mcp_add_transport = transport;
+        let placeholder = match transport {
+            McpAddTransport::Http => "https://mcp.example.com",
+            McpAddTransport::Stdio => "Command executable, e.g. npx",
+        };
+        self.mcp_add_target_input.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx)
+        });
+        cx.notify();
+    }
+
+    pub fn mcp_add_name_input(&self) -> &Entity<InputState> {
+        &self.mcp_add_name_input
+    }
+
+    pub fn mcp_add_target_input(&self) -> &Entity<InputState> {
+        &self.mcp_add_target_input
+    }
+
+    pub fn mcp_add_args_input(&self) -> &Entity<InputState> {
+        &self.mcp_add_args_input
+    }
+
+    pub fn mcp_add_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().mcp_config_write)
+    }
+
+    pub fn mcp_add_in_progress(&self) -> bool {
+        self.mcp_add_in_progress
+    }
+
+    pub fn add_mcp_server(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_add_in_progress {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Connections · adding MCP servers requires Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().mcp_config_write {
+            self.status_line =
+                "Connections · this backend does not expose MCP configuration writes".into();
+            cx.notify();
+            return;
+        }
+
+        let name = self.mcp_add_name_input.read(cx).value().trim().to_owned();
+        if !valid_mcp_server_name(&name) {
+            self.status_line =
+                "Connections · server name may use letters, numbers, '-' and '_' only".into();
+            cx.notify();
+            return;
+        }
+        let target = self.mcp_add_target_input.read(cx).value().trim().to_owned();
+        let transport = match self.mcp_add_transport {
+            McpAddTransport::Http => {
+                if !valid_mcp_http_url(&target) {
+                    self.status_line =
+                        "Connections · MCP URL must be a complete http:// or https:// URL".into();
+                    cx.notify();
+                    return;
+                }
+                McpServerTransportConfig::StreamableHttp { url: target }
+            }
+            McpAddTransport::Stdio => {
+                if target.is_empty() || target.chars().any(char::is_whitespace) {
+                    self.status_line =
+                        "Connections · command must be one executable path without arguments"
+                            .into();
+                    cx.notify();
+                    return;
+                }
+                let args_source = self.mcp_add_args_input.read(cx).value().trim().to_owned();
+                let args = if args_source.is_empty() {
+                    Vec::new()
+                } else {
+                    match serde_json::from_str::<Vec<String>>(&args_source) {
+                        Ok(args) => args,
+                        Err(_) => {
+                            self.status_line =
+                                "Connections · arguments must be a JSON array of strings".into();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                };
+                McpServerTransportConfig::Stdio {
+                    command: target,
+                    args,
+                }
+            }
+        };
+
+        let params = McpServerConfigAddParams {
+            name: name.clone(),
+            transport,
+        };
+        let generation = self.backend_generation;
+        self.mcp_add_in_progress = true;
+        self.status_line = format!("Connections · adding {name}…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .add_mcp_server(params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.mcp_add_in_progress = false;
+                match result {
+                    Ok(response) if response.status == ConfigWriteStatus::Ok => {
+                        app.status_line = format!("Connections · added {name}").into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Ok(response) => {
+                        let detail = response
+                            .overridden_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("message"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("a higher-precedence configuration layer overrides it");
+                        app.status_line =
+                            format!("Connections · saved {name}, but {detail}").into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Connections · could not add {name} · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn mcp_oauth_available(&self) -> bool {
@@ -9168,6 +9358,7 @@ impl MitsuroApp {
         self.skills.clear();
         self.mcp_servers.clear();
         self.pending_mcp_oauth.clear();
+        self.mcp_add_in_progress = false;
         self.plugins.clear();
         self.extensions_state = SurfaceDataState::Loading;
         self.plugin_mutation_in_progress = None;
@@ -9820,6 +10011,13 @@ fn valid_exec_server_url(value: &str) -> bool {
         .strip_prefix("ws://")
         .or_else(|| value.strip_prefix("wss://"));
     target.is_some_and(|target| !target.is_empty() && !target.chars().any(char::is_whitespace))
+}
+
+fn valid_mcp_http_url(value: &str) -> bool {
+    url::Url::parse(value).ok().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some_and(|host| !host.is_empty())
+    })
 }
 
 fn file_match_from_product(file: ProductFileMatch) -> FuzzyFileSearchResult {
@@ -11006,5 +11204,15 @@ mod tests {
         assert!(!valid_exec_server_url("https://exec.example.com"));
         assert!(!valid_exec_server_url("wss://"));
         assert!(!valid_exec_server_url("wss://bad host"));
+    }
+
+    #[test]
+    fn mcp_http_urls_fail_closed_before_config_writes() {
+        assert!(valid_mcp_http_url("https://mcp.example.com/rpc"));
+        assert!(valid_mcp_http_url("http://127.0.0.1:4100"));
+        assert!(!valid_mcp_http_url("wss://mcp.example.com"));
+        assert!(!valid_mcp_http_url("https://"));
+        assert!(!valid_mcp_http_url("https://?query-without-host"));
+        assert!(!valid_mcp_http_url("https://bad host/rpc"));
     }
 }

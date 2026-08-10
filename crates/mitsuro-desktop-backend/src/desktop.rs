@@ -8,14 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentError, ApprovalChoice, CodexAppServerBackend, LifecycleNotification,
-    LiveApprovalBridge, LiveTurnOutcome, McpServerOauthLoginParams, McpServerOauthLoginResponse,
-    MitsuroServerBackend, PendingApproval, PluginInstallParams, PluginInstallResponse,
-    PluginUninstallParams, PluginUninstallResponse, Result, ThreadRealtimeAppendAudioParams,
-    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
-    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
-    ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
-    ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams, ThreadRealtimeStartResponse,
-    ThreadRealtimeStopParams, ThreadRealtimeStopResponse, TurnStartParams, TurnStreamEvent,
+    LiveApprovalBridge, LiveTurnOutcome, McpServerConfigAddParams, McpServerOauthLoginParams,
+    McpServerOauthLoginResponse, MitsuroServerBackend, PendingApproval, PluginInstallParams,
+    PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse, Result,
+    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
+    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
+    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
+    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
+    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
+    TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,6 +71,7 @@ pub struct BackendCapabilities {
     pub plugin_mutations: bool,
     pub environment_add: bool,
     pub mcp_oauth: bool,
+    pub mcp_config_write: bool,
     pub hive: bool,
     pub schedules: bool,
     pub sites: bool,
@@ -100,6 +102,7 @@ impl BackendCapabilities {
             plugin_mutations: true,
             environment_add: true,
             mcp_oauth: true,
+            mcp_config_write: true,
             hive: false,
             schedules: false,
             sites: false,
@@ -133,6 +136,7 @@ impl BackendCapabilities {
             plugin_mutations: false,
             environment_add: false,
             mcp_oauth: false,
+            mcp_config_write: false,
             hive: true,
             schedules: true,
             sites: false,
@@ -365,6 +369,24 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn add_mcp_server(
+        &self,
+        params: McpServerConfigAddParams,
+    ) -> Result<crate::ConfigWriteResponse> {
+        match self {
+            Self::Codex(backend) => {
+                let response = backend
+                    .config_value_write(params.config_write_params())
+                    .await?;
+                backend.config_mcp_server_reload().await?;
+                Ok(response)
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose MCP configuration writes".to_owned(),
+            )),
+        }
+    }
+
     pub async fn uninstall_plugin(
         &self,
         params: PluginUninstallParams,
@@ -565,6 +587,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().environment_add);
         assert!(BackendCapabilities::codex().mcp_oauth);
         assert!(!BackendCapabilities::mitsuro().mcp_oauth);
+        assert!(BackendCapabilities::codex().mcp_config_write);
+        assert!(!BackendCapabilities::mitsuro().mcp_config_write);
     }
 
     #[tokio::test]

@@ -63,13 +63,13 @@ backend or are shown as unavailable.
 | Account authentication | Unsupported, unavailable state | Live browser OAuth, cancel, completion notification, logout | Explicit offline fixture only |
 | Files | Live tree/read/fuzzy adapter | Live typed paths | Typed fixture |
 | Processes | Read-only server catalog in client; interactive terminal spawn unsupported | Live spawn/stdin/PTY | Typed fixture |
-| Extensions/MCP/skills | Live read-only installed extensions, MCP status, and skills; plugin mutations and OAuth unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, MCP status, and skills | Typed read-only fixture |
+| Extensions/MCP/skills | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, and OAuth unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, and skills | Typed read-only fixture |
 | Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
 | Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
-| Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; server config writes unsupported | Same local persistence boundary |
+| Settings writes | Desktop preferences persist locally; server config writes unsupported | Desktop preferences persist locally; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
 
 Unsupported operations must return `NotImplemented` or be disabled through
 `BackendCapabilities`. A method name appearing in the Codex inventory does not make it
@@ -85,8 +85,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 57 typed adapters
-and 76 raw-transport-only methods. Raw reachability is treated as remaining product
+The executable client-method coverage matrix currently identifies 59 typed adapters
+and 74 raw-transport-only methods. Raw reachability is treated as remaining product
 work, not as feature completion; the matrix test must change with each typed adapter.
 
 ## Established recovery baseline
@@ -107,6 +107,11 @@ work, not as feature completion; the matrix test must change with each typed ada
 - MCP servers advertising `notLoggedIn` expose a real Codex sign-in action. GPUI sends
   typed `mcpServer/oauth/login`, opens only the returned authorization URL, tracks the
   server name until `mcpServer/oauthLogin/completed`, and refreshes the live catalog.
+- Codex MCP additions use typed `config/value/write` with the exact
+  `mcp_servers.<name>` upsert shape, followed by `config/mcpServer/reload`. The GPUI form
+  supports streamable HTTP URLs and stdio command plus JSON string-array arguments,
+  validates all fields before I/O, serializes one mutation at a time, and refreshes the
+  live catalog after success. Mitsuro renders this mutation as unsupported.
 - Codex notifications use an application-lifetime broadcast hub. Independent
   turn subscribers do not consume each other's events. The GPUI shell owns one
   backend-generation-scoped lifecycle subscriber for idle-time account, skills/MCP,

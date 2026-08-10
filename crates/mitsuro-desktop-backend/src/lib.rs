@@ -11,6 +11,7 @@ pub mod fixture;
 pub mod fs;
 pub mod live_turn;
 pub mod mcp_auth;
+pub mod mcp_config;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
@@ -90,6 +91,11 @@ pub use live_turn::{
 };
 pub use mcp_auth::{
     McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerOauthLoginResponse,
+};
+pub use mcp_config::{
+    valid_mcp_server_name, ConfigMcpServerReloadResponse, ConfigValueWriteParams,
+    ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams, McpServerTransportConfig,
+    MergeStrategy,
 };
 pub use methods::{
     client_method_coverage, client_methods_txt_path, is_known_client_method,
