@@ -4,19 +4,19 @@
 //! - Mode switcher pill (Chat / Codex) + search / bell icons
 //! - Nav: New chat · Pull requests · Sites · Scheduled · Plugins
 //! - Projects (empty)
-//! - Recents (scrollable thread titles)
+//! - Pinned + Recents (scrollable live thread titles)
 //! - Profile row → Settings
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    div, px, AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::app::{MitsuroApp, ProductMode};
-use crate::demo::{self, ThreadSurface};
+use crate::demo::{self, DemoThread, ThreadSurface};
 use crate::theme;
 
 const SIDEBAR_WIDTH: f32 = 260.0;
@@ -41,6 +41,44 @@ pub fn sidebar(
     let profile_name_visible = app.profile_name_visible_in_sidebar();
     let profile_plan = app.profile_plan_label().map(|p| p.to_string());
     let _ = search; // search field still wired via InputState; icon opens focus
+
+    let (mut pinned_threads, recent_threads): (Vec<_>, Vec<_>) = threads
+        .into_iter()
+        .partition(|thread| thread.summary.is_pinned.unwrap_or(false));
+    pinned_threads.sort_by_key(|thread| {
+        app.pinned_thread_rank(&thread.summary.id)
+            .unwrap_or(usize::MAX)
+    });
+    let mut thread_items: Vec<AnyElement> = Vec::new();
+    if !pinned_threads.is_empty() {
+        thread_items.push(thread_section_heading("Pinned", false));
+        thread_items.extend(pinned_threads.into_iter().map(|thread| {
+            let is_selected = selected.as_deref() == Some(thread.summary.id.as_str());
+            thread_row(thread, is_selected, cx)
+        }));
+    }
+    if !recent_threads.is_empty() {
+        thread_items.push(thread_section_heading("Recents", !thread_items.is_empty()));
+        thread_items.extend(recent_threads.into_iter().map(|thread| {
+            let is_selected = selected.as_deref() == Some(thread.summary.id.as_str());
+            thread_row(thread, is_selected, cx)
+        }));
+    }
+    if thread_items.is_empty() {
+        thread_items.push(
+            div()
+                .px(px(10.0))
+                .py(px(10.0))
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(if filter.is_empty() {
+                    "No recents yet.".to_string()
+                } else {
+                    "No matches.".to_string()
+                })
+                .into_any_element(),
+        );
+    }
 
     div()
         .id("thread-sidebar")
@@ -235,7 +273,7 @@ pub fn sidebar(
                     ),
             )
         })
-        // ── Recents (dense list · bar-like truncation + branch marks) ─
+        // ── Pinned + Recents (dense list · native host pin order) ─────
         .child(
             div()
                 .flex()
@@ -243,15 +281,6 @@ pub fn sidebar(
                 .flex_1()
                 .min_h_0()
                 .pt(px(6.0))
-                .child(
-                    div()
-                        .px(px(14.0))
-                        .pb(px(4.0))
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_tertiary)
-                        .child("Recents"),
-                )
                 .child(
                     div()
                         .id("thread-list")
@@ -262,88 +291,7 @@ pub fn sidebar(
                         .px(px(6.0))
                         .gap(px(0.0))
                         .overflow_y_scroll()
-                        .children(if threads.is_empty() {
-                            vec![div()
-                                .px(px(10.0))
-                                .py(px(10.0))
-                                .text_xs()
-                                .text_color(colors.text_tertiary)
-                                .child(if filter.is_empty() {
-                                    "No recents yet.".to_string()
-                                } else {
-                                    "No matches.".to_string()
-                                })
-                                .into_any_element()]
-                        } else {
-                            threads
-                                .into_iter()
-                                .map(|thread| {
-                                    let id = thread.summary.id.clone();
-                                    let is_selected = selected.as_deref() == Some(id.as_str());
-                                    let title = thread.summary.display_title();
-                                    // Branch glyph when thread is project-scoped (cwd set).
-                                    let show_branch = thread.summary.cwd.is_some();
-
-                                    div()
-                                        .id(SharedString::from(format!("thread-row-{id}")))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .px(px(8.0))
-                                        .py(px(5.0))
-                                        .rounded(px(6.0))
-                                        .cursor_pointer()
-                                        .bg(if is_selected {
-                                            theme::hex_alpha(0xffffff, 0.06)
-                                        } else {
-                                            theme::transparent()
-                                        })
-                                        .hover(|s| s.bg(colors.bg_hover))
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.close_mode_menu(cx);
-                                            // Ensure Chat/Codex mode matches surface
-                                            let surface = app
-                                                .threads()
-                                                .iter()
-                                                .find(|t| t.summary.id == id)
-                                                .map(|t| t.surface)
-                                                .unwrap_or(ThreadSurface::Codex);
-                                            let mode = match surface {
-                                                ThreadSurface::Chat => ProductMode::Chat,
-                                                ThreadSurface::Codex => ProductMode::Codex,
-                                            };
-                                            if app.active_mode() != mode {
-                                                app.set_mode(mode, window, cx);
-                                            }
-                                            app.select_thread_with_window(id.clone(), window, cx);
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .text_sm()
-                                                .text_color(if is_selected {
-                                                    colors.text
-                                                } else {
-                                                    colors.text_secondary
-                                                })
-                                                .whitespace_nowrap()
-                                                .overflow_hidden()
-                                                .child(title),
-                                        )
-                                        .when(show_branch, |this| {
-                                            this.child(
-                                                Icon::empty()
-                                                    .path("icons/git-branch.svg")
-                                                    .with_size(px(12.0))
-                                                    .text_color(theme::hex_alpha(0xa78bfa, 0.95)),
-                                            )
-                                        })
-                                        .into_any_element()
-                                })
-                                .collect()
-                        }),
+                        .children(thread_items),
                 ),
         )
         // Hidden search field (filter still works via InputState when focused programmatically)
@@ -361,6 +309,119 @@ pub fn sidebar(
             profile_name_visible,
             cx,
         ))
+}
+
+fn thread_section_heading(label: &'static str, separated: bool) -> AnyElement {
+    let colors = theme::colors();
+    div()
+        .px(px(8.0))
+        .pt(if separated { px(10.0) } else { px(0.0) })
+        .pb(px(4.0))
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(colors.text_tertiary)
+        .child(label)
+        .into_any_element()
+}
+
+fn thread_row(thread: DemoThread, is_selected: bool, cx: &mut Context<MitsuroApp>) -> AnyElement {
+    let colors = theme::colors();
+    let id = thread.summary.id.clone();
+    let open_id = id.clone();
+    let pin_id = id.clone();
+    let title = thread.summary.display_title();
+    let show_branch = thread.summary.cwd.is_some();
+    let is_pinned = thread.summary.is_pinned.unwrap_or(false);
+    let can_pin = thread.backend_session_id.is_some();
+    let group_name = SharedString::from(format!("thread-row-group-{id}"));
+
+    div()
+        .id(SharedString::from(format!("thread-row-{id}")))
+        .group(group_name.clone())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .bg(if is_selected {
+            theme::hex_alpha(0xffffff, 0.06)
+        } else {
+            theme::transparent()
+        })
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(move |app, _, window, cx| {
+            app.close_mode_menu(cx);
+            let surface = app
+                .threads()
+                .iter()
+                .find(|candidate| candidate.summary.id == open_id)
+                .map(|candidate| candidate.surface)
+                .unwrap_or(ThreadSurface::Codex);
+            let mode = match surface {
+                ThreadSurface::Chat => ProductMode::Chat,
+                ThreadSurface::Codex => ProductMode::Codex,
+            };
+            if app.active_mode() != mode {
+                app.set_mode(mode, window, cx);
+            }
+            app.select_thread_with_window(open_id.clone(), window, cx);
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(if is_selected {
+                    colors.text
+                } else {
+                    colors.text_secondary
+                })
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .child(title),
+        )
+        .when(show_branch, |this| {
+            this.child(
+                Icon::empty()
+                    .path("icons/git-branch.svg")
+                    .with_size(px(12.0))
+                    .text_color(theme::hex_alpha(0xa78bfa, 0.95)),
+            )
+        })
+        .when(can_pin, |this| {
+            this.child(
+                div()
+                    .id(SharedString::from(format!("thread-pin-{pin_id}")))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .flex_shrink_0()
+                    .rounded(px(6.0))
+                    .opacity(if is_pinned { 1.0 } else { 0.0 })
+                    .group_hover(group_name, |style| style.opacity(1.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|style| style.bg(theme::hex_alpha(0xffffff, 0.07)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        cx.stop_propagation();
+                        app.set_thread_pinned(pin_id.clone(), !is_pinned, cx);
+                    }))
+                    .child(
+                        Icon::empty()
+                            .path("icons/pin.svg")
+                            .with_size(px(13.0))
+                            .text_color(if is_pinned {
+                                colors.text_secondary
+                            } else {
+                                colors.text_tertiary
+                            }),
+                    ),
+            )
+        })
+        .into_any_element()
 }
 
 /// Dense account row: initials avatar · name + plan · circular help `?`.

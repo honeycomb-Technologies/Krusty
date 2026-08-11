@@ -391,6 +391,8 @@ fn thread_title_bar(
     let menu_open = app.thread_menu_open();
     let can_compact = app.can_compact_selected_thread();
     let can_review = app.can_review_selected_thread();
+    let can_pin = app.can_pin_selected_thread();
+    let is_pinned = app.selected_thread_is_pinned();
     let is_archived = app
         .selected_thread()
         .and_then(|t| t.summary.archived)
@@ -406,6 +408,8 @@ fn thread_title_bar(
         || status.starts_with("Compaction")
         || status.starts_with("Review")
         || status.starts_with("Find")
+        || status.starts_with("Pinned")
+        || status.starts_with("Unpinned")
     {
         Some(status)
     } else {
@@ -470,6 +474,8 @@ fn thread_title_bar(
         .when(menu_open, |this| {
             this.child(thread_overflow_dropdown(
                 is_archived,
+                can_pin,
+                is_pinned,
                 can_review,
                 can_compact,
                 cx,
@@ -743,12 +749,15 @@ fn thread_overflow_menu(
 /// Dense dropdown under the ⋯ control — Codex-like lifecycle actions.
 fn thread_overflow_dropdown(
     is_archived: bool,
+    can_pin: bool,
+    is_pinned: bool,
     can_review: bool,
     can_compact: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let archive_label = if is_archived { "Unarchive" } else { "Archive" };
+    let pin_label = if is_pinned { "Unpin" } else { "Pin" };
     div()
         .id("thread-overflow-menu")
         .absolute()
@@ -763,6 +772,16 @@ fn thread_overflow_dropdown(
         .flex()
         .flex_col()
         .gap(px(1.0))
+        .when(can_pin, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-pin",
+                pin_label,
+                "icons/pin.svg",
+                false,
+                cx,
+                |app, cx| app.toggle_selected_thread_pin(cx),
+            ))
+        })
         .child(thread_menu_item(
             "thread-menu-archive",
             archive_label,

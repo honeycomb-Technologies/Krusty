@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 5;
+const CURRENT_VERSION: u32 = 6;
 const STATE_FILE: &str = "gpui-desktop-state.json";
+const MAX_PINNED_SESSIONS_PER_BACKEND: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -39,6 +40,11 @@ pub struct DesktopPreferences {
     /// Plan/Default(Build) selection is scoped to the active backend.
     #[serde(default)]
     pub plan_by_backend: HashMap<BackendKind, bool>,
+    /// Ordered desktop-local pinned session ids, scoped to their backend.
+    /// Codex desktop owns this in its native host rather than app-server, so
+    /// this intentionally remains separate from server-owned thread metadata.
+    #[serde(default)]
+    pub pinned_sessions_by_backend: HashMap<BackendKind, Vec<String>>,
 }
 
 impl Default for DesktopPreferences {
@@ -54,6 +60,7 @@ impl Default for DesktopPreferences {
             reasoning_by_model: HashMap::new(),
             fast_by_model: HashMap::new(),
             plan_by_backend: HashMap::new(),
+            pinned_sessions_by_backend: HashMap::new(),
         }
     }
 }
@@ -78,6 +85,14 @@ impl DesktopPreferences {
                     preferences.selected_session =
                         preferences.sessions_by_backend.get(&backend).cloned();
                 }
+                for ids in preferences.pinned_sessions_by_backend.values_mut() {
+                    let mut seen = std::collections::HashSet::new();
+                    ids.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+                    ids.truncate(MAX_PINNED_SESSIONS_PER_BACKEND);
+                }
+                preferences
+                    .pinned_sessions_by_backend
+                    .retain(|_, ids| !ids.is_empty());
                 preferences.version = CURRENT_VERSION;
                 Ok(preferences)
             }
@@ -149,6 +164,34 @@ impl DesktopPreferences {
 
     pub fn plan_mode_for(&self, backend: BackendKind) -> bool {
         self.plan_by_backend.get(&backend).copied().unwrap_or(false)
+    }
+
+    pub fn is_session_pinned(&self, backend: BackendKind, session_id: &str) -> bool {
+        self.pinned_sessions_by_backend
+            .get(&backend)
+            .is_some_and(|ids| ids.iter().any(|id| id == session_id))
+    }
+
+    pub fn pinned_session_rank(&self, backend: BackendKind, session_id: &str) -> Option<usize> {
+        self.pinned_sessions_by_backend
+            .get(&backend)?
+            .iter()
+            .position(|id| id == session_id)
+    }
+
+    pub fn set_session_pinned(&mut self, backend: BackendKind, session_id: String, pinned: bool) {
+        if session_id.trim().is_empty() {
+            return;
+        }
+        let ids = self.pinned_sessions_by_backend.entry(backend).or_default();
+        ids.retain(|id| id != &session_id);
+        if pinned {
+            ids.insert(0, session_id);
+            ids.truncate(MAX_PINNED_SESSIONS_PER_BACKEND);
+        }
+        if ids.is_empty() {
+            self.pinned_sessions_by_backend.remove(&backend);
+        }
     }
 }
 
@@ -256,6 +299,74 @@ mod tests {
         );
         assert!(state.plan_mode_for(BackendKind::MitsuroHttp));
         assert!(!state.plan_mode_for(BackendKind::CodexStdio));
+    }
+
+    #[test]
+    fn pinned_sessions_are_ordered_bounded_and_backend_scoped() {
+        let mut state = DesktopPreferences::default();
+        state.set_session_pinned(BackendKind::CodexStdio, "thread-1".into(), true);
+        state.set_session_pinned(BackendKind::CodexStdio, "thread-2".into(), true);
+        state.set_session_pinned(BackendKind::MitsuroHttp, "thread-1".into(), true);
+        state.set_session_pinned(BackendKind::MitsuroHttp, "   ".into(), true);
+
+        assert_eq!(
+            state
+                .pinned_sessions_by_backend
+                .get(&BackendKind::CodexStdio),
+            Some(&vec!["thread-2".to_owned(), "thread-1".to_owned()])
+        );
+        assert_eq!(
+            state.pinned_session_rank(BackendKind::CodexStdio, "thread-2"),
+            Some(0)
+        );
+        assert!(state.is_session_pinned(BackendKind::MitsuroHttp, "thread-1"));
+
+        state.set_session_pinned(BackendKind::CodexStdio, "thread-2".into(), false);
+        assert!(!state.is_session_pinned(BackendKind::CodexStdio, "thread-2"));
+        assert!(state.is_session_pinned(BackendKind::CodexStdio, "thread-1"));
+
+        for index in 0..=MAX_PINNED_SESSIONS_PER_BACKEND {
+            state.set_session_pinned(
+                BackendKind::CodexStdio,
+                format!("bounded-thread-{index}"),
+                true,
+            );
+        }
+        let codex = state
+            .pinned_sessions_by_backend
+            .get(&BackendKind::CodexStdio)
+            .expect("Codex pins");
+        assert_eq!(codex.len(), MAX_PINNED_SESSIONS_PER_BACKEND);
+        assert_eq!(
+            codex.first().map(String::as_str),
+            Some("bounded-thread-200")
+        );
+        assert_eq!(codex.last().map(String::as_str), Some("bounded-thread-1"));
+    }
+
+    #[test]
+    fn loading_sanitizes_pinned_session_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 5,
+                "pinned_sessions_by_backend": {
+                    "codex-stdio": ["thread-1", "", "thread-1", "thread-2"]
+                }
+            }"#,
+        )
+        .expect("write preferences");
+
+        let restored = DesktopPreferences::load(&path).expect("load preferences");
+        assert_eq!(restored.version, CURRENT_VERSION);
+        assert_eq!(
+            restored
+                .pinned_sessions_by_backend
+                .get(&BackendKind::CodexStdio),
+            Some(&vec!["thread-1".to_owned(), "thread-2".to_owned()])
+        );
     }
 
     #[test]

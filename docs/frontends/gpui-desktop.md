@@ -35,10 +35,12 @@ cannot use fixture catalogs or fixture process/file/session operations. Backend 
 clear the affected projection and render a typed loading, empty, unsupported, or error
 state. They never substitute sample success.
 
-Desktop preferences, current mode, local browser URL history, and transient composer UI
-remain local application state. Server-owned sessions, transcripts, models, files,
-processes, extensions, Hive runs/schedules, and account usage come from the selected
-backend or are shown as unavailable.
+Desktop preferences, current mode, backend-scoped ordered pin ids, local browser URL
+history, and transient composer UI remain local application state. Server-owned sessions,
+transcripts, models, files, processes, extensions, Hive runs/schedules, and account usage
+come from the selected backend or are shown as unavailable. A saved pin never creates a
+thread row: the corresponding real session must still be present in the active backend's
+live catalog.
 
 ## Truth matrix
 
@@ -46,6 +48,7 @@ backend or are shown as unavailable.
 |---|---|---|---|
 | Health/connect | Live | Live | Explicit fixture |
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
+| Pinned recents | Desktop-local ordered pins scoped to Mitsuro session identity | Desktop-local ordered pins scoped to Codex thread identity, matching native-host ownership | Unavailable; fixture rows have no durable product identity |
 | Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
 | Conversation find/history | Live search over the real persisted transcript plus bounded turn pages | Live `thread/searchOccurrences` plus bidirectional `thread/turns/list`; runtimes returning `-32601` fall back to a real `thread/read(includeTurns)` projection | Typed fixture transcript; no invented matches |
 | Edit latest user message | Unsupported; hidden because there is no destructive tail mutation | Live `thread/rollback { numTurns: 1 }`, authoritative returned-thread replacement, then real turn resubmit with retained text/media/reference inputs | Unsupported in product UI; typed rollback fixture is contract-test only |

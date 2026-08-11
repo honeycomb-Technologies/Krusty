@@ -5990,7 +5990,7 @@ impl MitsuroApp {
                 match result {
                     Ok(session) => {
                         let backend_session_id = session.id.clone();
-                        let summary = thread_summary_from_session(session);
+                        let summary = thread_summary_from_session(session, &app.preferences);
                         let new_id = summary.id.clone();
                         if let Some(index) = app
                             .threads
@@ -11313,6 +11313,99 @@ impl MitsuroApp {
         }
     }
 
+    /// Whether a durable live thread can participate in desktop-local pinning.
+    /// Pins mirror the native Codex host contract and never invent identities
+    /// for optimistic drafts or explicit fixture records.
+    pub fn can_pin_thread(&self, ui_id: &str) -> bool {
+        if self.is_explicit_fixture() {
+            return false;
+        }
+        self.threads
+            .iter()
+            .find(|thread| thread.summary.id == ui_id)
+            .and_then(|thread| thread.backend_session_id.as_ref())
+            .is_some_and(|session| self.active_backend_kind() == Some(session.backend))
+    }
+
+    pub fn can_pin_selected_thread(&self) -> bool {
+        self.selected_thread
+            .as_deref()
+            .is_some_and(|id| self.can_pin_thread(id))
+    }
+
+    pub fn selected_thread_is_pinned(&self) -> bool {
+        self.selected_thread()
+            .and_then(|thread| thread.summary.is_pinned)
+            .unwrap_or(false)
+    }
+
+    /// Return the persisted order for a pinned live thread.
+    pub fn pinned_thread_rank(&self, ui_id: &str) -> Option<usize> {
+        let session = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == ui_id)?
+            .backend_session_id
+            .as_ref()?;
+        self.preferences
+            .pinned_session_rank(session.backend, &session.raw)
+    }
+
+    pub fn set_thread_pinned(&mut self, ui_id: String, pinned: bool, cx: &mut Context<Self>) {
+        self.thread_menu_open = false;
+        if !self.can_pin_thread(&ui_id) {
+            self.status_line = "Pinning requires a live thread identity.".into();
+            cx.notify();
+            return;
+        }
+        let Some(index) = self
+            .threads
+            .iter()
+            .position(|thread| thread.summary.id == ui_id)
+        else {
+            self.status_line = "Pinning failed · thread is no longer available.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.threads[index].backend_session_id.clone() else {
+            self.status_line = "Pinning requires a live thread identity.".into();
+            cx.notify();
+            return;
+        };
+
+        let previous_preferences = self.preferences.clone();
+        let previous_pinned = self.threads[index].summary.is_pinned;
+        self.preferences
+            .set_session_pinned(session.backend, session.raw, pinned);
+        self.threads[index].summary.is_pinned = Some(pinned);
+
+        match self.preferences.save_default() {
+            Ok(()) => {
+                self.status_line = if pinned {
+                    "Pinned chat.".into()
+                } else {
+                    "Unpinned chat.".into()
+                };
+            }
+            Err(error) => {
+                self.preferences = previous_preferences;
+                self.threads[index].summary.is_pinned = previous_pinned;
+                self.status_line = format!("Pinning failed · {error}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_selected_thread_pin(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            self.thread_menu_open = false;
+            self.status_line = "Pinning failed · no thread selected.".into();
+            cx.notify();
+            return;
+        };
+        self.set_thread_pinned(id, !self.selected_thread_is_pinned(), cx);
+    }
+
     pub fn can_steer_active_turn(&self) -> bool {
         self.turn_in_progress
             && self
@@ -12329,7 +12422,7 @@ impl MitsuroApp {
                         return;
                     }
                     let backend_session_id = session.id.clone();
-                    let summary = thread_summary_from_session(session);
+                    let summary = thread_summary_from_session(session, &app.preferences);
                     let new_id = summary.id.clone();
                     // Migrate local thread → server id (preserve user bubble).
                     if let Some(idx) = app.threads.iter().position(|t| t.summary.id == local_id) {
@@ -13963,7 +14056,7 @@ impl MitsuroApp {
                     for session in sessions {
                         let raw_id = session.id.raw.clone();
                         let backend_session_id = session.id.clone();
-                        let summary = thread_summary_from_session(session);
+                        let summary = thread_summary_from_session(session, &app.preferences);
                         if let Some(thread) = app
                             .threads
                             .iter_mut()
@@ -14465,11 +14558,12 @@ impl MitsuroApp {
                             app.preferences.remember_backend(backend_kind);
                             app.save_preferences_best_effort();
                         }
+                        let preferences = app.preferences.clone();
                         app.threads = remote
                             .into_iter()
                             .map(|session| DemoThread {
                                 backend_session_id: Some(session.id.clone()),
-                                summary: thread_summary_from_session(session),
+                                summary: thread_summary_from_session(session, &preferences),
                                 surface: ThreadSurface::Codex,
                                 messages: vec![],
                             })
@@ -14970,7 +15064,11 @@ fn should_release_thread_subscription(
         && active_backend == BackendKind::CodexStdio
 }
 
-fn thread_summary_from_session(session: SessionSummary) -> ThreadSummary {
+fn thread_summary_from_session(
+    session: SessionSummary,
+    preferences: &DesktopPreferences,
+) -> ThreadSummary {
+    let is_pinned = preferences.is_session_pinned(session.id.backend, &session.id.raw);
     ThreadSummary {
         id: session.id.raw,
         name: session.title,
@@ -14980,7 +15078,7 @@ fn thread_summary_from_session(session: SessionSummary) -> ThreadSummary {
         updated_at: session.updated_at,
         model_provider: session.model_provider,
         ephemeral: Some(session.ephemeral),
-        is_pinned: Some(false),
+        is_pinned: Some(is_pinned),
         archived: Some(session.archived),
         raw: None,
     }
@@ -16623,6 +16721,32 @@ mod tests {
             BackendKind::MitsuroHttp,
             false
         ));
+    }
+
+    #[test]
+    fn live_thread_projection_applies_only_its_backends_persisted_pin() {
+        let session = |backend, raw: &str| SessionSummary {
+            id: BackendSessionId::new(backend, raw),
+            title: Some("Real thread".into()),
+            preview: None,
+            working_dir: Some("/workspace".into()),
+            updated_at: Some(1),
+            model_provider: Some("live-provider".into()),
+            ephemeral: false,
+            archived: false,
+        };
+        let mut preferences = DesktopPreferences::default();
+        preferences.set_session_pinned(BackendKind::MitsuroHttp, "same-id".into(), true);
+
+        let mitsuro =
+            thread_summary_from_session(session(BackendKind::MitsuroHttp, "same-id"), &preferences);
+        let codex =
+            thread_summary_from_session(session(BackendKind::CodexStdio, "same-id"), &preferences);
+
+        assert_eq!(mitsuro.is_pinned, Some(true));
+        assert_eq!(codex.is_pinned, Some(false));
+        assert_eq!(mitsuro.name.as_deref(), Some("Real thread"));
+        assert_eq!(mitsuro.cwd.as_deref(), Some("/workspace"));
     }
 
     #[test]

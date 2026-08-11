@@ -20,8 +20,8 @@ or fall back to fixture records: loading, empty, unsupported, and error are dist
 states. `MITSURO_SKIP_APPSERVER` now leaves an explicit backend-disabled error instead of
 quietly entering fixture mode.
 
-The selected transport, backend-qualified session, backend-scoped model, and
-privacy-safe desktop preferences are persisted in
+The selected transport, backend-qualified session, backend-scoped model, ordered
+backend-scoped pinned-session ids, and privacy-safe desktop preferences are persisted in
 `~/.mitsuro/gpui-desktop-state.json` (override with `MITSURO_GPUI_STATE_PATH`). An
 explicit `MITSURO_BACKEND` always takes precedence. No server token or provider
 credential is written to this file.
@@ -35,6 +35,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 
 - Sessions, models, turns, files, skills, MCP servers, and extensions use the
   transport-neutral `ProductBackend` contract.
+- Pinned recents mirror the native Codex host contract: Pin/Unpin is desktop-local,
+  ordered, and scoped to the exact Mitsuro or Codex backend session identity. The current
+  Codex app-server contract does not own pin state. A saved pin only reorders a thread
+  returned by the active backend; it cannot synthesize a row, and fixture/draft rows are
+  not pinnable.
 - Codex plugin installation and removal use typed app-server methods and refresh the
   live marketplace afterward. Mitsuro and fixture extension inventories are read-only;
   the desktop never simulates a successful mutation. Marketplace search filters live
