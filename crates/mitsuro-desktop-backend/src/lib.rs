@@ -196,7 +196,7 @@ pub use product::{
     ProductScheduleDefinition, ProductScheduleMutation, ProductScheduleMutationRequest,
     ProductScheduleRecurrence, ProductScheduleReplaceRequest, ProductScheduleWeekday, ProductSkill,
     ProductSpeedMode, ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode,
-    SessionConversation, SessionSummary,
+    SessionConversation, SessionOpenMode, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,

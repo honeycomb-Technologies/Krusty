@@ -179,7 +179,7 @@ fn codex_composer(
                                 cx,
                             )
                             .into_any_element()
-                        } else if !draft_empty {
+                        } else if !draft_empty && !app.selected_thread_is_read_only() {
                             round_action(
                                 "composer-send",
                                 IconName::ArrowUp,
@@ -295,7 +295,7 @@ fn chat_slim_composer(
                 .child(if streaming {
                     streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
                         .into_any_element()
-                } else if !draft_empty {
+                } else if !draft_empty && !app.selected_thread_is_read_only() {
                     round_action(
                         "chat-send",
                         IconName::ArrowUp,
@@ -422,7 +422,7 @@ fn chat_thread_composer(
                                 cx,
                             )
                             .into_any_element()
-                        } else if !draft_empty {
+                        } else if !draft_empty && !app.selected_thread_is_read_only() {
                             round_action(
                                 "chat-thread-send",
                                 IconName::ArrowUp,

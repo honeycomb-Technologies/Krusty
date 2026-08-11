@@ -160,6 +160,20 @@ pub struct SessionConversation {
     /// Canonical durable delegation state loaded alongside the transcript.
     /// Empty for backends that do not expose the Mitsuro coordinator contract.
     pub delegation: SessionDelegationProjection,
+    /// How this client obtained the transcript. Only `Subscribed` owns a Codex
+    /// app-server subscription that must later be released.
+    pub open_mode: SessionOpenMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOpenMode {
+    /// Authoritative point-in-time backend read without a subscription lifecycle.
+    Snapshot,
+    /// Interactive Codex `thread/resume`; this client owns the subscription.
+    Subscribed,
+    /// `thread/resume` was refused because another client owns the writer, so
+    /// the transcript came from a truthful `thread/read(includeTurns)` fallback.
+    ReadOnlyActiveWriter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1342,6 +1356,14 @@ fn review_start_params(request: ProductReview) -> ReviewStartParams {
     }
 }
 
+fn is_active_writer_conflict(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Rpc { code: -32600, message }
+            if message.to_ascii_lowercase().contains("active writer")
+    )
+}
+
 #[async_trait]
 impl ProductBackend for DesktopBackend {
     fn backend_kind(&self) -> BackendKind {
@@ -1431,6 +1453,7 @@ impl ProductBackend for DesktopBackend {
             session,
             messages,
             delegation,
+            open_mode: SessionOpenMode::Snapshot,
         })
     }
 
@@ -1439,9 +1462,18 @@ impl ProductBackend for DesktopBackend {
         let DesktopBackend::Codex(_) = self else {
             return self.read_session(id).await;
         };
-        let response = self
+        let response = match self
             .thread_resume(ThreadResumeParams::new(id.raw.clone()))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if is_active_writer_conflict(&error) => {
+                let mut conversation = self.read_session(id).await?;
+                conversation.open_mode = SessionOpenMode::ReadOnlyActiveWriter;
+                return Ok(conversation);
+            }
+            Err(error) => return Err(error),
+        };
         let thread = response.summary();
         let session = SessionSummary {
             id: id.clone(),
@@ -1462,6 +1494,7 @@ impl ProductBackend for DesktopBackend {
             session,
             messages,
             delegation: SessionDelegationProjection::default(),
+            open_mode: SessionOpenMode::Subscribed,
         })
     }
 
@@ -2260,9 +2293,82 @@ mod tests {
         assert_eq!(conversation.session.title.as_deref(), Some("Live thread"));
         assert_eq!(conversation.messages.len(), 1);
         assert_eq!(conversation.messages[0].body, "hello");
+        assert_eq!(conversation.open_mode, SessionOpenMode::Subscribed);
 
         let closed = backend.close_session(&session_id).await.unwrap();
         assert_eq!(closed.status, crate::ThreadUnsubscribeStatus::Unsubscribed);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_product_open_reads_active_writer_thread_without_claiming_subscription() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let codex = Arc::new(crate::CodexAppServerBackend::with_defaults());
+        codex.connect_with_mock_writer(client_writer).await;
+        codex.mark_ready_for_test(crate::InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let backend = DesktopBackend::Codex(Arc::clone(&codex));
+        let responder = Arc::clone(&codex);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(&mut server_reader);
+            for expected in ["thread/resume", "thread/read"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let response = if expected == "thread/resume" {
+                    serde_json::json!({
+                        "id": request["id"],
+                        "error": {
+                            "code": -32600,
+                            "message": "thread thread-8 already has an active writer"
+                        }
+                    })
+                } else {
+                    assert_eq!(
+                        request["params"],
+                        serde_json::json!({ "threadId": "thread-8", "includeTurns": true })
+                    );
+                    serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "thread": {
+                                "id": "thread-8",
+                                "name": "Open elsewhere",
+                                "turns": [{
+                                    "id": "turn-1",
+                                    "items": [{
+                                        "type": "agentMessage",
+                                        "id": "item-1",
+                                        "text": "persisted answer"
+                                    }]
+                                }]
+                            }
+                        }
+                    })
+                };
+                responder.inject_stdout_line(&response.to_string()).await;
+            }
+        });
+
+        let session_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-8");
+        let conversation = backend.open_session(&session_id).await.unwrap();
+        assert_eq!(
+            conversation.session.title.as_deref(),
+            Some("Open elsewhere")
+        );
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.messages[0].body, "persisted answer");
+        assert_eq!(
+            conversation.open_mode,
+            SessionOpenMode::ReadOnlyActiveWriter
+        );
         server.await.unwrap();
     }
 

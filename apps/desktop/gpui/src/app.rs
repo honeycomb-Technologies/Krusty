@@ -65,17 +65,17 @@ use mitsuro_desktop_backend::{
     RemoteControlConnectionStatus, RemoteControlDisableParams, RemoteControlEnableParams,
     RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
     RemoteControlPairingStatusParams, RemoteControlStatusChangedNotification,
-    RemoteControlStatusReadResponse, SessionDelegationProjection, SessionSummary, SkillMetadata,
-    SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
-    ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsListParams,
-    ThreadBackgroundTerminalsTerminateParams, ThreadDeleteParams, ThreadForkParams,
-    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus,
-    ThreadListParams, ThreadRealtimeAppendAudioParams, ThreadRealtimeAudioChunk,
-    ThreadRealtimeStartParams, ThreadRealtimeStopParams, ThreadSearchOccurrence,
-    ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
-    TurnStreamEvent, WorkspaceMessage, CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE,
-    DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID,
-    WORKSPACE_PROFILE_ID,
+    RemoteControlStatusReadResponse, SessionDelegationProjection, SessionOpenMode, SessionSummary,
+    SkillMetadata, SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams,
+    ThreadBackgroundTerminal, ThreadBackgroundTerminalsCleanParams,
+    ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsTerminateParams,
+    ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams,
+    ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadRealtimeAppendAudioParams,
+    ThreadRealtimeAudioChunk, ThreadRealtimeStartParams, ThreadRealtimeStopParams,
+    ThreadSearchOccurrence, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
+    TurnInterruptParams, TurnStreamEvent, WorkspaceMessage, CLAUDE_CODE_MIGRATION_SOURCE,
+    CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
+    FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -1352,6 +1352,11 @@ pub struct MitsuroApp {
     backend: Option<Arc<DesktopBackend>>,
     /// Rejects stale async bootstrap results after an in-app backend switch.
     backend_generation: u64,
+    /// Raw Codex thread ids for subscriptions successfully owned by this app-server.
+    codex_thread_subscriptions: std::collections::HashSet<String>,
+    /// Raw Codex thread ids opened through a truthful snapshot because another
+    /// app-server owns the active writer.
+    codex_read_only_threads: std::collections::HashSet<String>,
     preferences: DesktopPreferences,
     fixture: Option<Arc<FixtureBackend>>,
     turn_in_progress: bool,
@@ -1956,6 +1961,8 @@ impl MitsuroApp {
             search_query: String::new(),
             backend: None,
             backend_generation: 0,
+            codex_thread_subscriptions: std::collections::HashSet::new(),
+            codex_read_only_threads: std::collections::HashSet::new(),
             preferences: preferences.clone(),
             fixture: Some(Arc::clone(&fixture)),
             turn_in_progress: false,
@@ -5906,6 +5913,7 @@ impl MitsuroApp {
             return true;
         }
         !self.turn_in_progress
+            && !self.selected_thread_is_read_only()
             && matches!(self.connection, UiConnection::Ready { has_auth: true, .. })
             && self
                 .live_backend()
@@ -8704,6 +8712,7 @@ impl MitsuroApp {
         if self.turn_in_progress
             || self.latest_message_edit_in_progress
             || self.latest_message_edit.is_some()
+            || self.selected_thread_is_read_only()
         {
             return false;
         }
@@ -8733,6 +8742,12 @@ impl MitsuroApp {
     ) {
         if self.turn_in_progress {
             self.status_line = "Edit unavailable while a turn is running.".into();
+            cx.notify();
+            return;
+        }
+        if self.selected_thread_is_read_only() {
+            self.status_line =
+                "Edit unavailable · this chat is active in another Codex client.".into();
             cx.notify();
             return;
         }
@@ -8816,6 +8831,12 @@ impl MitsuroApp {
 
     pub fn submit_latest_message_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.latest_message_edit_in_progress {
+            return;
+        }
+        if self.selected_thread_is_read_only() {
+            self.latest_message_edit_error =
+                Some("This chat is active in another Codex client".to_owned());
+            cx.notify();
             return;
         }
         let Some(edit) = self.latest_message_edit.clone() else {
@@ -10311,7 +10332,11 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    fn release_thread_subscription_best_effort(&self, thread_id: &str, cx: &mut Context<Self>) {
+    fn release_thread_subscription_best_effort(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        self.codex_read_only_threads.remove(thread_id);
+        if !self.codex_thread_subscriptions.remove(thread_id) {
+            return;
+        }
         let Some(session_id) = self
             .threads
             .iter()
@@ -10323,7 +10348,7 @@ impl MitsuroApp {
         let Some(backend) = self.live_backend() else {
             return;
         };
-        if !should_release_thread_subscription(&session_id, backend.kind(), false) {
+        if !should_release_thread_subscription(&session_id, backend.kind(), false, true) {
             return;
         }
         cx.spawn(async move |_this, cx| {
@@ -10678,6 +10703,12 @@ impl MitsuroApp {
     /// Whether a turn is currently streaming (Send blocked / Stop visible).
     pub fn turn_in_progress(&self) -> bool {
         self.turn_in_progress
+    }
+
+    pub fn selected_thread_is_read_only(&self) -> bool {
+        self.selected_thread
+            .as_ref()
+            .is_some_and(|id| self.codex_read_only_threads.contains(id))
     }
 
     pub fn composer_attachments(&self) -> &[ComposerAttachment] {
@@ -11774,6 +11805,7 @@ impl MitsuroApp {
 
     pub fn can_compact_selected_thread(&self) -> bool {
         !self.turn_in_progress
+            && !self.selected_thread_is_read_only()
             && self
                 .backend
                 .as_ref()
@@ -11787,6 +11819,7 @@ impl MitsuroApp {
 
     pub fn can_review_selected_thread(&self) -> bool {
         !self.turn_in_progress
+            && !self.selected_thread_is_read_only()
             && self
                 .backend
                 .as_ref()
@@ -11802,6 +11835,12 @@ impl MitsuroApp {
         self.thread_menu_open = false;
         if self.turn_in_progress {
             self.status_line = "Review unavailable · wait for the active turn to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.selected_thread_is_read_only() {
+            self.status_line =
+                "Review unavailable · this chat is active in another Codex client.".into();
             cx.notify();
             return;
         }
@@ -11838,6 +11877,12 @@ impl MitsuroApp {
         self.thread_menu_open = false;
         if self.turn_in_progress {
             self.status_line = "Compact unavailable · wait for the active turn to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.selected_thread_is_read_only() {
+            self.status_line =
+                "Compact unavailable · this chat is active in another Codex client.".into();
             cx.notify();
             return;
         }
@@ -12415,6 +12460,14 @@ impl MitsuroApp {
                 return;
             }
             self.submit_live_steer(input, trimmed.to_owned(), window, cx);
+            return;
+        }
+
+        if self.selected_thread_is_read_only() {
+            self.status_line =
+                "Send unavailable · this chat is active in another Codex client. Reopen it after that writer finishes."
+                    .into();
+            cx.notify();
             return;
         }
 
@@ -14619,6 +14672,8 @@ impl MitsuroApp {
         self.latest_message_edit_error = None;
         self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
         self.threads.clear();
+        self.codex_thread_subscriptions.clear();
+        self.codex_read_only_threads.clear();
         self.expanded_transcript_messages.clear();
         self.selected_thread = None;
         self.selected_chat_thread = None;
@@ -15286,6 +15341,7 @@ impl MitsuroApp {
                     let prepared = backend.block_on(async move {
                         match b.open_session(&session_id).await {
                             Ok(conversation) => {
+                                let open_mode = conversation.open_mode;
                                 let delegation = conversation.delegation;
                                 let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
@@ -15313,6 +15369,7 @@ impl MitsuroApp {
                                     ui,
                                     delegation,
                                     delegation_status,
+                                    open_mode,
                                 ))
                             }
                             Err(e) => {
@@ -15329,7 +15386,18 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((tid, n_in, ui_msgs, delegation, delegation_status)) => {
+                    Ok((tid, n_in, ui_msgs, delegation, delegation_status, open_mode)) => {
+                        app.codex_thread_subscriptions.remove(&tid);
+                        app.codex_read_only_threads.remove(&tid);
+                        match open_mode {
+                            SessionOpenMode::Subscribed => {
+                                app.codex_thread_subscriptions.insert(tid.clone());
+                            }
+                            SessionOpenMode::ReadOnlyActiveWriter => {
+                                app.codex_read_only_threads.insert(tid.clone());
+                            }
+                            SessionOpenMode::Snapshot => {}
+                        }
                         if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
                             thread.messages = ui_msgs;
                             app.delegations.insert(tid.clone(), delegation);
@@ -15352,10 +15420,19 @@ impl MitsuroApp {
                                     "thread/open · {} msgs (of {n_in})",
                                     thread.messages.len(),
                                 );
-                                app.status_line = delegation_status
-                                    .map(|status| format!("{transcript_status} · {status}"))
-                                    .unwrap_or(transcript_status)
-                                    .into();
+                                app.status_line = if open_mode
+                                    == SessionOpenMode::ReadOnlyActiveWriter
+                                {
+                                    format!(
+                                        "{transcript_status} · read-only · active in another Codex client"
+                                    )
+                                    .into()
+                                } else {
+                                    delegation_status
+                                        .map(|status| format!("{transcript_status} · {status}"))
+                                        .unwrap_or(transcript_status)
+                                        .into()
+                                };
                             }
                         } else {
                             eprintln!(
@@ -15403,8 +15480,10 @@ fn should_release_thread_subscription(
     session_id: &BackendSessionId,
     active_backend: BackendKind,
     has_active_turn: bool,
+    owns_subscription: bool,
 ) -> bool {
-    !has_active_turn
+    owns_subscription
+        && !has_active_turn
         && session_id.backend == BackendKind::CodexStdio
         && active_backend == BackendKind::CodexStdio
 }
@@ -17076,21 +17155,31 @@ mod tests {
         assert!(should_release_thread_subscription(
             &codex,
             BackendKind::CodexStdio,
-            false
+            false,
+            true
         ));
         assert!(!should_release_thread_subscription(
             &codex,
             BackendKind::CodexStdio,
+            true,
             true
         ));
         assert!(!should_release_thread_subscription(
             &codex,
             BackendKind::MitsuroHttp,
-            false
+            false,
+            true
         ));
         assert!(!should_release_thread_subscription(
             &mitsuro,
             BackendKind::MitsuroHttp,
+            false,
+            true
+        ));
+        assert!(!should_release_thread_subscription(
+            &codex,
+            BackendKind::CodexStdio,
+            false,
             false
         ));
     }

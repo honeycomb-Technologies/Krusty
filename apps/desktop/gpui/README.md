@@ -194,8 +194,13 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Long transcripts start with a 16-message tail and reveal earlier history in bounded
   pages. Opening a Codex conversation uses `thread/resume`; moving to another task
   releases the idle prior subscription with `thread/unsubscribe`, and returning resumes
-  it again. Mitsuro keeps its HTTP snapshot behavior, and an active Codex turn is never
-  unsubscribed mid-stream. Find in conversation queries the selected live backend rather than filtering a
+  it again. If the app-server reports that another client already owns the active writer,
+  the desktop falls back to the same thread's real `thread/read(includeTurns)` transcript
+  and marks it read-only. Send, voice, latest-message edit, review, and compaction remain
+  unavailable until reopening can acquire a subscription, and the snapshot is never
+  unsubscribed because this client does not own it. Mitsuro keeps its HTTP snapshot
+  behavior, and an active Codex turn is never unsubscribed mid-stream. Find in
+  conversation queries the selected live backend rather than filtering a
   local fixture: Codex uses `thread/searchOccurrences`, Mitsuro searches its persisted
   transcript, and an unloaded result hydrates bounded real turn pages around the exact
   returned cursor before scrolling to the item. Codex runtimes that advertise the

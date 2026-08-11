@@ -262,7 +262,10 @@ work, not as feature completion; the matrix test must change with each typed ada
 - Opening a persisted Codex conversation uses `thread/resume`, matching the reference
   client's subscription lifecycle. Leaving an idle Codex conversation issues the exact
   `thread/unsubscribe` request, while returning to it resumes and refreshes authoritative
-  history. Mitsuro remains snapshot-only and never receives the Codex lifecycle method;
+  history. An exact app-server active-writer conflict falls back to the same persisted
+  `thread/read(includeTurns)` transcript and is explicitly read-only: writer actions are
+  disabled and no `thread/unsubscribe` is sent for a subscription this client never
+  acquired. Mitsuro remains snapshot-only and never receives the Codex lifecycle method;
   active turns are not unsubscribed while their stream is still running.
 - Find in conversation searches only backend-owned user/final-assistant text. Selecting
   an unloaded match hydrates five real turns in both directions from the returned turn
