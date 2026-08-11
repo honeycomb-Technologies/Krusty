@@ -177,8 +177,13 @@ fn thread_main(
         .unwrap_or(&[]);
     let delegation = app.selected_delegation();
     let transcript_visible_limit = app.transcript_visible_limit();
-    // Selected + empty messages → loading (thread/read), not calm hero.
-    let loading_transcript = thread.is_some() && messages.is_empty() && delegation.is_none();
+    let has_older_server_history = app.transcript_has_older_server_history();
+    let older_history_loading = app.transcript_older_history_loading();
+    // Selected + empty messages stay loading until backend hydration completes.
+    let loading_transcript = thread.is_some()
+        && messages.is_empty()
+        && delegation.is_none()
+        && app.selected_transcript_is_loading();
     let empty = thread.is_none();
     let calm = app.is_calm_stage();
     // Open-thread chrome whenever a recent is selected (not calm home).
@@ -236,6 +241,8 @@ fn thread_main(
                                 surface,
                                 delegation,
                                 transcript_visible_limit,
+                                has_older_server_history,
+                                older_history_loading,
                                 transcript_thread_id,
                                 app,
                                 cx,
@@ -300,7 +307,7 @@ fn loading_transcript_state() -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(colors.text_tertiary)
-                .child("thread/read · includeTurns"),
+                .child("Loading persisted conversation"),
         )
 }
 
@@ -1142,6 +1149,8 @@ fn transcript(
     surface: ThreadSurface,
     delegation: Option<&SessionDelegationProjection>,
     visible_limit: usize,
+    has_older_server_history: bool,
+    older_history_loading: bool,
     thread_id: &str,
     app: &MitsuroApp,
     cx: &mut Context<MitsuroApp>,
@@ -1166,8 +1175,14 @@ fn transcript(
         .gap(if simple_bubbles { px(12.0) } else { px(14.0) })
         .overflow_y_scroll()
         .track_scroll(app.transcript_scroll_handle())
-        .when(hidden_count > 0, |this| {
-            this.child(show_earlier_button(hidden_count, messages.len(), cx))
+        .when(hidden_count > 0 || has_older_server_history, |this| {
+            this.child(show_earlier_button(
+                hidden_count,
+                messages.len(),
+                has_older_server_history,
+                older_history_loading,
+                cx,
+            ))
         })
         .children(visible.iter().enumerate().map(|(i, msg)| {
             let absolute_index = first_visible_index + i;
@@ -1211,10 +1226,12 @@ fn transcript_tail_range(total: usize, visible_limit: usize) -> std::ops::Range<
 fn show_earlier_button(
     hidden_count: usize,
     total_messages: usize,
+    has_older_server_history: bool,
+    loading: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
-    let next_count = hidden_count.min(TRANSCRIPT_PAGE_SIZE);
+    let label = earlier_history_label(hidden_count, has_older_server_history, loading);
     div()
         .id(("transcript-show-earlier", hidden_count))
         .flex()
@@ -1229,13 +1246,32 @@ fn show_earlier_button(
                 .rounded(px(7.0))
                 .text_xs()
                 .text_color(colors.text_tertiary)
-                .cursor_pointer()
+                .when(!loading, |this| this.cursor_pointer())
                 .hover(|style| style.bg(colors.bg_hover).text_color(colors.text_secondary))
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.show_earlier_transcript_messages(total_messages, cx);
+                    if !loading {
+                        app.show_earlier_transcript_messages(total_messages, cx);
+                    }
                 }))
-                .child(format!("Show {next_count} earlier · {hidden_count} hidden")),
+                .child(label),
         )
+}
+
+fn earlier_history_label(
+    hidden_count: usize,
+    has_older_server_history: bool,
+    loading: bool,
+) -> String {
+    if hidden_count > 0 {
+        let next_count = hidden_count.min(TRANSCRIPT_PAGE_SIZE);
+        format!("Show {next_count} earlier · {hidden_count} hidden")
+    } else if loading {
+        "Loading earlier…".to_owned()
+    } else if has_older_server_history {
+        "Load earlier messages".to_owned()
+    } else {
+        "No earlier messages".to_owned()
+    }
 }
 
 fn delegation_block(projection: &SessionDelegationProjection) -> impl IntoElement {
@@ -2619,6 +2655,19 @@ mod tests {
     fn transcript_expansion_never_exceeds_available_history() {
         assert_eq!(transcript_tail_range(35, 32), 3..35);
         assert_eq!(transcript_tail_range(20, usize::MAX), 0..20);
+    }
+
+    #[test]
+    fn earlier_history_control_distinguishes_local_and_server_pages() {
+        assert_eq!(
+            earlier_history_label(35, true, false),
+            "Show 16 earlier · 35 hidden"
+        );
+        assert_eq!(
+            earlier_history_label(0, true, false),
+            "Load earlier messages"
+        );
+        assert_eq!(earlier_history_label(0, true, true), "Loading earlier…");
     }
 
     #[test]

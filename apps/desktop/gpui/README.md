@@ -198,6 +198,13 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   serialized through typed `thread/settings/update`; the full
   `thread/settings/updated` notification reconciles the selected composer state. An
   active-writer read-only snapshot never sends those mutations.
+- Codex transcript opening is bounded at the server boundary using the reference fast
+  path: `thread/resume` atomically requests the newest five full turns and **Load earlier
+  messages** follows the opaque `thread/turns/list` cursor in five-turn pages. If a
+  runtime returns an incomplete turn, real cursor-guarded `thread/items/list` pages
+  complete it before projection. Mitsuro uses its complete real HTTP snapshot and never
+  advertises a synthetic older-history cursor. GPUI still limits how many hydrated
+  messages it lays out at once.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

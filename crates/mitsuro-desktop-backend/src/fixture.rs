@@ -1254,6 +1254,18 @@ impl AgentBackend for FixtureBackend {
                     ))
                 })?
         };
+        let initial_turns_page = params.initial_turns_page.as_ref().map(|initial| {
+            list_turns_in_thread(
+                &thread,
+                &ThreadTurnsListParams {
+                    thread_id: params.thread_id.clone(),
+                    cursor: None,
+                    limit: initial.limit,
+                    sort_direction: initial.sort_direction,
+                    items_view: initial.items_view,
+                },
+            )
+        });
         if params.exclude_turns == Some(true) {
             if let Some(obj) = thread.as_object_mut() {
                 obj.insert("turns".into(), Value::Array(vec![]));
@@ -1277,6 +1289,11 @@ impl AgentBackend for FixtureBackend {
             cwd,
             active_permission_profile: None,
             reasoning_effort: None,
+            turns_backwards_cursor: initial_turns_page
+                .as_ref()
+                .and_then(|page| page.backwards_cursor.clone()),
+            items_backwards_cursor: None,
+            initial_turns_page,
         })
     }
 

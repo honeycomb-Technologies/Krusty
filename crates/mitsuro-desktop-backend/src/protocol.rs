@@ -1924,6 +1924,20 @@ pub struct ThreadResumeParams {
     /// When true, omit `thread.turns` in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_turns: Option<bool>,
+    /// Optional first `thread/turns/list` page returned atomically with resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_turns_page: Option<ThreadResumeInitialTurnsPageParams>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadResumeInitialTurnsPageParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_direction: Option<crate::ThreadTurnsSortDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_view: Option<crate::ThreadTurnItemsView>,
 }
 
 impl ThreadResumeParams {
@@ -1935,6 +1949,7 @@ impl ThreadResumeParams {
             model_provider: None,
             cwd: None,
             exclude_turns: None,
+            initial_turns_page: None,
         }
     }
 }
@@ -1956,6 +1971,15 @@ pub struct ThreadResumeResponse {
     pub active_permission_profile: Option<crate::ActivePermissionProfile>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Page requested through `initialTurnsPage`, if supported by app-server.
+    #[serde(default)]
+    pub initial_turns_page: Option<crate::ThreadTurnsListResponse>,
+    /// Opaque cursor for reversing from the newest hydrated turn.
+    #[serde(default)]
+    pub turns_backwards_cursor: Option<String>,
+    /// Opaque cursor for reversing from the newest hydrated item.
+    #[serde(default)]
+    pub items_backwards_cursor: Option<String>,
 }
 
 impl ThreadResumeResponse {
@@ -3572,11 +3596,24 @@ mod p11_protocol_shape_tests {
     fn thread_resume_params_camel_case() {
         let mut p = ThreadResumeParams::new("th-resume");
         p.cwd = Some("/work".into());
-        p.exclude_turns = Some(false);
+        p.exclude_turns = Some(true);
+        p.initial_turns_page = Some(ThreadResumeInitialTurnsPageParams {
+            limit: Some(16),
+            sort_direction: Some(crate::ThreadTurnsSortDirection::Desc),
+            items_view: Some(crate::ThreadTurnItemsView::NotLoaded),
+        });
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["threadId"], "th-resume");
         assert_eq!(v["cwd"], "/work");
-        assert_eq!(v["excludeTurns"], false);
+        assert_eq!(v["excludeTurns"], true);
+        assert_eq!(
+            v["initialTurnsPage"],
+            serde_json::json!({
+                "limit": 16,
+                "sortDirection": "desc",
+                "itemsView": "notLoaded"
+            })
+        );
         assert!(v.get("thread_id").is_none());
     }
 

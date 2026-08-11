@@ -1200,6 +1200,25 @@ struct RealtimeVoiceRuntime {
 }
 
 #[derive(Clone, Debug)]
+struct TranscriptPaginationState {
+    older_turns_cursor: Option<String>,
+    fully_loaded: bool,
+    loading: bool,
+    generation: u64,
+}
+
+impl From<mitsuro_desktop_backend::SessionHistoryState> for TranscriptPaginationState {
+    fn from(history: mitsuro_desktop_backend::SessionHistoryState) -> Self {
+        Self {
+            older_turns_cursor: history.older_turns_cursor,
+            fully_loaded: history.fully_loaded,
+            loading: false,
+            generation: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ExternalAgentImportSource {
     pub id: String,
     pub label: String,
@@ -1217,6 +1236,9 @@ pub struct MitsuroApp {
     /// Per-thread transcript window. History is revealed deliberately so long
     /// sessions never force GPUI to lay out the entire conversation at once.
     transcript_visible_limits: std::collections::HashMap<String, usize>,
+    /// Opaque server-owned history cursors for transcripts that were opened
+    /// through bounded Codex turn/item pages.
+    transcript_pagination: std::collections::HashMap<String, TranscriptPaginationState>,
     /// Explicit user expansion for long transcript messages. Keys include the
     /// backend-qualified UI thread id and stable item id (or message index).
     expanded_transcript_messages: std::collections::HashSet<String>,
@@ -1882,6 +1904,7 @@ impl MitsuroApp {
             threads: Vec::new(),
             delegations: std::collections::HashMap::new(),
             transcript_visible_limits: std::collections::HashMap::new(),
+            transcript_pagination: std::collections::HashMap::new(),
             expanded_transcript_messages: std::collections::HashSet::new(),
             transcript_scroll_handle: ScrollHandle::new(),
             thread_find_input,
@@ -8720,6 +8743,35 @@ impl MitsuroApp {
             .unwrap_or(16)
     }
 
+    pub fn selected_transcript_is_loading(&self) -> bool {
+        let Some(thread_id) = self.selected_thread.as_ref() else {
+            return false;
+        };
+        self.threads
+            .iter()
+            .find(|thread| &thread.summary.id == thread_id)
+            .is_some_and(|thread| {
+                thread.backend_session_id.is_some()
+                    && !self.transcript_pagination.contains_key(thread_id)
+            })
+    }
+
+    pub fn transcript_has_older_server_history(&self) -> bool {
+        self.selected_thread.as_ref().is_some_and(|thread_id| {
+            self.transcript_pagination
+                .get(thread_id)
+                .is_some_and(|state| !state.fully_loaded && state.older_turns_cursor.is_some())
+        })
+    }
+
+    pub fn transcript_older_history_loading(&self) -> bool {
+        self.selected_thread.as_ref().is_some_and(|thread_id| {
+            self.transcript_pagination
+                .get(thread_id)
+                .is_some_and(|state| state.loading)
+        })
+    }
+
     pub fn show_earlier_transcript_messages(
         &mut self,
         total_messages: usize,
@@ -8730,10 +8782,131 @@ impl MitsuroApp {
         };
         let visible = self
             .transcript_visible_limits
-            .entry(thread_id)
+            .entry(thread_id.clone())
             .or_insert(16);
-        *visible = visible.saturating_add(16).min(total_messages);
-        self.status_line = format!("Transcript · showing {} of {total_messages}", *visible).into();
+        let hidden = total_messages.saturating_sub(*visible);
+        if hidden > 0 {
+            *visible = visible.saturating_add(16).min(total_messages);
+            self.status_line =
+                format!("Transcript · showing {} of {total_messages}", *visible).into();
+            cx.notify();
+            return;
+        }
+        self.load_older_transcript_messages(thread_id, cx);
+    }
+
+    fn load_older_transcript_messages(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let cursor = match self.transcript_pagination.get(&thread_id) {
+            Some(state) if state.loading || state.fully_loaded => return,
+            Some(state) => state.older_turns_cursor.clone(),
+            None => return,
+        };
+        let Some(cursor) = cursor else {
+            if let Some(state) = self.transcript_pagination.get_mut(&thread_id) {
+                state.fully_loaded = true;
+            }
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.status_line =
+                "Earlier history unavailable · missing backend-qualified identity".into();
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().item_pagination)
+        else {
+            self.status_line =
+                "Earlier history unavailable · backend does not expose item pagination".into();
+            cx.notify();
+            return;
+        };
+        let pagination_generation = {
+            let state = self
+                .transcript_pagination
+                .get_mut(&thread_id)
+                .expect("pagination state was checked above");
+            state.loading = true;
+            state.generation = state.generation.wrapping_add(1);
+            state.generation
+        };
+        let backend_generation = self.backend_generation;
+        self.status_line = "Transcript · loading earlier messages…".into();
+        cx.spawn(async move |this, cx| {
+            let history_backend = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        history_backend
+                            .load_older_session_history(&session_id, cursor, 5)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation {
+                    return;
+                }
+                let Some(current_generation) = app
+                    .transcript_pagination
+                    .get(&thread_id)
+                    .map(|state| state.generation)
+                else {
+                    return;
+                };
+                if current_generation != pagination_generation {
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        let fully_loaded = page.history.fully_loaded;
+                        if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
+                            state.loading = false;
+                            state.older_turns_cursor = page.history.older_turns_cursor;
+                            state.fully_loaded = fully_loaded;
+                        }
+                        let mut added = 0;
+                        let mut total = 0;
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.summary.id == thread_id)
+                        {
+                            let before = thread.messages.len();
+                            prepend_hydrated_messages(&mut thread.messages, page.messages);
+                            total = thread.messages.len();
+                            added = total.saturating_sub(before);
+                        }
+                        if added > 0 {
+                            let visible = app
+                                .transcript_visible_limits
+                                .entry(thread_id.clone())
+                                .or_insert(16);
+                            *visible = transcript_limit_after_prepend(*visible, added, total);
+                        }
+                        if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                            app.status_line = if fully_loaded {
+                                format!("Transcript · loaded {added} earlier · complete").into()
+                            } else {
+                                format!("Transcript · loaded {added} earlier").into()
+                            };
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
+                            state.loading = false;
+                        }
+                        if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                            app.status_line = format!("Earlier history failed · {error}").into();
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -15127,6 +15300,8 @@ impl MitsuroApp {
         self.threads.clear();
         self.codex_thread_subscriptions.clear();
         self.codex_read_only_threads.clear();
+        self.transcript_visible_limits.clear();
+        self.transcript_pagination.clear();
         self.expanded_transcript_messages.clear();
         self.selected_thread = None;
         self.selected_chat_thread = None;
@@ -15827,6 +16002,7 @@ impl MitsuroApp {
                                 let open_mode = conversation.open_mode;
                                 let delegation = conversation.delegation;
                                 let codex_settings = conversation.codex_settings;
+                                let history = conversation.history;
                                 let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
                                 let seen = msgs.len();
@@ -15854,6 +16030,7 @@ impl MitsuroApp {
                                     delegation,
                                     delegation_status,
                                     codex_settings,
+                                    history,
                                     open_mode,
                                 ))
                             }
@@ -15878,6 +16055,7 @@ impl MitsuroApp {
                         delegation,
                         delegation_status,
                         codex_settings,
+                        history,
                         open_mode,
                     )) => {
                         app.codex_thread_subscriptions.remove(&tid);
@@ -15891,6 +16069,8 @@ impl MitsuroApp {
                             }
                             SessionOpenMode::Snapshot => {}
                         }
+                        app.transcript_pagination
+                            .insert(tid.clone(), history.into());
                         let is_selected =
                             app.selected_thread.as_deref() == Some(tid.as_str());
                         if is_selected {
@@ -16830,6 +17010,10 @@ fn prepend_hydrated_messages(current: &mut Vec<DemoMessage>, hydrated: Vec<Conve
         .collect::<Vec<_>>();
     prefix.append(current);
     *current = prefix;
+}
+
+fn transcript_limit_after_prepend(current: usize, added: usize, total: usize) -> usize {
+    current.saturating_add(added.min(16)).min(total)
 }
 
 fn demo_image_attachments(images: Vec<ConversationImage>) -> Vec<DemoImageAttachment> {
@@ -18208,6 +18392,12 @@ mod tests {
         assert_eq!(current.len(), 2);
         assert_eq!(current[0].item_id.as_deref(), Some("item-old"));
         assert_eq!(current[1].item_id.as_deref(), Some("item-new"));
+    }
+
+    #[test]
+    fn server_history_prepend_keeps_gpui_layout_bounded() {
+        assert_eq!(transcript_limit_after_prepend(32, 120, 152), 48);
+        assert_eq!(transcript_limit_after_prepend(16, 4, 20), 20);
     }
 
     #[test]

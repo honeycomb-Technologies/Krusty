@@ -163,6 +163,9 @@ pub struct SessionConversation {
     /// Authoritative settings returned by Codex `thread/resume`. Snapshot-only
     /// backends and active-writer read fallbacks cannot claim these values.
     pub codex_settings: Option<CodexSessionSettings>,
+    /// Truthful durable-history boundary for this hydrated transcript. Codex
+    /// retains its opaque older-turn cursor; full snapshots are already complete.
+    pub history: SessionHistoryState,
     /// How this client obtained the transcript. Only `Subscribed` owns a Codex
     /// app-server subscription that must later be released.
     pub open_mode: SessionOpenMode,
@@ -174,6 +177,27 @@ pub struct CodexSessionSettings {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub permission_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHistoryState {
+    pub older_turns_cursor: Option<String>,
+    pub fully_loaded: bool,
+}
+
+impl SessionHistoryState {
+    fn complete() -> Self {
+        Self {
+            older_turns_cursor: None,
+            fully_loaded: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHistoryPage {
+    pub messages: Vec<ConversationMessage>,
+    pub history: SessionHistoryState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1006,6 +1030,46 @@ impl DesktopBackend {
         )))
     }
 
+    /// Load one older Codex turn page and hydrate every returned turn through
+    /// `thread/items/list`. The opaque cursor is owned by app-server and must
+    /// never be interpreted or synthesized by the product layer.
+    pub async fn load_older_session_history(
+        &self,
+        id: &BackendSessionId,
+        cursor: String,
+        turn_limit: u32,
+    ) -> Result<SessionHistoryPage> {
+        self.ensure_session_origin(id)?;
+        if !matches!(self, DesktopBackend::Codex(_)) {
+            return Err(AgentError::NotImplemented(
+                "older server history pages are not needed for complete Mitsuro snapshots"
+                    .to_owned(),
+            ));
+        }
+        let page = self
+            .list_thread_turns(
+                id,
+                crate::ThreadTurnsListParams {
+                    thread_id: id.raw.clone(),
+                    cursor: Some(cursor),
+                    limit: Some(turn_limit.clamp(1, 100)),
+                    sort_direction: Some(crate::ThreadTurnsSortDirection::Desc),
+                    items_view: Some(crate::ThreadTurnItemsView::Full),
+                },
+            )
+            .await?;
+        let older_turns_cursor = page.next_cursor.clone();
+        let mut turns = hydrate_codex_turn_values(self, id, page.data).await?;
+        turns.reverse();
+        Ok(SessionHistoryPage {
+            messages: conversation_messages_from_turn_values(turns),
+            history: SessionHistoryState {
+                fully_loaded: older_turns_cursor.is_none(),
+                older_turns_cursor,
+            },
+        })
+    }
+
     pub fn run_product_turn_with_bridge_blocking(
         &self,
         request: ProductTurn,
@@ -1375,6 +1439,98 @@ fn is_active_writer_conflict(error: &AgentError) -> bool {
     )
 }
 
+const CODEX_INITIAL_TURN_PAGE_SIZE: u32 = 5;
+const CODEX_ITEM_PAGE_SIZE: u32 = 200;
+const CODEX_MAX_ITEM_PAGES_PER_TURN: usize = 2_048;
+
+async fn hydrate_codex_turn_values(
+    backend: &DesktopBackend,
+    session: &BackendSessionId,
+    turns: Vec<serde_json::Value>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut hydrated = Vec::with_capacity(turns.len());
+    // Codex reads a shared rollout while serving these pages. Keep requests
+    // sequential so later turns do not spend their 30-second request budget
+    // queued behind several concurrent rollout scans.
+    for turn in turns {
+        if turn.get("itemsView").and_then(serde_json::Value::as_str) == Some("full") {
+            hydrated.push(turn);
+        } else {
+            hydrated.push(hydrate_codex_turn_items(backend, session, turn).await?);
+        }
+    }
+    Ok(hydrated)
+}
+
+async fn hydrate_codex_turn_items(
+    backend: &DesktopBackend,
+    session: &BackendSessionId,
+    mut turn: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let turn_id = turn
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| AgentError::Protocol("paginated Codex turn is missing its id".to_owned()))?;
+    let mut items = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut seen_items = std::collections::HashSet::new();
+
+    for _ in 0..CODEX_MAX_ITEM_PAGES_PER_TURN {
+        let page = backend
+            .list_thread_items(
+                session,
+                crate::ThreadItemsListParams {
+                    thread_id: session.raw.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    cursor: cursor.clone(),
+                    limit: Some(CODEX_ITEM_PAGE_SIZE),
+                    sort_direction: Some(crate::ThreadItemsSortDirection::Asc),
+                },
+            )
+            .await?;
+        for entry in page.data {
+            if entry.turn_id != turn_id {
+                return Err(AgentError::Protocol(format!(
+                    "thread/items/list returned turn {} while hydrating {turn_id}",
+                    entry.turn_id
+                )));
+            }
+            let identity = entry
+                .item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| entry.item.to_string());
+            if seen_items.insert(identity) {
+                items.push(entry.item);
+            }
+        }
+        let Some(next_cursor) = page.next_cursor else {
+            let object = turn.as_object_mut().ok_or_else(|| {
+                AgentError::Protocol(format!("paginated Codex turn {turn_id} is not an object"))
+            })?;
+            object.insert("items".to_owned(), serde_json::Value::Array(items));
+            object.insert(
+                "itemsView".to_owned(),
+                serde_json::Value::String("full".to_owned()),
+            );
+            return Ok(turn);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(AgentError::Protocol(format!(
+                "thread/items/list repeated cursor while hydrating turn {turn_id}"
+            )));
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Err(AgentError::Protocol(format!(
+        "thread/items/list exceeded {CODEX_MAX_ITEM_PAGES_PER_TURN} pages for turn {turn_id}"
+    )))
+}
+
 #[async_trait]
 impl ProductBackend for DesktopBackend {
     fn backend_kind(&self) -> BackendKind {
@@ -1465,6 +1621,7 @@ impl ProductBackend for DesktopBackend {
             messages,
             delegation,
             codex_settings: None,
+            history: SessionHistoryState::complete(),
             open_mode: SessionOpenMode::Snapshot,
         })
     }
@@ -1474,10 +1631,14 @@ impl ProductBackend for DesktopBackend {
         let DesktopBackend::Codex(_) = self else {
             return self.read_session(id).await;
         };
-        let response = match self
-            .thread_resume(ThreadResumeParams::new(id.raw.clone()))
-            .await
-        {
+        let mut resume = ThreadResumeParams::new(id.raw.clone());
+        resume.exclude_turns = Some(true);
+        resume.initial_turns_page = Some(crate::ThreadResumeInitialTurnsPageParams {
+            limit: Some(CODEX_INITIAL_TURN_PAGE_SIZE),
+            sort_direction: Some(crate::ThreadTurnsSortDirection::Desc),
+            items_view: Some(crate::ThreadTurnItemsView::Full),
+        });
+        let mut response = match self.thread_resume(resume).await {
             Ok(response) => response,
             Err(error) if is_active_writer_conflict(&error) => {
                 let mut conversation = self.read_session(id).await?;
@@ -1497,11 +1658,56 @@ impl ProductBackend for DesktopBackend {
             ephemeral: thread.ephemeral.unwrap_or(false),
             archived: thread.archived.unwrap_or(false),
         };
-        let messages = response
-            .transcript_messages()
-            .into_iter()
-            .map(conversation_message_from_transcript)
-            .collect();
+        let (messages, history) = if let Some(page) = response.initial_turns_page.take() {
+            let older_turns_cursor = page.next_cursor.clone();
+            let mut turns = match hydrate_codex_turn_values(self, id, page.data).await {
+                Ok(turns) => turns,
+                Err(error) => {
+                    // `thread/resume` already acquired a subscription. A failed
+                    // hydration must not strand that ownership in app-server.
+                    let _ = self
+                        .thread_unsubscribe(ThreadUnsubscribeParams::new(id.raw.clone()))
+                        .await;
+                    return Err(error);
+                }
+            };
+            turns.reverse();
+            (
+                conversation_messages_from_turn_values(turns),
+                SessionHistoryState {
+                    fully_loaded: older_turns_cursor.is_none(),
+                    older_turns_cursor,
+                },
+            )
+        } else {
+            // Compatibility path for an app-server that accepts resume but
+            // does not return the requested atomic page. Because excludeTurns
+            // was true, recover the real transcript explicitly rather than
+            // treating an absent page as an empty, complete conversation.
+            let fallback = match self
+                .thread_read(ThreadReadParams {
+                    thread_id: id.raw.clone(),
+                    include_turns: Some(true),
+                })
+                .await
+            {
+                Ok(fallback) => fallback,
+                Err(error) => {
+                    let _ = self
+                        .thread_unsubscribe(ThreadUnsubscribeParams::new(id.raw.clone()))
+                        .await;
+                    return Err(error);
+                }
+            };
+            (
+                fallback
+                    .transcript_messages()
+                    .into_iter()
+                    .map(conversation_message_from_transcript)
+                    .collect(),
+                SessionHistoryState::complete(),
+            )
+        };
         Ok(SessionConversation {
             session,
             messages,
@@ -1512,6 +1718,7 @@ impl ProductBackend for DesktopBackend {
                 service_tier: response.service_tier,
                 permission_profile: response.active_permission_profile.map(|profile| profile.id),
             }),
+            history,
             open_mode: SessionOpenMode::Subscribed,
         })
     }
@@ -2271,40 +2478,142 @@ mod tests {
         let responder = Arc::clone(&codex);
         let server = tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(&mut server_reader);
-            for expected in ["thread/resume", "thread/unsubscribe"] {
+            for expected in [
+                "thread/resume",
+                "thread/items/list",
+                "thread/items/list",
+                "thread/turns/list",
+                "thread/items/list",
+                "thread/unsubscribe",
+            ] {
                 let mut line = String::new();
                 reader.read_line(&mut line).await.unwrap();
                 let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
                 assert_eq!(request["method"], expected);
-                assert_eq!(
-                    request["params"],
-                    serde_json::json!({ "threadId": "thread-7" })
-                );
-                let result = if expected == "thread/resume" {
-                    serde_json::json!({
-                        "model": "gpt-5.6-sol",
-                        "modelProvider": "openai",
-                        "serviceTier": "priority",
-                        "reasoningEffort": "high",
-                        "activePermissionProfile": {
-                            "id": ":workspace",
-                            "extends": null
-                        },
-                        "thread": {
-                            "id": "thread-7",
-                            "name": "Live thread",
-                            "turns": [{
-                                "id": "turn-1",
-                                "items": [{
+                let result = match expected {
+                    "thread/resume" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-7",
+                                "excludeTurns": true,
+                                "initialTurnsPage": {
+                                    "limit": 5,
+                                    "sortDirection": "desc",
+                                    "itemsView": "full"
+                                }
+                            })
+                        );
+                        serde_json::json!({
+                            "model": "gpt-5.6-sol",
+                            "modelProvider": "openai",
+                            "serviceTier": "priority",
+                            "reasoningEffort": "high",
+                            "activePermissionProfile": {
+                                "id": ":workspace",
+                                "extends": null
+                            },
+                            "thread": {
+                                "id": "thread-7",
+                                "name": "Live thread",
+                                "turns": []
+                            },
+                            "initialTurnsPage": {
+                                "data": [{
+                                    "id": "turn-1",
+                                    "items": [],
+                                    "itemsView": "notLoaded",
+                                    "status": "completed"
+                                }],
+                                "nextCursor": "older-turns",
+                                "backwardsCursor": "newest-turn"
+                            }
+                        })
+                    }
+                    "thread/turns/list" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-7",
+                                "cursor": "older-turns",
+                                "limit": 5,
+                                "sortDirection": "desc",
+                                "itemsView": "full"
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [{
+                                "id": "turn-0",
+                                "items": [],
+                                "itemsView": "notLoaded",
+                                "status": "completed"
+                            }],
+                            "nextCursor": null,
+                            "backwardsCursor": "older-head"
+                        })
+                    }
+                    "thread/items/list" => {
+                        let turn_id = request["params"]["turnId"].as_str().unwrap();
+                        let item_cursor = request["params"]
+                            .get("cursor")
+                            .and_then(serde_json::Value::as_str);
+                        let mut expected_params = serde_json::json!({
+                            "threadId": "thread-7",
+                            "turnId": turn_id,
+                            "limit": 200,
+                            "sortDirection": "asc"
+                        });
+                        if let Some(item_cursor) = item_cursor {
+                            expected_params["cursor"] = item_cursor.into();
+                        }
+                        assert_eq!(request["params"], expected_params);
+                        let (item, next_cursor) = if turn_id == "turn-1" && item_cursor.is_none() {
+                            (
+                                serde_json::json!({
                                     "type": "userMessage",
                                     "id": "item-1",
                                     "content": [{ "type": "text", "text": "hello" }]
-                                }]
-                            }]
-                        }
-                    })
-                } else {
-                    serde_json::json!({ "status": "unsubscribed" })
+                                }),
+                                Some("items-next"),
+                            )
+                        } else if turn_id == "turn-1" {
+                            assert_eq!(item_cursor, Some("items-next"));
+                            (
+                                serde_json::json!({
+                                    "type": "agentMessage",
+                                    "id": "item-2",
+                                    "text": "answer"
+                                }),
+                                None,
+                            )
+                        } else {
+                            assert_eq!(turn_id, "turn-0");
+                            (
+                                serde_json::json!({
+                                    "type": "userMessage",
+                                    "id": "item-0",
+                                    "content": [{ "type": "text", "text": "older" }]
+                                }),
+                                None,
+                            )
+                        };
+                        serde_json::json!({
+                            "data": [{
+                                "turnId": turn_id,
+                                "item": item
+                            }],
+                            "nextCursor": next_cursor,
+                            "backwardsCursor": null
+                        })
+                    }
+                    "thread/unsubscribe" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({ "threadId": "thread-7" })
+                        );
+                        serde_json::json!({ "status": "unsubscribed" })
+                    }
+                    _ => unreachable!(),
                 };
                 responder
                     .inject_stdout_line(
@@ -2317,8 +2626,16 @@ mod tests {
         let session_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-7");
         let conversation = backend.open_session(&session_id).await.unwrap();
         assert_eq!(conversation.session.title.as_deref(), Some("Live thread"));
-        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.messages.len(), 2);
         assert_eq!(conversation.messages[0].body, "hello");
+        assert_eq!(conversation.messages[1].body, "answer");
+        assert_eq!(
+            conversation.history,
+            SessionHistoryState {
+                older_turns_cursor: Some("older-turns".to_owned()),
+                fully_loaded: false,
+            }
+        );
         assert_eq!(conversation.open_mode, SessionOpenMode::Subscribed);
         assert_eq!(
             conversation.codex_settings,
@@ -2329,6 +2646,14 @@ mod tests {
                 permission_profile: Some(":workspace".to_owned()),
             })
         );
+
+        let older = backend
+            .load_older_session_history(&session_id, "older-turns".to_owned(), 5)
+            .await
+            .unwrap();
+        assert_eq!(older.messages.len(), 1);
+        assert_eq!(older.messages[0].body, "older");
+        assert_eq!(older.history, SessionHistoryState::complete());
 
         let closed = backend.close_session(&session_id).await.unwrap();
         assert_eq!(closed.status, crate::ThreadUnsubscribeStatus::Unsubscribed);
@@ -2405,6 +2730,146 @@ mod tests {
             SessionOpenMode::ReadOnlyActiveWriter
         );
         assert_eq!(conversation.codex_settings, None);
+        assert_eq!(conversation.history, SessionHistoryState::complete());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_product_open_reads_real_history_when_atomic_page_is_absent() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let codex = Arc::new(crate::CodexAppServerBackend::with_defaults());
+        codex.connect_with_mock_writer(client_writer).await;
+        codex.mark_ready_for_test(crate::InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let backend = DesktopBackend::Codex(Arc::clone(&codex));
+        let responder = Arc::clone(&codex);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(&mut server_reader);
+            for expected in ["thread/resume", "thread/read", "thread/unsubscribe"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "thread/resume" => serde_json::json!({
+                        "thread": {
+                            "id": "thread-legacy-page",
+                            "name": "Compatibility",
+                            "turns": []
+                        }
+                    }),
+                    "thread/read" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-legacy-page",
+                                "includeTurns": true
+                            })
+                        );
+                        serde_json::json!({
+                            "thread": {
+                                "id": "thread-legacy-page",
+                                "name": "Compatibility",
+                                "turns": [{
+                                    "id": "turn-1",
+                                    "items": [{
+                                        "id": "item-1",
+                                        "type": "agentMessage",
+                                        "text": "real fallback"
+                                    }]
+                                }]
+                            }
+                        })
+                    }
+                    "thread/unsubscribe" => {
+                        serde_json::json!({"status": "unsubscribed"})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let session_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-legacy-page");
+        let conversation = backend.open_session(&session_id).await.unwrap();
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.messages[0].body, "real fallback");
+        assert_eq!(conversation.history, SessionHistoryState::complete());
+        backend.close_session(&session_id).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_product_open_releases_subscription_when_item_hydration_fails() {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let (client_writer, mut server_reader) = tokio::io::duplex(64 * 1024);
+        let codex = Arc::new(crate::CodexAppServerBackend::with_defaults());
+        codex.connect_with_mock_writer(client_writer).await;
+        codex.mark_ready_for_test(crate::InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+        let backend = DesktopBackend::Codex(Arc::clone(&codex));
+        let responder = Arc::clone(&codex);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(&mut server_reader);
+            for expected in ["thread/resume", "thread/items/list", "thread/unsubscribe"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let response = match expected {
+                    "thread/resume" => serde_json::json!({
+                        "id": request["id"],
+                        "result": {
+                            "thread": {"id": "thread-failure", "turns": []},
+                            "initialTurnsPage": {
+                                "data": [{
+                                    "id": "turn-failure",
+                                    "items": [],
+                                    "itemsView": "notLoaded"
+                                }],
+                                "nextCursor": null,
+                                "backwardsCursor": null
+                            }
+                        }
+                    }),
+                    "thread/items/list" => serde_json::json!({
+                        "id": request["id"],
+                        "error": {"code": -32000, "message": "rollout read failed"}
+                    }),
+                    "thread/unsubscribe" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"threadId": "thread-failure"})
+                        );
+                        serde_json::json!({
+                            "id": request["id"],
+                            "result": {"status": "unsubscribed"}
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                responder.inject_stdout_line(&response.to_string()).await;
+            }
+        });
+
+        let session_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-failure");
+        let error = backend.open_session(&session_id).await.unwrap_err();
+        assert!(error.to_string().contains("rollout read failed"));
         server.await.unwrap();
     }
 

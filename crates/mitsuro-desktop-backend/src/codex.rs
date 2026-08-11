@@ -3935,6 +3935,7 @@ mod integration_tests {
         // Data may be empty but must deserialize. Exercise the exact non-mutating
         // open/close lifecycle against the first idle persisted thread. A live
         // desktop task can legitimately own a writer for any listed thread.
+        let mut paginated_resume_verified = false;
         for thread in list.threads() {
             let thread_id = thread.id.clone();
             let items = backend
@@ -3948,12 +3949,37 @@ mod integration_tests {
                 .await
                 .expect("thread/items/list or real thread/read fallback");
             assert!(items.data.len() <= 1);
-            match backend
-                .resume_thread(ThreadResumeParams::new(thread_id.clone()))
-                .await
-            {
+            let mut resume = ThreadResumeParams::new(thread_id.clone());
+            resume.exclude_turns = Some(true);
+            resume.initial_turns_page = Some(crate::ThreadResumeInitialTurnsPageParams {
+                limit: Some(3),
+                sort_direction: Some(crate::ThreadTurnsSortDirection::Desc),
+                items_view: Some(crate::ThreadTurnItemsView::NotLoaded),
+            });
+            match backend.resume_thread(resume).await {
                 Ok(resumed) => {
                     assert_eq!(resumed.summary().id, thread_id);
+                    let page = resumed
+                        .initial_turns_page
+                        .expect("codex-cli 0.147 must return requested initialTurnsPage");
+                    assert!(page.data.len() <= 3);
+                    for turn in page.data {
+                        let turn_id = turn["id"].as_str().expect("turn id");
+                        assert_eq!(turn["itemsView"], "notLoaded");
+                        let items = backend
+                            .list_thread_items(ThreadItemsListParams {
+                                thread_id: thread_id.clone(),
+                                turn_id: Some(turn_id.to_owned()),
+                                cursor: None,
+                                limit: Some(1),
+                                sort_direction: Some(crate::ThreadItemsSortDirection::Asc),
+                            })
+                            .await
+                            .expect("thread/items/list for initial turn page");
+                        assert!(items.data.len() <= 1);
+                        assert!(items.data.iter().all(|entry| entry.turn_id == turn_id));
+                    }
+                    paginated_resume_verified = true;
                     backend
                         .unsubscribe_thread(ThreadUnsubscribeParams::new(thread_id))
                         .await
@@ -3964,6 +3990,10 @@ mod integration_tests {
                 Err(error) => panic!("thread/resume persisted thread: {error}"),
             }
         }
+        assert!(
+            paginated_resume_verified,
+            "no idle persisted thread was available to verify paginated resume"
+        );
 
         // ephemeral thread/start — no model turn
         let started = backend

@@ -298,9 +298,14 @@ each typed adapter or approved platform/product exclusion.
   reconciles the selected composer. Active-writer snapshots never send these mutations.
   `thread/items/list` is also typed with turn identity, direction, and cursor
   preservation; a runtime returning JSON-RPC `-32601` is projected from the same real
-  `thread/read(includeTurns)` payload. Adopting item pages as the primary transcript
-  loader remains product/UI work; typed reachability alone is not reported as
-  interaction parity.
+  `thread/read(includeTurns)` payload. The Codex open path now follows the reference
+  fast path by requesting five full newest turns atomically with `thread/resume`, then
+  retains the opaque `thread/turns/list` cursor for five-turn **Load earlier messages**
+  pages. Cursor-guarded sequential item pages complete any turn a runtime nevertheless
+  returns as summary or `notLoaded`.
+  Mitsuro continues to use its complete real HTTP snapshot and never fabricates an
+  older-history cursor. Local GPUI layout remains bounded independently of server
+  hydration.
 - Backend session IDs are namespaced (`BackendSessionId`) and are stored on every
   live GPUI thread. Session/model/turn flows use the transport-neutral
   `ProductBackend` contract, and mutations reject a session whose origin differs

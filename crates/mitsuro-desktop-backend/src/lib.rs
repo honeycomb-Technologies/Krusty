@@ -202,7 +202,7 @@ pub use product::{
     ProductScheduleMutation, ProductScheduleMutationRequest, ProductScheduleRecurrence,
     ProductScheduleReplaceRequest, ProductScheduleWeekday, ProductSkill, ProductSpeedMode,
     ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode, SessionConversation,
-    SessionOpenMode, SessionSummary,
+    SessionHistoryPage, SessionHistoryState, SessionOpenMode, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,
@@ -220,13 +220,14 @@ pub use protocol::{
     ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
     ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
     ThreadGoalStatus, ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse,
-    ThreadSearchResult, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse,
-    ThreadUnsubscribeParams, ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TranscriptAudio,
-    TranscriptAudioSource, TranscriptImage, TranscriptImageSource, TranscriptMessage,
-    TranscriptReference, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ThreadResumeInitialTurnsPageParams, ThreadResumeParams, ThreadResumeResponse,
+    ThreadSearchParams, ThreadSearchResponse, ThreadSearchResult, ThreadSetNameParams,
+    ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadSummary,
+    ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
+    ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TranscriptAudio, TranscriptAudioSource,
+    TranscriptImage, TranscriptImageSource, TranscriptMessage, TranscriptReference,
+    TranscriptReferenceKind, TranscriptRole, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 pub use realtime::{
     CodexResponseHandoffMode, ConversationTextRole, RealtimeConversationVersion, RealtimeEvent,
