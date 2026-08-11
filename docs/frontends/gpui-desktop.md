@@ -71,6 +71,7 @@ live catalog.
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin and marketplace mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, marketplace add/remove/upgrade, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
+| Interactive MCP Apps | Unsupported because Mitsuro HTTP does not expose app resources or tool calls; no substitute UI | Live app metadata, resource read, MIME/size/CSP validation, ephemeral permission-denying WebKitGTK sandbox, bidirectional JSON-RPC, tool/resource proxying, consented follow-up turns and downloads, model context, inline/fullscreen display, and live resource subscription polling | Never synthesized; fixture transcripts cannot start the runtime |
 | Hive Work | Live catalog plus per-session task/runtime detail; typed dispatch, message, pause/resume, priority, crew, and confirmed cancellation, with idempotent writes and authoritative refresh | Unsupported; no Mitsuro Hive control plane | Local goal/plan behavior only in explicit fixture mode |
 | Hive schedules | Live global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
@@ -104,10 +105,13 @@ add/remove/upgrade, MCP resource read, plugin skill read, plugin share
 list/save/update/delete, and Guardian denied-action approval. Of the remaining raw
 methods, two are Windows-sandbox-only and 12 appear only in the generated inventory or
 unused reference modules; their exact names are asserted by the matrix test. Typed
-transport coverage is not feature-surface completion. In particular,
-`mcpServer/resource/read` serves the reference client's MCP-app runtime; it is not a
-standalone resource catalog. A native MCP-app host, including resource watch/query and
-widget rendering, remains a separate parity requirement.
+transport coverage is not feature-surface completion. The native MCP-app host now uses
+`mcpServer/resource/read` and `mcpServer/tool/call` for real Codex data, retains current
+and legacy app metadata through hydration, and renders the returned app in a dedicated
+ephemeral WebKitGTK process on Wayland. Because app-server does not expose a
+resource-subscribe client method, `resources/subscribe` is implemented with bounded live
+resource reads and emits `notifications/resources/updated` only after a real value
+changes. No fixture HTML, generic web page, or locally generated widget enters this path.
 
 ## Established recovery baseline
 
@@ -379,6 +383,10 @@ cargo test -p mitsuro-client -p mitsuro-desktop-backend
 cargo check -p mitsuro-gpui-desktop
 cargo test -p mitsuro-gpui-desktop
 scripts/gpui-codex-protocol-check.sh
+
+# Real WebKitGTK render, two-way JSON-RPC, click, Blob, and resize probe
+MITSURO_RUN_MCP_APP_RUNTIME_TEST=1 cargo test -p mitsuro-gpui-desktop \
+  live_webkit_probe_renders_and_bridges_json_rpc --bin mitsuro-gpui-desktop -- --nocapture
 
 # Explicit opt-in because this method deliberately executes outside the thread sandbox
 MITSURO_RUN_LIVE_SHELL_ACCEPTANCE=1 cargo test -p mitsuro-desktop-backend \

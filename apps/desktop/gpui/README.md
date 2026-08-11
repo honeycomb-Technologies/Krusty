@@ -303,5 +303,16 @@ API has no history-injection primitive.
 scripts/gpui-codex-protocol-check.sh
 ```
 
-The optional `browser-native` feature links Wry/WebKitGTK. The default build uses the
-external-browser bridge only while native embedding remains incomplete.
+Interactive Codex MCP Apps are not represented by a placeholder. Completed
+`mcpToolCall` items retain their real app URI/input/result metadata, load exact
+`text/html;profile=mcp-app` (or legacy Skybridge) resources through app-server, apply a
+host-owned CSP, and render in an ephemeral WebKitGTK view whose pixels and input are
+owned by GPUI. The host supports initialize, tool/resource proxies and catalogs,
+resource update subscriptions backed by real bounded reads, HTTP(S) links, native
+downloads, consented `ui/message` turns, untrusted model-context updates, and
+inline/fullscreen display. Mitsuro and fixture modes remain explicitly unsupported and
+never substitute synthetic app content.
+
+The optional `browser-native` feature remains the legacy Atlas child-embed experiment.
+The default build uses the external-browser bridge for Atlas and the separate
+Wayland-capable `mcp-app-runtime` WebKitGTK renderer for interactive MCP Apps.

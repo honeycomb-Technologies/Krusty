@@ -1454,6 +1454,7 @@ pub(crate) enum McpAppViewState {
         supports_fullscreen: bool,
         display_mode: McpAppDisplayMode,
         model_context: Vec<ProductAttachment>,
+        resource_subscriptions: BTreeMap<String, Option<serde_json::Value>>,
         frame: Option<McpAppFrame>,
         bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
         focus: FocusHandle,
@@ -1557,6 +1558,7 @@ pub struct MitsuroApp {
     mcp_app_runtime_error: Option<String>,
     mcp_app_poll_scheduled: bool,
     pending_mcp_app_message: Option<PendingMcpAppMessage>,
+    mcp_app_subscription_poll_scheduled: bool,
     transcript_scroll_handle: ScrollHandle,
     /// Reference-desktop find-in-conversation state backed by
     /// `thread/searchOccurrences` (or Mitsuro's real transcript projection).
@@ -2291,6 +2293,7 @@ impl MitsuroApp {
             mcp_app_runtime_error,
             mcp_app_poll_scheduled: false,
             pending_mcp_app_message: None,
+            mcp_app_subscription_poll_scheduled: false,
             transcript_scroll_handle: ScrollHandle::new(),
             thread_find_input,
             thread_find_open: false,
@@ -9931,6 +9934,7 @@ impl MitsuroApp {
                                 supports_fullscreen: false,
                                 display_mode: McpAppDisplayMode::Inline,
                                 model_context: Vec::new(),
+                                resource_subscriptions: BTreeMap::new(),
                                 frame: None,
                                 bounds: Arc::new(Mutex::new(None)),
                                 focus: cx.focus_handle(),
@@ -10219,6 +10223,40 @@ impl MitsuroApp {
                 key,
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"prompts": []}}),
             ),
+            "resources/subscribe" | "resources/unsubscribe" if id.is_some() => {
+                let uri = message
+                    .pointer("/params/uri")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|uri| !uri.is_empty() && uri.len() <= 4096)
+                    .map(str::to_owned);
+                let Some(uri) = uri else {
+                    self.send_mcp_app_protocol_error(key, id, -32602, "Resource URI is required");
+                    cx.notify();
+                    return;
+                };
+                let subscribed = method == "resources/subscribe";
+                if let Some(McpAppViewState::Ready {
+                    resource_subscriptions,
+                    ..
+                }) = self.mcp_app_views.get_mut(&key)
+                {
+                    if subscribed {
+                        resource_subscriptions.entry(uri).or_insert(None);
+                    } else {
+                        resource_subscriptions.remove(&uri);
+                    }
+                    self.send_mcp_app_message(
+                        key,
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
+                    );
+                    if subscribed {
+                        self.schedule_mcp_app_subscription_poll(cx);
+                    }
+                } else {
+                    self.send_mcp_app_protocol_error(key, id, -32000, "MCP app is not active");
+                }
+            }
             "ui/download-file" if id.is_some() => {
                 self.handle_mcp_app_download(key, id.unwrap(), message, cx);
             }
@@ -10645,6 +10683,104 @@ impl MitsuroApp {
             .flatten()
             .cloned()
             .collect()
+    }
+
+    fn schedule_mcp_app_subscription_poll(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_app_subscription_poll_scheduled {
+            return;
+        }
+        let requests = self
+            .mcp_app_views
+            .iter()
+            .flat_map(|(key, state)| match state {
+                McpAppViewState::Ready {
+                    session,
+                    call,
+                    resource_subscriptions,
+                    ..
+                } => resource_subscriptions
+                    .keys()
+                    .map(|uri| {
+                        (
+                            key.clone(),
+                            session.clone(),
+                            call.server.clone(),
+                            uri.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        if requests.is_empty() {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        self.mcp_app_subscription_poll_scheduled = true;
+        let backend_generation = self.backend_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async {
+                std::thread::sleep(Duration::from_secs(2));
+            })
+            .await;
+            let results = cx
+                .background_spawn(async move {
+                    let mut results = Vec::with_capacity(requests.len());
+                    for (key, session, server, uri) in requests {
+                        let result = backend
+                            .read_mcp_resource(Some(&session), server, uri.clone())
+                            .await
+                            .and_then(|response| {
+                                serde_json::to_value(response)
+                                    .map_err(|error| mitsuro_desktop_backend::AgentError::Protocol(error.to_string()))
+                            });
+                        results.push((key, uri, result));
+                    }
+                    results
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.mcp_app_subscription_poll_scheduled = false;
+                if app.backend_generation != backend_generation {
+                    return;
+                }
+                for (key, uri, result) in results {
+                    let Ok(value) = result else {
+                        continue;
+                    };
+                    let previous = app.mcp_app_views.get_mut(&key).and_then(|state| match state {
+                        McpAppViewState::Ready {
+                            resource_subscriptions,
+                            ..
+                        } => resource_subscriptions.get_mut(&uri),
+                        _ => None,
+                    });
+                    let Some(previous) = previous else {
+                        continue;
+                    };
+                    let changed = previous.as_ref().is_some_and(|old| old != &value);
+                    *previous = Some(value);
+                    if changed {
+                        app.send_mcp_app_message(
+                            key,
+                            serde_json::json!({
+                                "jsonrpc":"2.0",
+                                "method":"notifications/resources/updated",
+                                "params":{"uri":uri}
+                            }),
+                        );
+                    }
+                }
+                if app.mcp_app_views.values().any(|state| {
+                    matches!(state, McpAppViewState::Ready { resource_subscriptions, .. } if !resource_subscriptions.is_empty())
+                }) {
+                    app.schedule_mcp_app_subscription_poll(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn pending_mcp_app_message(&self) -> Option<(&str, &str, usize)> {
