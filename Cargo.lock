@@ -5939,6 +5939,7 @@ dependencies = [
  "chrono-tz",
  "gpui",
  "gpui-component",
+ "gtk",
  "mitsuro-desktop-backend",
  "serde",
  "serde_json",
@@ -5946,6 +5947,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "webkit2gtk",
  "wry",
 ]
 

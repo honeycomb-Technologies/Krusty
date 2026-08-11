@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use mitsuro_desktop_backend::{BackendSessionId, ThreadSummary};
+use mitsuro_desktop_backend::{BackendSessionId, McpAppToolCall, ThreadSummary};
 
 #[derive(Clone, Debug)]
 pub struct DemoImageAttachment {
@@ -94,6 +94,7 @@ pub enum DemoMessageKind {
         title: String,
         body: String,
         status: String,
+        mcp_app: Option<Box<McpAppToolCall>>,
     },
     Error {
         body: String,
@@ -209,12 +210,24 @@ impl DemoMessage {
         status: impl Into<String>,
         item_id: Option<String>,
     ) -> Self {
+        Self::activity_with_mcp_app(kind, title, body, status, item_id, None)
+    }
+
+    pub fn activity_with_mcp_app(
+        kind: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        status: impl Into<String>,
+        item_id: Option<String>,
+        mcp_app: Option<McpAppToolCall>,
+    ) -> Self {
         Self {
             kind: DemoMessageKind::Activity {
                 kind: kind.into(),
                 title: title.into(),
                 body: body.into(),
                 status: status.into(),
+                mcp_app: mcp_app.map(Box::new),
             },
             item_id,
             streaming: false,

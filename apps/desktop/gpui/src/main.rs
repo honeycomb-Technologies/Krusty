@@ -4,6 +4,7 @@ mod app;
 mod browser;
 mod components;
 mod demo;
+mod mcp_app_runtime;
 mod preferences;
 mod theme;
 

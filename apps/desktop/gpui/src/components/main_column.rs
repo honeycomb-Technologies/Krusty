@@ -16,10 +16,10 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable as _};
 use mitsuro_desktop_backend::{
-    DelegationGroupStatus, DelegationTaskStatus, SessionDelegationProjection,
+    DelegationGroupStatus, DelegationTaskStatus, McpAppToolCall, SessionDelegationProjection,
 };
 
-use crate::app::{MitsuroApp, ProductMode};
+use crate::app::{McpAppViewState, MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer, markdown};
 use crate::demo::{
     DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
@@ -1287,6 +1287,7 @@ fn transcript(
                 .map(str::to_owned)
                 .unwrap_or_else(|| absolute_index.to_string());
             let message_key = format!("{thread_id}:{message_identity}");
+            let mcp_app_state = app.mcp_app_view_state(&message_key).cloned();
             let expanded = app.transcript_message_is_expanded(&message_key);
             let highlighted = app
                 .selected_thread_find_item_id()
@@ -1305,6 +1306,7 @@ fn transcript(
                 editing.then(|| app.latest_message_edit_input().clone()),
                 app.latest_message_edit_in_progress(),
                 app.latest_message_edit_error().map(str::to_owned),
+                mcp_app_state,
                 cx,
             )
         }))
@@ -1514,6 +1516,7 @@ fn transcript_block(
     edit_input: Option<Entity<InputState>>,
     edit_in_progress: bool,
     edit_error: Option<String>,
+    mcp_app_state: Option<McpAppViewState>,
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     match &msg.kind {
@@ -1689,7 +1692,20 @@ fn transcript_block(
             title,
             body,
             status,
-        } => activity_block(index, kind, title, body, status, msg.streaming).into_any_element(),
+            mcp_app,
+        } => activity_block(
+            index,
+            kind,
+            title,
+            body,
+            status,
+            message_key,
+            mcp_app.as_deref(),
+            mcp_app_state.as_ref(),
+            msg.streaming,
+            cx,
+        )
+        .into_any_element(),
         DemoMessageKind::Error { body } => error_block(index, body).into_any_element(),
     }
 }
@@ -1700,7 +1716,11 @@ fn activity_block(
     title: &str,
     body: &str,
     status: &str,
+    message_key: String,
+    mcp_app: Option<&McpAppToolCall>,
+    mcp_app_state: Option<&McpAppViewState>,
     streaming: bool,
+    cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let icon = match kind {
@@ -1734,6 +1754,43 @@ fn activity_block(
     } else {
         body.to_owned()
     };
+    let app_status = match mcp_app_state {
+        None => None,
+        Some(McpAppViewState::Loading { .. }) => Some("Loading interactive app…".to_owned()),
+        Some(McpAppViewState::Ready {
+            resource,
+            runtime_ready: false,
+            ..
+        }) => Some(format!("Starting interactive app · {}", resource.uri)),
+        Some(McpAppViewState::Ready {
+            resource,
+            frame: None,
+            ..
+        }) => Some(format!("Rendering interactive app · {}", resource.uri)),
+        Some(McpAppViewState::Ready { resource, .. }) => {
+            Some(format!("Interactive app · {}", resource.uri))
+        }
+        Some(McpAppViewState::Error { message, .. }) => {
+            Some(format!("Interactive app unavailable · {message}"))
+        }
+    };
+    let can_load = mcp_app.is_some()
+        && !matches!(
+            mcp_app_state,
+            Some(McpAppViewState::Loading { .. } | McpAppViewState::Ready { .. })
+        );
+    let call_for_load = mcp_app.cloned();
+    let app_frame = mcp_app_state.and_then(|state| match state {
+        McpAppViewState::Ready {
+            frame,
+            bounds,
+            focus,
+            ..
+        } => frame
+            .clone()
+            .map(|frame| (frame, bounds.clone(), focus.clone())),
+        _ => None,
+    });
 
     div()
         .id(("msg-activity", index))
@@ -1796,7 +1853,146 @@ fn activity_block(
                         .text_color(colors.text_tertiary)
                         .whitespace_normal()
                         .child(display_body),
-                ),
+                )
+                .when_some(mcp_app, |this, app| {
+                    this.child(
+                        div()
+                            .mt(px(3.0))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(
+                                        if matches!(
+                                            mcp_app_state,
+                                            Some(McpAppViewState::Error { .. })
+                                        ) {
+                                            colors.status_error
+                                        } else {
+                                            colors.text_secondary
+                                        },
+                                    )
+                                    .child(app_status.clone().unwrap_or_else(|| {
+                                        format!("Interactive MCP app · {}", app.server)
+                                    })),
+                            )
+                            .when(can_load, |this| {
+                                let call = call_for_load
+                                    .clone()
+                                    .expect("load action requires MCP app metadata");
+                                let key = message_key.clone();
+                                this.child(
+                                    div()
+                                        .id(("mcp-app-load", index))
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .text_xs()
+                                        .text_color(colors.text_secondary)
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(colors.bg_hover))
+                                        .on_click(cx.listener(move |app, _, _window, cx| {
+                                            app.load_mcp_app_resource(
+                                                key.clone(),
+                                                call.clone(),
+                                                cx,
+                                            );
+                                        }))
+                                        .child(
+                                            if matches!(
+                                                mcp_app_state,
+                                                Some(McpAppViewState::Error { .. })
+                                            ) {
+                                                "Retry"
+                                            } else {
+                                                "Load app"
+                                            },
+                                        ),
+                                )
+                            }),
+                    )
+                })
+                .when_some(app_frame, |this, (frame, bounds, focus)| {
+                    let prepaint_bounds = bounds.clone();
+                    let click_bounds = bounds;
+                    let key = message_key.clone();
+                    let width = frame.width;
+                    let height = frame.height;
+                    let click_focus = focus.clone();
+                    let key_focus = focus.clone();
+                    let keyboard_key = message_key.clone();
+                    this.child(
+                        div()
+                            .on_children_prepainted(move |child_bounds, _window, _cx| {
+                                if let Some(bounds) = child_bounds.first().copied() {
+                                    if let Ok(mut stored) = prepaint_bounds.lock() {
+                                        *stored = Some(bounds);
+                                    }
+                                }
+                            })
+                            .id(("mcp-app-frame", index))
+                            .key_context("McpApp")
+                            .track_focus(&focus)
+                            .mt(px(7.0))
+                            .w_full()
+                            .h(px(height as f32))
+                            .max_h(px(520.0))
+                            .overflow_hidden()
+                            .rounded(px(9.0))
+                            .border_1()
+                            .border_color(colors.border_subtle)
+                            .bg(colors.bg_sidebar)
+                            .cursor_pointer()
+                            .on_click(cx.listener(
+                                move |app, event: &gpui::ClickEvent, window, cx| {
+                                    let Some(position) = event.mouse_position() else {
+                                        return;
+                                    };
+                                    let Ok(stored) = click_bounds.lock() else {
+                                        return;
+                                    };
+                                    let Some(bounds) = *stored else {
+                                        return;
+                                    };
+                                    let rendered_width = f32::from(bounds.size.width).max(1.0);
+                                    let rendered_height = f32::from(bounds.size.height).max(1.0);
+                                    let x = f32::from(position.x - bounds.origin.x) * width as f32
+                                        / rendered_width;
+                                    let y = f32::from(position.y - bounds.origin.y) * height as f32
+                                        / rendered_height;
+                                    window.focus(&click_focus);
+                                    app.mcp_app_click(key.clone(), x, y, cx);
+                                },
+                            ))
+                            .on_key_down(cx.listener(
+                                move |app, event: &gpui::KeyDownEvent, window, cx| {
+                                    if !key_focus.is_focused(window) {
+                                        return;
+                                    }
+                                    let value = event
+                                        .keystroke
+                                        .key_char
+                                        .clone()
+                                        .unwrap_or_else(|| event.keystroke.key.clone());
+                                    app.mcp_app_key(keyboard_key.clone(), value, cx);
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .child(
+                                img(frame.image)
+                                    .w_full()
+                                    .h_full()
+                                    .object_fit(gpui::ObjectFit::Fill),
+                            ),
+                    )
+                }),
         )
 }
 

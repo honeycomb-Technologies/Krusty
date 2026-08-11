@@ -472,6 +472,7 @@ pub struct ActivityFields {
     pub title: String,
     pub summary: String,
     pub status: String,
+    pub mcp_app: Option<crate::McpAppToolCall>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -761,6 +762,7 @@ pub fn activity_item_fields(item: &Value) -> ActivityFields {
         title,
         summary: bound_text(summary, 2_000),
         status,
+        mcp_app: crate::McpAppToolCall::from_thread_item(item),
     }
 }
 
@@ -3258,7 +3260,14 @@ mod event_tests {
                         "server": "github",
                         "tool": "search_issues",
                         "status": "completed",
-                        "arguments": {}
+                        "arguments": {"query": "is:open label:bug"},
+                        "appContext": {
+                            "resourceUri": "ui://github/issues",
+                            "appName": "GitHub issues"
+                        },
+                        "result": {
+                            "structuredContent": {"total": 2}
+                        }
                     },
                     {
                         "type": "webSearch",
@@ -3290,6 +3299,22 @@ mod event_tests {
         assert_eq!(messages[0].activity.as_ref().unwrap().kind, "mcpToolCall");
         assert_eq!(messages[0].activity.as_ref().unwrap().title, "MCP tool");
         assert!(messages[0].body.contains("search_issues"));
+        let mcp_app = messages[0]
+            .activity
+            .as_ref()
+            .unwrap()
+            .mcp_app
+            .as_ref()
+            .expect("interactive MCP app metadata survives hydration");
+        assert_eq!(mcp_app.resource_uri, "ui://github/issues");
+        assert_eq!(
+            mcp_app.arguments,
+            serde_json::json!({"query": "is:open label:bug"})
+        );
+        assert_eq!(
+            mcp_app.result.as_ref().unwrap()["structuredContent"]["total"],
+            2
+        );
         assert_eq!(messages[1].activity.as_ref().unwrap().title, "Web search");
         assert_eq!(
             messages[2].activity.as_ref().unwrap().title,

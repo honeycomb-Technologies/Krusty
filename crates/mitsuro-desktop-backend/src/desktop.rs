@@ -719,6 +719,30 @@ impl DesktopBackend {
         }
     }
 
+    pub async fn call_mcp_tool(
+        &self,
+        session: &BackendSessionId,
+        server: impl Into<String>,
+        tool: impl Into<String>,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<crate::McpServerToolCallResponse> {
+        self.ensure_session_origin(session)?;
+        match self {
+            Self::Codex(backend) => {
+                let mut params = crate::McpServerToolCallParams::new(
+                    session.raw.clone(),
+                    server.into(),
+                    tool.into(),
+                );
+                params.arguments = arguments;
+                backend.mcp_server_tool_call(params).await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex MCP tool calls".to_owned(),
+            )),
+        }
+    }
+
     pub async fn read_plugin_skill(
         &self,
         params: crate::PluginSkillReadParams,
@@ -1718,6 +1742,10 @@ mod tests {
                 .read_mcp_resource(Some(&session), "docs", "docs://readme")
                 .await
                 .expect_err("MCP resources must be excluded"),
+            backend
+                .call_mcp_tool(&session, "docs", "search", None)
+                .await
+                .expect_err("MCP app tool calls must be excluded"),
             backend
                 .read_plugin_skill(crate::PluginSkillReadParams {
                     remote_marketplace_name: "marketplace".to_owned(),

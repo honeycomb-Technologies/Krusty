@@ -7,12 +7,14 @@ description = "Experimental native GPUI desktop client for Mitsuro and Codex app
 default-run = "mitsuro-gpui-desktop"
 
 [features]
-default = ["browser-external"]
+default = ["browser-external", "mcp-app-runtime"]
 # Link wry (WebKitGTK on Linux). Probes GPUI HasWindowHandle; optional child embed
 # via MITSURO_ATLAS_EMBED=1 (X11 only). Surface is mock unless embed succeeds.
 browser-native = ["dep:wry"]
 # System-browser bridge (xdg-open) + Chromium --app sibling. No DISPLAY needed to compile.
 browser-external = []
+# Wayland-capable, offscreen WebKitGTK renderer for sandboxed MCP Apps.
+mcp-app-runtime = ["dep:wry", "dep:gtk", "dep:webkit2gtk"]
 
 [dependencies]
 anyhow = "1.0"
@@ -28,6 +30,10 @@ tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "ti
 url = "2.5"
 uuid = { version = "1.11", features = ["v4"] }
 wry = { version = "0.53", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }
+webkit2gtk = { version = "2.0.1", optional = true, features = ["v2_40"] }
 
 [lints]
 workspace = true

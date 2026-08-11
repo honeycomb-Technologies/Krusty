@@ -165,7 +165,11 @@ pub use mcp_config::{
     ConfigValueWriteParams, ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams,
     McpServerTransportConfig, MergeStrategy,
 };
-pub use mcp_resources::{McpResourceContent, McpResourceReadParams, McpResourceReadResponse};
+pub use mcp_resources::{
+    McpAppHtmlResource, McpAppResourceError, McpAppSandboxPolicy, McpAppToolCall,
+    McpResourceContent, McpResourceReadParams, McpResourceReadResponse, MCP_APP_HTML_MIME_TYPE,
+    MCP_APP_MAX_HTML_BYTES, MCP_APP_SKYBRIDGE_MIME_TYPE,
+};
 pub use memory::{
     MemoryResetResponse, ThreadMemoryMode, ThreadMemoryModeSetParams, ThreadMemoryModeSetResponse,
 };

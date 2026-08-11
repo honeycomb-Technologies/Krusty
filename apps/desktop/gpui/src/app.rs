@@ -5,14 +5,14 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, AppContext as _, Context, Entity, FocusHandle, Focusable, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    div, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, ImageFormat,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Pixels, Render,
     ScrollHandle, SharedString, Styled as _, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
@@ -44,15 +44,16 @@ use mitsuro_desktop_backend::{
     GetWorkspaceMessagesResponse, GuardianApprovalReviewNotification, HookMetadata, HooksListEntry,
     HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
     LiveApprovalBridge, LoginAccountParams, MarketplaceAddParams, MarketplaceRemoveParams,
-    MarketplaceUpgradeParams, McpAuthStatus, McpElicitationMode, McpServerConfigAddParams,
-    McpServerInfo, McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
-    McpServerTransportConfig, MergeStrategy, MessageRole, ModeKind, ModelInfo, ModelListParams,
-    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse, ModelServiceTier,
-    PendingApproval, PendingMcpElicitation, PendingUserInput, PermissionProfileListParams,
-    PermissionProfileSummary, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
-    PluginMarketplaceEntry, PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams,
-    ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
-    ProductBackend, ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
+    MarketplaceUpgradeParams, McpAppHtmlResource, McpAppToolCall, McpAuthStatus,
+    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
+    MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
+    PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
+    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginMarketplaceEntry,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
     ProductFileMatch, ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
     ProductHiveSessionDetail, ProductHiveSessionMutationRequest, ProductHiveSnapshot,
     ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
@@ -90,6 +91,7 @@ use crate::demo::{
     DemoImageSource, DemoMessage, DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind,
     DemoThread, ThreadSurface,
 };
+use crate::mcp_app_runtime::{McpAppRuntime, McpAppRuntimeEvent};
 use crate::preferences::{DesktopPreferences, DesktopProject};
 use crate::theme;
 
@@ -1429,6 +1431,37 @@ struct ConcurrentSideTurnState {
     mcp_form_values: BTreeMap<String, serde_json::Value>,
 }
 
+/// Per-transcript-item lifecycle for a real Codex MCP App resource. HTML stays
+/// in memory and is never rendered as text or executed outside the sandbox host.
+#[derive(Clone, Debug)]
+pub(crate) enum McpAppViewState {
+    Loading {
+        generation: u64,
+    },
+    Ready {
+        generation: u64,
+        call: Box<McpAppToolCall>,
+        session: BackendSessionId,
+        resource: Arc<McpAppHtmlResource>,
+        runtime_ready: bool,
+        initialized: bool,
+        frame: Option<McpAppFrame>,
+        bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+        focus: FocusHandle,
+    },
+    Error {
+        generation: u64,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct McpAppFrame {
+    pub image: Arc<gpui::Image>,
+    pub width: u32,
+    pub height: u32,
+}
+
 impl ConcurrentSideTurnState {
     fn new(thread_id: String, generation: u64) -> Self {
         Self {
@@ -1489,6 +1522,14 @@ pub struct MitsuroApp {
     /// Explicit user expansion for long transcript messages. Keys include the
     /// backend-qualified UI thread id and stable item id (or message index).
     expanded_transcript_messages: std::collections::HashSet<String>,
+    /// Loaded MCP App HTML keyed by the same stable thread:item identity used
+    /// for transcript expansion. Only real Codex `mcpServer/resource/read`
+    /// results enter this map.
+    mcp_app_views: std::collections::HashMap<String, McpAppViewState>,
+    mcp_app_view_generation: u64,
+    mcp_app_runtime: Option<McpAppRuntime>,
+    mcp_app_runtime_error: Option<String>,
+    mcp_app_poll_scheduled: bool,
     transcript_scroll_handle: ScrollHandle,
     /// Reference-desktop find-in-conversation state backed by
     /// `thread/searchOccurrences` (or Mitsuro's real transcript projection).
@@ -2203,6 +2244,10 @@ impl MitsuroApp {
             bridge_mode,
             host_kind_override,
         );
+        let (mcp_app_runtime, mcp_app_runtime_error) = match McpAppRuntime::start() {
+            Ok(runtime) => (Some(runtime), None),
+            Err(error) => (None, Some(error)),
+        };
 
         let mut app = Self {
             focus_handle: cx.focus_handle(),
@@ -2213,6 +2258,11 @@ impl MitsuroApp {
             transcript_visible_limits: std::collections::HashMap::new(),
             transcript_pagination: std::collections::HashMap::new(),
             expanded_transcript_messages: std::collections::HashSet::new(),
+            mcp_app_views: std::collections::HashMap::new(),
+            mcp_app_view_generation: 0,
+            mcp_app_runtime,
+            mcp_app_runtime_error,
+            mcp_app_poll_scheduled: false,
             transcript_scroll_handle: ScrollHandle::new(),
             thread_find_input,
             thread_find_open: false,
@@ -2580,6 +2630,7 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        self.close_all_mcp_app_views();
         self.preferences.remember_backend(kind);
         self.save_preferences_best_effort();
         self.pending_start_thread = self
@@ -9665,6 +9716,694 @@ impl MitsuroApp {
         self.threads.iter().find(|t| &t.summary.id == id)
     }
 
+    pub(crate) fn mcp_app_view_state(&self, message_key: &str) -> Option<&McpAppViewState> {
+        self.mcp_app_views.get(message_key)
+    }
+
+    fn auto_load_selected_mcp_apps(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .live_backend()
+            .is_some_and(|backend| backend.capabilities().mcp_resources)
+        {
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let visible_limit = self.transcript_visible_limit();
+        let pending = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == thread_id)
+            .map(|thread| {
+                let start = thread.messages.len().saturating_sub(visible_limit.max(16));
+                thread.messages[start..]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(relative_index, message)| {
+                        let DemoMessageKind::Activity {
+                            mcp_app: Some(call),
+                            ..
+                        } = &message.kind
+                        else {
+                            return None;
+                        };
+                        let absolute_index = start + relative_index;
+                        let identity = message
+                            .item_id
+                            .clone()
+                            .unwrap_or_else(|| absolute_index.to_string());
+                        let key = format!("{thread_id}:{identity}");
+                        (!self.mcp_app_views.contains_key(&key)).then(|| (key, call.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (key, call) in pending {
+            self.load_mcp_app_resource(key, *call, cx);
+        }
+    }
+
+    /// Fetch and validate one interactive MCP App resource through the selected
+    /// Codex thread. Unsupported backends fail visibly and never substitute a
+    /// fixture, generic HTML page, or locally generated placeholder.
+    pub(crate) fn load_mcp_app_resource(
+        &mut self,
+        message_key: String,
+        call: McpAppToolCall,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .mcp_app_views
+            .get(&message_key)
+            .is_some_and(|state| matches!(state, McpAppViewState::Loading { .. }))
+        {
+            return;
+        }
+        let Some(ui_thread_id) = self.selected_thread.clone() else {
+            self.status_line = "MCP app unavailable · no conversation selected.".into();
+            cx.notify();
+            return;
+        };
+        if !message_key.starts_with(&format!("{ui_thread_id}:")) {
+            self.status_line =
+                "MCP app unavailable · transcript item is no longer selected.".into();
+            cx.notify();
+            return;
+        }
+        let Some(session) = self.live_session_id(&ui_thread_id) else {
+            self.status_line = "MCP app unavailable · live thread identity is missing.".into();
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "MCP app unavailable · backend is not ready.".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().mcp_resources || session.backend != BackendKind::CodexStdio {
+            self.status_line = match session.backend {
+                BackendKind::MitsuroHttp => {
+                    "Interactive MCP apps are not exposed by the Mitsuro server."
+                }
+                _ => "Interactive MCP apps are not supported by this backend.",
+            }
+            .into();
+            cx.notify();
+            return;
+        }
+        if self.mcp_app_runtime.is_none() {
+            self.status_line = format!(
+                "Interactive MCP app renderer unavailable · {}",
+                self.mcp_app_runtime_error
+                    .as_deref()
+                    .unwrap_or("runtime did not start")
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+
+        self.mcp_app_view_generation = self.mcp_app_view_generation.wrapping_add(1);
+        let view_generation = self.mcp_app_view_generation;
+        let backend_generation = self.backend_generation;
+        let server = call.server.clone();
+        let uri = call.resource_uri.clone();
+        self.mcp_app_views.insert(
+            message_key.clone(),
+            McpAppViewState::Loading {
+                generation: view_generation,
+            },
+        );
+        self.status_line = format!(
+            "Loading MCP app · {}",
+            call.app_name.as_deref().unwrap_or(&call.tool)
+        )
+        .into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let expected_uri = uri.clone();
+            let request_session = session.clone();
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .read_mcp_resource(Some(&request_session), server, uri)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .into_mcp_app_html(&expected_uri)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                let current_generation =
+                    app.mcp_app_views
+                        .get(&message_key)
+                        .map(|state| match state {
+                            McpAppViewState::Loading { generation, .. }
+                            | McpAppViewState::Ready { generation, .. }
+                            | McpAppViewState::Error { generation, .. } => *generation,
+                        });
+                if app.backend_generation != backend_generation
+                    || current_generation != Some(view_generation)
+                {
+                    return;
+                }
+                match result {
+                    Ok(resource) => {
+                        let html = resource.sandboxed_html();
+                        let runtime_result = app
+                            .mcp_app_runtime
+                            .as_ref()
+                            .ok_or_else(|| "renderer stopped".to_owned())
+                            .and_then(|runtime| runtime.load(message_key.clone(), html));
+                        if let Err(message) = runtime_result {
+                            app.status_line =
+                                format!("MCP app could not render · {message}").into();
+                            app.mcp_app_views.insert(
+                                message_key,
+                                McpAppViewState::Error {
+                                    generation: view_generation,
+                                    message,
+                                },
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        app.status_line = format!("Rendering MCP app · {}", resource.uri).into();
+                        app.mcp_app_views.insert(
+                            message_key,
+                            McpAppViewState::Ready {
+                                generation: view_generation,
+                                call: Box::new(call),
+                                session,
+                                resource: Arc::new(resource),
+                                runtime_ready: false,
+                                initialized: false,
+                                frame: None,
+                                bounds: Arc::new(Mutex::new(None)),
+                                focus: cx.focus_handle(),
+                            },
+                        );
+                        app.schedule_mcp_app_runtime_poll(cx);
+                    }
+                    Err(message) => {
+                        app.status_line = format!("MCP app could not load · {message}").into();
+                        app.mcp_app_views.insert(
+                            message_key,
+                            McpAppViewState::Error {
+                                generation: view_generation,
+                                message,
+                            },
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_mcp_app_runtime_poll(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_app_poll_scheduled || self.mcp_app_runtime.is_none() {
+            return;
+        }
+        self.mcp_app_poll_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async {
+                std::thread::sleep(Duration::from_millis(16));
+            })
+            .await;
+            let _ = this.update(cx, |app, cx| {
+                app.mcp_app_poll_scheduled = false;
+                app.poll_mcp_app_runtime(cx);
+                if app
+                    .mcp_app_views
+                    .values()
+                    .any(|state| matches!(state, McpAppViewState::Ready { .. }))
+                {
+                    app.schedule_mcp_app_runtime_poll(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn poll_mcp_app_runtime(&mut self, cx: &mut Context<Self>) {
+        let mut events = Vec::new();
+        if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+            while events.len() < 100 {
+                let Some(event) = runtime.try_recv() else {
+                    break;
+                };
+                events.push(event);
+            }
+        }
+        for event in events {
+            self.handle_mcp_app_runtime_event(event, cx);
+        }
+    }
+
+    fn handle_mcp_app_runtime_event(&mut self, event: McpAppRuntimeEvent, cx: &mut Context<Self>) {
+        match event {
+            McpAppRuntimeEvent::Started => {}
+            McpAppRuntimeEvent::Ready { key } => {
+                if let Some(McpAppViewState::Ready { runtime_ready, .. }) =
+                    self.mcp_app_views.get_mut(&key)
+                {
+                    *runtime_ready = true;
+                    self.status_line = "Interactive MCP app ready.".into();
+                    cx.notify();
+                }
+            }
+            McpAppRuntimeEvent::Frame {
+                key,
+                png,
+                width,
+                height,
+            } => {
+                if let Some(McpAppViewState::Ready { frame, .. }) = self.mcp_app_views.get_mut(&key)
+                {
+                    *frame = Some(McpAppFrame {
+                        image: Arc::new(gpui::Image::from_bytes(ImageFormat::Png, png)),
+                        width,
+                        height,
+                    });
+                    cx.notify();
+                }
+            }
+            McpAppRuntimeEvent::HostMessage { key, message } => {
+                self.handle_mcp_app_host_message(key, message, cx);
+            }
+            McpAppRuntimeEvent::FrameDirty { key } => {
+                if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+                    let _ = runtime.capture(key);
+                }
+            }
+            McpAppRuntimeEvent::OpenLink { key, url } => {
+                if matches!(url::Url::parse(&url), Ok(parsed) if matches!(parsed.scheme(), "http" | "https"))
+                {
+                    let result = open_system_browser(&url);
+                    self.status_line =
+                        format!("MCP app link · {key} · {}", result.summary()).into();
+                } else {
+                    self.status_line = "MCP app blocked an unsupported link URL.".into();
+                }
+                cx.notify();
+            }
+            McpAppRuntimeEvent::Error { key, message } => {
+                if let Some(key) = key {
+                    if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+                        let _ = runtime.close(key.clone());
+                    }
+                    let generation = self
+                        .mcp_app_views
+                        .get(&key)
+                        .map(|state| match state {
+                            McpAppViewState::Loading { generation, .. }
+                            | McpAppViewState::Ready { generation, .. }
+                            | McpAppViewState::Error { generation, .. } => *generation,
+                        })
+                        .unwrap_or_default();
+                    self.mcp_app_views.insert(
+                        key,
+                        McpAppViewState::Error {
+                            generation,
+                            message: message.clone(),
+                        },
+                    );
+                } else {
+                    self.mcp_app_runtime_error = Some(message.clone());
+                    self.mcp_app_runtime = None;
+                }
+                self.status_line = format!("MCP app renderer error · {message}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn handle_mcp_app_host_message(
+        &mut self,
+        key: String,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if message.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+            self.send_mcp_app_protocol_error(
+                key,
+                message.get("id").cloned(),
+                -32600,
+                "Invalid JSON-RPC request",
+            );
+            return;
+        }
+        let method = message
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let id = message.get("id").cloned();
+        match method {
+            "ui/initialize" => {
+                let protocol_version = message
+                    .pointer("/params/protocolVersion")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("2026-01-26");
+                let policy = self
+                    .mcp_app_views
+                    .get(&key)
+                    .and_then(|state| match state {
+                        McpAppViewState::Ready { resource, .. } => Some(resource.sandbox_policy()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.send_mcp_app_message(
+                    key,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": protocol_version,
+                            "hostCapabilities": {
+                                "openLinks": {},
+                                "serverTools": {"listChanged": false},
+                                "serverResources": {"listChanged": false},
+                                "logging": {},
+                                "sandbox": {"csp": {
+                                    "connectDomains": policy.connect_domains,
+                                    "resourceDomains": policy.resource_domains,
+                                    "frameDomains": policy.frame_domains,
+                                    "baseUriDomains": policy.base_uri_domains
+                                }}
+                            },
+                            "hostInfo": {"name": "mitsuro-desktop", "version": env!("CARGO_PKG_VERSION")},
+                            "hostContext": {
+                                "theme": "dark",
+                                "displayMode": "inline",
+                                "availableDisplayModes": ["inline"],
+                                "containerDimensions": {"width": 680, "height": 420},
+                                "userAgent": "mitsuro-gpui-desktop",
+                                "platform": "desktop",
+                                "deviceCapabilities": {"touch": false, "hover": true},
+                                "safeAreaInsets": {"top": 0, "right": 0, "bottom": 0, "left": 0}
+                            }
+                        }
+                    }),
+                );
+            }
+            "ui/notifications/initialized" => {
+                let payload = self
+                    .mcp_app_views
+                    .get_mut(&key)
+                    .and_then(|state| match state {
+                        McpAppViewState::Ready {
+                            call, initialized, ..
+                        } if !*initialized => {
+                            *initialized = true;
+                            Some((call.arguments.clone(), call.result.clone()))
+                        }
+                        _ => None,
+                    });
+                if let Some((arguments, result)) = payload {
+                    self.send_mcp_app_message(
+                        key.clone(),
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "ui/notifications/tool-input",
+                            "params": {"arguments": arguments}
+                        }),
+                    );
+                    if let Some(result) = result {
+                        self.send_mcp_app_message(
+                            key,
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "ui/notifications/tool-result",
+                                "params": result
+                            }),
+                        );
+                    }
+                }
+            }
+            "tools/call" if id.is_some() => {
+                self.handle_mcp_app_tool_call(key, id.unwrap(), message, cx);
+            }
+            "resources/read" if id.is_some() => {
+                self.handle_mcp_app_resource_read(key, id.unwrap(), message, cx);
+            }
+            "tools/list" | "resources/list" | "resources/templates/list" if id.is_some() => {
+                match self.mcp_app_inventory_response(&key, method) {
+                    Some(result) => self.send_mcp_app_message(
+                        key,
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    ),
+                    None => self.send_mcp_app_protocol_error(
+                        key,
+                        id,
+                        -32000,
+                        "MCP server inventory is unavailable",
+                    ),
+                }
+            }
+            "prompts/list" if id.is_some() => self.send_mcp_app_message(
+                key,
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"prompts": []}}),
+            ),
+            "ui/open-link" if id.is_some() => {
+                let url = message
+                    .pointer("/params/url")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if matches!(url::Url::parse(url), Ok(parsed) if matches!(parsed.scheme(), "http" | "https"))
+                {
+                    let result = open_system_browser(url);
+                    self.status_line = format!("MCP app link · {}", result.summary()).into();
+                    self.send_mcp_app_message(
+                        key,
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                    );
+                } else {
+                    self.send_mcp_app_protocol_error(
+                        key,
+                        id,
+                        -32602,
+                        "Only HTTP and HTTPS links are allowed",
+                    );
+                }
+            }
+            "ping" => self.send_mcp_app_message(
+                key,
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            ),
+            "notifications/message" => {
+                let level = message
+                    .pointer("/params/level")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("info");
+                let data = message.pointer("/params/data").cloned().unwrap_or_default();
+                eprintln!("[mitsuro:mcp-app:{level}] {data}");
+            }
+            _ if id.is_some() => {
+                self.send_mcp_app_protocol_error(key, id, -32601, "Method not implemented by host");
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn mcp_app_inventory_response(&self, key: &str, method: &str) -> Option<serde_json::Value> {
+        let server_name = self.mcp_app_views.get(key).and_then(|state| match state {
+            McpAppViewState::Ready { call, .. } => Some(call.server.as_str()),
+            _ => None,
+        })?;
+        let server = self
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == server_name)?;
+        match method {
+            "tools/list" => Some(serde_json::json!({"tools": mcp_app_tools(server)})),
+            "resources/list" => Some(serde_json::json!({"resources": server.resources})),
+            "resources/templates/list" => {
+                Some(serde_json::json!({"resourceTemplates": server.resource_templates}))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_mcp_app_tool_call(
+        &mut self,
+        key: String,
+        id: serde_json::Value,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = message
+            .pointer("/params/name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+        else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32602, "Tool name is required");
+            return;
+        };
+        let arguments = message.pointer("/params/arguments").cloned();
+        let Some((session, server)) = self.mcp_app_views.get(&key).and_then(|state| match state {
+            McpAppViewState::Ready { session, call, .. } => {
+                Some((session.clone(), call.server.clone()))
+            }
+            _ => None,
+        }) else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "MCP app is not active");
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "Backend is not ready");
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        self.status_line = format!("MCP app tool · {name}").into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .call_mcp_tool(&session, server, name, arguments)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || !matches!(
+                        app.mcp_app_views.get(&key),
+                        Some(McpAppViewState::Ready { .. })
+                    )
+                {
+                    return;
+                }
+                match result {
+                    Ok(result) => app.send_mcp_app_message(
+                        key,
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    ),
+                    Err(message) => {
+                        app.send_mcp_app_protocol_error(key, Some(id), -32000, &message)
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn handle_mcp_app_resource_read(
+        &mut self,
+        key: String,
+        id: serde_json::Value,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(uri) = message
+            .pointer("/params/uri")
+            .and_then(serde_json::Value::as_str)
+            .filter(|uri| !uri.trim().is_empty())
+            .map(str::to_owned)
+        else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32602, "Resource URI is required");
+            return;
+        };
+        let Some((session, server)) = self.mcp_app_views.get(&key).and_then(|state| match state {
+            McpAppViewState::Ready { session, call, .. } => {
+                Some((session.clone(), call.server.clone()))
+            }
+            _ => None,
+        }) else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "MCP app is not active");
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "Backend is not ready");
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .read_mcp_resource(Some(&session), server, uri)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || !matches!(
+                        app.mcp_app_views.get(&key),
+                        Some(McpAppViewState::Ready { .. })
+                    )
+                {
+                    return;
+                }
+                match result {
+                    Ok(result) => app.send_mcp_app_message(
+                        key,
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    ),
+                    Err(message) => {
+                        app.send_mcp_app_protocol_error(key, Some(id), -32000, &message)
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn send_mcp_app_message(&self, key: String, message: serde_json::Value) {
+        if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+            let _ = runtime.send_host_message(key, message);
+        }
+    }
+
+    fn send_mcp_app_protocol_error(
+        &self,
+        key: String,
+        id: Option<serde_json::Value>,
+        code: i64,
+        message: &str,
+    ) {
+        self.send_mcp_app_message(
+            key,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id.unwrap_or(serde_json::Value::Null),
+                "error": {"code": code, "message": message}
+            }),
+        );
+    }
+
+    pub(crate) fn mcp_app_click(&mut self, key: String, x: f32, y: f32, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| "renderer is unavailable".to_owned())
+            .and_then(|runtime| runtime.click(key, x, y));
+        if let Err(error) = result {
+            self.status_line = format!("MCP app interaction failed · {error}").into();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn mcp_app_key(&mut self, key: String, value: String, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| "renderer is unavailable".to_owned())
+            .and_then(|runtime| runtime.key(key, value));
+        if let Err(error) = result {
+            self.status_line = format!("MCP app keyboard input failed · {error}").into();
+        }
+        cx.notify();
+    }
+
     pub fn transcript_visible_limit(&self) -> usize {
         self.selected_thread
             .as_ref()
@@ -11934,6 +12673,7 @@ impl MitsuroApp {
         let selection_changed = self.selected_thread.as_deref() != Some(id.as_str());
         if selection_changed {
             if let Some(previous_id) = self.selected_thread.clone() {
+                self.close_mcp_app_views_for_thread(&previous_id);
                 if self.active_turn_thread_id.as_deref() != Some(previous_id.as_str()) {
                     self.release_thread_subscription_best_effort(&previous_id, cx);
                 }
@@ -12025,6 +12765,34 @@ impl MitsuroApp {
         }
         self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
+    }
+
+    fn close_mcp_app_views_for_thread(&mut self, thread_id: &str) {
+        let prefix = format!("{thread_id}:");
+        let keys = self
+            .mcp_app_views
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+            for key in &keys {
+                let _ = runtime.close(key.clone());
+            }
+        }
+        for key in keys {
+            self.mcp_app_views.remove(&key);
+        }
+    }
+
+    fn close_all_mcp_app_views(&mut self) {
+        let keys = self.mcp_app_views.keys().cloned().collect::<Vec<_>>();
+        if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+            for key in keys {
+                let _ = runtime.close(key);
+            }
+        }
+        self.mcp_app_views.clear();
     }
 
     fn release_thread_subscription_best_effort(&mut self, thread_id: &str, cx: &mut Context<Self>) {
@@ -16067,6 +16835,7 @@ impl MitsuroApp {
                                         title: activity_title(kind.as_str()),
                                         summary: text.clone().unwrap_or_default(),
                                         status: String::new(),
+                                        mcp_app: None,
                                     },
                                 );
                                 if let DemoMessageKind::Activity {
@@ -16074,12 +16843,14 @@ impl MitsuroApp {
                                     title,
                                     body,
                                     status,
+                                    mcp_app,
                                 } = &mut msg.kind
                                 {
                                     *kind = fields.kind;
                                     *title = fields.title;
                                     *body = fields.summary;
                                     *status = fields.status;
+                                    *mcp_app = fields.mcp_app.map(Box::new);
                                 }
                             }
                             _ => {
@@ -18216,6 +18987,19 @@ fn mcp_status_from_product(server: ProductMcpServer) -> McpServerStatus {
     }
 }
 
+fn mcp_app_tools(server: &McpServerStatus) -> Vec<serde_json::Value> {
+    server
+        .tools
+        .iter()
+        .map(|(name, tool)| {
+            let mut tool = tool.as_object().cloned().unwrap_or_default();
+            tool.entry("name".to_owned())
+                .or_insert_with(|| serde_json::Value::String(name.clone()));
+            serde_json::Value::Object(tool)
+        })
+        .collect()
+}
+
 fn plugin_summary_from_product(extension: ProductExtension) -> PluginSummary {
     let mut extra = serde_json::Map::new();
     if let Some(path) = extension.marketplace_path {
@@ -18326,13 +19110,15 @@ fn activity_message(
             title: activity_title(kind.as_str()),
             summary: String::new(),
             status: String::new(),
+            mcp_app: None,
         });
-    DemoMessage::activity(
+    DemoMessage::activity_with_mcp_app(
         fields.kind,
         fields.title,
         fields.summary,
         fields.status,
         Some(item_id),
+        fields.mcp_app,
     )
 }
 
@@ -18875,13 +19661,15 @@ fn demo_message_from_conversation(message: ConversationMessage) -> DemoMessage {
                 title: "Activity".to_owned(),
                 summary: message.body,
                 status: String::new(),
+                mcp_app: None,
             });
-            DemoMessage::activity(
+            DemoMessage::activity_with_mcp_app(
                 fields.kind,
                 fields.title,
                 fields.summary,
                 fields.status,
                 message.item_id.clone(),
+                fields.mcp_app,
             )
         }
         MessageRole::Reasoning => DemoMessage::reasoning(message.body, message.item_id.clone()),
@@ -19505,6 +20293,7 @@ impl Focusable for MitsuroApp {
 impl Render for MitsuroApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_search_from_input(cx);
+        self.auto_load_selected_mcp_apps(cx);
         if matches!(self.active_mode, ProductMode::Settings) {
             self.sync_settings_search(cx);
         }
@@ -20376,6 +21165,67 @@ mod tests {
             images[2].resubmit_url.as_deref(),
             Some("data:image/png;base64,cG5nIGJ5dGVz")
         );
+    }
+
+    #[test]
+    fn conversation_activity_keeps_interactive_mcp_app_metadata() {
+        let mcp_app = mitsuro_desktop_backend::McpAppToolCall {
+            server: "calendar".to_owned(),
+            tool: "find_events".to_owned(),
+            resource_uri: "ui://calendar/current".to_owned(),
+            arguments: serde_json::json!({"day": "Monday"}),
+            result: Some(serde_json::json!({"structuredContent": {"count": 2}})),
+            error: None,
+            connector_id: Some("calendar".to_owned()),
+            app_name: Some("Calendar".to_owned()),
+            action_name: Some("Find events".to_owned()),
+            link_id: None,
+            plugin_id: None,
+        };
+        let message = demo_message_from_conversation(ConversationMessage {
+            role: MessageRole::Activity,
+            body: "calendar · find_events".to_owned(),
+            item_id: Some("mcp-1".to_owned()),
+            command: None,
+            file_change: None,
+            activity: Some(ActivityFields {
+                kind: "mcpToolCall".to_owned(),
+                title: "MCP tool".to_owned(),
+                summary: "calendar · find_events".to_owned(),
+                status: "completed".to_owned(),
+                mcp_app: Some(mcp_app.clone()),
+            }),
+            images: Vec::new(),
+            audio: Vec::new(),
+            references: Vec::new(),
+        });
+
+        assert!(matches!(
+            message.kind,
+            DemoMessageKind::Activity {
+                mcp_app: Some(ref preserved),
+                ..
+            } if **preserved == mcp_app
+        ));
+    }
+
+    #[test]
+    fn mcp_app_tool_inventory_is_exact_and_always_names_tools() {
+        let mut server = fixture_demo_mcp_servers().data.remove(0);
+        server.tools.insert(
+            "unnamed".to_owned(),
+            serde_json::json!({"description": "Live server omitted the repeated name"}),
+        );
+        server
+            .tools
+            .insert("minimal".to_owned(), serde_json::Value::Null);
+
+        let tools = mcp_app_tools(&server);
+        assert!(tools.iter().any(|tool| {
+            tool["name"] == "unnamed"
+                && tool["description"] == "Live server omitted the repeated name"
+        }));
+        assert!(tools.iter().any(|tool| tool["name"] == "minimal"));
     }
 
     #[test]
