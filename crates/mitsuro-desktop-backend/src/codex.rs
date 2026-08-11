@@ -72,12 +72,13 @@ use crate::protocol::{
     SkillsListResponse, ThreadArchiveParams, ThreadArchiveResponse, ThreadDeleteParams,
     ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams,
     ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
-    ThreadGoalSetResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
-    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadShellCommandParams,
-    ThreadShellCommandResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
-    ThreadUnarchiveResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    ThreadGoalSetResponse, ThreadInjectItemsParams, ThreadInjectItemsResponse, ThreadListParams,
+    ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
+    ThreadSetNameResponse, ThreadShellCommandParams, ThreadShellCommandResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
+    ThreadUnsubscribeResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::realtime::{
     ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
@@ -1341,6 +1342,14 @@ impl AgentBackend for CodexAppServerBackend {
 
     async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse> {
         self.fork_thread(params).await
+    }
+
+    async fn thread_inject_items(
+        &self,
+        params: ThreadInjectItemsParams,
+    ) -> Result<ThreadInjectItemsResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/inject_items", Some(value)).await
     }
 
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
@@ -2808,6 +2817,90 @@ mod tests {
             .thread_shell_command(ThreadShellCommandParams::new(
                 "thread-7",
                 "printf 'one\\ntwo\\n' | tail -n 1",
+            ))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn side_thread_fork_and_injection_use_exact_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in ["thread/fork", "thread/inject_items"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "thread/fork" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-parent",
+                                "model": "gpt-5.6-sol",
+                                "cwd": "/workspace",
+                                "config": {"model_reasoning_effort": "high"},
+                                "ephemeral": true,
+                                "threadSource": "user",
+                                "excludeTurns": true
+                            })
+                        );
+                        serde_json::json!({
+                            "thread": {
+                                "id": "thread-side",
+                                "cwd": "/workspace",
+                                "ephemeral": true,
+                                "turns": []
+                            },
+                            "model": "gpt-5.6-sol",
+                            "cwd": "/workspace"
+                        })
+                    }
+                    _ => {
+                        assert_eq!(request["params"]["threadId"], "thread-side");
+                        assert_eq!(
+                            request["params"]["items"][0]["content"][0]["text"],
+                            "Side conversation boundary."
+                        );
+                        serde_json::json!({})
+                    }
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let mut fork = ThreadForkParams::new("thread-parent");
+        fork.model = Some("gpt-5.6-sol".into());
+        fork.cwd = Some("/workspace".into());
+        fork.config = Some(std::collections::BTreeMap::from([(
+            "model_reasoning_effort".to_owned(),
+            serde_json::json!("high"),
+        )]));
+        fork.ephemeral = Some(true);
+        fork.thread_source = Some("user".into());
+        fork.exclude_turns = Some(true);
+        let response = backend.thread_fork(fork).await.unwrap();
+        let side_id = response.summary().id;
+        backend
+            .thread_inject_items(ThreadInjectItemsParams::input_text_boundary(
+                side_id,
+                "Side conversation boundary.",
             ))
             .await
             .unwrap();
@@ -4331,6 +4424,72 @@ mod integration_tests {
         assert!(observed.0, "missing userShell commandExecution start");
         assert!(observed.1, "missing completed userShell commandExecution");
         assert!(observed.2.contains("mitsuro-thread-shell"));
+        backend.disconnect().await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn real_app_server_side_thread_fork_and_injection_round_trip() {
+        if std::env::var_os("MITSURO_RUN_LIVE_INJECT_ACCEPTANCE").is_none() {
+            eprintln!(
+                "skip: set MITSURO_RUN_LIVE_INJECT_ACCEPTANCE=1 to exercise thread/fork + thread/inject_items"
+            );
+            return;
+        }
+        if !should_run_integration() {
+            panic!("MITSURO_RUN_LIVE_INJECT_ACCEPTANCE requires an available Codex binary");
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        // Fork requires a persisted rollout. Reuse a real parent read-only;
+        // the child is ephemeral and the parent is never modified.
+        let parents = backend
+            .thread_list(ThreadListParams {
+                limit: Some(20),
+                ..Default::default()
+            })
+            .await
+            .expect("thread/list")
+            .threads();
+        let mut side = None;
+        let mut last_error = None;
+        for parent in parents {
+            let mut fork = ThreadForkParams::new(parent.id);
+            fork.cwd = parent.cwd;
+            fork.ephemeral = Some(true);
+            fork.thread_source = Some("user".into());
+            fork.exclude_turns = Some(true);
+            match backend.thread_fork(fork).await {
+                Ok(response) => {
+                    side = Some(response);
+                    break;
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+        let side = side.unwrap_or_else(|| {
+            panic!(
+                "no listed persisted thread could be forked: {}",
+                last_error.unwrap_or_else(|| "thread/list was empty".to_owned())
+            )
+        });
+        let side_summary = side.summary();
+        assert_eq!(side_summary.ephemeral, Some(true));
+        assert!(
+            side.thread
+                .get("turns")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "excludeTurns must omit turns or return an empty list"
+        );
+
+        backend
+            .thread_inject_items(ThreadInjectItemsParams::input_text_boundary(
+                side_summary.id,
+                "Side conversation boundary.",
+            ))
+            .await
+            .expect("thread/inject_items");
         backend.disconnect().await.expect("disconnect");
     }
 

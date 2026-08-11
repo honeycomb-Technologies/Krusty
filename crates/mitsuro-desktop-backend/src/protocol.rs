@@ -1868,7 +1868,7 @@ pub struct ThreadDeleteResponse {}
 // thread/fork
 // ---------------------------------------------------------------------------
 
-/// Params for `thread/fork` (subset; prefer `threadId`).
+/// Params for `thread/fork`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadForkParams {
@@ -1885,13 +1885,39 @@ pub struct ThreadForkParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
+    /// Double-wrapped so callers can distinguish omission from clearing a
+    /// sticky service tier with JSON `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<crate::AskForApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<crate::ApprovalsReviewer>,
+    /// Unlike turn/start's structured policy, thread/fork accepts a named
+    /// sandbox mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::SandboxMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<std::collections::BTreeMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_source: Option<String>,
     /// When true, omit `thread.turns` in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_turns: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_goal_continuation: Option<bool>,
 }
 
 impl ThreadForkParams {
@@ -1903,9 +1929,20 @@ impl ThreadForkParams {
             path: None,
             model: None,
             model_provider: None,
+            service_tier: None,
             cwd: None,
+            runtime_workspace_roots: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: None,
+            permissions: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
             ephemeral: None,
+            thread_source: None,
             exclude_turns: None,
+            defer_goal_continuation: None,
         }
     }
 }
@@ -1928,6 +1965,39 @@ impl ThreadForkResponse {
         ThreadSummary::from_value(&self.thread)
     }
 }
+
+/// Raw Responses API items appended to a thread's model-visible history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInjectItemsParams {
+    pub thread_id: String,
+    pub items: Vec<Value>,
+}
+
+impl ThreadInjectItemsParams {
+    pub fn new(thread_id: impl Into<String>, items: Vec<Value>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            items,
+        }
+    }
+
+    /// Construct the hidden user message used to separate inherited fork
+    /// history from instructions in a side conversation.
+    pub fn input_text_boundary(thread_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::new(
+            thread_id,
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text.into()}]
+            })],
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadInjectItemsResponse {}
 
 // ---------------------------------------------------------------------------
 // thread/resume
@@ -3633,6 +3703,53 @@ mod p11_protocol_shape_tests {
         // Omitted optionals not present
         assert!(v.get("beforeTurnId").is_none());
         assert!(v.get("path").is_none());
+    }
+
+    #[test]
+    fn side_thread_fork_and_injection_match_generated_contracts() {
+        let mut fork = ThreadForkParams::new("th-parent");
+        fork.cwd = Some("/workspace".into());
+        fork.model = Some("gpt-5.6-sol".into());
+        fork.service_tier = Some(None);
+        fork.config = Some(std::collections::BTreeMap::from([(
+            "model_reasoning_effort".to_owned(),
+            serde_json::json!("high"),
+        )]));
+        fork.ephemeral = Some(true);
+        fork.thread_source = Some("user".into());
+        fork.exclude_turns = Some(true);
+        let value = serde_json::to_value(fork).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "threadId": "th-parent",
+                "model": "gpt-5.6-sol",
+                "serviceTier": null,
+                "cwd": "/workspace",
+                "config": {"model_reasoning_effort": "high"},
+                "ephemeral": true,
+                "threadSource": "user",
+                "excludeTurns": true
+            })
+        );
+
+        let inject =
+            ThreadInjectItemsParams::input_text_boundary("th-side", "Side conversation boundary.");
+        assert_eq!(
+            serde_json::to_value(inject).unwrap(),
+            serde_json::json!({
+                "threadId": "th-side",
+                "items": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Side conversation boundary."
+                    }]
+                }]
+            })
+        );
+        let _: ThreadInjectItemsResponse = serde_json::from_value(serde_json::json!({})).unwrap();
     }
 
     #[test]

@@ -237,6 +237,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "thread/goal/clear",
     "thread/goal/get",
     "thread/goal/set",
+    "thread/inject_items",
     "thread/items/list",
     "thread/list",
     "thread/memoryMode/set",
@@ -381,7 +382,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 107);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 108);
         assert!(
             TYPED_CLIENT_METHODS
                 .windows(2)

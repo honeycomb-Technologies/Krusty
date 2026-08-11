@@ -97,8 +97,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 107 typed adapters
-and 26 raw-transport-only methods. The reviewed reference client uses 12 of those raw
+The executable client-method coverage matrix currently identifies 108 typed adapters
+and 25 raw-transport-only methods. The reviewed reference client uses 11 of those raw
 methods on Linux product paths; two are Windows-sandbox-only, and 12 appear only in the
 generated inventory or unused reference modules. Raw reachability is treated as
 remaining product work, not as feature completion; the matrix test must change with
@@ -161,6 +161,15 @@ each typed adapter or approved platform/product exclusion.
   routed from the GPUI composer: the reviewed desktop bundle contains the method in its
   protocol/request telemetry but no product caller, while Codex TUI's `!command`
   affordance is a different client. Mitsuro reports this capability as unsupported.
+- Codex side chats use the reference product's real lifecycle: an ephemeral
+  `thread/fork` with excluded visible turns and side-only developer instructions,
+  followed by a hidden typed `thread/inject_items` boundary. GPUI supports both
+  `/side [prompt]` and **Open side chat**, keeps the fork out of Recents, and deletes
+  it when **Back to main chat** is selected. Mitsuro reports the feature as unsupported
+  because its HTTP API has no model-history injection primitive. The GPUI currently
+  waits for an active main turn to finish before opening the side chat because active
+  turn/approval state is still window-global; concurrent main and side turns remain a
+  parity item rather than being simulated.
 - Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
   visibility, and archived-recents visibility can mutate the privacy-safe local
   preference store; Full access and realtime voice retain their specialized live paths.
@@ -350,6 +359,11 @@ scripts/gpui-codex-protocol-check.sh
 # Explicit opt-in because this method deliberately executes outside the thread sandbox
 MITSURO_RUN_LIVE_SHELL_ACCEPTANCE=1 cargo test -p mitsuro-desktop-backend \
   real_app_server_thread_shell_command_round_trip -- --nocapture
+
+# No model turn: fork a real persisted parent into an ephemeral child, then
+# prove the hidden model-history boundary is accepted by the installed runtime
+MITSURO_RUN_LIVE_INJECT_ACCEPTANCE=1 cargo test -p mitsuro-desktop-backend \
+  real_app_server_side_thread_fork_and_injection_round_trip -- --nocapture
 
 # Read-only check against a running local Mitsuro server
 MITSURO_RUN_SERVER_IT=1 cargo test -p mitsuro-desktop-backend \

@@ -77,13 +77,14 @@ use crate::protocol::{
     ThreadArchiveParams, ThreadArchiveResponse, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadDeleteParams, ThreadDeleteResponse, ThreadForkParams,
     ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
-    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams,
-    ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
-    ThreadSetNameResponse, ThreadShellCommandParams, ThreadShellCommandResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
-    ThreadUnsubscribeResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadInjectItemsParams,
+    ThreadInjectItemsResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
+    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadShellCommandParams,
+    ThreadShellCommandResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
+    ThreadUnarchiveResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnSteerParams, TurnSteerResponse,
 };
 use crate::remote_control::{
     RemoteControlClientsListParams, RemoteControlClientsListResponse,
@@ -355,6 +356,16 @@ pub trait AgentBackend: Send + Sync {
 
     /// Fork a thread into a new thread via `thread/fork`.
     async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse>;
+
+    /// Append raw Responses API items to a loaded thread's model-visible history.
+    async fn thread_inject_items(
+        &self,
+        _params: ThreadInjectItemsParams,
+    ) -> Result<ThreadInjectItemsResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread item injection is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Resume / rejoin a thread via `thread/resume` (distinct from `thread/start`).
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;

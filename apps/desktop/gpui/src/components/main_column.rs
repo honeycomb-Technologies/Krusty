@@ -206,6 +206,9 @@ fn thread_main(
         .when(show_title, |this| {
             this.child(thread_title_bar(&title, project_path.as_deref(), app, cx))
         })
+        .when(app.selected_side_conversation_parent().is_some(), |this| {
+            this.child(side_conversation_bar(cx))
+        })
         .when(show_title && app.thread_find_open(), |this| {
             this.child(thread_find_bar(app, cx))
         })
@@ -403,6 +406,8 @@ fn thread_title_bar(
     let can_review = app.can_review_selected_thread();
     let can_pin = app.can_pin_selected_thread();
     let can_assign_project = app.can_assign_selected_thread_project();
+    let can_open_side =
+        app.side_conversations_available() && app.selected_side_conversation_parent().is_none();
     let project_menu_open = app.thread_project_menu_open();
     let selected_project_id = app.selected_thread_project_id().map(str::to_owned);
     let local_projects = app.local_projects().to_vec();
@@ -418,6 +423,10 @@ fn thread_title_bar(
         || status.starts_with("Archive")
         || status.starts_with("Delete")
         || status.starts_with("Fork")
+        || status.starts_with("Side")
+        || status.starts_with("Opening side")
+        || status.starts_with("Could not open side")
+        || status.starts_with("Returned to main")
         || status.starts_with("Compact")
         || status.starts_with("Compaction")
         || status.starts_with("Review")
@@ -499,6 +508,7 @@ fn thread_title_bar(
                     is_pinned,
                     can_review,
                     can_compact,
+                    can_open_side,
                     can_assign_project,
                     project_menu_open,
                     selected_project_id,
@@ -780,6 +790,7 @@ fn thread_overflow_dropdown(
     is_pinned: bool,
     can_review: bool,
     can_compact: bool,
+    can_open_side: bool,
     can_assign_project: bool,
     project_menu_open: bool,
     selected_project_id: Option<String>,
@@ -877,6 +888,16 @@ fn thread_overflow_dropdown(
                 |app, cx| app.fork_selected_thread(cx),
             ))
         })
+        .when(!project_menu_open && can_open_side, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-side",
+                "Open side chat",
+                "icons/git-branch.svg",
+                false,
+                cx,
+                |app, cx| app.open_side_conversation(cx),
+            ))
+        })
         .when(!project_menu_open && can_review, |this| {
             this.child(thread_menu_item(
                 "thread-menu-review",
@@ -916,6 +937,68 @@ fn thread_overflow_dropdown(
                 |app, cx| app.delete_selected_thread(cx),
             ))
         })
+}
+
+fn side_conversation_bar(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("side-conversation-bar")
+        .h(px(38.0))
+        .px(px(20.0))
+        .border_b_1()
+        .border_color(colors.border_subtle)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    Icon::empty()
+                        .path("icons/git-branch.svg")
+                        .with_size(px(14.0))
+                        .text_color(colors.text_tertiary),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text_secondary)
+                        .child("Temporary side chat"),
+                ),
+        )
+        .child(
+            div()
+                .id("side-conversation-back")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.return_to_side_conversation_parent(cx);
+                }))
+                .child(
+                    Icon::empty()
+                        .path("icons/arrow-left.svg")
+                        .with_size(px(13.0))
+                        .text_color(colors.text_tertiary),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .child("Back to main chat"),
+                ),
+        )
 }
 
 fn thread_project_menu_item(

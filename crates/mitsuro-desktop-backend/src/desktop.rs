@@ -35,14 +35,14 @@ use crate::{
     ThreadBackgroundTerminalsCleanParams, ThreadBackgroundTerminalsCleanResponse,
     ThreadBackgroundTerminalsListParams, ThreadBackgroundTerminalsListResponse,
     ThreadBackgroundTerminalsTerminateParams, ThreadBackgroundTerminalsTerminateResponse,
-    ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
-    ThreadRealtimeAppendSpeechParams, ThreadRealtimeAppendSpeechResponse,
-    ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
-    ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
-    ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
-    ThreadSearchOccurrence, ThreadShellCommandParams, ThreadShellCommandResponse,
-    ThreadTurnItemsView, ThreadTurnsListParams, ThreadTurnsSortDirection, TurnStartParams,
-    TurnStreamEvent,
+    ThreadInjectItemsParams, ThreadInjectItemsResponse, ThreadRealtimeAppendAudioParams,
+    ThreadRealtimeAppendAudioResponse, ThreadRealtimeAppendSpeechParams,
+    ThreadRealtimeAppendSpeechResponse, ThreadRealtimeAppendTextParams,
+    ThreadRealtimeAppendTextResponse, ThreadRealtimeListVoicesParams,
+    ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams, ThreadRealtimeStartResponse,
+    ThreadRealtimeStopParams, ThreadRealtimeStopResponse, ThreadSearchOccurrence,
+    ThreadShellCommandParams, ThreadShellCommandResponse, ThreadTurnItemsView,
+    ThreadTurnsListParams, ThreadTurnsSortDirection, TurnStartParams, TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,6 +127,7 @@ pub struct BackendCapabilities {
     pub sites: bool,
     pub archive: bool,
     pub fork: bool,
+    pub side_conversations: bool,
     pub conversation_search: bool,
     pub paged_history: bool,
     pub edit_latest_message: bool,
@@ -185,6 +186,7 @@ impl BackendCapabilities {
             sites: false,
             archive: true,
             fork: true,
+            side_conversations: true,
             conversation_search: true,
             paged_history: true,
             edit_latest_message: true,
@@ -246,6 +248,7 @@ impl BackendCapabilities {
             sites: false,
             archive: false,
             fork: false,
+            side_conversations: false,
             conversation_search: true,
             paged_history: true,
             edit_latest_message: false,
@@ -538,6 +541,25 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.thread_rollback(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose destructive turn rollback".to_owned(),
+            )),
+        }
+    }
+
+    /// Append model-visible response items to a backend-qualified Codex thread.
+    pub async fn inject_thread_items(
+        &self,
+        session: &BackendSessionId,
+        items: Vec<serde_json::Value>,
+    ) -> Result<ThreadInjectItemsResponse> {
+        self.ensure_session_origin(session)?;
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .thread_inject_items(ThreadInjectItemsParams::new(session.raw.clone(), items))
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose model-history item injection".to_owned(),
             )),
         }
     }
@@ -1391,6 +1413,8 @@ mod tests {
         assert!(BackendCapabilities::mitsuro().paged_history);
         assert!(BackendCapabilities::codex().edit_latest_message);
         assert!(!BackendCapabilities::mitsuro().edit_latest_message);
+        assert!(BackendCapabilities::codex().side_conversations);
+        assert!(!BackendCapabilities::mitsuro().side_conversations);
     }
 
     #[tokio::test]
@@ -1449,6 +1473,27 @@ mod tests {
         let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
         let error = codex
             .start_thread_shell_command(&mitsuro_session, "pwd")
+            .await
+            .expect_err("cross-backend session must be rejected before transport");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn thread_item_injection_rejects_mitsuro_and_cross_backend_sessions_before_io() {
+        let mitsuro = DesktopBackend::Mitsuro(Arc::new(MitsuroServerBackend::new()));
+        let mitsuro_session = BackendSessionId::new(BackendKind::MitsuroHttp, "mitsuro-thread");
+        let items =
+            ThreadInjectItemsParams::input_text_boundary("ignored", "Side conversation boundary.")
+                .items;
+        let error = mitsuro
+            .inject_thread_items(&mitsuro_session, items.clone())
+            .await
+            .expect_err("Mitsuro must reject Codex model-history injection");
+        assert!(matches!(error, AgentError::NotImplemented(_)));
+
+        let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
+        let error = codex
+            .inject_thread_items(&mitsuro_session, items)
             .await
             .expect_err("cross-backend session must be rejected before transport");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
