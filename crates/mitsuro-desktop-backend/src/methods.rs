@@ -204,6 +204,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "mcpServer/oauth/login",
     "mcpServer/tool/call",
     "mcpServerStatus/list",
+    "memory/reset",
     "model/list",
     "modelProvider/capabilities/read",
     "permissionProfile/list",
@@ -237,6 +238,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "thread/goal/get",
     "thread/goal/set",
     "thread/list",
+    "thread/memoryMode/set",
     "thread/name/set",
     "thread/read",
     "thread/realtime/appendAudio",
@@ -375,7 +377,13 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 101);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 103);
+        assert!(
+            TYPED_CLIENT_METHODS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "typed method registry must remain sorted and duplicate-free"
+        );
         for method in TYPED_CLIENT_METHODS {
             assert!(
                 is_known_client_method(method),

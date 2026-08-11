@@ -81,6 +81,7 @@ live catalog.
 | External-agent import | Unsupported; explicit capability boundary | Live Claude Code/Cursor detection, explicit review/confirmation, import lifecycle, and completed history | Explicit fixture state; no invented sources or history |
 | Settings writes | Only controls with an observable local/runtime effect are interactive; server config writes unsupported | Send shortcut, sidebar-name visibility, archived-recents visibility, and Full access availability persist locally; permission profiles, requirements, provider capabilities, and MCP config use live typed contracts; remaining reference controls render disabled | Same explicit capability boundary; no decorative preference mutations |
 | Experimental features | Unsupported; explicit capability boundary | User-facing beta catalog from `experimentalFeature/list`; atomic persistent toggles through `config/batchWrite` and effective-state refresh | Explicit fixture state; no invented toggles |
+| Personalization memory | Unsupported; Mitsuro HTTP has no compatible local-memory contract | Effective Codex config with protocol defaults, atomic persistent toggles through `config/batchWrite`, confirmed `memory/reset`, and typed per-thread memory mode | Explicit unsupported/fixture state; no invented memory values |
 
 Unsupported operations must return `NotImplemented` or be disabled through
 `BackendCapabilities`. A method name appearing in the Codex inventory does not make it
@@ -96,9 +97,12 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 101 typed adapters
-and 32 raw-transport-only methods. Raw reachability is treated as remaining product
-work, not as feature completion; the matrix test must change with each typed adapter.
+The executable client-method coverage matrix currently identifies 103 typed adapters
+and 30 raw-transport-only methods. The reviewed reference client uses 16 of those raw
+methods on Linux product paths; two are Windows-sandbox-only, and 12 appear only in the
+generated inventory or unused reference modules. Raw reachability is treated as
+remaining product work, not as feature completion; the matrix test must change with
+each typed adapter or approved platform/product exclusion.
 
 ## Established recovery baseline
 
@@ -143,6 +147,14 @@ work, not as feature completion; the matrix test must change with each typed ada
   canonical `features.<name>` key through typed `config/batchWrite` with user-config
   reload, then refresh effective enablement. Mitsuro and fixture modes never inherit
   or synthesize Codex feature flags.
+- Personalization Memory derives effective state from the live Codex `config/read`
+  response, including the protocol defaults when the optional `memories` object or
+  keys are absent. Both user-facing toggles write the exact `memories.*` keys through
+  one typed `config/batchWrite` transaction, reload and re-read effective state, and
+  surface policy overrides or failures. Deleting all memories requires two clicks and
+  calls typed `memory/reset`; live validation does not invoke it. Mitsuro and fixture
+  modes cannot inherit or synthesize Codex memory state. The exact
+  `thread/memoryMode/set` contract is typed for the remaining per-thread settings work.
 - Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
   visibility, and archived-recents visibility can mutate the privacy-safe local
   preference store; Full access and realtime voice retain their specialized live paths.
@@ -287,8 +299,12 @@ work, not as feature completion; the matrix test must change with each typed ada
 
 ## Release posture
 
-- The fixture/live visual matrix, dual-provider acceptance gauntlet, full workspace
-  gates, optimized GPUI build, and isolated runtime provenance check are complete.
+- The established fixture/live visual matrix, dual-provider acceptance gauntlet,
+  focused workspace gates, optimized GPUI build, and isolated runtime provenance check
+  are complete for the surfaces already recorded above. The expanded 1:1 completion
+  audit remains open across the raw reference-used method families, per-thread settings,
+  residual disabled destinations, full interaction/visual comparison, and installable
+  release lifecycle; the established gates are not evidence that those items are done.
 - The production-data purity matrix was revalidated on both live transports for Work,
   Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids
   fixture records for every product backend connection state.

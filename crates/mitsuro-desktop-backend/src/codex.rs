@@ -1167,6 +1167,19 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("config/mcpServer/reload", None).await
     }
 
+    async fn thread_memory_mode_set(
+        &self,
+        params: crate::ThreadMemoryModeSetParams,
+    ) -> Result<crate::ThreadMemoryModeSetResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/memoryMode/set", Some(value))
+            .await
+    }
+
+    async fn memory_reset(&self) -> Result<crate::MemoryResetResponse> {
+        self.request_typed("memory/reset", None).await
+    }
+
     async fn permission_profile_list(
         &self,
         params: PermissionProfileListParams,
@@ -2552,6 +2565,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write.status, crate::ConfigWriteStatus::Ok);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_methods_match_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in ["thread/memoryMode/set", "memory/reset"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                if expected == "thread/memoryMode/set" {
+                    assert_eq!(
+                        request["params"],
+                        serde_json::json!({
+                            "threadId": "thread-7",
+                            "mode": "disabled"
+                        })
+                    );
+                } else {
+                    assert!(request.get("params").is_none());
+                }
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": {}}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        backend
+            .thread_memory_mode_set(crate::ThreadMemoryModeSetParams {
+                thread_id: "thread-7".to_owned(),
+                mode: crate::ThreadMemoryMode::Disabled,
+            })
+            .await
+            .unwrap();
+        backend.memory_reset().await.unwrap();
         server.await.unwrap();
     }
 

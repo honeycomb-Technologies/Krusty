@@ -89,6 +89,14 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   `config/batchWrite`, then re-read effective state. The prior hard-coded Plugins and
   Request user input toggles were local decoration and have been removed. Mitsuro HTTP
   and fixture mode show explicit unsupported/fixture states.
+- Personalization → Memory reads the effective Codex `memories` configuration,
+  applies the app-server defaults when optional keys are absent, and persists the
+  two product toggles with atomic `config/batchWrite` mutations followed by an
+  authoritative `config/read`. Deleting the local Codex memory store requires a
+  second confirmation and calls typed `memory/reset`; automated acceptance never
+  performs that destructive action. Mitsuro HTTP and fixture mode remain explicitly
+  unsupported instead of displaying invented preference state. The typed
+  `thread/memoryMode/set` adapter is retained for the per-conversation controls slice.
 - Live terminal, file, account, environment, extension, Work, and Scheduled failures
   remain attached to their originating backend. They never retry against the fixture
   backend, and a backend switch clears the previous backend's projection immediately.
@@ -223,10 +231,12 @@ the native client does not show sample repositories, sample deployments, or inac
 create/review controls. Atlas/browser, the composer, live-turn failure handling, and
 secondary Settings actions follow the same honest capability treatment. Desktop-only
 Settings values are durable and explicitly distinguished from live server configuration.
-The release candidate has passed the complete surface matrix and strict dual-provider
-live acceptance. The production-data purity slice adds a source-level fixture gate and
-fresh live captures for Work, Scheduled, Computer, Extensions, Settings, and Files on
-both transports. Installation and deployment remain separate operator actions.
+The established surface matrix has passed strict dual-provider live acceptance. The
+production-data purity slice adds a source-level fixture gate and fresh live captures
+for Work, Scheduled, Computer, Extensions, Settings, and Files on both transports.
+The expanded reference-method, interaction, and installable-release audit is still in
+progress; those earlier gates do not by themselves prove the full 1:1 objective.
+Installation and deployment remain separate operator actions.
 
 ## Build
 

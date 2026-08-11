@@ -54,6 +54,7 @@ use crate::mcp_config::{
     ConfigBatchWriteParams, ConfigMcpServerReloadResponse, ConfigValueWriteParams,
     ConfigWriteResponse,
 };
+use crate::memory::{MemoryResetResponse, ThreadMemoryModeSetParams, ThreadMemoryModeSetResponse};
 use crate::methods::is_known_client_method;
 use crate::permissions::{
     ConfigRequirementsReadResponse, ModelProviderCapabilitiesReadParams,
@@ -169,6 +170,23 @@ pub trait AgentBackend: Send + Sync {
     async fn config_mcp_server_reload(&self) -> Result<ConfigMcpServerReloadResponse> {
         Err(crate::AgentError::NotImplemented(
             "MCP configuration reload is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Enable or disable memory generation for one loaded Codex thread.
+    async fn thread_memory_mode_set(
+        &self,
+        _params: ThreadMemoryModeSetParams,
+    ) -> Result<ThreadMemoryModeSetResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "per-thread memory mode is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Delete all local Codex memories.
+    async fn memory_reset(&self) -> Result<MemoryResetResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "memory reset is not implemented by this backend".to_owned(),
         ))
     }
 

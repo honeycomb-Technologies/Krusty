@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod live_turn;
 pub mod mcp_auth;
 pub mod mcp_config;
+pub mod memory;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
@@ -147,6 +148,9 @@ pub use mcp_config::{
     valid_mcp_server_name, ConfigBatchWriteParams, ConfigEdit, ConfigMcpServerReloadResponse,
     ConfigValueWriteParams, ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams,
     McpServerTransportConfig, MergeStrategy,
+};
+pub use memory::{
+    MemoryResetResponse, ThreadMemoryMode, ThreadMemoryModeSetParams, ThreadMemoryModeSetResponse,
 };
 pub use methods::{
     client_method_coverage, client_methods_txt_path, is_known_client_method,

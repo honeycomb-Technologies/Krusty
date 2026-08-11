@@ -1496,60 +1496,7 @@ fn personalization_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                 )),
         )
         .child(group_label("Memory"))
-        .child(
-            settings_card()
-                .child(
-                    div()
-                        .px(px(14.0))
-                        .pt(px(12.0))
-                        .pb(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_tertiary)
-                                .child(
-                                    "Configure how local memories are collected, retained, and consolidated on this computer."
-                                        .to_string(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.accent)
-                                .child("Learn more".to_string()),
-                        ),
-                )
-                .child(card_divider())
-                .child(toggle_row(
-                    "Enable local memories",
-                    "Create memories from chats on this computer and use them to personalize future chats on this computer",
-                    "enable_local_memories",
-                    true,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(toggle_row(
-                    "Memories from tool-assisted chats",
-                    "Generate memories from chats that used MCP tools or web search",
-                    "memory_from_tools",
-                    false,
-                    app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Delete local memories",
-                    "Delete all memories stored locally on this computer",
-                    "Delete",
-                    "delete-memories",
-                    cx,
-                )),
-        )
+        .child(memory_settings_card(app, cx))
         .child(group_label("Chronicle research preview"))
         .child(
             settings_card()
@@ -4512,6 +4459,199 @@ fn disabled_toggle_row(title: &str, subtitle: &str, on: bool) -> impl IntoElemen
                 ),
         )
         .child(div().opacity(0.55).child(toggle_switch(on)))
+}
+
+fn memory_settings_card(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let state = app.memory_settings_state();
+    let state_detail = match state {
+        SurfaceDataState::Live => app
+            .memory_settings_error()
+            .unwrap_or("Settings are read from and written to the active Codex app-server config."),
+        SurfaceDataState::Loading => "Reading effective Codex memory configuration…",
+        SurfaceDataState::Unsupported => {
+            "Mitsuro HTTP does not expose a compatible local-memory configuration contract."
+        }
+        SurfaceDataState::Fixture => "Offline fixture mode never invents memory state.",
+        SurfaceDataState::Error => app
+            .memory_settings_error()
+            .unwrap_or("Memory configuration could not be read from app-server."),
+    };
+    settings_card()
+        .child(
+            div()
+                .px(px(14.0))
+                .pt(px(12.0))
+                .pb(px(8.0))
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(state_detail.to_owned()),
+        )
+        .child(card_divider())
+        .child(memory_toggle_row(
+            "Enable local memories",
+            "Create memories from chats on this computer and use them in future chats",
+            "memory-enabled",
+            app.memory_enabled(),
+            app,
+            cx,
+        ))
+        .child(card_divider())
+        .child(memory_toggle_row(
+            "Memories from tool-assisted chats",
+            "Generate memories from chats that used MCP tools or web search",
+            "memory-external-context",
+            app.memories_from_external_context(),
+            app,
+            cx,
+        ))
+        .child(card_divider())
+        .child(memory_reset_row(app, cx))
+}
+
+fn memory_toggle_row(
+    title: &str,
+    subtitle: &str,
+    key: &'static str,
+    on: bool,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let available =
+        app.memory_settings_state() == SurfaceDataState::Live && !app.memory_settings_busy();
+    let title = title.to_owned();
+    let subtitle = subtitle.to_owned();
+    div()
+        .id(key)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .when(available, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| match key {
+                    "memory-enabled" => app.set_memory_enabled(!on, cx),
+                    "memory-external-context" => app.set_memories_from_external_context(!on, cx),
+                    _ => {}
+                }))
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(subtitle),
+                ),
+        )
+        .child(
+            div()
+                .when(!available, |switch| switch.opacity(0.45))
+                .child(toggle_switch(available && on)),
+        )
+}
+
+fn memory_reset_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    let colors = theme::colors();
+    let available =
+        app.memory_settings_state() == SurfaceDataState::Live && !app.memory_settings_busy();
+    let confirmation = app.memory_reset_confirmation();
+    div()
+        .id("memory-reset-row")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child("Delete local memories"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(if confirmation {
+                            "This cannot be undone. Click Delete again to confirm."
+                        } else {
+                            "Delete all memories stored locally by Codex on this computer"
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id("memory-reset-button")
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                .bg(if confirmation {
+                    theme::hex_alpha(0xef4444, 0.16)
+                } else {
+                    colors.bg_button_secondary
+                })
+                .border_1()
+                .border_color(if confirmation {
+                    theme::hex_alpha(0xef4444, 0.45)
+                } else {
+                    colors.border
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(available, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(|app, _, _, cx| app.reset_memories(cx)))
+                })
+                .when(!available, |button| button.opacity(0.45))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if confirmation {
+                            theme::hex(0xef4444)
+                        } else {
+                            colors.text_secondary
+                        })
+                        .child(if app.memory_settings_busy() {
+                            "Working…"
+                        } else if confirmation {
+                            "Confirm delete"
+                        } else {
+                            "Delete"
+                        }),
+                ),
+        )
 }
 
 fn toggle_row(

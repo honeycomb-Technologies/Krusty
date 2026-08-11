@@ -698,6 +698,59 @@ pub enum SurfaceDataState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemorySettingsSnapshot {
+    generate_memories: bool,
+    use_memories: bool,
+    memories_from_external_context: bool,
+}
+
+impl MemorySettingsSnapshot {
+    fn from_config(config: &serde_json::Value) -> Self {
+        let memories = config
+            .get("memories")
+            .and_then(serde_json::Value::as_object);
+        Self {
+            // These are the Codex 0.147.0 effective defaults when the keys are absent.
+            generate_memories: memories
+                .and_then(|value| value.get("generate_memories"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            use_memories: memories
+                .and_then(|value| value.get("use_memories"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            memories_from_external_context: !memories
+                .and_then(|value| value.get("disable_on_external_context"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self.generate_memories && self.use_memories
+    }
+}
+
+fn memory_enabled_config_edits(enabled: bool) -> Vec<ConfigEdit> {
+    ["memories.generate_memories", "memories.use_memories"]
+        .into_iter()
+        .map(|key_path| ConfigEdit {
+            key_path: key_path.to_owned(),
+            value: serde_json::Value::Bool(enabled),
+            merge_strategy: MergeStrategy::Upsert,
+        })
+        .collect()
+}
+
+fn memories_external_context_config_edits(enabled: bool) -> Vec<ConfigEdit> {
+    vec![ConfigEdit {
+        key_path: "memories.disable_on_external_context".to_owned(),
+        value: serde_json::Value::Bool(!enabled),
+        merge_strategy: MergeStrategy::Upsert,
+    }]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum McpAddTransport {
     #[default]
@@ -1266,6 +1319,12 @@ pub struct MitsuroApp {
     experimental_features_state: SurfaceDataState,
     experimental_features_error: Option<String>,
     experimental_feature_mutation: Option<String>,
+    /// Effective Codex `config.memories` state. Absent for unsupported backends.
+    memory_settings: Option<MemorySettingsSnapshot>,
+    memory_settings_state: SurfaceDataState,
+    memory_settings_error: Option<String>,
+    memory_settings_mutation: Option<&'static str>,
+    memory_reset_confirmation: bool,
     /// Skills from `skills/list` (or fixture demo).
     skills: Vec<SkillMetadata>,
     /// Exact per-workspace catalog returned by Codex `hooks/list`.
@@ -1901,6 +1960,11 @@ impl MitsuroApp {
             experimental_features_state: SurfaceDataState::Loading,
             experimental_features_error: None,
             experimental_feature_mutation: None,
+            memory_settings: None,
+            memory_settings_state: SurfaceDataState::Loading,
+            memory_settings_error: None,
+            memory_settings_mutation: None,
+            memory_reset_confirmation: false,
             skills: Vec::new(),
             hooks: Vec::new(),
             hooks_state: SurfaceDataState::Loading,
@@ -6545,6 +6609,190 @@ impl MitsuroApp {
                         app.experimental_features_state = SurfaceDataState::Error;
                         app.experimental_features_error = Some(error.clone());
                         app.status_line = format!("Experimental feature failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn memory_settings_state(&self) -> SurfaceDataState {
+        self.memory_settings_state
+    }
+
+    pub fn memory_settings_error(&self) -> Option<&str> {
+        self.memory_settings_error.as_deref()
+    }
+
+    pub fn memory_settings_busy(&self) -> bool {
+        self.memory_settings_mutation.is_some()
+    }
+
+    pub fn memory_enabled(&self) -> bool {
+        self.memory_settings
+            .is_some_and(MemorySettingsSnapshot::enabled)
+    }
+
+    pub fn memories_from_external_context(&self) -> bool {
+        self.memory_settings
+            .is_some_and(|settings| settings.memories_from_external_context)
+    }
+
+    pub fn memory_reset_confirmation(&self) -> bool {
+        self.memory_reset_confirmation
+    }
+
+    pub fn set_memory_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.write_memory_config(
+            "memory-enabled",
+            memory_enabled_config_edits(enabled),
+            if enabled {
+                "Local memories enabled"
+            } else {
+                "Local memories disabled"
+            },
+            cx,
+        );
+    }
+
+    pub fn set_memories_from_external_context(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.write_memory_config(
+            "memory-external-context",
+            memories_external_context_config_edits(enabled),
+            if enabled {
+                "Memories from tool-assisted chats enabled"
+            } else {
+                "Memories from tool-assisted chats disabled"
+            },
+            cx,
+        );
+    }
+
+    fn write_memory_config(
+        &mut self,
+        mutation: &'static str,
+        edits: Vec<ConfigEdit>,
+        success_message: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.memory_settings_state != SurfaceDataState::Live
+            || self.memory_settings_mutation.is_some()
+        {
+            return;
+        }
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().memory_settings)
+        else {
+            return;
+        };
+        self.memory_settings_mutation = Some(mutation);
+        self.memory_settings_error = None;
+        self.memory_reset_confirmation = false;
+        self.status_line = "Personalization · saving memory settings…".into();
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        let write = runner
+                            .write_config_batch(ConfigBatchWriteParams {
+                                edits,
+                                file_path: None,
+                                expected_version: None,
+                                reload_user_config: true,
+                            })
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let config = runner
+                            .config_read(ConfigReadParams {
+                                cwd: std::env::current_dir()
+                                    .ok()
+                                    .map(|path| path.display().to_string()),
+                                include_layers: Some(false),
+                            })
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok::<_, String>((
+                            write.status,
+                            MemorySettingsSnapshot::from_config(&config.config),
+                        ))
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.memory_settings_mutation = None;
+                match result {
+                    Ok((status, settings)) => {
+                        app.memory_settings = Some(settings);
+                        app.memory_settings_state = SurfaceDataState::Live;
+                        app.memory_settings_error = None;
+                        app.status_line = match status {
+                            ConfigWriteStatus::Ok => success_message.into(),
+                            ConfigWriteStatus::OkOverridden => {
+                                "Memory setting saved but overridden by policy".into()
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        app.memory_settings_state = SurfaceDataState::Error;
+                        app.memory_settings_error = Some(error.clone());
+                        app.status_line = format!("Memory settings failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn reset_memories(&mut self, cx: &mut Context<Self>) {
+        if self.memory_settings_state != SurfaceDataState::Live
+            || self.memory_settings_mutation.is_some()
+        {
+            return;
+        }
+        if !self.memory_reset_confirmation {
+            self.memory_reset_confirmation = true;
+            self.status_line = "Delete local memories · click Delete again to confirm.".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().memory_settings)
+        else {
+            return;
+        };
+        self.memory_settings_mutation = Some("memory-reset");
+        self.memory_settings_error = None;
+        self.status_line = "Deleting local memories…".into();
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        runner
+                            .reset_memories()
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.memory_settings_mutation = None;
+                app.memory_reset_confirmation = false;
+                match result {
+                    Ok(_) => {
+                        app.memory_settings_error = None;
+                        app.status_line = "Local memories deleted.".into();
+                    }
+                    Err(error) => {
+                        app.memory_settings_error = Some(error.clone());
+                        app.status_line = format!("Delete memories failed · {error}").into();
                     }
                 }
                 cx.notify();
@@ -14508,6 +14756,11 @@ impl MitsuroApp {
         self.experimental_features_state = SurfaceDataState::Fixture;
         self.experimental_features_error = None;
         self.experimental_feature_mutation = None;
+        self.memory_settings = None;
+        self.memory_settings_state = SurfaceDataState::Fixture;
+        self.memory_settings_error = None;
+        self.memory_settings_mutation = None;
+        self.memory_reset_confirmation = false;
 
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -14711,6 +14964,15 @@ impl MitsuroApp {
         };
         self.experimental_features_error = None;
         self.experimental_feature_mutation = None;
+        self.memory_settings = None;
+        self.memory_settings_state = match kind {
+            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
+            BackendKind::Fixture => SurfaceDataState::Fixture,
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
+        };
+        self.memory_settings_error = None;
+        self.memory_settings_mutation = None;
+        self.memory_reset_confirmation = false;
         self.skills.clear();
         self.hooks.clear();
         self.hooks_state = SurfaceDataState::Loading;
@@ -14927,6 +15189,7 @@ impl MitsuroApp {
                             permissions,
                             external_agent_import,
                             experimental_features,
+                            memory_settings,
                             skills,
                             hooks,
                             connector_apps,
@@ -15050,6 +15313,23 @@ impl MitsuroApp {
                                 app.experimental_features.clear();
                                 app.experimental_features_state = SurfaceDataState::Error;
                                 app.experimental_features_error = Some(error);
+                            }
+                        }
+                        match memory_settings {
+                            Ok(Some(settings)) => {
+                                app.memory_settings = Some(settings);
+                                app.memory_settings_state = SurfaceDataState::Live;
+                                app.memory_settings_error = None;
+                            }
+                            Ok(None) => {
+                                app.memory_settings = None;
+                                app.memory_settings_state = SurfaceDataState::Unsupported;
+                                app.memory_settings_error = None;
+                            }
+                            Err(error) => {
+                                app.memory_settings = None;
+                                app.memory_settings_state = SurfaceDataState::Error;
+                                app.memory_settings_error = Some(error);
                             }
                         }
                         app.apply_skills(skills);
@@ -16509,6 +16789,7 @@ struct BackendBootstrap {
     permissions: Result<Option<PermissionsSnapshot>, String>,
     external_agent_import: Result<Option<ExternalAgentImportSnapshot>, String>,
     experimental_features: Result<Option<Vec<ExperimentalFeature>>, String>,
+    memory_settings: Result<Option<MemorySettingsSnapshot>, String>,
     skills: Vec<SkillMetadata>,
     hooks: Result<Option<Vec<HooksListEntry>>, String>,
     connector_apps: Result<Option<(Vec<AppInfo>, Vec<InstalledApp>)>, String>,
@@ -16574,11 +16855,14 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
                 cwd: effective_cwd.clone(),
                 include_layers: Some(false),
             })
-            .await
-            .ok();
-        let config_snip = config.as_ref().map(|response| response.settings_snippet());
+            .await;
+        let config_snip = config
+            .as_ref()
+            .ok()
+            .map(|response| response.settings_snippet());
         let config_default_permissions = config
             .as_ref()
+            .ok()
             .and_then(|response| response.config.get("default_permissions"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
@@ -16605,6 +16889,14 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
         };
         let experimental_features = if b.capabilities().experimental_features {
             list_all_experimental_features(b.as_ref()).await.map(Some)
+        } else {
+            Ok(None)
+        };
+        let memory_settings = if b.capabilities().memory_settings {
+            config
+                .as_ref()
+                .map(|response| Some(MemorySettingsSnapshot::from_config(&response.config)))
+                .map_err(|error| error.to_string())
         } else {
             Ok(None)
         };
@@ -16673,6 +16965,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             permissions,
             external_agent_import,
             experimental_features,
+            memory_settings,
             skills,
             hooks,
             connector_apps,
@@ -16981,6 +17274,50 @@ mod tests {
         assert!(runtime_wired_settings_choice("send_shortcut"));
         assert!(!runtime_wired_settings_choice("follow_up"));
         assert!(!runtime_wired_settings_choice("accent_color"));
+    }
+
+    #[test]
+    fn memory_settings_follow_codex_defaults_and_exact_config_overrides() {
+        let defaults = MemorySettingsSnapshot::from_config(&serde_json::json!({}));
+        assert!(defaults.enabled());
+        assert!(defaults.memories_from_external_context);
+
+        let configured = MemorySettingsSnapshot::from_config(&serde_json::json!({
+            "memories": {
+                "generate_memories": true,
+                "use_memories": false,
+                "disable_on_external_context": true
+            }
+        }));
+        assert!(!configured.enabled());
+        assert!(!configured.memories_from_external_context);
+    }
+
+    #[test]
+    fn memory_setting_writes_use_exact_codex_config_keys_and_polarity() {
+        assert_eq!(
+            serde_json::to_value(memory_enabled_config_edits(false)).unwrap(),
+            serde_json::json!([
+                {
+                    "keyPath": "memories.generate_memories",
+                    "value": false,
+                    "mergeStrategy": "upsert"
+                },
+                {
+                    "keyPath": "memories.use_memories",
+                    "value": false,
+                    "mergeStrategy": "upsert"
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(memories_external_context_config_edits(true)).unwrap(),
+            serde_json::json!([{
+                "keyPath": "memories.disable_on_external_context",
+                "value": false,
+                "mergeStrategy": "upsert"
+            }])
+        );
     }
 
     #[test]

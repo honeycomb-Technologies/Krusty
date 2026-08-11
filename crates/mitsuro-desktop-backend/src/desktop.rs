@@ -110,6 +110,7 @@ pub struct BackendCapabilities {
     pub model_provider_capabilities: bool,
     pub external_agent_import: bool,
     pub experimental_features: bool,
+    pub memory_settings: bool,
     pub account_workspace_messages: bool,
     pub account_reset_credits: bool,
     pub account_credit_nudge: bool,
@@ -163,6 +164,7 @@ impl BackendCapabilities {
             model_provider_capabilities: true,
             external_agent_import: true,
             experimental_features: true,
+            memory_settings: true,
             account_workspace_messages: true,
             account_reset_credits: true,
             account_credit_nudge: true,
@@ -219,6 +221,7 @@ impl BackendCapabilities {
             model_provider_capabilities: false,
             external_agent_import: false,
             experimental_features: false,
+            memory_settings: false,
             account_workspace_messages: false,
             account_reset_credits: false,
             account_credit_nudge: false,
@@ -716,6 +719,27 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.config_batch_write(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose Codex configuration writes".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn set_thread_memory_mode(
+        &self,
+        params: crate::ThreadMemoryModeSetParams,
+    ) -> Result<crate::ThreadMemoryModeSetResponse> {
+        match self {
+            Self::Codex(backend) => backend.thread_memory_mode_set(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose per-thread Codex memory mode".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn reset_memories(&self) -> Result<crate::MemoryResetResponse> {
+        match self {
+            Self::Codex(backend) => backend.memory_reset().await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose the Codex local-memory store".to_owned(),
             )),
         }
     }
@@ -1255,6 +1279,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().external_agent_import);
         assert!(BackendCapabilities::codex().experimental_features);
         assert!(!BackendCapabilities::mitsuro().experimental_features);
+        assert!(BackendCapabilities::codex().memory_settings);
+        assert!(!BackendCapabilities::mitsuro().memory_settings);
         assert!(BackendCapabilities::codex().account_workspace_messages);
         assert!(!BackendCapabilities::mitsuro().account_workspace_messages);
         assert!(BackendCapabilities::codex().account_reset_credits);
