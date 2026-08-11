@@ -11,9 +11,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Pixels, Render,
-    ScrollHandle, SharedString, Styled as _, Window,
+    div, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, ImageFormat,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
+    Pixels, Render, ScrollHandle, SharedString, Styled as _, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 use mitsuro_desktop_backend::{
@@ -94,6 +94,50 @@ use crate::demo::{
 use crate::mcp_app_runtime::{McpAppRuntime, McpAppRuntimeEvent};
 use crate::preferences::{DesktopPreferences, DesktopProject};
 use crate::theme;
+
+gpui::actions!(
+    mitsuro,
+    [
+        OpenSettings,
+        OpenKeyboardShortcuts,
+        NewConversation,
+        ToggleSidebar,
+        FocusComposer,
+        ArchiveConversation,
+        StopActiveRun,
+        ToggleRealtimeVoice,
+        ToggleFastMode,
+        TogglePlanMode,
+        GoToChat,
+        GoToWork,
+        GoToCodex,
+        OpenTerminal,
+        OpenAtlas,
+    ]
+);
+
+/// Register the in-window shortcuts that the Keyboard Shortcuts settings page
+/// advertises. These are GPUI actions, so focused inputs and component dialogs
+/// retain their more-specific key contexts before an action reaches the app.
+pub fn init_keybindings(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("ctrl-/", OpenKeyboardShortcuts, None),
+        KeyBinding::new("ctrl-n", NewConversation, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-l", FocusComposer, None),
+        KeyBinding::new("ctrl-shift-a", ArchiveConversation, None),
+        KeyBinding::new("escape", StopActiveRun, None),
+        KeyBinding::new("ctrl-shift-v", ToggleRealtimeVoice, None),
+        KeyBinding::new("ctrl-shift-f", ToggleFastMode, None),
+        KeyBinding::new("ctrl-shift-p", TogglePlanMode, None),
+        KeyBinding::new("ctrl-1", GoToChat, None),
+        KeyBinding::new("ctrl-2", GoToWork, None),
+        KeyBinding::new("ctrl-3", GoToCodex, None),
+        KeyBinding::new("ctrl-`", OpenTerminal, None),
+        KeyBinding::new("ctrl-shift-b", OpenAtlas, None),
+    ]);
+}
 
 const SIDE_BOUNDARY_PROMPT: &str = r#"Side conversation boundary.
 
@@ -2684,6 +2728,11 @@ impl MitsuroApp {
             }
         }
 
+        // Give the app action tree an initial focus path. Component inputs
+        // replace this focus normally when clicked, while global GPUI actions
+        // continue to bubble to the root listener set.
+        window.focus(&app.focus_handle);
+
         app
     }
 
@@ -2900,11 +2949,16 @@ impl MitsuroApp {
         self.navigation_replaying = false;
     }
 
-    pub fn new_codex_thread_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_conversation_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.app_menu = None;
-        self.set_mode(ProductMode::Codex, window, cx);
+        if !matches!(self.active_mode, ProductMode::Chat | ProductMode::Codex) {
+            self.set_mode(ProductMode::Codex, window, cx);
+        }
         self.new_thread(cx);
         self.update_composer_placeholder(window, cx);
+        self.composer_input.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
     }
 
     pub fn open_help_documentation(&mut self, cx: &mut Context<Self>) {
@@ -2920,6 +2974,7 @@ impl MitsuroApp {
     /// Selection is preserved: Chat/Codex each remember their last thread; Work
     /// keeps `selected_goal` across hops (goals list is never cleared here).
     pub fn set_mode(&mut self, mode: ProductMode, window: &mut Window, cx: &mut Context<Self>) {
+        let mode_changed = mode != self.active_mode;
         if self.latest_message_edit_in_progress && mode != self.active_mode {
             self.status_line =
                 "Finish the message rollback and resend before leaving this conversation.".into();
@@ -3127,6 +3182,12 @@ impl MitsuroApp {
             self.update_composer_placeholder(window, cx);
         }
 
+        if mode_changed {
+            // The previously focused control may no longer be in the rendered
+            // surface. Restore the stable root focus path so the next app
+            // shortcut remains dispatchable after keyboard navigation.
+            window.focus(&self.focus_handle);
+        }
         cx.notify();
     }
 
@@ -9809,7 +9870,7 @@ impl MitsuroApp {
     fn browser_host_kind_label(&self) -> String {
         #[cfg(feature = "browser-native")]
         {
-            return self.native_host.host_kind_label();
+            self.native_host.host_kind_label()
         }
         #[cfg(not(feature = "browser-native"))]
         {
@@ -21553,6 +21614,121 @@ async fn list_all_remote_control_clients(
     ))
 }
 
+impl MitsuroApp {
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Settings, window, cx);
+        self.set_settings_section(SettingsSection::General, cx);
+    }
+
+    fn on_open_keyboard_shortcuts(
+        &mut self,
+        _: &OpenKeyboardShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_mode(ProductMode::Settings, window, cx);
+        self.set_settings_section(SettingsSection::KeyboardShortcuts, cx);
+    }
+
+    fn on_new_conversation(
+        &mut self,
+        _: &NewConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_conversation_from_menu(window, cx);
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_thread_sidebar(cx);
+    }
+
+    fn on_focus_composer(
+        &mut self,
+        _: &FocusComposer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.active_mode, ProductMode::Chat | ProductMode::Codex) {
+            self.set_mode(ProductMode::Codex, window, cx);
+        }
+        self.composer_input.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
+        self.status_line = "Composer focused.".into();
+        cx.notify();
+    }
+
+    fn on_archive_conversation(
+        &mut self,
+        _: &ArchiveConversation,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.archive_selected_thread(cx);
+    }
+
+    fn stop_active_run(&mut self, cx: &mut Context<Self>) {
+        if self.realtime_voice_active() {
+            self.toggle_realtime_voice(cx);
+        } else if self.turn_in_progress() {
+            self.interrupt_turn(cx);
+        }
+    }
+
+    fn on_stop_active_run(&mut self, _: &StopActiveRun, _: &mut Window, cx: &mut Context<Self>) {
+        self.stop_active_run(cx);
+    }
+
+    fn on_input_escape(
+        &mut self,
+        _: &gpui_component::input::Escape,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // InputState propagates Escape only after giving IME/completion state a
+        // chance to consume it, preserving normal text-entry behavior.
+        self.stop_active_run(cx);
+    }
+
+    fn on_toggle_realtime_voice(
+        &mut self,
+        _: &ToggleRealtimeVoice,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_realtime_voice(cx);
+    }
+
+    fn on_toggle_fast_mode(&mut self, _: &ToggleFastMode, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_fast_mode(cx);
+    }
+
+    fn on_toggle_plan_mode(&mut self, _: &TogglePlanMode, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_work_mode(cx);
+    }
+
+    fn on_go_to_chat(&mut self, _: &GoToChat, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Chat, window, cx);
+    }
+
+    fn on_go_to_work(&mut self, _: &GoToWork, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Work, window, cx);
+    }
+
+    fn on_go_to_codex(&mut self, _: &GoToCodex, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Codex, window, cx);
+    }
+
+    fn on_open_terminal(&mut self, _: &OpenTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_mode(ProductMode::Terminal, window, cx);
+    }
+
+    fn on_open_atlas(&mut self, _: &OpenAtlas, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_atlas(window, cx);
+    }
+}
+
 impl Focusable for MitsuroApp {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
@@ -21582,6 +21758,22 @@ impl Render for MitsuroApp {
             .bg(colors.bg_under)
             .text_color(colors.text)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_open_keyboard_shortcuts))
+            .on_action(cx.listener(Self::on_new_conversation))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_focus_composer))
+            .on_action(cx.listener(Self::on_archive_conversation))
+            .on_action(cx.listener(Self::on_stop_active_run))
+            .on_action(cx.listener(Self::on_input_escape))
+            .on_action(cx.listener(Self::on_toggle_realtime_voice))
+            .on_action(cx.listener(Self::on_toggle_fast_mode))
+            .on_action(cx.listener(Self::on_toggle_plan_mode))
+            .on_action(cx.listener(Self::on_go_to_chat))
+            .on_action(cx.listener(Self::on_go_to_work))
+            .on_action(cx.listener(Self::on_go_to_codex))
+            .on_action(cx.listener(Self::on_open_terminal))
+            .on_action(cx.listener(Self::on_open_atlas))
             .child(components::app_header(self, cx))
             .child(
                 div()

@@ -143,6 +143,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   changes runtime behavior immediately. Full access and realtime voice keep their
   specialized live paths. All remaining reference controls are dimmed, explicitly
   unavailable, non-hovering, and non-clickable.
+- Keyboard Shortcuts lists only registered GPUI actions and composer-owned input
+  behavior as active. Settings, conversation creation, sidebar/focus/archive, stop,
+  realtime voice, Fast/Plan, and primary navigation shortcuts are wired in-window;
+  unimplemented command-palette, dictation, approval, popout, microphone, pet, and
+  custom-remapping controls are explicitly labeled unavailable.
 - Account and Usage render protocol data only when the connected backend supplies a
   complete snapshot. Mitsuro HTTP shows an explicit unsupported state; it does not show
   sample identities, plans, credits, limits, or billing history.

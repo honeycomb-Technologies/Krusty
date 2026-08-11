@@ -107,16 +107,27 @@ fn menu_items(
 ) -> Vec<gpui::AnyElement> {
     match menu {
         AppMenu::File => vec![
-            menu_item("menu-new-chat", "New chat", true, cx, |app, window, cx| {
-                app.new_codex_thread_from_menu(window, cx)
-            }),
-            menu_item("menu-settings", "Settings", true, cx, |app, window, cx| {
-                app.set_mode(ProductMode::Settings, window, cx)
-            }),
+            menu_item(
+                "menu-new-chat",
+                "New chat",
+                Some("Ctrl+N"),
+                true,
+                cx,
+                |app, window, cx| app.new_conversation_from_menu(window, cx),
+            ),
+            menu_item(
+                "menu-settings",
+                "Settings",
+                Some("Ctrl+,"),
+                true,
+                cx,
+                |app, window, cx| app.set_mode(ProductMode::Settings, window, cx),
+            ),
             menu_separator(),
             menu_item(
                 "menu-close-window",
                 "Close window",
+                None,
                 true,
                 cx,
                 |_, window, _| window.remove_window(),
@@ -125,6 +136,7 @@ fn menu_items(
         AppMenu::Edit => vec![menu_item(
             "menu-find-conversation",
             "Find in conversation",
+            None,
             app.selected_thread_id().is_some(),
             cx,
             |app, window, cx| {
@@ -140,18 +152,29 @@ fn menu_items(
                 } else {
                     "Show sidebar"
                 },
+                Some("Ctrl+B"),
                 app.thread_sidebar_toggle_available(),
                 cx,
                 |app, _, cx| app.toggle_thread_sidebar(cx),
             ),
             menu_separator(),
-            menu_item("menu-work", "Work", true, cx, |app, window, cx| {
-                app.set_mode(ProductMode::Work, window, cx)
-            }),
-            menu_item("menu-terminal", "Terminal", true, cx, |app, window, cx| {
-                app.set_mode(ProductMode::Terminal, window, cx)
-            }),
-            menu_item("menu-files", "Files", true, cx, |app, window, cx| {
+            menu_item(
+                "menu-work",
+                "Work",
+                Some("Ctrl+2"),
+                true,
+                cx,
+                |app, window, cx| app.set_mode(ProductMode::Work, window, cx),
+            ),
+            menu_item(
+                "menu-terminal",
+                "Terminal",
+                Some("Ctrl+`"),
+                true,
+                cx,
+                |app, window, cx| app.set_mode(ProductMode::Terminal, window, cx),
+            ),
+            menu_item("menu-files", "Files", None, true, cx, |app, window, cx| {
                 app.set_mode(ProductMode::Files, window, cx)
             }),
         ],
@@ -159,6 +182,7 @@ fn menu_items(
             menu_item(
                 "menu-feedback",
                 "Send feedback",
+                None,
                 true,
                 cx,
                 |app, window, cx| {
@@ -169,6 +193,7 @@ fn menu_items(
             menu_item(
                 "menu-documentation",
                 "Mitsuro documentation",
+                None,
                 true,
                 cx,
                 |app, _, cx| app.open_help_documentation(cx),
@@ -246,6 +271,7 @@ fn header_menu_button(
 fn menu_item(
     id: &'static str,
     label: &'static str,
+    shortcut: Option<&'static str>,
     enabled: bool,
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
@@ -258,6 +284,8 @@ fn menu_item(
         .rounded(px(6.0))
         .flex()
         .items_center()
+        .justify_between()
+        .gap(px(14.0))
         .when(enabled, |this| {
             this.cursor_pointer()
                 .hover(|style| style.bg(colors.bg_hover))
@@ -270,6 +298,15 @@ fn menu_item(
                 .text_color(colors.text_secondary)
                 .child(label),
         )
+        .when_some(shortcut, |this, shortcut| {
+            this.child(
+                div()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(colors.text_tertiary)
+                    .child(shortcut),
+            )
+        })
         .into_any_element()
 }
 

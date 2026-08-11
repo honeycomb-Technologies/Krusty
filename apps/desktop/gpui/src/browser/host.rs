@@ -195,7 +195,7 @@ impl BrowserHost for DesktopBrowserHost {
 pub fn create_default_host() -> DesktopBrowserHost {
     #[cfg(feature = "browser-native")]
     {
-        return crate::browser::native::create_wry_linked_host();
+        crate::browser::native::create_wry_linked_host()
     }
     #[cfg(not(feature = "browser-native"))]
     {

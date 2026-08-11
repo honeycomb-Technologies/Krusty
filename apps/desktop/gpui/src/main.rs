@@ -100,6 +100,7 @@ fn main() {
         .with_assets(FileAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            app::init_keybindings(cx);
 
             // Prefer dark component theme to match Codex tokens.
             // `Theme::change` applies the matching component palette; assigning

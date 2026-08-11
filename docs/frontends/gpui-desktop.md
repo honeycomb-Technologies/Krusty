@@ -209,6 +209,10 @@ changes. No fixture HTML, generic web page, or locally generated widget enters t
   Reference controls without a runtime contract remain visible for parity but have no
   pointer, hover, or click affordance, display an unavailable label, and cannot add
   decorative values to the preference file.
+- Keyboard Shortcuts is backed by registered GPUI actions rather than a reference-only
+  catalog. It wires the supported in-window navigation and composer/run commands,
+  preserves component-specific Escape handling for IME and dialogs, reflects the live
+  Send preference, and labels unsupported global/remapping commands unavailable.
 - MCP servers advertising `notLoggedIn` expose a real Codex sign-in action. GPUI sends
   typed `mcpServer/oauth/login`, opens only the returned authorization URL, tracks the
   server name until `mcpServer/oauthLogin/completed`, and refreshes the live catalog.

@@ -1615,8 +1615,16 @@ fn pets_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement
 }
 
 fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
-    // Reverse: keyboard-shortcuts-settings — searchable list + reset all.
+    // Only advertise shortcuts that are registered as GPUI actions or handled
+    // directly by the composer. Unsupported reference commands remain visible
+    // below with an explicit unavailable state instead of faux key bindings.
     let colors = theme::colors();
+    let send_shortcut = app.settings_choice("send_shortcut", "Enter");
+    let newline_shortcut = if send_shortcut == "Ctrl+Enter" {
+        "Enter"
+    } else {
+        "Shift+Enter"
+    };
     div()
         .id("settings-keyboard")
         .flex()
@@ -1625,27 +1633,9 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
         .max_w(px(720.0))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(32.0))
-                .px(px(12.0))
-                .rounded(px(8.0))
-                .bg(colors.bg_elevated)
-                .border_1()
-                .border_color(colors.border)
-                .child(
-                    Icon::new(IconName::Search)
-                        .with_size(px(13.0))
-                        .text_color(colors.text_tertiary),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.text_tertiary)
-                        .child("Search shortcuts".to_string()),
-                ),
+                .text_sm()
+                .text_color(colors.text_secondary)
+                .child("These in-window shortcuts are active now. System-wide hotkeys and custom remapping are not available in this build."),
         )
         .child(group_label("General"))
         .child(
@@ -1658,45 +1648,24 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
                 .child(card_divider())
                 .child(shortcut_row("Focus composer", "Ctrl+L"))
                 .child(card_divider())
-                .child(shortcut_row("Command palette", "Ctrl+K"))
-                .child(card_divider())
                 .child(shortcut_row("Show keyboard shortcuts", "Ctrl+/"))
                 .child(card_divider())
-                .child(shortcut_row("Archive current chat", "Ctrl+Shift+A"))
-                .child(card_divider())
-                .child(shortcut_row("Popout Window hotkey", "Off")),
+                .child(shortcut_row("Archive current chat", "Ctrl+Shift+A")),
         )
         .child(group_label("Chat & runs"))
         .child(
             settings_card()
-                .child(shortcut_row("Send message", "Enter"))
+                .child(shortcut_row("Send message", &send_shortcut))
                 .child(card_divider())
-                .child(shortcut_row("New line in composer", "Shift+Enter"))
+                .child(shortcut_row("New line in composer", newline_shortcut))
                 .child(card_divider())
                 .child(shortcut_row("Stop generation", "Esc"))
                 .child(card_divider())
                 .child(shortcut_row("Toggle voice chat", "Ctrl+Shift+V"))
                 .child(card_divider())
-                .child(shortcut_row("Start dictation", "Ctrl+Shift+D"))
-                .child(card_divider())
                 .child(shortcut_row("Toggle Fast mode", "Ctrl+Shift+F"))
                 .child(card_divider())
-                .child(shortcut_row("Toggle plan mode", "Ctrl+Shift+P"))
-                .child(card_divider())
-                .child(shortcut_row("Approve tool call", "Ctrl+Enter")),
-        )
-        .child(group_label("Global dictation & voice"))
-        .child(
-            settings_card()
-                .child(shortcut_row("Hold-to-dictate hotkey", "Off"))
-                .child(card_divider())
-                .child(shortcut_row("Toggle dictation hotkey", "Off"))
-                .child(card_divider())
-                .child(shortcut_row("Voice Chat hotkey", "Off"))
-                .child(card_divider())
-                .child(shortcut_row("End Voice Chat", "Esc"))
-                .child(card_divider())
-                .child(shortcut_row("Toggle Voice Chat microphone", "M")),
+                .child(shortcut_row("Toggle plan mode", "Ctrl+Shift+P")),
         )
         .child(group_label("Navigation"))
         .child(
@@ -1709,9 +1678,22 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
                 .child(card_divider())
                 .child(shortcut_row("Open terminal", "Ctrl+`"))
                 .child(card_divider())
-                .child(shortcut_row("Toggle browser panel", "Ctrl+Shift+B"))
+                .child(shortcut_row("Open Atlas browser", "Ctrl+Shift+B")),
+        )
+        .child(group_label("Unavailable in this build"))
+        .child(
+            settings_card()
+                .child(unavailable_shortcut_row("Command palette"))
                 .child(card_divider())
-                .child(shortcut_row("Show pet", "Ctrl+Shift+."))
+                .child(unavailable_shortcut_row("Popout window hotkey"))
+                .child(card_divider())
+                .child(unavailable_shortcut_row("Start dictation"))
+                .child(card_divider())
+                .child(unavailable_shortcut_row("Approve tool call"))
+                .child(card_divider())
+                .child(unavailable_shortcut_row("Voice microphone hotkey"))
+                .child(card_divider())
+                .child(unavailable_shortcut_row("Show pet"))
                 .child(card_divider())
                 .child(toggle_row(
                     "Use Emacs-style bindings in composer",
@@ -1719,14 +1701,6 @@ fn keyboard_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEle
                     "emacs_bindings",
                     false,
                     app,
-                    cx,
-                ))
-                .child(card_divider())
-                .child(action_row(
-                    "Reset all to defaults",
-                    "This will discard all custom shortcuts and restore the defaults",
-                    "Reset",
-                    "keyboard-reset",
                     cx,
                 )),
         )
@@ -5370,6 +5344,37 @@ fn shortcut_row(title: &str, keys: &str) -> impl IntoElement {
                 .font_family("monospace")
                 .text_color(colors.text_secondary)
                 .child(keys.to_string()),
+        )
+}
+
+fn unavailable_shortcut_row(title: &str) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.text_tertiary)
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .bg(colors.bg_button_secondary)
+                .border_1()
+                .border_color(colors.border)
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child("Unavailable"),
         )
 }
 
