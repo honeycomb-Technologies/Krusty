@@ -1273,7 +1273,10 @@ impl AgentBackend for FixtureBackend {
             thread,
             model: params.model,
             model_provider: params.model_provider.or_else(|| Some("fixture".into())),
+            service_tier: None,
             cwd,
+            active_permission_profile: None,
+            reasoning_effort: None,
         })
     }
 

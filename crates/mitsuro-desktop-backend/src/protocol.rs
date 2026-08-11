@@ -1949,7 +1949,13 @@ pub struct ThreadResumeResponse {
     #[serde(default)]
     pub model_provider: Option<String>,
     #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub active_permission_profile: Option<crate::ActivePermissionProfile>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 impl ThreadResumeResponse {

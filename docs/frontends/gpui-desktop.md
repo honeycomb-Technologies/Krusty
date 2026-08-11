@@ -291,12 +291,16 @@ each typed adapter or approved platform/product exclusion.
   rollback because its HTTP API has no equivalent mutation.
 - The exact `thread/settings/update` and `thread/metadata/update` nullable-patch
   contracts are typed and origin-checked, including the difference between an omitted
-  field and an explicit `null` clear. `thread/items/list` is also typed with turn
-  identity, direction, and cursor preservation; a runtime returning JSON-RPC `-32601`
-  is projected from the same real `thread/read(includeTurns)` payload. Wiring the
-  per-thread settings notification into every composer selector and adopting item pages
-  as the primary transcript loader remain product/UI work; typed reachability alone is
-  not reported as interaction parity.
+  field and an explicit `null` clear. A subscribed Codex thread hydrates model,
+  reasoning effort, service tier, and active permission profile from `thread/resume`.
+  Model, effort, speed, collaboration mode, and access changes are serialized before
+  app-server I/O, while the authoritative `thread/settings/updated` notification
+  reconciles the selected composer. Active-writer snapshots never send these mutations.
+  `thread/items/list` is also typed with turn identity, direction, and cursor
+  preservation; a runtime returning JSON-RPC `-32601` is projected from the same real
+  `thread/read(includeTurns)` payload. Adopting item pages as the primary transcript
+  loader remains product/UI work; typed reachability alone is not reported as
+  interaction parity.
 - Backend session IDs are namespaced (`BackendSessionId`) and are stored on every
   live GPUI thread. Session/model/turn flows use the transport-neutral
   `ProductBackend` contract, and mutations reject a session whose origin differs

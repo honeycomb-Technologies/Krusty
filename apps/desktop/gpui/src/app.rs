@@ -25,10 +25,10 @@ use mitsuro_desktop_backend::{
     summarize_file_changes, valid_mcp_server_name, Account, ActivityFields,
     AddCreditsNudgeCreditType, AddCreditsNudgeEmailStatus, AgentBackend, AppInfo, ApprovalChoice,
     AppsInstalledParams, AppsListParams, BackendKind, BackendSelection, BackendSessionId,
-    CancelLoginAccountParams, CancelLoginAccountStatus, CollaborationModeListParams,
-    CollaborationModeMask, CommandExecOutputDeltaNotification, CommandExecOutputStream,
-    CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams, ConfigBatchWriteParams,
-    ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
+    CancelLoginAccountParams, CancelLoginAccountStatus, CodexSessionSettings,
+    CollaborationModeListParams, CollaborationModeMask, CommandExecOutputDeltaNotification,
+    CommandExecOutputStream, CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams,
+    ConfigBatchWriteParams, ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
     ConsumeAccountRateLimitResetCreditOutcome, ConsumeAccountRateLimitResetCreditParams,
     ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
     ConversationReferenceKind, CreateSession, DesktopBackend, EnvironmentAddParams,
@@ -72,10 +72,11 @@ use mitsuro_desktop_backend::{
     ThreadDeleteParams, ThreadForkParams, ThreadGoalClearParams, ThreadGoalGetParams,
     ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadRealtimeAppendAudioParams,
     ThreadRealtimeAudioChunk, ThreadRealtimeStartParams, ThreadRealtimeStopParams,
-    ThreadSearchOccurrence, ThreadSetNameParams, ThreadSummary, ThreadUnarchiveParams,
-    TurnInterruptParams, TurnStreamEvent, WorkspaceMessage, CLAUDE_CODE_MIGRATION_SOURCE,
-    CURSOR_MIGRATION_SOURCE, DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT,
-    FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID, WORKSPACE_PROFILE_ID,
+    ThreadSearchOccurrence, ThreadSetNameParams, ThreadSettingsUpdateParams,
+    ThreadSettingsUpdatedNotification, ThreadSummary, ThreadUnarchiveParams, TurnInterruptParams,
+    TurnStreamEvent, WorkspaceMessage, CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE,
+    DEFAULT_LIVE_TURN_TIMEOUT, FIXTURE_PROJECT_ROOT, FULL_ACCESS_PROFILE_ID, READ_ONLY_PROFILE_ID,
+    WORKSPACE_PROFILE_ID,
 };
 
 use crate::browser::open_system_browser;
@@ -1411,6 +1412,10 @@ pub struct MitsuroApp {
     backend: Option<Arc<DesktopBackend>>,
     /// Rejects stale async bootstrap results after an in-app backend switch.
     backend_generation: u64,
+    /// Serializes persistent `thread/settings/update` writes so rapid composer
+    /// changes cannot reach app-server out of order.
+    thread_settings_write_lock: Arc<tokio::sync::Mutex<()>>,
+    thread_settings_update_generation: u64,
     /// Raw Codex thread ids for subscriptions successfully owned by this app-server.
     codex_thread_subscriptions: std::collections::HashSet<String>,
     /// Raw Codex thread ids opened through a truthful snapshot because another
@@ -2025,6 +2030,8 @@ impl MitsuroApp {
             search_query: String::new(),
             backend: None,
             backend_generation: 0,
+            thread_settings_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            thread_settings_update_generation: 0,
             codex_thread_subscriptions: std::collections::HashSet::new(),
             codex_read_only_threads: std::collections::HashSet::new(),
             preferences: preferences.clone(),
@@ -6321,6 +6328,46 @@ impl MitsuroApp {
         })
     }
 
+    fn apply_codex_session_settings(&mut self, settings: CodexSessionSettings) {
+        if let Some(model) = settings.model.as_deref() {
+            if let Some(id) = self
+                .models
+                .iter()
+                .find(|candidate| candidate.model == model || candidate.id == model)
+                .map(|candidate| candidate.id.clone())
+            {
+                self.selected_model_id = Some(id);
+            }
+        }
+        if let Some(effort) = settings.reasoning_effort {
+            if self
+                .reasoning_options_for_selected_model()
+                .iter()
+                .any(|candidate| candidate == &effort)
+            {
+                self.selected_reasoning_effort = Some(effort);
+            }
+        }
+        self.selected_fast_mode = settings.service_tier.as_deref().is_some_and(|tier| {
+            self.selected_model()
+                .is_some_and(|model| model.service_tiers.iter().any(|option| option.id == tier))
+        });
+        if let (Some(thread_id), Some(profile)) = (
+            self.selected_thread.clone(),
+            settings.permission_profile.as_deref(),
+        ) {
+            let mode = match profile {
+                READ_ONLY_PROFILE_ID => Some(ProductAccessMode::CodexReadOnly),
+                WORKSPACE_PROFILE_ID => Some(ProductAccessMode::CodexAuto),
+                FULL_ACCESS_PROFILE_ID => Some(ProductAccessMode::CodexFullAccess),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                self.composer_access_modes.insert(thread_id, mode);
+            }
+        }
+    }
+
     pub fn selected_reasoning_effort(&self) -> Option<&str> {
         self.selected_reasoning_effort.as_deref()
     }
@@ -6370,6 +6417,19 @@ impl MitsuroApp {
         } else {
             "Standard response speed selected.".into()
         };
+        if let Some(service_tier) = match self.selected_speed_mode() {
+            Some(ProductSpeedMode::CodexStandard) => Some(None),
+            Some(ProductSpeedMode::CodexServiceTier(tier)) => Some(Some(tier)),
+            _ => None,
+        } {
+            let mut params = ThreadSettingsUpdateParams::new(String::new());
+            params.service_tier = Some(service_tier);
+            self.persist_selected_codex_thread_settings(
+                params,
+                format!("Response speed · {}", self.fast_mode_label()),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -7997,6 +8057,27 @@ impl MitsuroApp {
             self.save_preferences_best_effort();
         }
         self.status_line = format!("Work mode: {}", self.work_mode_label()).into();
+        if let Some(ProductWorkMode::Codex {
+            mode,
+            model,
+            reasoning_effort,
+        }) = self.selected_work_mode()
+        {
+            let mut params = ThreadSettingsUpdateParams::new(String::new());
+            params.collaboration_mode = Some(Some(mitsuro_desktop_backend::CollaborationMode {
+                mode,
+                settings: mitsuro_desktop_backend::CollaborationModeSettings {
+                    model,
+                    reasoning_effort,
+                    developer_instructions: None,
+                },
+            }));
+            self.persist_selected_codex_thread_settings(
+                params,
+                format!("Work mode · {}", self.work_mode_label()),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -11050,6 +11131,13 @@ impl MitsuroApp {
         self.composer_reasoning_menu_open = false;
         self.remember_selected_reasoning();
         self.status_line = format!("Reasoning: {}", reasoning_effort_display_name(&effort)).into();
+        let mut params = ThreadSettingsUpdateParams::new(String::new());
+        params.effort = Some(Some(effort.clone()));
+        self.persist_selected_codex_thread_settings(
+            params,
+            format!("Reasoning · {}", reasoning_effort_display_name(&effort)),
+            cx,
+        );
         cx.notify();
     }
 
@@ -11562,6 +11650,21 @@ impl MitsuroApp {
         }
         self.composer_access_menu_open = false;
         self.status_line = format!("Access · {}", self.composer_access_label()).into();
+        let permission_profile = match mode {
+            ProductAccessMode::CodexReadOnly => Some(READ_ONLY_PROFILE_ID),
+            ProductAccessMode::CodexAuto => Some(WORKSPACE_PROFILE_ID),
+            ProductAccessMode::CodexFullAccess => Some(FULL_ACCESS_PROFILE_ID),
+            ProductAccessMode::MitsuroSupervised | ProductAccessMode::MitsuroAutonomous => None,
+        };
+        if let Some(permission_profile) = permission_profile {
+            let mut params = ThreadSettingsUpdateParams::new(String::new());
+            params.permissions = Some(Some(permission_profile.to_owned()));
+            self.persist_selected_codex_thread_settings(
+                params,
+                format!("Access · {}", self.composer_access_label()),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -12660,6 +12763,16 @@ impl MitsuroApp {
             self.remember_selected_model();
             let label = self.model_label();
             self.status_line = format!("Model: {label}").into();
+            if let Some(model) = self.selected_model_slug() {
+                let mut params = ThreadSettingsUpdateParams::new(String::new());
+                params.model = Some(Some(model));
+                params.effort = Some(self.selected_reasoning_effort.clone());
+                params.service_tier = Some(match self.selected_speed_mode() {
+                    Some(ProductSpeedMode::CodexServiceTier(tier)) => Some(tier),
+                    _ => None,
+                });
+                self.persist_selected_codex_thread_settings(params, format!("Model · {label}"), cx);
+            }
             cx.notify();
         }
     }
@@ -13126,6 +13239,67 @@ impl MitsuroApp {
         } else {
             None
         }
+    }
+
+    fn persist_selected_codex_thread_settings(
+        &mut self,
+        mut params: ThreadSettingsUpdateParams,
+        success_message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ui_thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let Some(session_id) = self.live_session_id(&ui_thread_id) else {
+            return;
+        };
+        if !matches!(
+            session_id.backend,
+            BackendKind::CodexStdio | BackendKind::CodexWebSocket
+        ) || self.codex_read_only_threads.contains(&ui_thread_id)
+        {
+            return;
+        }
+        let Some(backend) = self
+            .live_backend()
+            .filter(|backend| backend.capabilities().thread_settings)
+        else {
+            return;
+        };
+        params.thread_id.clone_from(&session_id.raw);
+        self.thread_settings_update_generation =
+            self.thread_settings_update_generation.wrapping_add(1);
+        let update_generation = self.thread_settings_update_generation;
+        let backend_generation = self.backend_generation;
+        let write_lock = Arc::clone(&self.thread_settings_write_lock);
+        cx.spawn(async move |this, cx| {
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    backend.block_on(async move {
+                        let _guard = write_lock.lock().await;
+                        runner
+                            .update_thread_settings(&session_id, params)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation
+                    || app.thread_settings_update_generation != update_generation
+                    || app.selected_thread.as_deref() != Some(ui_thread_id.as_str())
+                {
+                    return;
+                }
+                app.status_line = match result {
+                    Ok(_) => success_message.into(),
+                    Err(error) => format!("Thread settings failed · {error}").into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn preferred_backend_selection(&self) -> mitsuro_desktop_backend::Result<BackendSelection> {
@@ -14419,6 +14593,32 @@ impl MitsuroApp {
             }
         }
 
+        if event.method == "thread/settings/updated" {
+            match event.params.as_ref().and_then(|params| {
+                serde_json::from_value::<ThreadSettingsUpdatedNotification>(params.clone()).ok()
+            }) {
+                Some(notification)
+                    if self.selected_thread.as_deref() == Some(notification.thread_id.as_str()) =>
+                {
+                    let settings = notification.thread_settings;
+                    self.composer_plan_mode = settings.collaboration_mode.mode == ModeKind::Plan;
+                    self.apply_codex_session_settings(CodexSessionSettings {
+                        model: Some(settings.model),
+                        reasoning_effort: settings.effort,
+                        service_tier: settings.service_tier,
+                        permission_profile: settings
+                            .active_permission_profile
+                            .map(|profile| profile.id),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    self.status_line =
+                        "Thread settings · ignored malformed app-server update".into();
+                }
+            }
+        }
+
         let thread_idx = event.thread_id.as_ref().and_then(|thread_id| {
             self.threads.iter().position(|thread| {
                 thread.summary.id == *thread_id
@@ -15081,6 +15281,9 @@ impl MitsuroApp {
         self.composer_default_access_mode = None;
         self.composer_access_modes.clear();
         self.composer_access_menu_open = false;
+        self.thread_settings_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        self.thread_settings_update_generation =
+            self.thread_settings_update_generation.wrapping_add(1);
         self.account = AccountSession::empty(kind.id());
         self.account_state = SurfaceDataState::Loading;
         self.account_workspace_messages_error = None;
@@ -15623,6 +15826,7 @@ impl MitsuroApp {
                             Ok(conversation) => {
                                 let open_mode = conversation.open_mode;
                                 let delegation = conversation.delegation;
+                                let codex_settings = conversation.codex_settings;
                                 let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
                                 let seen = msgs.len();
@@ -15649,6 +15853,7 @@ impl MitsuroApp {
                                     ui,
                                     delegation,
                                     delegation_status,
+                                    codex_settings,
                                     open_mode,
                                 ))
                             }
@@ -15666,7 +15871,15 @@ impl MitsuroApp {
 
             let _ = this.update(cx, |app, cx| {
                 match result {
-                    Ok((tid, n_in, ui_msgs, delegation, delegation_status, open_mode)) => {
+                    Ok((
+                        tid,
+                        n_in,
+                        ui_msgs,
+                        delegation,
+                        delegation_status,
+                        codex_settings,
+                        open_mode,
+                    )) => {
                         app.codex_thread_subscriptions.remove(&tid);
                         app.codex_read_only_threads.remove(&tid);
                         match open_mode {
@@ -15678,6 +15891,13 @@ impl MitsuroApp {
                             }
                             SessionOpenMode::Snapshot => {}
                         }
+                        let is_selected =
+                            app.selected_thread.as_deref() == Some(tid.as_str());
+                        if is_selected {
+                            if let Some(settings) = codex_settings {
+                                app.apply_codex_session_settings(settings);
+                            }
+                        }
                         if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
                             thread.messages = ui_msgs;
                             app.delegations.insert(tid.clone(), delegation);
@@ -15687,7 +15907,7 @@ impl MitsuroApp {
                                 n_in,
                                 thread.messages.len()
                             );
-                            if app.selected_thread.as_deref() == Some(tid.as_str()) {
+                            if is_selected {
                                 app.transcript_scroll_handle.scroll_to_bottom();
                                 app.selected_codex_thread = Some(tid.clone());
                                 if !matches!(

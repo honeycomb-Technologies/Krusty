@@ -192,7 +192,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   the server permits it and the user has confirmed that it should be shown. Mitsuro
   maps Supervised and Autonomous to its typed `permission_mode`.
   Existing server threads show their persisted workspace read-only and require a new
-  thread to change it.
+  thread to change it. Opening a subscribed Codex thread also hydrates its authoritative
+  model, reasoning effort, service tier, and active permission profile from
+  `thread/resume`. Subsequent model, effort, speed, work-mode, and access changes are
+  serialized through typed `thread/settings/update`; the full
+  `thread/settings/updated` notification reconciles the selected composer state. An
+  active-writer read-only snapshot never sends those mutations.
 - Codex server requests cannot disappear into the notification stream. Command, file,
   and exact-profile permission approvals render above the composer; structured user
   questions support options, freeform, and secret answers; standard MCP forms and URL

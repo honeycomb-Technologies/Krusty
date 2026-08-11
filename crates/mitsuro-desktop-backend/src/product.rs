@@ -160,9 +160,20 @@ pub struct SessionConversation {
     /// Canonical durable delegation state loaded alongside the transcript.
     /// Empty for backends that do not expose the Mitsuro coordinator contract.
     pub delegation: SessionDelegationProjection,
+    /// Authoritative settings returned by Codex `thread/resume`. Snapshot-only
+    /// backends and active-writer read fallbacks cannot claim these values.
+    pub codex_settings: Option<CodexSessionSettings>,
     /// How this client obtained the transcript. Only `Subscribed` owns a Codex
     /// app-server subscription that must later be released.
     pub open_mode: SessionOpenMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSessionSettings {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub permission_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1453,6 +1464,7 @@ impl ProductBackend for DesktopBackend {
             session,
             messages,
             delegation,
+            codex_settings: None,
             open_mode: SessionOpenMode::Snapshot,
         })
     }
@@ -1494,6 +1506,12 @@ impl ProductBackend for DesktopBackend {
             session,
             messages,
             delegation: SessionDelegationProjection::default(),
+            codex_settings: Some(CodexSessionSettings {
+                model: response.model,
+                reasoning_effort: response.reasoning_effort,
+                service_tier: response.service_tier,
+                permission_profile: response.active_permission_profile.map(|profile| profile.id),
+            }),
             open_mode: SessionOpenMode::Subscribed,
         })
     }
@@ -2264,6 +2282,14 @@ mod tests {
                 );
                 let result = if expected == "thread/resume" {
                     serde_json::json!({
+                        "model": "gpt-5.6-sol",
+                        "modelProvider": "openai",
+                        "serviceTier": "priority",
+                        "reasoningEffort": "high",
+                        "activePermissionProfile": {
+                            "id": ":workspace",
+                            "extends": null
+                        },
                         "thread": {
                             "id": "thread-7",
                             "name": "Live thread",
@@ -2294,6 +2320,15 @@ mod tests {
         assert_eq!(conversation.messages.len(), 1);
         assert_eq!(conversation.messages[0].body, "hello");
         assert_eq!(conversation.open_mode, SessionOpenMode::Subscribed);
+        assert_eq!(
+            conversation.codex_settings,
+            Some(CodexSessionSettings {
+                model: Some("gpt-5.6-sol".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                service_tier: Some("priority".to_owned()),
+                permission_profile: Some(":workspace".to_owned()),
+            })
+        );
 
         let closed = backend.close_session(&session_id).await.unwrap();
         assert_eq!(closed.status, crate::ThreadUnsubscribeStatus::Unsubscribed);
@@ -2369,6 +2404,7 @@ mod tests {
             conversation.open_mode,
             SessionOpenMode::ReadOnlyActiveWriter
         );
+        assert_eq!(conversation.codex_settings, None);
         server.await.unwrap();
     }
 

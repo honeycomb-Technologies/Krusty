@@ -202,4 +202,55 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn settings_notification_preserves_authoritative_composer_state() {
+        let notification: ThreadSettingsUpdatedNotification =
+            serde_json::from_value(serde_json::json!({
+                "threadId": "thread-1",
+                "threadSettings": {
+                    "cwd": "/workspace",
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "user",
+                    "sandboxPolicy": {
+                        "type": "workspaceWrite",
+                        "writableRoots": ["/workspace"],
+                        "networkAccess": false,
+                        "excludeSlashTmp": false,
+                        "excludeTmpdirEnvVar": false
+                    },
+                    "activePermissionProfile": {"id": ":workspace", "extends": null},
+                    "model": "gpt-5.6-sol",
+                    "modelProvider": "openai",
+                    "serviceTier": "priority",
+                    "effort": "high",
+                    "summary": "concise",
+                    "collaborationMode": {
+                        "mode": "plan",
+                        "settings": {
+                            "model": "gpt-5.6-sol",
+                            "reasoning_effort": "high",
+                            "developer_instructions": null
+                        }
+                    },
+                    "multiAgentMode": "explicitRequestOnly",
+                    "personality": "pragmatic"
+                }
+            }))
+            .unwrap();
+        assert_eq!(notification.thread_id, "thread-1");
+        assert_eq!(notification.thread_settings.model, "gpt-5.6-sol");
+        assert_eq!(
+            notification.thread_settings.collaboration_mode.mode,
+            crate::ModeKind::Plan
+        );
+        assert_eq!(
+            notification
+                .thread_settings
+                .active_permission_profile
+                .unwrap()
+                .id,
+            ":workspace"
+        );
+    }
 }
