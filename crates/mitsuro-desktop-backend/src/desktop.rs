@@ -112,6 +112,12 @@ pub struct BackendCapabilities {
     pub model_provider_capabilities: bool,
     pub external_agent_import: bool,
     pub experimental_features: bool,
+    pub feedback_upload: bool,
+    pub marketplace_mutations: bool,
+    pub mcp_resources: bool,
+    pub plugin_skill_read: bool,
+    pub plugin_sharing: bool,
+    pub guardian_overrides: bool,
     pub memory_settings: bool,
     pub thread_settings: bool,
     pub thread_metadata: bool,
@@ -171,6 +177,12 @@ impl BackendCapabilities {
             model_provider_capabilities: true,
             external_agent_import: true,
             experimental_features: true,
+            feedback_upload: true,
+            marketplace_mutations: true,
+            mcp_resources: true,
+            plugin_skill_read: true,
+            plugin_sharing: true,
+            guardian_overrides: true,
             memory_settings: true,
             thread_settings: true,
             thread_metadata: true,
@@ -233,6 +245,12 @@ impl BackendCapabilities {
             model_provider_capabilities: false,
             external_agent_import: false,
             experimental_features: false,
+            feedback_upload: false,
+            marketplace_mutations: false,
+            mcp_resources: false,
+            plugin_skill_read: false,
+            plugin_sharing: false,
+            guardian_overrides: false,
             memory_settings: false,
             thread_settings: false,
             thread_metadata: false,
@@ -609,6 +627,162 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.plugin_install(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP exposes extension inventory but not plugin installation".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn upload_feedback(
+        &self,
+        params: crate::FeedbackUploadParams,
+    ) -> Result<crate::FeedbackUploadResponse> {
+        match self {
+            Self::Codex(backend) => backend.feedback_upload(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex feedback upload".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn add_marketplace(
+        &self,
+        params: crate::MarketplaceAddParams,
+    ) -> Result<crate::MarketplaceAddResponse> {
+        match self {
+            Self::Codex(backend) => backend.marketplace_add(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex marketplace management".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn remove_marketplace(
+        &self,
+        params: crate::MarketplaceRemoveParams,
+    ) -> Result<crate::MarketplaceRemoveResponse> {
+        match self {
+            Self::Codex(backend) => backend.marketplace_remove(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex marketplace management".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn upgrade_marketplaces(
+        &self,
+        params: crate::MarketplaceUpgradeParams,
+    ) -> Result<crate::MarketplaceUpgradeResponse> {
+        match self {
+            Self::Codex(backend) => backend.marketplace_upgrade(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex marketplace management".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_mcp_resource(
+        &self,
+        session: Option<&BackendSessionId>,
+        server: impl Into<String>,
+        uri: impl Into<String>,
+    ) -> Result<crate::McpResourceReadResponse> {
+        if let Some(session) = session {
+            self.ensure_session_origin(session)?;
+        }
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .mcp_server_resource_read(crate::McpResourceReadParams {
+                        thread_id: session.map(|session| session.raw.clone()),
+                        server: server.into(),
+                        uri: uri.into(),
+                    })
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex MCP resources".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn read_plugin_skill(
+        &self,
+        params: crate::PluginSkillReadParams,
+    ) -> Result<crate::PluginSkillReadResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_skill_read(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex plugin skill sources".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_plugin_shares(
+        &self,
+        params: crate::PluginShareListParams,
+    ) -> Result<crate::PluginShareListResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_share_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex plugin sharing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn save_plugin_share(
+        &self,
+        params: crate::PluginShareSaveParams,
+    ) -> Result<crate::PluginShareSaveResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_share_save(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex plugin sharing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn delete_plugin_share(
+        &self,
+        params: crate::PluginShareDeleteParams,
+    ) -> Result<crate::PluginShareDeleteResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_share_delete(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex plugin sharing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn update_plugin_share_targets(
+        &self,
+        params: crate::PluginShareUpdateTargetsParams,
+    ) -> Result<crate::PluginShareUpdateTargetsResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_share_update_targets(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex plugin sharing".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn approve_guardian_denied_action(
+        &self,
+        session: &BackendSessionId,
+        event: serde_json::Value,
+    ) -> Result<crate::ThreadApproveGuardianDeniedActionResponse> {
+        self.ensure_session_origin(session)?;
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .thread_approve_guardian_denied_action(
+                        crate::ThreadApproveGuardianDeniedActionParams {
+                            thread_id: session.raw.clone(),
+                            event,
+                        },
+                    )
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex Guardian overrides".to_owned(),
             )),
         }
     }
@@ -1385,6 +1559,18 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().external_agent_import);
         assert!(BackendCapabilities::codex().experimental_features);
         assert!(!BackendCapabilities::mitsuro().experimental_features);
+        assert!(BackendCapabilities::codex().feedback_upload);
+        assert!(!BackendCapabilities::mitsuro().feedback_upload);
+        assert!(BackendCapabilities::codex().marketplace_mutations);
+        assert!(!BackendCapabilities::mitsuro().marketplace_mutations);
+        assert!(BackendCapabilities::codex().mcp_resources);
+        assert!(!BackendCapabilities::mitsuro().mcp_resources);
+        assert!(BackendCapabilities::codex().plugin_skill_read);
+        assert!(!BackendCapabilities::mitsuro().plugin_skill_read);
+        assert!(BackendCapabilities::codex().plugin_sharing);
+        assert!(!BackendCapabilities::mitsuro().plugin_sharing);
+        assert!(BackendCapabilities::codex().guardian_overrides);
+        assert!(!BackendCapabilities::mitsuro().guardian_overrides);
         assert!(BackendCapabilities::codex().memory_settings);
         assert!(!BackendCapabilities::mitsuro().memory_settings);
         assert!(BackendCapabilities::codex().thread_settings);
@@ -1497,5 +1683,45 @@ mod tests {
             .await
             .expect_err("cross-backend session must be rejected before transport");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn reference_used_codex_capabilities_are_explicitly_excluded_from_mitsuro() {
+        let backend = DesktopBackend::Mitsuro(Arc::new(MitsuroServerBackend::new()));
+        let session = BackendSessionId::new(BackendKind::MitsuroHttp, "mitsuro-thread");
+
+        let errors = [
+            backend
+                .upload_feedback(crate::FeedbackUploadParams::new("bug"))
+                .await
+                .expect_err("feedback must be excluded"),
+            backend
+                .add_marketplace(crate::MarketplaceAddParams::new("source"))
+                .await
+                .expect_err("marketplace mutation must be excluded"),
+            backend
+                .read_mcp_resource(Some(&session), "docs", "docs://readme")
+                .await
+                .expect_err("MCP resources must be excluded"),
+            backend
+                .read_plugin_skill(crate::PluginSkillReadParams {
+                    remote_marketplace_name: "marketplace".to_owned(),
+                    remote_plugin_id: "plugin".to_owned(),
+                    skill_name: "skill".to_owned(),
+                })
+                .await
+                .expect_err("plugin skill reads must be excluded"),
+            backend
+                .list_plugin_shares(crate::PluginShareListParams::default())
+                .await
+                .expect_err("plugin sharing must be excluded"),
+            backend
+                .approve_guardian_denied_action(&session, serde_json::json!({}))
+                .await
+                .expect_err("Guardian overrides must be excluded"),
+        ];
+        assert!(errors
+            .iter()
+            .all(|error| matches!(error, AgentError::NotImplemented(_))));
     }
 }

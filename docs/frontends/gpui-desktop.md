@@ -97,12 +97,15 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 108 typed adapters
-and 25 raw-transport-only methods. The reviewed reference client uses 11 of those raw
-methods on Linux product paths; two are Windows-sandbox-only, and 12 appear only in the
-generated inventory or unused reference modules. Raw reachability is treated as
-remaining product work, not as feature completion; the matrix test must change with
-each typed adapter or approved platform/product exclusion.
+The executable client-method coverage matrix currently identifies 119 typed adapters
+and 14 raw-transport-only methods. Every method used by the reviewed reference client
+on Linux product paths now has a schema-backed adapter: feedback upload, marketplace
+add/remove/upgrade, MCP resource read, plugin skill read, plugin share
+list/save/update/delete, and Guardian denied-action approval. Of the remaining raw
+methods, two are Windows-sandbox-only and 12 appear only in the generated inventory or
+unused reference modules; their exact names are asserted by the matrix test. Typed
+transport coverage is not feature-surface completion: controls remain disabled until
+their interaction, policy, and refresh lifecycle is implemented against the adapter.
 
 ## Established recovery baseline
 
@@ -338,9 +341,10 @@ each typed adapter or approved platform/product exclusion.
 
 - The established fixture/live visual matrix, dual-provider acceptance gauntlet,
   focused workspace gates, optimized GPUI build, and isolated runtime provenance check
-  are complete for the surfaces already recorded above. The expanded 1:1 completion
-  audit remains open across the raw reference-used method families, residual disabled
-  destinations, full interaction/visual comparison, and installable
+  are complete for the surfaces already recorded above. The Linux reference-used raw
+  adapter tranche is complete, while the expanded 1:1 completion audit remains open
+  across the corresponding product interactions, residual disabled destinations,
+  full interaction/visual comparison, and installable
   release lifecycle; the established gates are not evidence that those items are done.
 - The production-data purity matrix was revalidated on both live transports for Work,
   Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids

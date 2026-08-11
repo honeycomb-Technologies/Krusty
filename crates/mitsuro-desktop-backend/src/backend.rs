@@ -39,6 +39,7 @@ use crate::external_agent_config::{
     ExternalAgentConfigImportHistoryRecordResponse, ExternalAgentConfigImportParams,
     ExternalAgentConfigImportResponse,
 };
+use crate::feedback::{FeedbackUploadParams, FeedbackUploadResponse};
 use crate::fs::{
     FsCopyParams, FsCopyResponse, FsCreateDirectoryParams, FsCreateDirectoryResponse,
     FsGetMetadataParams, FsGetMetadataResponse, FsReadDirectoryParams, FsReadDirectoryResponse,
@@ -49,11 +50,19 @@ use crate::fs::{
     FuzzyFileSearchSessionStopResponse, FuzzyFileSearchSessionUpdateParams,
     FuzzyFileSearchSessionUpdateResponse,
 };
+use crate::guardian::{
+    ThreadApproveGuardianDeniedActionParams, ThreadApproveGuardianDeniedActionResponse,
+};
+use crate::marketplace::{
+    MarketplaceAddParams, MarketplaceAddResponse, MarketplaceRemoveParams,
+    MarketplaceRemoveResponse, MarketplaceUpgradeParams, MarketplaceUpgradeResponse,
+};
 use crate::mcp_auth::{McpServerOauthLoginParams, McpServerOauthLoginResponse};
 use crate::mcp_config::{
     ConfigBatchWriteParams, ConfigMcpServerReloadResponse, ConfigValueWriteParams,
     ConfigWriteResponse,
 };
+use crate::mcp_resources::{McpResourceReadParams, McpResourceReadResponse};
 use crate::memory::{MemoryResetResponse, ThreadMemoryModeSetParams, ThreadMemoryModeSetResponse};
 use crate::methods::is_known_client_method;
 use crate::permissions::{
@@ -63,6 +72,12 @@ use crate::permissions::{
 };
 use crate::plugin_mutations::{
     PluginInstallParams, PluginInstallResponse, PluginUninstallParams, PluginUninstallResponse,
+};
+use crate::plugin_sharing::{
+    PluginShareDeleteParams, PluginShareDeleteResponse, PluginShareListParams,
+    PluginShareListResponse, PluginShareSaveParams, PluginShareSaveResponse,
+    PluginShareUpdateTargetsParams, PluginShareUpdateTargetsResponse, PluginSkillReadParams,
+    PluginSkillReadResponse,
 };
 use crate::process::{
     ProcessKillParams, ProcessKillResponse, ProcessResizePtyParams, ProcessResizePtyResponse,
@@ -299,6 +314,16 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<ExperimentalFeatureEnablementSetResponse> {
         Err(crate::AgentError::NotImplemented(
             "experimental feature enablement is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Upload explicit user feedback through `feedback/upload`.
+    async fn feedback_upload(
+        &self,
+        _params: FeedbackUploadParams,
+    ) -> Result<FeedbackUploadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "feedback upload is not implemented by this backend".to_owned(),
         ))
     }
 
@@ -719,6 +744,16 @@ pub trait AgentBackend: Send + Sync {
         params: McpServerToolCallParams,
     ) -> Result<McpServerToolCallResponse>;
 
+    /// Read a resource exposed by a configured MCP server.
+    async fn mcp_server_resource_read(
+        &self,
+        _params: McpResourceReadParams,
+    ) -> Result<McpResourceReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "MCP resource reading is not implemented by this backend".to_owned(),
+        ))
+    }
+
     async fn mcp_server_oauth_login(
         &self,
         _params: McpServerOauthLoginParams,
@@ -754,6 +789,96 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<PluginUninstallResponse> {
         Err(crate::AgentError::NotImplemented(
             "plugin removal is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Add a plugin marketplace source.
+    async fn marketplace_add(
+        &self,
+        _params: MarketplaceAddParams,
+    ) -> Result<MarketplaceAddResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "marketplace addition is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Remove a configured plugin marketplace.
+    async fn marketplace_remove(
+        &self,
+        _params: MarketplaceRemoveParams,
+    ) -> Result<MarketplaceRemoveResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "marketplace removal is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Upgrade one or all configured plugin marketplaces.
+    async fn marketplace_upgrade(
+        &self,
+        _params: MarketplaceUpgradeParams,
+    ) -> Result<MarketplaceUpgradeResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "marketplace upgrade is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Read the source of one skill bundled by a remote plugin.
+    async fn plugin_skill_read(
+        &self,
+        _params: PluginSkillReadParams,
+    ) -> Result<PluginSkillReadResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin skill reading is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// List plugins shared by the current account/workspace.
+    async fn plugin_share_list(
+        &self,
+        _params: PluginShareListParams,
+    ) -> Result<PluginShareListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin sharing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Publish or update a local plugin share.
+    async fn plugin_share_save(
+        &self,
+        _params: PluginShareSaveParams,
+    ) -> Result<PluginShareSaveResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin sharing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Delete a remote plugin share.
+    async fn plugin_share_delete(
+        &self,
+        _params: PluginShareDeleteParams,
+    ) -> Result<PluginShareDeleteResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin sharing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Replace a shared plugin's discoverability and principals.
+    async fn plugin_share_update_targets(
+        &self,
+        _params: PluginShareUpdateTargetsParams,
+    ) -> Result<PluginShareUpdateTargetsResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "plugin sharing is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Approve a previously denied Guardian action for a thread.
+    async fn thread_approve_guardian_denied_action(
+        &self,
+        _params: ThreadApproveGuardianDeniedActionParams,
+    ) -> Result<ThreadApproveGuardianDeniedActionResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "Guardian denied-action approval is not implemented by this backend".to_owned(),
         ))
     }
 

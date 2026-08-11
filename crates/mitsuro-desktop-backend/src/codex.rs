@@ -1289,6 +1289,14 @@ impl AgentBackend for CodexAppServerBackend {
             .await
     }
 
+    async fn feedback_upload(
+        &self,
+        params: crate::FeedbackUploadParams,
+    ) -> Result<crate::FeedbackUploadResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("feedback/upload", Some(value)).await
+    }
+
     async fn thread_search(&self, params: ThreadSearchParams) -> Result<ThreadSearchResponse> {
         self.search_threads(params).await
     }
@@ -1715,6 +1723,15 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("mcpServer/tool/call", Some(value)).await
     }
 
+    async fn mcp_server_resource_read(
+        &self,
+        params: crate::McpResourceReadParams,
+    ) -> Result<crate::McpResourceReadResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("mcpServer/resource/read", Some(value))
+            .await
+    }
+
     async fn mcp_server_oauth_login(
         &self,
         params: McpServerOauthLoginParams,
@@ -1753,6 +1770,80 @@ impl AgentBackend for CodexAppServerBackend {
     ) -> Result<PluginUninstallResponse> {
         let value = serde_json::to_value(params)?;
         self.request_typed("plugin/uninstall", Some(value)).await
+    }
+
+    async fn marketplace_add(
+        &self,
+        params: crate::MarketplaceAddParams,
+    ) -> Result<crate::MarketplaceAddResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("marketplace/add", Some(value)).await
+    }
+
+    async fn marketplace_remove(
+        &self,
+        params: crate::MarketplaceRemoveParams,
+    ) -> Result<crate::MarketplaceRemoveResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("marketplace/remove", Some(value)).await
+    }
+
+    async fn marketplace_upgrade(
+        &self,
+        params: crate::MarketplaceUpgradeParams,
+    ) -> Result<crate::MarketplaceUpgradeResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("marketplace/upgrade", Some(value)).await
+    }
+
+    async fn plugin_skill_read(
+        &self,
+        params: crate::PluginSkillReadParams,
+    ) -> Result<crate::PluginSkillReadResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/skill/read", Some(value)).await
+    }
+
+    async fn plugin_share_list(
+        &self,
+        params: crate::PluginShareListParams,
+    ) -> Result<crate::PluginShareListResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/share/list", Some(value)).await
+    }
+
+    async fn plugin_share_save(
+        &self,
+        params: crate::PluginShareSaveParams,
+    ) -> Result<crate::PluginShareSaveResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/share/save", Some(value)).await
+    }
+
+    async fn plugin_share_delete(
+        &self,
+        params: crate::PluginShareDeleteParams,
+    ) -> Result<crate::PluginShareDeleteResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/share/delete", Some(value)).await
+    }
+
+    async fn plugin_share_update_targets(
+        &self,
+        params: crate::PluginShareUpdateTargetsParams,
+    ) -> Result<crate::PluginShareUpdateTargetsResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("plugin/share/updateTargets", Some(value))
+            .await
+    }
+
+    async fn thread_approve_guardian_denied_action(
+        &self,
+        params: crate::ThreadApproveGuardianDeniedActionParams,
+    ) -> Result<crate::ThreadApproveGuardianDeniedActionResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/approveGuardianDeniedAction", Some(value))
+            .await
     }
 
     async fn environment_info(
@@ -3160,6 +3251,290 @@ mod tests {
         backend
             .plugin_uninstall(PluginUninstallParams {
                 plugin_id: "documents@openai".to_owned(),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reference_used_capabilities_use_typed_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "feedback/upload",
+                "marketplace/add",
+                "marketplace/remove",
+                "marketplace/upgrade",
+                "mcpServer/resource/read",
+                "plugin/skill/read",
+                "plugin/share/list",
+                "plugin/share/save",
+                "plugin/share/updateTargets",
+                "plugin/share/delete",
+                "thread/approveGuardianDeniedAction",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "feedback/upload" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "classification": "bug",
+                                "reason": "Something failed",
+                                "threadId": "thread-1",
+                                "includeLogs": false
+                            })
+                        );
+                        serde_json::json!({"threadId": "feedback-thread"})
+                    }
+                    "marketplace/add" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "source": "https://example.test/plugins.git",
+                                "refName": "main",
+                                "sparsePaths": ["plugins/docs"]
+                            })
+                        );
+                        serde_json::json!({
+                            "marketplaceName": "example",
+                            "installedRoot": "/tmp/marketplaces/example",
+                            "alreadyAdded": false
+                        })
+                    }
+                    "marketplace/remove" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({"marketplaceName": "example"})
+                        );
+                        serde_json::json!({
+                            "marketplaceName": "example",
+                            "installedRoot": "/tmp/marketplaces/example"
+                        })
+                    }
+                    "marketplace/upgrade" => {
+                        assert_eq!(request["params"], serde_json::json!({}));
+                        serde_json::json!({
+                            "selectedMarketplaces": ["example"],
+                            "upgradedRoots": ["/tmp/marketplaces/example"],
+                            "errors": []
+                        })
+                    }
+                    "mcpServer/resource/read" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-1",
+                                "server": "docs",
+                                "uri": "docs://readme"
+                            })
+                        );
+                        serde_json::json!({
+                            "contents": [{
+                                "uri": "docs://readme",
+                                "mimeType": "text/markdown",
+                                "text": "# Live resource"
+                            }]
+                        })
+                    }
+                    "plugin/skill/read" => {
+                        assert_eq!(request["params"]["skillName"], "documents");
+                        serde_json::json!({"contents": "# Documents skill"})
+                    }
+                    "plugin/share/list" => {
+                        assert_eq!(request["params"], serde_json::json!({}));
+                        serde_json::json!({
+                            "data": [{
+                                "plugin": {
+                                    "id": "documents",
+                                    "remotePluginId": "remote-documents",
+                                    "version": "1.0.0",
+                                    "localVersion": "1.0.0",
+                                    "name": "Documents",
+                                    "shareContext": {
+                                        "remotePluginId": "remote-documents",
+                                        "remoteVersion": "1.0.0",
+                                        "discoverability": "UNLISTED",
+                                        "shareUrl": "https://example.test/share/documents",
+                                        "creatorAccountUserId": "user-1",
+                                        "creatorName": "Test User",
+                                        "sharePrincipals": [],
+                                        "canPublishToWorkspace": true
+                                    },
+                                    "source": {"type": "remote"},
+                                    "installed": true,
+                                    "enabled": true,
+                                    "installPolicy": "AVAILABLE",
+                                    "installPolicySource": null,
+                                    "mustShowInstallationInterstitial": null,
+                                    "authPolicy": "ON_USE",
+                                    "availability": "AVAILABLE",
+                                    "interface": null,
+                                    "keywords": []
+                                },
+                                "localPluginPath": "/tmp/plugins/documents"
+                            }]
+                        })
+                    }
+                    "plugin/share/save" => {
+                        assert_eq!(request["params"]["discoverability"], "UNLISTED");
+                        serde_json::json!({
+                            "remotePluginId": "remote-documents",
+                            "shareUrl": "https://example.test/share/documents",
+                            "canPublishToWorkspace": true
+                        })
+                    }
+                    "plugin/share/updateTargets" => {
+                        assert_eq!(request["params"]["shareTargets"][0]["role"], "editor");
+                        serde_json::json!({
+                            "principals": [{
+                                "principalType": "workspace",
+                                "principalId": "workspace-1",
+                                "role": "editor",
+                                "name": "Workspace"
+                            }],
+                            "discoverability": "PRIVATE"
+                        })
+                    }
+                    "plugin/share/delete" => {
+                        assert_eq!(request["params"]["remotePluginId"], "remote-documents");
+                        serde_json::json!({})
+                    }
+                    "thread/approveGuardianDeniedAction" => {
+                        assert_eq!(request["params"]["threadId"], "thread-1");
+                        assert_eq!(request["params"]["event"]["action"], "network");
+                        serde_json::json!({})
+                    }
+                    _ => unreachable!(),
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let mut feedback = crate::FeedbackUploadParams::new("bug");
+        feedback.reason = Some("Something failed".to_owned());
+        feedback.thread_id = Some("thread-1".to_owned());
+        feedback.include_logs = Some(false);
+        assert_eq!(
+            backend.feedback_upload(feedback).await.unwrap().thread_id,
+            "feedback-thread"
+        );
+
+        let mut marketplace = crate::MarketplaceAddParams::new("https://example.test/plugins.git");
+        marketplace.ref_name = Some("main".to_owned());
+        marketplace.sparse_paths = Some(vec!["plugins/docs".to_owned()]);
+        assert_eq!(
+            backend
+                .marketplace_add(marketplace)
+                .await
+                .unwrap()
+                .marketplace_name,
+            "example"
+        );
+        backend
+            .marketplace_remove(crate::MarketplaceRemoveParams {
+                marketplace_name: "example".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .marketplace_upgrade(crate::MarketplaceUpgradeParams::default())
+                .await
+                .unwrap()
+                .upgraded_roots,
+            ["/tmp/marketplaces/example"]
+        );
+
+        let resource = backend
+            .mcp_server_resource_read(crate::McpResourceReadParams {
+                thread_id: Some("thread-1".to_owned()),
+                server: "docs".to_owned(),
+                uri: "docs://readme".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            resource.contents[0],
+            crate::McpResourceContent::Text { .. }
+        ));
+        assert_eq!(
+            backend
+                .plugin_skill_read(crate::PluginSkillReadParams {
+                    remote_marketplace_name: "openai".to_owned(),
+                    remote_plugin_id: "remote-documents".to_owned(),
+                    skill_name: "documents".to_owned(),
+                })
+                .await
+                .unwrap()
+                .contents
+                .as_deref(),
+            Some("# Documents skill")
+        );
+        let shares = backend
+            .plugin_share_list(crate::PluginShareListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(shares.data[0].plugin.id, "documents");
+        let share_context = shares.data[0].share_context().unwrap().unwrap();
+        assert_eq!(
+            share_context.discoverability,
+            Some(crate::PluginShareDiscoverability::Unlisted)
+        );
+        assert_eq!(share_context.can_publish_to_workspace, Some(true));
+
+        let target = crate::PluginShareTarget {
+            principal_type: crate::PluginSharePrincipalType::Workspace,
+            principal_id: "workspace-1".to_owned(),
+            role: crate::PluginShareTargetRole::Editor,
+        };
+        backend
+            .plugin_share_save(crate::PluginShareSaveParams {
+                plugin_path: "/tmp/plugins/documents".to_owned(),
+                remote_plugin_id: None,
+                discoverability: Some(crate::PluginShareDiscoverability::Unlisted),
+                share_targets: Some(vec![target.clone()]),
+            })
+            .await
+            .unwrap();
+        let updated = backend
+            .plugin_share_update_targets(crate::PluginShareUpdateTargetsParams {
+                remote_plugin_id: "remote-documents".to_owned(),
+                discoverability: crate::PluginShareDiscoverability::Private,
+                share_targets: vec![target],
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.principals[0].name, "Workspace");
+        backend
+            .plugin_share_delete(crate::PluginShareDeleteParams {
+                remote_plugin_id: "remote-documents".to_owned(),
+            })
+            .await
+            .unwrap();
+        backend
+            .thread_approve_guardian_denied_action(crate::ThreadApproveGuardianDeniedActionParams {
+                thread_id: "thread-1".to_owned(),
+                event: serde_json::json!({"action": "network"}),
             })
             .await
             .unwrap();

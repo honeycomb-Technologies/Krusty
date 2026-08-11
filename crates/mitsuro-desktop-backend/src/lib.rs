@@ -11,18 +11,23 @@ pub mod environment;
 pub mod experimental_features;
 pub mod extensions;
 pub mod external_agent_config;
+pub mod feedback;
 pub mod fixture;
 pub mod fs;
+pub mod guardian;
 pub mod hooks;
 pub mod live_turn;
+pub mod marketplace;
 pub mod mcp_auth;
 pub mod mcp_config;
+pub mod mcp_resources;
 pub mod memory;
 pub mod methods;
 pub mod mitsuro;
 pub mod notifications;
 pub mod permissions;
 pub mod plugin_mutations;
+pub mod plugin_sharing;
 pub mod process;
 pub mod product;
 pub mod protocol;
@@ -114,6 +119,7 @@ pub use external_agent_config::{
     ExternalAgentImportedConnectorCandidate, ExternalAgentImportedConnectorSource,
     CLAUDE_CODE_MIGRATION_SOURCE, CURSOR_MIGRATION_SOURCE,
 };
+pub use feedback::{FeedbackRequirements, FeedbackUploadParams, FeedbackUploadResponse};
 pub use fixture::{
     load_sample_turn_events, replay_events, replay_sample_turn, FixtureBackend, SAMPLE_TURN_JSONL,
 };
@@ -130,6 +136,9 @@ pub use fs::{
     FuzzyFileSearchSessionStopParams, FuzzyFileSearchSessionStopResponse,
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse, FIXTURE_PROJECT_ROOT,
 };
+pub use guardian::{
+    ThreadApproveGuardianDeniedActionParams, ThreadApproveGuardianDeniedActionResponse,
+};
 pub use hooks::{
     HookErrorInfo, HookEventName, HookHandlerType, HookMetadata, HookSource, HookTrustStatus,
     HooksListEntry, HooksListParams, HooksListResponse,
@@ -142,6 +151,11 @@ pub use live_turn::{
     run_live_turn_with_policy_blocking, LiveApprovalBridge, LiveApprovalPolicy, LiveReviewOutcome,
     LiveTurnOutcome, DEFAULT_LIVE_TURN_TIMEOUT,
 };
+pub use marketplace::{
+    MarketplaceAddParams, MarketplaceAddResponse, MarketplaceRemoveParams,
+    MarketplaceRemoveResponse, MarketplaceUpgradeErrorInfo, MarketplaceUpgradeParams,
+    MarketplaceUpgradeResponse,
+};
 pub use mcp_auth::{
     McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerOauthLoginResponse,
 };
@@ -150,6 +164,7 @@ pub use mcp_config::{
     ConfigValueWriteParams, ConfigWriteResponse, ConfigWriteStatus, McpServerConfigAddParams,
     McpServerTransportConfig, MergeStrategy,
 };
+pub use mcp_resources::{McpResourceContent, McpResourceReadParams, McpResourceReadResponse};
 pub use memory::{
     MemoryResetResponse, ThreadMemoryMode, ThreadMemoryModeSetParams, ThreadMemoryModeSetResponse,
 };
@@ -158,8 +173,8 @@ pub use methods::{
     is_stable_client_method, load_client_methods_from_bar, load_stable_client_methods_from_bar,
     requires_experimental_api, stable_client_methods_txt_path, ClientMethodCoverage,
     CLIENT_METHODS, CLIENT_METHOD_COUNT, EXPERIMENTAL_ONLY_CLIENT_METHOD_COUNT,
-    STABLE_CLIENT_METHODS_TEXT, STABLE_CLIENT_METHOD_COUNT, TYPED_CLIENT_METHODS,
-    TYPED_CLIENT_METHOD_COUNT,
+    RAW_ONLY_CLIENT_METHODS, RAW_ONLY_CLIENT_METHOD_COUNT, STABLE_CLIENT_METHODS_TEXT,
+    STABLE_CLIENT_METHOD_COUNT, TYPED_CLIENT_METHODS, TYPED_CLIENT_METHOD_COUNT,
 };
 pub use mitsuro::MitsuroServerBackend;
 pub use notifications::{
@@ -175,6 +190,14 @@ pub use permissions::{
 pub use plugin_mutations::{
     PluginAppSummary, PluginInstallParams, PluginInstallResponse, PluginUninstallParams,
     PluginUninstallResponse,
+};
+pub use plugin_sharing::{
+    PluginShareContext, PluginShareDeleteParams, PluginShareDeleteResponse,
+    PluginShareDiscoverability, PluginShareListItem, PluginShareListParams,
+    PluginShareListResponse, PluginSharePrincipal, PluginSharePrincipalRole,
+    PluginSharePrincipalType, PluginShareSaveParams, PluginShareSaveResponse, PluginShareTarget,
+    PluginShareTargetRole, PluginShareUpdateDiscoverability, PluginShareUpdateTargetsParams,
+    PluginShareUpdateTargetsResponse, PluginSkillReadParams, PluginSkillReadResponse,
 };
 pub use process::{
     decode_base64, decode_base64_lossy, encode_base64, parse_process_exited,

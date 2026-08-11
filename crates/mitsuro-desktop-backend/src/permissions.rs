@@ -78,6 +78,8 @@ pub struct ConfigRequirements {
     pub allow_remote_control: Option<bool>,
     #[serde(default)]
     pub feature_requirements: Option<HashMap<String, bool>>,
+    #[serde(default)]
+    pub feedback: Option<crate::FeedbackRequirements>,
 }
 
 impl ConfigRequirements {
@@ -145,13 +147,15 @@ mod tests {
                         ":danger-full-access": false
                     },
                     "allowedSandboxModes": ["read-only", "workspace-write"],
-                    "allowedApprovalsReviewers": ["user", "auto_review"]
+                    "allowedApprovalsReviewers": ["user", "auto_review"],
+                    "feedback": {"enabled": false}
                 }
             }))
             .unwrap();
         let requirements = requirements.requirements.unwrap();
         assert!(requirements.allows_profile(WORKSPACE_PROFILE_ID));
         assert!(!requirements.allows_profile(FULL_ACCESS_PROFILE_ID));
+        assert_eq!(requirements.feedback.unwrap().enabled, Some(false));
 
         assert_eq!(
             serde_json::to_value(PermissionProfileListParams::default()).unwrap(),

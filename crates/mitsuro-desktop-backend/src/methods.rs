@@ -186,6 +186,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "externalAgentConfig/import",
     "externalAgentConfig/import/readHistories",
     "externalAgentConfig/import/recordHistory",
+    "feedback/upload",
     "fs/copy",
     "fs/createDirectory",
     "fs/getMetadata",
@@ -201,7 +202,11 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "fuzzyFileSearch/sessionUpdate",
     "hooks/list",
     "initialize",
+    "marketplace/add",
+    "marketplace/remove",
+    "marketplace/upgrade",
     "mcpServer/oauth/login",
+    "mcpServer/resource/read",
     "mcpServer/tool/call",
     "mcpServerStatus/list",
     "memory/reset",
@@ -212,6 +217,11 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "plugin/installed",
     "plugin/list",
     "plugin/read",
+    "plugin/share/delete",
+    "plugin/share/list",
+    "plugin/share/save",
+    "plugin/share/updateTargets",
+    "plugin/skill/read",
     "plugin/uninstall",
     "process/kill",
     "process/resizePty",
@@ -227,6 +237,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "review/start",
     "skills/config/write",
     "skills/list",
+    "thread/approveGuardianDeniedAction",
     "thread/archive",
     "thread/backgroundTerminals/clean",
     "thread/backgroundTerminals/list",
@@ -266,6 +277,31 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
 ];
 
 pub const TYPED_CLIENT_METHOD_COUNT: usize = TYPED_CLIENT_METHODS.len();
+
+/// Generated methods that do not currently have a Linux product adapter.
+///
+/// The final two entries are Windows-only. The others are present in the
+/// generated protocol but are not called by the reviewed reference desktop.
+/// Keeping the exact set executable prevents a newly used method from hiding
+/// behind universal raw transport.
+pub const RAW_ONLY_CLIENT_METHODS: &[&str] = &[
+    "mock/experimentalMethod",
+    "plugin/search",
+    "plugin/share/checkout",
+    "skills/extraRoots/set",
+    "thread/decrement_elicitation",
+    "thread/increment_elicitation",
+    "thread/loaded/list",
+    "thread/section/move",
+    "threadSection/create",
+    "threadSection/delete",
+    "threadSection/list",
+    "threadSection/update",
+    "windowsSandbox/readiness",
+    "windowsSandbox/setupStart",
+];
+
+pub const RAW_ONLY_CLIENT_METHOD_COUNT: usize = RAW_ONLY_CLIENT_METHODS.len();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMethodCoverage {
@@ -382,7 +418,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 108);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 119);
         assert!(
             TYPED_CLIENT_METHODS
                 .windows(2)
@@ -399,8 +435,14 @@ mod tests {
         let raw_only = CLIENT_METHODS
             .iter()
             .filter(|method| client_method_coverage(method) == ClientMethodCoverage::RawOnly)
-            .count();
-        assert_eq!(raw_only, CLIENT_METHOD_COUNT - TYPED_CLIENT_METHOD_COUNT);
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(raw_only, RAW_ONLY_CLIENT_METHODS);
+        assert_eq!(raw_only.len(), RAW_ONLY_CLIENT_METHOD_COUNT);
+        assert_eq!(
+            RAW_ONLY_CLIENT_METHOD_COUNT,
+            CLIENT_METHOD_COUNT - TYPED_CLIENT_METHOD_COUNT
+        );
         assert_eq!(
             client_method_coverage("future/not-yet-generated"),
             ClientMethodCoverage::Unknown
