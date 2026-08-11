@@ -267,6 +267,15 @@ pub enum ProductMode {
     Scheduled,
 }
 
+/// Active native application-menu popup in the client-decorated title bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppMenu {
+    File,
+    Edit,
+    View,
+    Help,
+}
+
 /// Plugins marketplace category chips (Public catalog vs Personal / MCP).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PluginsFilter {
@@ -430,6 +439,21 @@ fn parse_start_mode() -> Option<ProductMode> {
     })
 }
 
+/// Optional application menu to open on first paint for deterministic visual
+/// regression capture (`MITSURO_START_APP_MENU=file|edit|view|help`).
+///
+/// This controls chrome only; it never substitutes fixture or backend data.
+fn parse_start_app_menu() -> Option<AppMenu> {
+    let raw = std::env::var("MITSURO_START_APP_MENU").ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "file" => Some(AppMenu::File),
+        "edit" => Some(AppMenu::Edit),
+        "view" => Some(AppMenu::View),
+        "help" => Some(AppMenu::Help),
+        _ => None,
+    }
+}
+
 /// Optional thread id/title to select after bootstrap (`MITSURO_START_THREAD`).
 ///
 /// Accepts:
@@ -503,6 +527,17 @@ fn composer_enter_should_send(send_shortcut: &str, secondary: bool) -> bool {
     match send_shortcut {
         "Ctrl+Enter" => secondary,
         _ => !secondary,
+    }
+}
+
+fn push_bounded_navigation(history: &mut Vec<ProductMode>, mode: ProductMode) {
+    const MAX_NAVIGATION_ENTRIES: usize = 64;
+    if history.last().copied() == Some(mode) {
+        return;
+    }
+    history.push(mode);
+    if history.len() > MAX_NAVIGATION_ENTRIES {
+        history.remove(0);
     }
 }
 
@@ -1584,6 +1619,14 @@ pub struct MitsuroApp {
     status_line: SharedString,
     /// Active product shell mode (rail selection).
     active_mode: ProductMode,
+    /// Bounded product-surface navigation history for the title-bar arrows.
+    navigation_back: Vec<ProductMode>,
+    navigation_forward: Vec<ProductMode>,
+    navigation_replaying: bool,
+    /// Reference title-bar sidebar toggle; it never changes backend state.
+    thread_sidebar_visible: bool,
+    /// At most one native title-bar application menu is open.
+    app_menu: Option<AppMenu>,
     /// Selected Settings left-nav section (only meaningful in Settings mode).
     settings_section: SettingsSection,
     /// Mode to restore when leaving Settings via "Back to app".
@@ -2330,6 +2373,11 @@ impl MitsuroApp {
             mcp_form_field_index: 0,
             mcp_form_values: BTreeMap::new(),
             active_mode: parse_start_mode().unwrap_or(ProductMode::Codex),
+            navigation_back: Vec::new(),
+            navigation_forward: Vec::new(),
+            navigation_replaying: false,
+            thread_sidebar_visible: true,
+            app_menu: None,
             settings_section: SettingsSection::General,
             settings_return_mode: ProductMode::Codex,
             settings_search_query: String::new(),
@@ -2565,6 +2613,10 @@ impl MitsuroApp {
             cx.notify();
         }
 
+        // Apply the chrome-only capture state after mode initialization because
+        // normal surface navigation deliberately closes any open app menu.
+        app.app_menu = parse_start_app_menu();
+
         // Eager select only if seed already has the id (fixture demo path).
         // Live server threads arrive async — see apply_pending_start_thread.
         if let Some(thread_id) = app.pending_start_thread.clone() {
@@ -2709,6 +2761,103 @@ impl MitsuroApp {
         self.active_mode
     }
 
+    pub fn app_menu(&self) -> Option<AppMenu> {
+        self.app_menu
+    }
+
+    pub fn toggle_app_menu(&mut self, menu: AppMenu, cx: &mut Context<Self>) {
+        self.app_menu = if self.app_menu == Some(menu) {
+            None
+        } else {
+            Some(menu)
+        };
+        cx.notify();
+    }
+
+    pub fn close_app_menu(&mut self, cx: &mut Context<Self>) {
+        if self.app_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn thread_sidebar_visible(&self) -> bool {
+        self.thread_sidebar_visible
+    }
+
+    pub fn thread_sidebar_toggle_available(&self) -> bool {
+        self.active_mode.shows_thread_sidebar()
+    }
+
+    pub fn toggle_thread_sidebar(&mut self, cx: &mut Context<Self>) {
+        if !self.thread_sidebar_toggle_available() {
+            self.status_line = "This surface does not use the conversation sidebar.".into();
+        } else {
+            self.thread_sidebar_visible = !self.thread_sidebar_visible;
+            self.status_line = if self.thread_sidebar_visible {
+                "Conversation sidebar shown".into()
+            } else {
+                "Conversation sidebar hidden".into()
+            };
+        }
+        self.app_menu = None;
+        cx.notify();
+    }
+
+    pub fn can_navigate_back(&self) -> bool {
+        !self.navigation_back.is_empty()
+    }
+
+    pub fn can_navigate_forward(&self) -> bool {
+        !self.navigation_forward.is_empty()
+    }
+
+    pub fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            self.status_line =
+                "Finish the message rollback and resend before navigating away.".into();
+            cx.notify();
+            return;
+        }
+        let Some(mode) = self.navigation_back.pop() else {
+            return;
+        };
+        push_bounded_navigation(&mut self.navigation_forward, self.active_mode);
+        self.navigation_replaying = true;
+        self.set_mode(mode, window, cx);
+        self.navigation_replaying = false;
+    }
+
+    pub fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.latest_message_edit_in_progress {
+            self.status_line =
+                "Finish the message rollback and resend before navigating away.".into();
+            cx.notify();
+            return;
+        }
+        let Some(mode) = self.navigation_forward.pop() else {
+            return;
+        };
+        push_bounded_navigation(&mut self.navigation_back, self.active_mode);
+        self.navigation_replaying = true;
+        self.set_mode(mode, window, cx);
+        self.navigation_replaying = false;
+    }
+
+    pub fn new_codex_thread_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_menu = None;
+        self.set_mode(ProductMode::Codex, window, cx);
+        self.new_thread(cx);
+        self.update_composer_placeholder(window, cx);
+    }
+
+    pub fn open_help_documentation(&mut self, cx: &mut Context<Self>) {
+        self.app_menu = None;
+        let result =
+            open_system_browser("https://github.com/honeycomb-Technologies/Mitsuro/tree/main/docs");
+        self.status_line = format!("Documentation · {}", result.summary()).into();
+        cx.notify();
+    }
+
     /// Switch product mode (activity rail) and refresh status chrome.
     ///
     /// Selection is preserved: Chat/Codex each remember their last thread; Work
@@ -2726,6 +2875,11 @@ impl MitsuroApp {
             self.latest_message_edit_generation =
                 self.latest_message_edit_generation.wrapping_add(1);
         }
+        if mode != self.active_mode && !self.navigation_replaying {
+            push_bounded_navigation(&mut self.navigation_back, self.active_mode);
+            self.navigation_forward.clear();
+        }
+        self.app_menu = None;
         self.remember_thread_selection_for_mode(self.active_mode);
 
         // Entering Settings from any other mode: land on General + remember return.
@@ -6296,7 +6450,7 @@ impl MitsuroApp {
             && !self.feedback_details_input.read(cx).value().contains('\0')
     }
 
-    fn open_feedback_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_feedback_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.feedback_submission_available() {
             self.status_line = match self.active_backend_kind() {
                 Some(BackendKind::MitsuroHttp) => {
@@ -21002,7 +21156,7 @@ impl Render for MitsuroApp {
         let colors = theme::colors();
         // Bar home: always-on left sidebar for Chat/Codex (+ stubs/plugins).
         // Activity rail only for advanced modes outside bar home nav.
-        let show_sidebar = self.active_mode.shows_thread_sidebar();
+        let show_sidebar = self.active_mode.shows_thread_sidebar() && self.thread_sidebar_visible;
         let show_rail = self.active_mode.shows_activity_rail();
 
         div()
@@ -21013,6 +21167,7 @@ impl Render for MitsuroApp {
             .bg(colors.bg_under)
             .text_color(colors.text)
             .track_focus(&self.focus_handle)
+            .child(components::app_header(self, cx))
             .child(
                 div()
                     .flex()
@@ -21027,6 +21182,9 @@ impl Render for MitsuroApp {
                     })
                     .child(components::main_column(self, &self.composer_input, cx)),
             )
+            .when(self.app_menu().is_some(), |this| {
+                this.child(components::app_menu_overlay(self, cx))
+            })
             .when(self.feedback_dialog_open(), |this| {
                 this.child(components::feedback_dialog(self, cx))
             })
@@ -21177,6 +21335,25 @@ mod tests {
             detail: "test".into(),
             has_auth: true,
         }
+    }
+
+    #[test]
+    fn product_navigation_history_is_bounded_and_deduplicated() {
+        let mut history = Vec::new();
+        push_bounded_navigation(&mut history, ProductMode::Codex);
+        push_bounded_navigation(&mut history, ProductMode::Codex);
+        assert_eq!(history, vec![ProductMode::Codex]);
+
+        for index in 0..80 {
+            let mode = if index % 2 == 0 {
+                ProductMode::Files
+            } else {
+                ProductMode::Terminal
+            };
+            push_bounded_navigation(&mut history, mode);
+        }
+        assert_eq!(history.len(), 64);
+        assert_eq!(history.last(), Some(&ProductMode::Terminal));
     }
 
     #[test]

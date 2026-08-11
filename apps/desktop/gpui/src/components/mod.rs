@@ -1,6 +1,7 @@
 //! Shell chrome pieces (Codex-like layout).
 
 mod activity_rail;
+mod app_header;
 mod approval_bar;
 mod browser_panel;
 mod codex_button;
@@ -25,6 +26,7 @@ mod work_panel;
 // Connection chip + status text live in main column title bar.
 
 pub use activity_rail::activity_rail;
+pub use app_header::{app_header, app_menu_overlay};
 pub use approval_bar::approval_bar;
 pub use browser_panel::browser_panel;
 pub use composer::composer;

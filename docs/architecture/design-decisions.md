@@ -75,20 +75,28 @@ This document covers the major architectural decisions behind Mitsuro — what w
 
 **The trade-off:** React Native has overhead compared to native. The web build uses Metro instead of a more optimized web bundler. Some platform features (iOS widgets, Live Activities) still need native code. But the development velocity gain from one codebase far outweighs these costs.
 
-## 6. Why Tauri for Desktop?
+## 6. Why GPUI for Desktop?
 
-**The choice:** Wrap the Expo web build in Tauri for native desktop distribution.
+**The choice:** Implement the canonical desktop workspace directly in Rust with GPUI
+and GPUI Component.
 
-**Alternatives considered:** Electron (most popular), native desktop app (GTK/Qt), TUI-only (skip desktop GUI entirely).
+**Alternatives considered:** Electron, the earlier Tauri/Expo shell, GTK/Qt, and
+remaining TUI-only.
 
-**Why Tauri won:** The desktop app is just a window around the web frontend. We don't need a full browser engine:
+**Why GPUI won:** The desktop is a product client, not a wrapper around the mobile UI:
 
-- **Tiny binary** — Tauri uses the system's native web view instead of bundling Chromium (unlike Electron, which adds ~150MB)
-- **Low memory** — no separate browser process eating RAM
-- **Rust backend** — Tauri's backend is Rust, which integrates naturally with our existing Rust codebase
-- **Same frontend** — it literally loads the same Expo web build as the server
+- **Native interaction model** — transcript, approvals, terminal, files, settings,
+  Work, and Scheduled surfaces use GPUI components and Rust state directly.
+- **Two first-class transports** — one normalized product contract can switch between
+  Mitsuro HTTP/SSE and a managed Codex app-server without restarting the app.
+- **Truthful capability boundaries** — unsupported server operations remain disabled
+  or return typed errors; they are never filled with demo records.
+- **Focused web isolation** — WebKitGTK is used only for sandboxed interactive MCP
+  Apps (and an optional browser bridge), not as the main application renderer.
 
-**The trade-off:** System web views vary by OS (WebKit on Linux, WebView2 on Windows, WebKit on macOS). Some CSS/JS features work differently across them. Electron's consistent Chromium would eliminate these cross-platform quirks, but at a massive size and memory cost.
+**The trade-off:** GPUI currently makes Linux the packaged desktop target and requires
+native parity work that a shared web shell avoided. The legacy Tauri/Expo source remains
+available for migration evidence, but tagged Linux releases build the GPUI client.
 
 ## 7. Why WASM for Extensions?
 

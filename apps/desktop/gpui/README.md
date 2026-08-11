@@ -1,6 +1,6 @@
 # Mitsuro GPUI Desktop
 
-Experimental native desktop client built with GPUI and GPUI Component.
+Canonical native desktop client built with GPUI and GPUI Component.
 
 This directory contains the maintained source imported from the earlier standalone
 prototype. The original local directory remains an unchanged forensic snapshot;
@@ -246,9 +246,11 @@ Settings values are durable and explicitly distinguished from live server config
 The established surface matrix has passed strict dual-provider live acceptance. The
 production-data purity slice adds a source-level fixture gate and fresh live captures
 for Work, Scheduled, Computer, Extensions, Settings, and Files on both transports.
-The expanded reference-method, interaction, and installable-release audit is still in
-progress; those earlier gates do not by themselves prove the full 1:1 objective.
-Installation and deployment remain separate operator actions.
+The tagged Linux release workflow now builds this GPUI client rather than the legacy
+Tauri shell and emits installable Debian and RPM packages. The expanded interaction,
+visual, clean-host installation, and runtime acceptance audit remains in progress;
+earlier gates do not by themselves prove the full 1:1 objective. Installation and
+deployment remain separate operator actions.
 
 ## Build
 
@@ -258,6 +260,9 @@ cargo check -p mitsuro-gpui-desktop
 cargo test -p mitsuro-desktop-backend
 cargo test -p mitsuro-client
 cargo test -p mitsuro-gpui-desktop --no-default-features
+cargo build --release --locked -p mitsuro-gpui-desktop
+scripts/package-gpui-desktop.sh \
+  target/release/mitsuro-gpui-desktop artifacts/gpui-desktop
 ```
 
 Run against the local Mitsuro server without authorizing provider turns:
@@ -271,6 +276,11 @@ Use `MITSURO_BACKEND=codex-stdio` for a managed Codex app-server child. A Ready,
 authenticated backend sends a provider-backed turn when the user presses Send. Keep
 `MITSURO_NO_LIVE_TURN=1` for read-only visual validation; use
 `MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
+
+Visual regression runs may set `MITSURO_START_MODE` to a product surface and
+`MITSURO_START_APP_MENU=file|edit|view|help` to open deterministic native chrome on
+first paint. These variables select presentation state only; backend data still comes
+from `MITSURO_BACKEND` and is never replaced with fixture content.
 
 The Codex adapter negotiates experimental APIs because the desktop exposes process,
 environment, realtime, Remote Control, external-agent import, and background-terminal protocol families. The reviewed

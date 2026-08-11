@@ -27,6 +27,12 @@ Use `MITSURO_NO_LIVE_TURN=1` for read-only UI review or an explicit fixture back
 deterministic replay. Merely connecting and discovering auth does not itself send a turn.
 `MITSURO_NO_LIVE_TURN` disables Send; it does not select fixture replay.
 
+The client-decorated GPUI Component title bar owns real sidebar, back/forward,
+File/Edit/View/Help, and native window-control interactions. Visual regression runs can
+select a surface with `MITSURO_START_MODE` and open one menu with
+`MITSURO_START_APP_MENU=file|edit|view|help`; both affect initial presentation only and
+never substitute backend records.
+
 ## Production data invariant
 
 Fixture records are allowed only when both the UI connection and active backend are
@@ -361,10 +367,12 @@ changes. No fixture HTML, generic web page, or locally generated widget enters t
 - The established fixture/live visual matrix, dual-provider acceptance gauntlet,
   focused workspace gates, optimized GPUI build, and isolated runtime provenance check
   are complete for the surfaces already recorded above. The Linux reference-used raw
-  adapter tranche is complete, while the expanded 1:1 completion audit remains open
-  across the corresponding product interactions, residual disabled destinations,
-  full interaction/visual comparison, and installable
-  release lifecycle; the established gates are not evidence that those items are done.
+  adapter tranche is complete. The tagged Linux workflow now tests and packages this
+  GPUI binary as the canonical `.deb` and `.rpm`, including executable-relative SVG
+  asset lookup. The expanded 1:1 completion audit remains open across the corresponding
+  product interactions, residual disabled destinations, full interaction/visual
+  comparison, and clean-host install/runtime acceptance; the established gates are not
+  evidence that those items are done.
 - The production-data purity matrix was revalidated on both live transports for Work,
   Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids
   fixture records for every product backend connection state.

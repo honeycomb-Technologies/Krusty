@@ -1,9 +1,9 @@
 [package]
 name = "mitsuro-gpui-desktop"
-version = "0.9.21"
+version = "0.9.22"
 edition = "2021"
 license = "MIT"
-description = "Experimental native GPUI desktop client for Mitsuro and Codex app-server"
+description = "Native GPUI desktop client for Mitsuro and Codex app-server"
 default-run = "mitsuro-gpui-desktop"
 
 [features]

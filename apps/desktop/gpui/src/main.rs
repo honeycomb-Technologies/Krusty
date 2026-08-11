@@ -9,7 +9,7 @@ mod preferences;
 mod theme;
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     px, size, App, AppContext as _, Application, AssetSource, Bounds, WindowBounds, WindowOptions,
@@ -60,8 +60,17 @@ fn asset_candidates(path: &str) -> Vec<PathBuf> {
         return vec![path];
     }
 
+    let mut candidates = Vec::new();
+    if let Some(root) = std::env::var_os("MITSURO_GPUI_ASSET_DIR") {
+        candidates.push(PathBuf::from(root).join(&path));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        for root in executable_asset_roots(&executable) {
+            candidates.push(root.join(&path));
+        }
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    vec![
+    candidates.extend([
         // As requested by IconName: "icons/foo.svg"
         path.clone(),
         // Bundled under crate assets/
@@ -71,7 +80,19 @@ fn asset_candidates(path: &str) -> Vec<PathBuf> {
         // Cwd variants (cargo run from workspace root)
         PathBuf::from("crates/mitsuro-desktop/assets").join(&path),
         PathBuf::from("assets").join(&path),
-    ]
+    ]);
+    candidates
+}
+
+fn executable_asset_roots(executable: &Path) -> Vec<PathBuf> {
+    let Some(bin_dir) = executable.parent() else {
+        return Vec::new();
+    };
+    let mut roots = vec![bin_dir.join("assets")];
+    if let Some(prefix) = bin_dir.parent() {
+        roots.push(prefix.join("share/mitsuro-gpui-desktop/assets"));
+    }
+    roots
 }
 
 fn main() {
@@ -95,11 +116,8 @@ fn main() {
             let open = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("Mitsuro — Codex".into()),
-                        appears_transparent: false,
-                        traffic_light_position: None,
-                    }),
+                    titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                    app_id: Some("io.mitsuro.desktop".to_owned()),
                     ..Default::default()
                 },
                 |window, cx| {
@@ -112,4 +130,21 @@ fn main() {
                 eprintln!("failed to open Mitsuro window: {error}");
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::executable_asset_roots;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn installed_binary_resolves_packaged_assets() {
+        assert_eq!(
+            executable_asset_roots(Path::new("/usr/bin/mitsuro-desktop")),
+            vec![
+                PathBuf::from("/usr/bin/assets"),
+                PathBuf::from("/usr/share/mitsuro-gpui-desktop/assets"),
+            ]
+        );
+    }
 }
