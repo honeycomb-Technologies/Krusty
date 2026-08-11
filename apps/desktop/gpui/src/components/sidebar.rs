@@ -3,7 +3,7 @@
 //! Structure:
 //! - Mode switcher pill (Chat / Codex) + search / bell icons
 //! - Nav: New chat · Pull requests · Sites · Scheduled · Plugins
-//! - Projects (empty)
+//! - Native-host Projects (real workspace roots; live thread membership)
 //! - Pinned + Recents (scrollable live thread titles)
 //! - Profile row → Settings
 
@@ -40,6 +40,18 @@ pub fn sidebar(
     let profile_name = app.profile_display_name().to_string();
     let profile_name_visible = app.profile_name_visible_in_sidebar();
     let profile_plan = app.profile_plan_label().map(|p| p.to_string());
+    let projects_available = app.can_manage_local_projects();
+    let selected_project = app.selected_project_id().map(str::to_owned);
+    let project_items = app
+        .local_projects()
+        .iter()
+        .cloned()
+        .map(|project| {
+            let is_selected = selected_project.as_deref() == Some(project.id.as_str());
+            let remove_armed = app.project_remove_armed(&project.id);
+            project_row(project, is_selected, remove_armed, projects_available, cx)
+        })
+        .collect::<Vec<_>>();
     let _ = search; // search field still wired via InputState; icon opens focus
 
     let (mut pinned_threads, recent_threads): (Vec<_>, Vec<_>) = threads
@@ -258,6 +270,16 @@ pub fn sidebar(
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .opacity(if projects_available { 1.0 } else { 0.4 })
+                                    .when(projects_available, |this| {
+                                        this.cursor_pointer()
+                                            .hover(|style| {
+                                                style.bg(theme::hex_alpha(0xffffff, 0.08))
+                                            })
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.create_local_project(cx);
+                                            }))
+                                    })
                                     .child(
                                         Icon::new(IconName::Plus)
                                             .with_size(px(12.0))
@@ -265,12 +287,21 @@ pub fn sidebar(
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.text_tertiary)
-                            .child("Unavailable from backend"),
-                    ),
+                    .when(project_items.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child(if projects_available {
+                                    "No projects yet."
+                                } else {
+                                    "Projects unavailable for this backend."
+                                }),
+                        )
+                    })
+                    .children(project_items),
             )
         })
         // ── Pinned + Recents (dense list · native host pin order) ─────
@@ -321,6 +352,100 @@ fn thread_section_heading(label: &'static str, separated: bool) -> AnyElement {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(colors.text_tertiary)
         .child(label)
+        .into_any_element()
+}
+
+fn project_row(
+    project: crate::preferences::DesktopProject,
+    is_selected: bool,
+    remove_armed: bool,
+    enabled: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> AnyElement {
+    let colors = theme::colors();
+    let id = project.id.clone();
+    let open_id = id.clone();
+    let remove_id = id.clone();
+    let group_name = SharedString::from(format!("project-row-group-{id}"));
+
+    div()
+        .id(SharedString::from(format!("project-row-{id}")))
+        .group(group_name.clone())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .opacity(if enabled { 1.0 } else { 0.55 })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.close_mode_menu(cx);
+                    app.select_local_project(open_id.clone(), window, cx);
+                }))
+        })
+        .bg(if is_selected {
+            theme::hex_alpha(0xffffff, 0.06)
+        } else {
+            theme::transparent()
+        })
+        .child(
+            Icon::empty()
+                .path("icons/folder.svg")
+                .with_size(px(14.0))
+                .text_color(if is_selected {
+                    colors.text_secondary
+                } else {
+                    colors.text_tertiary
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(if is_selected {
+                    colors.text
+                } else {
+                    colors.text_secondary
+                })
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .child(project.name),
+        )
+        .when(enabled, |this| {
+            this.child(
+                div()
+                    .id(SharedString::from(format!("project-remove-{remove_id}")))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .flex_shrink_0()
+                    .rounded(px(6.0))
+                    .opacity(if remove_armed { 1.0 } else { 0.0 })
+                    .group_hover(group_name, |style| style.opacity(1.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|style| style.bg(theme::hex_alpha(0xffffff, 0.07)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        cx.stop_propagation();
+                        app.request_remove_local_project(remove_id.clone(), cx);
+                    }))
+                    .child(
+                        Icon::empty()
+                            .path("icons/delete.svg")
+                            .with_size(px(13.0))
+                            .text_color(if remove_armed {
+                                theme::hex_alpha(0xef4444, 0.95)
+                            } else {
+                                colors.text_tertiary
+                            }),
+                    ),
+            )
+        })
         .into_any_element()
 }
 

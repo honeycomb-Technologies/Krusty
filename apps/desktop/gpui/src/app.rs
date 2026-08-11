@@ -88,7 +88,7 @@ use crate::demo::{
     DemoImageSource, DemoMessage, DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind,
     DemoThread, ThreadSurface,
 };
-use crate::preferences::DesktopPreferences;
+use crate::preferences::{DesktopPreferences, DesktopProject};
 use crate::theme;
 
 /// Top-level product shell mode (ChatGPT + Codex desktop unified chrome).
@@ -1337,6 +1337,11 @@ pub struct MitsuroApp {
     composer_reasoning_menu_open: bool,
     /// Workspace picked for the next optimistic draft before it has a thread id.
     composer_default_workspace_dir: Option<String>,
+    /// Active native-host project filter. Project records are local; thread
+    /// membership is always derived from each backend's real working directory.
+    selected_project_id: Option<String>,
+    /// Two-step local-only project removal confirmation.
+    project_remove_confirmation: Option<String>,
     /// Backend-specific access preset picked before an optimistic draft exists.
     composer_default_access_mode: Option<ProductAccessMode>,
     /// Explicit per-thread access overrides; absent means preserve backend defaults.
@@ -1936,6 +1941,8 @@ impl MitsuroApp {
             composer_default_workspace_dir: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
+            selected_project_id: None,
+            project_remove_confirmation: None,
             composer_default_access_mode: None,
             composer_access_modes: std::collections::HashMap::new(),
             composer_access_menu_open: false,
@@ -10500,6 +10507,8 @@ impl MitsuroApp {
             demo::ThreadSurface::Codex => ProductMode::Codex,
         };
         self.selected_thread = None;
+        self.selected_project_id = None;
+        self.project_remove_confirmation = None;
         self.mode_menu_open = false;
         self.thread_menu_open = false;
         self.set_mode(mode, window, cx);
@@ -10733,6 +10742,189 @@ impl MitsuroApp {
     pub fn show_composer_workspace_control(&self) -> bool {
         self.live_backend()
             .is_some_and(|backend| backend.capabilities().workspace_selection)
+    }
+
+    /// Native-host Projects require a ready backend that can start a thread in
+    /// a chosen workspace. Project records themselves are shared by both live
+    /// backends and never contain server-owned thread data.
+    pub fn can_manage_local_projects(&self) -> bool {
+        !self.is_explicit_fixture() && self.show_composer_workspace_control()
+    }
+
+    pub fn local_projects(&self) -> &[DesktopProject] {
+        &self.preferences.local_projects
+    }
+
+    pub fn selected_project_id(&self) -> Option<&str> {
+        self.selected_project_id.as_deref()
+    }
+
+    pub fn project_remove_armed(&self, project_id: &str) -> bool {
+        self.project_remove_confirmation.as_deref() == Some(project_id)
+    }
+
+    /// Persist a native-host project from a real, existing folder. The picker
+    /// path is canonicalized before it enters preferences; no thread or server
+    /// record is created until the user actually sends a new conversation.
+    pub fn create_local_project(&mut self, cx: &mut Context<Self>) {
+        if !self.can_manage_local_projects() {
+            self.status_line =
+                "Project creation requires a live backend with workspace selection.".into();
+            cx.notify();
+            return;
+        }
+        self.project_remove_confirmation = None;
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose project folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let selected = receiver.await;
+            let _ = this.update(cx, |app, cx| {
+                if !app.can_manage_local_projects() {
+                    app.status_line =
+                        "Project creation canceled because the backend changed.".into();
+                    cx.notify();
+                    return;
+                }
+                match selected {
+                    Ok(Ok(Some(paths))) => {
+                        let canonical = paths
+                            .into_iter()
+                            .next()
+                            .and_then(|path| std::fs::canonicalize(path).ok())
+                            .filter(|path| path.is_dir());
+                        let Some(path) = canonical else {
+                            app.status_line =
+                                "Project creation rejected · choose an existing folder.".into();
+                            cx.notify();
+                            return;
+                        };
+                        let raw_path = path.display().to_string();
+                        if let Some(existing) =
+                            app.preferences.local_projects.iter().find(|project| {
+                                project.root_paths.iter().any(|root| root == &raw_path)
+                            })
+                        {
+                            app.status_line =
+                                format!("Project already added · {}", existing.name).into();
+                            cx.notify();
+                            return;
+                        }
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(raw_path.as_str())
+                            .to_owned();
+                        let project = DesktopProject {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            name: name.clone(),
+                            root_paths: vec![raw_path],
+                        };
+                        let previous_preferences = app.preferences.clone();
+                        app.preferences.add_project(project);
+                        match app.preferences.save_default() {
+                            Ok(()) => {
+                                app.status_line = format!("Project added · {name}").into();
+                            }
+                            Err(error) => {
+                                app.preferences = previous_preferences;
+                                app.status_line =
+                                    format!("Project creation failed · {error}").into();
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) | Err(_) => {
+                        app.status_line = "Project creation canceled.".into();
+                    }
+                    Ok(Err(error)) => {
+                        app.status_line = format!("Project picker failed · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Select a host project and show only real sessions whose authoritative
+    /// working directory belongs to its root set. New threads inherit its first
+    /// root, while existing server threads remain immutable.
+    pub fn select_local_project(
+        &mut self,
+        project_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.preferences.project(&project_id).cloned() else {
+            self.status_line = "Project is no longer available.".into();
+            cx.notify();
+            return;
+        };
+        if !self.can_manage_local_projects() {
+            self.status_line = "Projects require a live backend with workspace selection.".into();
+            cx.notify();
+            return;
+        }
+        if self.active_mode != ProductMode::Codex {
+            self.set_mode(ProductMode::Codex, window, cx);
+        }
+        self.selected_thread = None;
+        self.selected_project_id = Some(project.id);
+        self.project_remove_confirmation = None;
+        self.composer_default_workspace_dir = project.root_paths.first().cloned();
+        self.status_line = format!("Project · {}", project.name).into();
+        self.update_composer_placeholder(window, cx);
+        cx.notify();
+    }
+
+    /// First activation arms removal; the second removes only host navigation
+    /// state. Server threads and their workspace content are never mutated.
+    pub fn request_remove_local_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        let Some(project) = self.preferences.project(&project_id).cloned() else {
+            self.project_remove_confirmation = None;
+            self.status_line = "Project is no longer available.".into();
+            cx.notify();
+            return;
+        };
+        if self.project_remove_confirmation.as_deref() != Some(project_id.as_str()) {
+            self.project_remove_confirmation = Some(project_id);
+            self.status_line = format!(
+                "Remove {} from the sidebar? Click remove again to confirm. Threads and files are kept.",
+                project.name
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+
+        let previous_preferences = self.preferences.clone();
+        self.preferences.remove_project(&project_id);
+        match self.preferences.save_default() {
+            Ok(()) => {
+                self.project_remove_confirmation = None;
+                if self.selected_project_id.as_deref() == Some(project_id.as_str()) {
+                    self.selected_project_id = None;
+                    self.selected_thread = None;
+                    self.composer_default_workspace_dir = std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string());
+                }
+                self.status_line = format!(
+                    "Removed {} from Projects. Threads and files were kept.",
+                    project.name
+                )
+                .into();
+            }
+            Err(error) => {
+                self.preferences = previous_preferences;
+                self.status_line = format!("Project removal failed · {error}").into();
+            }
+        }
+        cx.notify();
     }
 
     pub fn can_select_composer_workspace(&self) -> bool {
@@ -11427,6 +11619,13 @@ impl MitsuroApp {
                 }
                 let archived = t.summary.archived.unwrap_or(false);
                 if !self.show_archived && archived {
+                    return false;
+                }
+                if !thread_matches_selected_project(
+                    &t.summary,
+                    self.selected_project_id.as_deref(),
+                    &self.preferences,
+                ) {
                     return false;
                 }
                 self.thread_matches_search(&t.summary)
@@ -14413,9 +14612,17 @@ impl MitsuroApp {
         self.composer_add_menu_open = false;
         self.composer_model_menu_open = false;
         self.composer_reasoning_menu_open = false;
-        self.composer_default_workspace_dir = std::env::current_dir()
-            .ok()
-            .map(|path| path.display().to_string());
+        self.composer_default_workspace_dir = self
+            .selected_project_id
+            .as_deref()
+            .and_then(|id| self.preferences.project(id))
+            .and_then(|project| project.root_paths.first())
+            .cloned()
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.display().to_string())
+            });
         self.composer_default_access_mode = None;
         self.composer_access_modes.clear();
         self.composer_access_menu_open = false;
@@ -16498,6 +16705,22 @@ fn duplicate_file_name(path: &str) -> String {
     format!("{name} copy")
 }
 
+fn thread_matches_selected_project(
+    summary: &ThreadSummary,
+    selected_project_id: Option<&str>,
+    preferences: &DesktopPreferences,
+) -> bool {
+    let Some(project_id) = selected_project_id else {
+        return true;
+    };
+    let Some(cwd) = summary.cwd.as_deref() else {
+        return false;
+    };
+    preferences
+        .project_for_path(cwd)
+        .is_some_and(|project| project.id == project_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16747,6 +16970,73 @@ mod tests {
         assert_eq!(codex.is_pinned, Some(false));
         assert_eq!(mitsuro.name.as_deref(), Some("Real thread"));
         assert_eq!(mitsuro.cwd.as_deref(), Some("/workspace"));
+    }
+
+    #[test]
+    fn local_project_filter_uses_real_working_dirs_for_both_backends() {
+        let session = |backend, raw: &str, working_dir: Option<&str>| SessionSummary {
+            id: BackendSessionId::new(backend, raw),
+            title: Some("Real thread".into()),
+            preview: None,
+            working_dir: working_dir.map(str::to_owned),
+            updated_at: Some(1),
+            model_provider: Some("live-provider".into()),
+            ephemeral: false,
+            archived: false,
+        };
+        let mut preferences = DesktopPreferences::default();
+        preferences.add_project(DesktopProject {
+            id: "mitsuro-project".into(),
+            name: "Mitsuro".into(),
+            root_paths: vec!["/workspace/Mitsuro".into()],
+        });
+
+        let mitsuro = thread_summary_from_session(
+            session(
+                BackendKind::MitsuroHttp,
+                "session-1",
+                Some("/workspace/Mitsuro/apps/desktop"),
+            ),
+            &preferences,
+        );
+        let codex = thread_summary_from_session(
+            session(
+                BackendKind::CodexStdio,
+                "thread-1",
+                Some("/workspace/Mitsuro"),
+            ),
+            &preferences,
+        );
+        let missing = thread_summary_from_session(
+            session(BackendKind::CodexStdio, "thread-2", None),
+            &preferences,
+        );
+
+        assert!(thread_matches_selected_project(
+            &mitsuro,
+            Some("mitsuro-project"),
+            &preferences
+        ));
+        assert!(thread_matches_selected_project(
+            &codex,
+            Some("mitsuro-project"),
+            &preferences
+        ));
+        assert!(!thread_matches_selected_project(
+            &missing,
+            Some("mitsuro-project"),
+            &preferences
+        ));
+        assert!(!thread_matches_selected_project(
+            &codex,
+            Some("another-project"),
+            &preferences
+        ));
+        assert!(thread_matches_selected_project(
+            &missing,
+            None,
+            &preferences
+        ));
     }
 
     #[test]

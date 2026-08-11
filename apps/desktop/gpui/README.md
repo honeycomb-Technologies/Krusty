@@ -40,6 +40,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   Codex app-server contract does not own pin state. A saved pin only reorders a thread
   returned by the active backend; it cannot synthesize a row, and fixture/draft rows are
   not pinnable.
+- Codex-surface Projects also follow the native-host contract. GPUI persists only a
+  stable project name and canonical folder roots, then filters each backend's real
+  session catalog by its authoritative `working_dir`. The same saved project works after
+  switching between Mitsuro HTTP and Codex stdio; removing it keeps all server threads
+  and files. Fixture mode cannot create or select projects.
 - Codex plugin installation and removal use typed app-server methods and refresh the
   live marketplace afterward. Mitsuro and fixture extension inventories are read-only;
   the desktop never simulates a successful mutation. Marketplace search filters live

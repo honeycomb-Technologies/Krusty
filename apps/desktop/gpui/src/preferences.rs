@@ -9,9 +9,21 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 6;
+const CURRENT_VERSION: u32 = 7;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 const MAX_PINNED_SESSIONS_PER_BACKEND: usize = 200;
+const MAX_LOCAL_PROJECTS: usize = 50;
+const MAX_PROJECT_ROOTS: usize = 8;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopProject {
+    /// Stable desktop-host identity. The server never interprets this value.
+    pub id: String,
+    pub name: String,
+    /// Canonical absolute folders that provide the project's real workspace context.
+    pub root_paths: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -45,6 +57,10 @@ pub struct DesktopPreferences {
     /// this intentionally remains separate from server-owned thread metadata.
     #[serde(default)]
     pub pinned_sessions_by_backend: HashMap<BackendKind, Vec<String>>,
+    /// Native-host projects shared across backends. They organize real sessions by
+    /// authoritative working directory and never cache server-owned thread content.
+    #[serde(default)]
+    pub local_projects: Vec<DesktopProject>,
 }
 
 impl Default for DesktopPreferences {
@@ -61,6 +77,7 @@ impl Default for DesktopPreferences {
             fast_by_model: HashMap::new(),
             plan_by_backend: HashMap::new(),
             pinned_sessions_by_backend: HashMap::new(),
+            local_projects: Vec::new(),
         }
     }
 }
@@ -93,6 +110,7 @@ impl DesktopPreferences {
                 preferences
                     .pinned_sessions_by_backend
                     .retain(|_, ids| !ids.is_empty());
+                sanitize_local_projects(&mut preferences.local_projects);
                 preferences.version = CURRENT_VERSION;
                 Ok(preferences)
             }
@@ -193,6 +211,80 @@ impl DesktopPreferences {
             self.pinned_sessions_by_backend.remove(&backend);
         }
     }
+
+    pub fn project(&self, project_id: &str) -> Option<&DesktopProject> {
+        self.local_projects
+            .iter()
+            .find(|project| project.id == project_id)
+    }
+
+    pub fn project_for_path(&self, path: &str) -> Option<&DesktopProject> {
+        let path = Path::new(path);
+        self.local_projects
+            .iter()
+            .flat_map(|project| {
+                project
+                    .root_paths
+                    .iter()
+                    .map(move |root| (project, Path::new(root)))
+            })
+            .filter(|(_, root)| path == *root || path.starts_with(root))
+            .max_by_key(|(_, root)| root.components().count())
+            .map(|(project, _)| project)
+    }
+
+    pub fn add_project(&mut self, project: DesktopProject) {
+        if project.id.trim().is_empty()
+            || project.name.trim().is_empty()
+            || project.root_paths.is_empty()
+            || project
+                .root_paths
+                .iter()
+                .any(|root| !Path::new(root).is_absolute())
+        {
+            return;
+        }
+        self.local_projects.retain(|existing| {
+            existing.id != project.id
+                && !existing
+                    .root_paths
+                    .iter()
+                    .any(|root| project.root_paths.contains(root))
+        });
+        self.local_projects.insert(0, project);
+        sanitize_local_projects(&mut self.local_projects);
+    }
+
+    pub fn remove_project(&mut self, project_id: &str) {
+        self.local_projects
+            .retain(|project| project.id != project_id);
+    }
+}
+
+fn sanitize_local_projects(projects: &mut Vec<DesktopProject>) {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_roots = std::collections::HashSet::new();
+    projects.retain_mut(|project| {
+        project.id = project.id.trim().to_owned();
+        project.name = project.name.trim().to_owned();
+        let mut roots_in_project = std::collections::HashSet::new();
+        project.root_paths.retain(|root| {
+            Path::new(root).is_absolute()
+                && roots_in_project.insert(root.clone())
+                && !seen_roots.contains(root)
+        });
+        project.root_paths.truncate(MAX_PROJECT_ROOTS);
+        if project.id.is_empty()
+            || project.name.is_empty()
+            || project.root_paths.is_empty()
+            || !seen_ids.insert(project.id.clone())
+        {
+            return false;
+        }
+        seen_roots.extend(project.root_paths.iter().cloned());
+        true
+    });
+    projects.truncate(MAX_LOCAL_PROJECTS);
 }
 
 fn reasoning_key(backend: BackendKind, model_id: &str) -> String {
@@ -367,6 +459,66 @@ mod tests {
                 .get(&BackendKind::CodexStdio),
             Some(&vec!["thread-1".to_owned(), "thread-2".to_owned()])
         );
+    }
+
+    #[test]
+    fn local_projects_use_real_absolute_roots_and_most_specific_membership() {
+        let mut state = DesktopPreferences::default();
+        state.add_project(DesktopProject {
+            id: "parent".into(),
+            name: "Workspace".into(),
+            root_paths: vec!["/workspace".into()],
+        });
+        state.add_project(DesktopProject {
+            id: "nested".into(),
+            name: "Mitsuro".into(),
+            root_paths: vec!["/workspace/Mitsuro".into()],
+        });
+        state.add_project(DesktopProject {
+            id: "invalid".into(),
+            name: "Relative".into(),
+            root_paths: vec!["relative/path".into()],
+        });
+
+        assert!(state.project("invalid").is_none());
+        assert_eq!(
+            state
+                .project_for_path("/workspace/Mitsuro/apps/desktop")
+                .map(|project| project.id.as_str()),
+            Some("nested")
+        );
+        assert_eq!(
+            state
+                .project_for_path("/workspace/Other")
+                .map(|project| project.id.as_str()),
+            Some("parent")
+        );
+        assert!(state.project_for_path("/workspace-other").is_none());
+    }
+
+    #[test]
+    fn loading_sanitizes_duplicate_and_invalid_local_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 6,
+                "local_projects": [
+                    {"id":" first ","name":" First ","rootPaths":["/workspace","/workspace"]},
+                    {"id":"second","name":"Second","rootPaths":["/workspace"]},
+                    {"id":"relative","name":"Relative","rootPaths":["tmp/project"]}
+                ]
+            }"#,
+        )
+        .expect("write preferences");
+
+        let restored = DesktopPreferences::load(&path).expect("load preferences");
+        assert_eq!(restored.version, CURRENT_VERSION);
+        assert_eq!(restored.local_projects.len(), 1);
+        assert_eq!(restored.local_projects[0].id, "first");
+        assert_eq!(restored.local_projects[0].name, "First");
+        assert_eq!(restored.local_projects[0].root_paths, ["/workspace"]);
     }
 
     #[test]

@@ -58,7 +58,7 @@ live catalog.
 | File mentions | Unsupported, hidden and rejected before I/O | Live schema-exact `mention { name, path }` from native file picker | Unsupported, hidden |
 | Models | Live | Live | Typed fixture catalog |
 | Reasoning effort | Live model-advertised `thinking_enabled` | Live model-advertised `turn/start.effort` | Typed fixture options |
-| Project/workspace | Native folder picker; selected path becomes `working_dir` on real session creation | Native folder picker; absolute `cwd` and runtime workspace root on real session creation | Hidden |
+| Project/workspace | Native-host saved canonical folder roots; real sessions group by authoritative `working_dir`, and the selected root becomes `working_dir` on real session creation | The same native-host projects and real-session grouping; selected root becomes absolute `cwd` plus runtime workspace root on real session creation | Creation/selection hidden; no fixture project or thread rows |
 | Access mode | Live typed `permission_mode`: Supervised or Autonomous | Live allowed Read-only, Auto, or Full access named profile from `permissionProfile/list` plus managed requirements | Hidden |
 | Interrupt | Live session cancel | Live turn interrupt | Typed fixture |
 | Tool approval | Live | Live command, file, and exact-profile permission decisions | Sample approval |
@@ -221,6 +221,14 @@ work, not as feature completion; the matrix test must change with each typed ada
   to Codex `effort` and Mitsuro `thinking_enabled`; models with zero or one advertised
   option do not show a misleading selector.
 - Project and access controls are real product adapters rather than prompt decoration.
+  Codex-surface Projects match the reversed native-host ownership contract: the desktop
+  stores stable ids, display names, and canonical folder roots, while membership always
+  comes from each live session's authoritative working directory. Selecting a project
+  filters the current Mitsuro or Codex catalog and seeds the next real thread with its
+  first root. Removing a project is a two-step local operation and never deletes a
+  server thread or filesystem content. The app-server `threadSection/*` family is a
+  separate server-persisted thread-section capability and is not misrepresented as the
+  native Projects sidebar.
   A new conversation is an optimistic local draft until first Send, when the selected
   absolute project path and backend-specific access preset are used for the real session
   and first turn. Codex Read-only/Auto/Full access comes from its live allowed permission
