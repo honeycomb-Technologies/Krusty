@@ -1371,6 +1371,8 @@ pub struct MitsuroApp {
     /// Demo/sample threads loaded into sidebar Recents.
     /// Mode switcher dropdown (Chat / Codex) open state.
     mode_menu_open: bool,
+    /// Reference activity filter: priority work plus real timestamp buckets.
+    sidebar_activity_view: bool,
     /// Thread title overflow menu (Archive / Fork / Delete) open state.
     thread_menu_open: bool,
     /// Dismissible home promo card: usage.
@@ -1830,6 +1832,7 @@ impl MitsuroApp {
             status_line: SharedString::from(""),
             samples_loaded: false,
             mode_menu_open: false,
+            sidebar_activity_view: false,
             thread_menu_open: false,
             dismiss_usage_card: false,
             pending_user_input: None,
@@ -10402,6 +10405,38 @@ impl MitsuroApp {
         }
     }
 
+    pub fn sidebar_activity_view(&self) -> bool {
+        self.sidebar_activity_view
+    }
+
+    pub fn toggle_sidebar_activity_view(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_activity_view = !self.sidebar_activity_view;
+        self.mode_menu_open = false;
+        self.thread_menu_open = false;
+        self.status_line = if self.sidebar_activity_view {
+            "Activity · priority and recent work".into()
+        } else {
+            "All conversations".into()
+        };
+        cx.notify();
+    }
+
+    /// Priority is derived only from a real in-flight turn or interaction owned
+    /// by this app instance. Idle catalog rows are never promoted decoratively.
+    pub fn thread_has_priority_activity(&self, thread_id: &str) -> bool {
+        self.active_turn_thread_id.as_deref() == Some(thread_id)
+            && (self.turn_in_progress
+                || self.pending_approval.is_some()
+                || self.pending_user_input.is_some()
+                || self.pending_mcp_elicitation.is_some())
+    }
+
+    pub fn sidebar_has_priority_activity(&self) -> bool {
+        self.active_turn_thread_id
+            .as_deref()
+            .is_some_and(|id| self.thread_has_priority_activity(id))
+    }
+
     pub fn thread_menu_open(&self) -> bool {
         self.thread_menu_open
     }
@@ -10753,6 +10788,10 @@ impl MitsuroApp {
 
     pub fn local_projects(&self) -> &[DesktopProject] {
         &self.preferences.local_projects
+    }
+
+    pub fn local_project_for_path(&self, path: &str) -> Option<&DesktopProject> {
+        self.preferences.project_for_path(path)
     }
 
     pub fn selected_project_id(&self) -> Option<&str> {

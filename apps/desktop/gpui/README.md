@@ -40,6 +40,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   Codex app-server contract does not own pin state. A saved pin only reorders a thread
   returned by the active backend; it cannot synthesize a row, and fixture/draft rows are
   not pinnable.
+- The sidebar bell switches to the reference Activity catalog: authoritative in-flight
+  interactions appear under Priority, followed by pinned work and real session update
+  dates grouped as Today, Yesterday, or full weekday. Mitsuro RFC 3339 values
+  are normalized at the HTTP adapter boundary; Codex epoch values flow through unchanged.
+  Missing or invalid timestamps remain explicitly grouped as Earlier.
 - Codex-surface Projects also follow the native-host contract. GPUI persists only a
   stable project name and canonical folder roots, then filters each backend's real
   session catalog by its authoritative `working_dir`. The same saved project works after

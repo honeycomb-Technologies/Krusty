@@ -724,10 +724,17 @@ fn session_json(session: &mitsuro_client::SessionInfo) -> Value {
         "name": session.title,
         "preview": session.title,
         "cwd": session.working_dir,
+        "updatedAt": parse_session_timestamp(&session.updated_at),
         "modelProvider": session.model_key.as_ref().map(|key| key.provider.clone()),
         "ephemeral": false,
         "archived": false,
     })
+}
+
+fn parse_session_timestamp(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|timestamp| timestamp.timestamp())
 }
 
 fn collect_fuzzy_matches(
@@ -1502,6 +1509,27 @@ fn mitsuro_work_mode(value: Option<&str>) -> Result<Option<WorkMode>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_json_preserves_authoritative_rfc3339_update_time() {
+        let session: mitsuro_client::SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": "session-1",
+            "title": "Real session",
+            "updated_at": "2026-08-11T03:42:58.324417490+00:00"
+        }))
+        .expect("typed session");
+
+        let summary: crate::protocol::ThreadSummary =
+            serde_json::from_value(session_json(&session)).expect("thread summary");
+
+        assert_eq!(summary.updated_at, Some(1_786_419_778));
+    }
+
+    #[test]
+    fn invalid_session_update_time_remains_unknown() {
+        assert_eq!(parse_session_timestamp(""), None);
+        assert_eq!(parse_session_timestamp("not-a-timestamp"), None);
+    }
 
     #[test]
     fn product_permission_modes_map_to_exact_mitsuro_contract() {

@@ -4,16 +4,21 @@
 //! - Mode switcher pill (Chat / Codex) + search / bell icons
 //! - Nav: New chat · Pull requests · Sites · Scheduled · Plugins
 //! - Native-host Projects (real workspace roots; live thread membership)
-//! - Pinned + Recents (scrollable live thread titles)
+//! - Pinned/Recents or Priority/day-grouped activity from real thread state
 //! - Profile row → Settings
 
+use std::collections::BTreeMap;
+
+use chrono::{Local, NaiveDate};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, IconName, Sizable as _};
+use mitsuro_desktop_backend::BackendKind;
 
 use crate::app::{MitsuroApp, ProductMode};
 use crate::demo::{self, DemoThread, ThreadSurface};
@@ -33,6 +38,8 @@ pub fn sidebar(
     let mode = app.active_mode();
     let chat_mode = matches!(mode, ProductMode::Chat);
     let menu_open = app.mode_menu_open();
+    let activity_view = app.sidebar_activity_view();
+    let has_priority_activity = app.sidebar_has_priority_activity();
     let surface = app.active_thread_surface();
     // Chat mode pill: "Chat"; Codex surface: "Codex".
     let switcher_label = mode.mode_switcher_label();
@@ -54,28 +61,11 @@ pub fn sidebar(
         .collect::<Vec<_>>();
     let _ = search; // search field still wired via InputState; icon opens focus
 
-    let (mut pinned_threads, recent_threads): (Vec<_>, Vec<_>) = threads
-        .into_iter()
-        .partition(|thread| thread.summary.is_pinned.unwrap_or(false));
-    pinned_threads.sort_by_key(|thread| {
-        app.pinned_thread_rank(&thread.summary.id)
-            .unwrap_or(usize::MAX)
-    });
-    let mut thread_items: Vec<AnyElement> = Vec::new();
-    if !pinned_threads.is_empty() {
-        thread_items.push(thread_section_heading("Pinned", false));
-        thread_items.extend(pinned_threads.into_iter().map(|thread| {
-            let is_selected = selected.as_deref() == Some(thread.summary.id.as_str());
-            thread_row(thread, is_selected, cx)
-        }));
-    }
-    if !recent_threads.is_empty() {
-        thread_items.push(thread_section_heading("Recents", !thread_items.is_empty()));
-        thread_items.extend(recent_threads.into_iter().map(|thread| {
-            let is_selected = selected.as_deref() == Some(thread.summary.id.as_str());
-            thread_row(thread, is_selected, cx)
-        }));
-    }
+    let mut thread_items = if activity_view {
+        activity_thread_items(app, threads, selected.as_deref(), cx)
+    } else {
+        standard_thread_items(app, threads, selected.as_deref(), cx)
+    };
     if thread_items.is_empty() {
         thread_items.push(
             div()
@@ -124,6 +114,8 @@ pub fn sidebar(
                         .child(header_icon_btn(
                             "sidebar-search",
                             IconName::Search,
+                            false,
+                            false,
                             cx,
                             |app, _, _, cx| {
                                 app.set_status_line("Search recents · type to filter", cx);
@@ -133,9 +125,11 @@ pub fn sidebar(
                         .child(header_icon_btn(
                             "sidebar-bell",
                             IconName::Bell,
+                            activity_view,
+                            has_priority_activity,
                             cx,
                             |app, _, _, cx| {
-                                app.set_status_line("Notifications · no new alerts", cx);
+                                app.toggle_sidebar_activity_view(cx);
                             },
                         )),
                 ),
@@ -342,8 +336,145 @@ pub fn sidebar(
         ))
 }
 
-fn thread_section_heading(label: &'static str, separated: bool) -> AnyElement {
+fn standard_thread_items(
+    app: &MitsuroApp,
+    threads: Vec<DemoThread>,
+    selected: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> Vec<AnyElement> {
+    let (mut pinned_threads, recent_threads): (Vec<_>, Vec<_>) = threads
+        .into_iter()
+        .partition(|thread| thread.summary.is_pinned.unwrap_or(false));
+    pinned_threads.sort_by_key(|thread| {
+        app.pinned_thread_rank(&thread.summary.id)
+            .unwrap_or(usize::MAX)
+    });
+    let mut items = Vec::new();
+    if !pinned_threads.is_empty() {
+        items.push(thread_section_heading("Pinned", false));
+        for thread in pinned_threads {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            let is_active = app.thread_has_priority_activity(&thread.summary.id);
+            items.push(thread_row(app, thread, is_selected, is_active, cx));
+        }
+    }
+    if !recent_threads.is_empty() {
+        items.push(thread_section_heading("Recents", !items.is_empty()));
+        for thread in recent_threads {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            let is_active = app.thread_has_priority_activity(&thread.summary.id);
+            items.push(thread_row(app, thread, is_selected, is_active, cx));
+        }
+    }
+    items
+}
+
+fn activity_thread_items(
+    app: &MitsuroApp,
+    threads: Vec<DemoThread>,
+    selected: Option<&str>,
+    cx: &mut Context<MitsuroApp>,
+) -> Vec<AnyElement> {
     let colors = theme::colors();
+    let mut priority = Vec::new();
+    let mut pinned = Vec::new();
+    let mut recent = Vec::new();
+    for thread in threads {
+        if app.thread_has_priority_activity(&thread.summary.id) {
+            priority.push(thread);
+        } else if thread.summary.is_pinned.unwrap_or(false) {
+            pinned.push(thread);
+        } else {
+            recent.push(thread);
+        }
+    }
+    pinned.sort_by_key(|thread| {
+        app.pinned_thread_rank(&thread.summary.id)
+            .unwrap_or(usize::MAX)
+    });
+
+    let mut items = vec![thread_section_heading("Priority", false)];
+    if priority.is_empty() {
+        items.push(
+            div()
+                .px(px(10.0))
+                .py(px(7.0))
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child("Nothing needs attention")
+                .into_any_element(),
+        );
+    } else {
+        for thread in priority {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            items.push(thread_row(app, thread, is_selected, true, cx));
+        }
+    }
+
+    if !pinned.is_empty() {
+        items.push(thread_section_heading("Pinned", true));
+        for thread in pinned {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            items.push(thread_row(app, thread, is_selected, false, cx));
+        }
+    }
+
+    let today = Local::now().date_naive();
+    let mut by_day: BTreeMap<NaiveDate, Vec<DemoThread>> = BTreeMap::new();
+    let mut unknown_time = Vec::new();
+    for thread in recent {
+        match thread
+            .summary
+            .updated_at
+            .and_then(local_date_from_timestamp)
+        {
+            Some(day) => by_day.entry(day).or_default().push(thread),
+            None => unknown_time.push(thread),
+        }
+    }
+    for (day, threads) in by_day.into_iter().rev() {
+        items.push(thread_section_heading(
+            activity_day_heading(day, today),
+            true,
+        ));
+        for thread in threads {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            items.push(thread_row(app, thread, is_selected, false, cx));
+        }
+    }
+    if !unknown_time.is_empty() {
+        items.push(thread_section_heading("Earlier", true));
+        for thread in unknown_time {
+            let is_selected = selected == Some(thread.summary.id.as_str());
+            items.push(thread_row(app, thread, is_selected, false, cx));
+        }
+    }
+    items
+}
+
+fn local_date_from_timestamp(value: i64) -> Option<NaiveDate> {
+    let seconds = if value.unsigned_abs() >= 1_000_000_000_000 {
+        value / 1_000
+    } else {
+        value
+    };
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|timestamp| timestamp.with_timezone(&Local).date_naive())
+}
+
+fn activity_day_heading(day: NaiveDate, today: NaiveDate) -> String {
+    if day == today {
+        "Today".to_owned()
+    } else if day.succ_opt() == Some(today) {
+        "Yesterday".to_owned()
+    } else {
+        day.format("%A").to_string()
+    }
+}
+
+fn thread_section_heading(label: impl Into<SharedString>, separated: bool) -> AnyElement {
+    let colors = theme::colors();
+    let label = label.into();
     div()
         .px(px(8.0))
         .pt(if separated { px(10.0) } else { px(0.0) })
@@ -449,13 +580,44 @@ fn project_row(
         .into_any_element()
 }
 
-fn thread_row(thread: DemoThread, is_selected: bool, cx: &mut Context<MitsuroApp>) -> AnyElement {
+fn thread_row(
+    app: &MitsuroApp,
+    thread: DemoThread,
+    is_selected: bool,
+    is_active: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> AnyElement {
     let colors = theme::colors();
     let id = thread.summary.id.clone();
     let open_id = id.clone();
     let pin_id = id.clone();
     let title = thread.summary.display_title();
-    let show_branch = thread.summary.cwd.is_some();
+    let project_name = thread
+        .summary
+        .cwd
+        .as_deref()
+        .and_then(|path| app.local_project_for_path(path))
+        .map(|project| project.name.clone());
+    let context_label = project_name.clone().unwrap_or_else(|| {
+        thread
+            .backend_session_id
+            .as_ref()
+            .map(|session| match session.backend {
+                BackendKind::MitsuroHttp => "Mitsuro",
+                BackendKind::CodexStdio | BackendKind::CodexWebSocket => "Codex",
+                BackendKind::Fixture => "Fixture",
+            })
+            .unwrap_or(match thread.surface {
+                ThreadSurface::Chat => "Chat",
+                ThreadSurface::Codex => "Draft",
+            })
+            .to_owned()
+    });
+    let context_icon = if project_name.is_some() {
+        "icons/folder.svg"
+    } else {
+        "icons/square-terminal.svg"
+    };
     let is_pinned = thread.summary.is_pinned.unwrap_or(false);
     let can_pin = thread.backend_session_id.is_some();
     let group_name = SharedString::from(format!("thread-row-group-{id}"));
@@ -498,25 +660,48 @@ fn thread_row(thread: DemoThread, is_selected: bool, cx: &mut Context<MitsuroApp
             div()
                 .flex_1()
                 .min_w_0()
-                .text_sm()
-                .text_color(if is_selected {
-                    colors.text
-                } else {
-                    colors.text_secondary
-                })
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(title),
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if is_selected {
+                            colors.text
+                        } else {
+                            colors.text_secondary
+                        })
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(
+                            Icon::empty()
+                                .path(context_icon)
+                                .with_size(px(10.0))
+                                .text_color(colors.text_tertiary),
+                        )
+                        .child(context_label),
+                ),
         )
-        .when(show_branch, |this| {
+        .when(is_active, |this| {
             this.child(
-                Icon::empty()
-                    .path("icons/git-branch.svg")
-                    .with_size(px(12.0))
-                    .text_color(theme::hex_alpha(0xa78bfa, 0.95)),
+                div().w(px(14.0)).h(px(14.0)).flex_shrink_0().child(
+                    Spinner::new()
+                        .with_size(px(12.0))
+                        .color(colors.text_tertiary),
+                ),
             )
         })
-        .when(can_pin, |this| {
+        .when(can_pin && (!is_active || is_pinned), |this| {
             this.child(
                 div()
                     .id(SharedString::from(format!("thread-pin-{pin_id}")))
@@ -781,6 +966,8 @@ fn mode_option(
 fn header_icon_btn(
     id: &'static str,
     icon: IconName,
+    selected: bool,
+    attention: bool,
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &gpui::ClickEvent, &mut gpui::Window, &mut Context<MitsuroApp>)
         + 'static,
@@ -788,20 +975,38 @@ fn header_icon_btn(
     let colors = theme::colors();
     div()
         .id(id)
+        .relative()
         .w(px(28.0))
         .h(px(28.0))
         .rounded(px(8.0))
         .flex()
         .items_center()
         .justify_center()
+        .bg(if selected {
+            colors.accent_soft
+        } else {
+            theme::transparent()
+        })
         .cursor_pointer()
         .hover(|s| s.bg(colors.bg_hover))
         .on_click(cx.listener(on_click))
-        .child(
-            Icon::new(icon)
-                .with_size(px(15.0))
-                .text_color(colors.text_secondary),
-        )
+        .child(Icon::new(icon).with_size(px(15.0)).text_color(if selected {
+            colors.accent
+        } else {
+            colors.text_secondary
+        }))
+        .when(attention && !selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(4.0))
+                    .right(px(4.0))
+                    .w(px(5.0))
+                    .h(px(5.0))
+                    .rounded_full()
+                    .bg(colors.accent),
+            )
+        })
 }
 
 fn nav_item(
@@ -943,4 +1148,45 @@ fn nav_item_with_trailing(
 #[allow(dead_code)]
 fn _meta(summary: &mitsuro_desktop_backend::ThreadSummary) -> String {
     demo::meta_line(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_day_headings_follow_the_reference_relative_day_contract() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 10).expect("valid date");
+        assert_eq!(activity_day_heading(today, today), "Today");
+        assert_eq!(
+            activity_day_heading(
+                NaiveDate::from_ymd_opt(2026, 8, 9).expect("valid date"),
+                today
+            ),
+            "Yesterday"
+        );
+        assert_eq!(
+            activity_day_heading(
+                NaiveDate::from_ymd_opt(2026, 8, 8).expect("valid date"),
+                today
+            ),
+            "Saturday"
+        );
+        assert_eq!(
+            activity_day_heading(
+                NaiveDate::from_ymd_opt(2026, 7, 1).expect("valid date"),
+                today
+            ),
+            "Wednesday"
+        );
+    }
+
+    #[test]
+    fn activity_timestamps_accept_seconds_and_milliseconds() {
+        let seconds = 1_786_323_600;
+        assert_eq!(
+            local_date_from_timestamp(seconds),
+            local_date_from_timestamp(seconds * 1_000)
+        );
+    }
 }
