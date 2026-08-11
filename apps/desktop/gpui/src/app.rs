@@ -1375,6 +1375,8 @@ pub struct MitsuroApp {
     sidebar_activity_view: bool,
     /// Thread title overflow menu (Archive / Fork / Delete) open state.
     thread_menu_open: bool,
+    /// Nested native-host Project membership picker inside thread actions.
+    thread_project_menu_open: bool,
     /// Dismissible home promo card: usage.
     dismiss_usage_card: bool,
     /// Active server approval request (exec / patch) awaiting user decision.
@@ -1834,6 +1836,7 @@ impl MitsuroApp {
             mode_menu_open: false,
             sidebar_activity_view: false,
             thread_menu_open: false,
+            thread_project_menu_open: false,
             dismiss_usage_card: false,
             pending_user_input: None,
             user_input_question_index: 0,
@@ -10441,10 +10444,25 @@ impl MitsuroApp {
         self.thread_menu_open
     }
 
+    pub fn thread_project_menu_open(&self) -> bool {
+        self.thread_project_menu_open
+    }
+
     pub fn toggle_thread_menu(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = !self.thread_menu_open;
+        self.thread_project_menu_open = false;
         if self.thread_menu_open {
             self.mode_menu_open = false;
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_thread_project_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.can_assign_selected_thread_project() {
+            self.thread_project_menu_open = false;
+            self.status_line = "Moving to a Project requires a live thread identity.".into();
+        } else {
+            self.thread_project_menu_open = !self.thread_project_menu_open;
         }
         cx.notify();
     }
@@ -10453,6 +10471,7 @@ impl MitsuroApp {
     pub fn close_thread_menu(&mut self, cx: &mut Context<Self>) {
         if self.thread_menu_open {
             self.thread_menu_open = false;
+            self.thread_project_menu_open = false;
             cx.notify();
         }
     }
@@ -10790,8 +10809,12 @@ impl MitsuroApp {
         &self.preferences.local_projects
     }
 
-    pub fn local_project_for_path(&self, path: &str) -> Option<&DesktopProject> {
-        self.preferences.project_for_path(path)
+    pub fn local_project_for_thread(&self, thread: &DemoThread) -> Option<&DesktopProject> {
+        project_for_thread(
+            &thread.summary,
+            thread.backend_session_id.as_ref(),
+            &self.preferences,
+        )
     }
 
     pub fn selected_project_id(&self) -> Option<&str> {
@@ -10961,6 +10984,81 @@ impl MitsuroApp {
             Err(error) => {
                 self.preferences = previous_preferences;
                 self.status_line = format!("Project removal failed · {error}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn can_assign_selected_thread_project(&self) -> bool {
+        self.can_manage_local_projects()
+            && self
+                .selected_thread()
+                .and_then(|thread| thread.backend_session_id.as_ref())
+                .is_some_and(|session| self.active_backend_kind() == Some(session.backend))
+    }
+
+    pub fn selected_thread_project_id(&self) -> Option<&str> {
+        self.selected_thread()
+            .and_then(|thread| self.local_project_for_thread(thread))
+            .map(|project| project.id.as_str())
+    }
+
+    /// Persist a native-host membership override for one real session. This
+    /// changes only sidebar organization; the existing server thread keeps its
+    /// authoritative working directory and permissions.
+    pub fn assign_selected_thread_to_project(
+        &mut self,
+        project_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread_menu_open = false;
+        self.thread_project_menu_open = false;
+        if !self.can_assign_selected_thread_project() {
+            self.status_line = "Moving to a Project requires a live thread identity.".into();
+            cx.notify();
+            return;
+        }
+        let Some(thread) = self.selected_thread() else {
+            self.status_line = "Moving to a Project failed · no thread selected.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = thread.backend_session_id.clone() else {
+            self.status_line = "Moving to a Project requires a live thread identity.".into();
+            cx.notify();
+            return;
+        };
+        let working_dir = thread.summary.cwd.clone();
+        let target_name = match project_id.as_deref() {
+            Some(project_id) => {
+                let Some(project) = self.preferences.project(project_id) else {
+                    self.status_line = "Moving to a Project failed · project unavailable.".into();
+                    cx.notify();
+                    return;
+                };
+                project.name.clone()
+            }
+            None => "No project".to_owned(),
+        };
+
+        let previous_preferences = self.preferences.clone();
+        if !self.preferences.set_session_project(
+            &session,
+            working_dir.as_deref(),
+            project_id.as_deref(),
+        ) {
+            self.status_line = "Moving to a Project failed · invalid membership.".into();
+            cx.notify();
+            return;
+        }
+        match self.preferences.save_default() {
+            Ok(()) => {
+                self.status_line =
+                    format!("Moved chat to {target_name}. Workspace unchanged.").into();
+            }
+            Err(error) => {
+                self.preferences = previous_preferences;
+                self.status_line = format!("Couldn’t move chat · {error}").into();
             }
         }
         cx.notify();
@@ -11662,6 +11760,7 @@ impl MitsuroApp {
                 }
                 if !thread_matches_selected_project(
                     &t.summary,
+                    t.backend_session_id.as_ref(),
                     self.selected_project_id.as_deref(),
                     &self.preferences,
                 ) {
@@ -16746,18 +16845,29 @@ fn duplicate_file_name(path: &str) -> String {
 
 fn thread_matches_selected_project(
     summary: &ThreadSummary,
+    backend_session_id: Option<&BackendSessionId>,
     selected_project_id: Option<&str>,
     preferences: &DesktopPreferences,
 ) -> bool {
     let Some(project_id) = selected_project_id else {
         return true;
     };
-    let Some(cwd) = summary.cwd.as_deref() else {
-        return false;
-    };
-    preferences
-        .project_for_path(cwd)
+    project_for_thread(summary, backend_session_id, preferences)
         .is_some_and(|project| project.id == project_id)
+}
+
+fn project_for_thread<'a>(
+    summary: &ThreadSummary,
+    backend_session_id: Option<&BackendSessionId>,
+    preferences: &'a DesktopPreferences,
+) -> Option<&'a DesktopProject> {
+    match backend_session_id {
+        Some(session) => preferences.project_for_session(session, summary.cwd.as_deref()),
+        None => summary
+            .cwd
+            .as_deref()
+            .and_then(|cwd| preferences.project_for_path(cwd)),
+    }
 }
 
 #[cfg(test)]
@@ -17029,6 +17139,11 @@ mod tests {
             name: "Mitsuro".into(),
             root_paths: vec!["/workspace/Mitsuro".into()],
         });
+        preferences.add_project(DesktopProject {
+            id: "other-project".into(),
+            name: "Other".into(),
+            root_paths: vec!["/workspace/Other".into()],
+        });
 
         let mitsuro = thread_summary_from_session(
             session(
@@ -17050,30 +17165,70 @@ mod tests {
             session(BackendKind::CodexStdio, "thread-2", None),
             &preferences,
         );
+        let mitsuro_id = BackendSessionId::new(BackendKind::MitsuroHttp, "session-1");
+        let codex_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-1");
+        let missing_id = BackendSessionId::new(BackendKind::CodexStdio, "thread-2");
 
         assert!(thread_matches_selected_project(
             &mitsuro,
+            Some(&mitsuro_id),
             Some("mitsuro-project"),
             &preferences
         ));
         assert!(thread_matches_selected_project(
             &codex,
+            Some(&codex_id),
             Some("mitsuro-project"),
             &preferences
         ));
         assert!(!thread_matches_selected_project(
             &missing,
+            Some(&missing_id),
             Some("mitsuro-project"),
             &preferences
         ));
         assert!(!thread_matches_selected_project(
             &codex,
+            Some(&codex_id),
             Some("another-project"),
             &preferences
         ));
         assert!(thread_matches_selected_project(
             &missing,
+            Some(&missing_id),
             None,
+            &preferences
+        ));
+
+        assert!(preferences.set_session_project(
+            &mitsuro_id,
+            mitsuro.cwd.as_deref(),
+            Some("other-project")
+        ));
+        assert!(!thread_matches_selected_project(
+            &mitsuro,
+            Some(&mitsuro_id),
+            Some("mitsuro-project"),
+            &preferences
+        ));
+        assert!(thread_matches_selected_project(
+            &mitsuro,
+            Some(&mitsuro_id),
+            Some("other-project"),
+            &preferences
+        ));
+        assert!(thread_matches_selected_project(
+            &codex,
+            Some(&codex_id),
+            Some("mitsuro-project"),
+            &preferences
+        ));
+
+        assert!(preferences.set_session_project(&codex_id, codex.cwd.as_deref(), None));
+        assert!(!thread_matches_selected_project(
+            &codex,
+            Some(&codex_id),
+            Some("mitsuro-project"),
             &preferences
         ));
     }

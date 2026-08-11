@@ -592,11 +592,8 @@ fn thread_row(
     let open_id = id.clone();
     let pin_id = id.clone();
     let title = thread.summary.display_title();
-    let project_name = thread
-        .summary
-        .cwd
-        .as_deref()
-        .and_then(|path| app.local_project_for_path(path))
+    let project_name = app
+        .local_project_for_thread(&thread)
         .map(|project| project.name.clone());
     let context_label = project_name.clone().unwrap_or_else(|| {
         thread

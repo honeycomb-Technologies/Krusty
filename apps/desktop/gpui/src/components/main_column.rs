@@ -8,10 +8,12 @@ use std::path::Path;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    deferred, div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable as _};
 use mitsuro_desktop_backend::{
     DelegationGroupStatus, DelegationTaskStatus, SessionDelegationProjection,
@@ -23,6 +25,7 @@ use crate::demo::{
     DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
     DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind, ThreadSurface,
 };
+use crate::preferences::DesktopProject;
 use crate::theme;
 
 /// Shared content width for transcript + composer (Codex chat density).
@@ -392,6 +395,10 @@ fn thread_title_bar(
     let can_compact = app.can_compact_selected_thread();
     let can_review = app.can_review_selected_thread();
     let can_pin = app.can_pin_selected_thread();
+    let can_assign_project = app.can_assign_selected_thread_project();
+    let project_menu_open = app.thread_project_menu_open();
+    let selected_project_id = app.selected_thread_project_id().map(str::to_owned);
+    let local_projects = app.local_projects().to_vec();
     let is_pinned = app.selected_thread_is_pinned();
     let is_archived = app
         .selected_thread()
@@ -410,6 +417,8 @@ fn thread_title_bar(
         || status.starts_with("Find")
         || status.starts_with("Pinned")
         || status.starts_with("Unpinned")
+        || status.starts_with("Moved chat")
+        || status.starts_with("Couldn’t move chat")
     {
         Some(status)
     } else {
@@ -457,14 +466,18 @@ fn thread_title_bar(
                 .gap(px(8.0))
                 .flex_shrink_0()
                 .when_some(quiet_status, |this, line| {
+                    let tooltip = line.clone();
                     this.child(
                         div()
                             .id("thread-status-quiet")
-                            .max_w(px(200.0))
+                            .max_w(px(300.0))
                             .text_xs()
                             .text_color(colors.text_tertiary)
                             .whitespace_nowrap()
                             .overflow_hidden()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
                             .child(line),
                     )
                 })
@@ -472,14 +485,21 @@ fn thread_title_bar(
                 .child(thread_overflow_menu(menu_open, is_archived, cx)),
         )
         .when(menu_open, |this| {
-            this.child(thread_overflow_dropdown(
-                is_archived,
-                can_pin,
-                is_pinned,
-                can_review,
-                can_compact,
-                cx,
-            ))
+            this.child(
+                deferred(thread_overflow_dropdown(
+                    is_archived,
+                    can_pin,
+                    is_pinned,
+                    can_review,
+                    can_compact,
+                    can_assign_project,
+                    project_menu_open,
+                    selected_project_id,
+                    local_projects,
+                    cx,
+                ))
+                .with_priority(10),
+            )
         })
 }
 
@@ -753,17 +773,25 @@ fn thread_overflow_dropdown(
     is_pinned: bool,
     can_review: bool,
     can_compact: bool,
+    can_assign_project: bool,
+    project_menu_open: bool,
+    selected_project_id: Option<String>,
+    local_projects: Vec<DesktopProject>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let archive_label = if is_archived { "Unarchive" } else { "Archive" };
     let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+    let has_local_projects = !local_projects.is_empty();
     div()
         .id("thread-overflow-menu")
+        .occlude()
         .absolute()
         .top(px(44.0))
         .right(px(56.0))
-        .w(px(168.0))
+        .w(px(if project_menu_open { 208.0 } else { 180.0 }))
+        .max_h(px(360.0))
+        .overflow_y_scroll()
         .rounded(px(10.0))
         .bg(colors.bg_elevated)
         .border_1()
@@ -772,7 +800,34 @@ fn thread_overflow_dropdown(
         .flex()
         .flex_col()
         .gap(px(1.0))
-        .when(can_pin, |this| {
+        .when(project_menu_open, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-project-back",
+                "Projects",
+                "icons/arrow-left.svg",
+                false,
+                cx,
+                |app, cx| app.toggle_thread_project_menu(cx),
+            ))
+            .child(
+                div()
+                    .h(px(1.0))
+                    .mx(px(6.0))
+                    .my(px(3.0))
+                    .bg(colors.border_subtle),
+            )
+            .child(thread_project_menu_item(
+                None,
+                "No project".to_owned(),
+                selected_project_id.is_none(),
+                cx,
+            ))
+            .children(local_projects.into_iter().map(|project| {
+                let selected = selected_project_id.as_deref() == Some(project.id.as_str());
+                thread_project_menu_item(Some(project.id), project.name, selected, cx)
+            }))
+        })
+        .when(!project_menu_open && can_pin, |this| {
             this.child(thread_menu_item(
                 "thread-menu-pin",
                 pin_label,
@@ -782,23 +837,40 @@ fn thread_overflow_dropdown(
                 |app, cx| app.toggle_selected_thread_pin(cx),
             ))
         })
-        .child(thread_menu_item(
-            "thread-menu-archive",
-            archive_label,
-            "icons/inbox.svg",
-            false,
-            cx,
-            |app, cx| app.archive_selected_thread(cx),
-        ))
-        .child(thread_menu_item(
-            "thread-menu-fork",
-            "Fork",
-            "icons/git-branch.svg",
-            false,
-            cx,
-            |app, cx| app.fork_selected_thread(cx),
-        ))
-        .when(can_review, |this| {
+        .when(
+            !project_menu_open && can_assign_project && has_local_projects,
+            |this| {
+                this.child(thread_menu_item(
+                    "thread-menu-project",
+                    "Move to project…",
+                    "icons/folder.svg",
+                    false,
+                    cx,
+                    |app, cx| app.toggle_thread_project_menu(cx),
+                ))
+            },
+        )
+        .when(!project_menu_open, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-archive",
+                archive_label,
+                "icons/inbox.svg",
+                false,
+                cx,
+                |app, cx| app.archive_selected_thread(cx),
+            ))
+        })
+        .when(!project_menu_open, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-fork",
+                "Fork",
+                "icons/git-branch.svg",
+                false,
+                cx,
+                |app, cx| app.fork_selected_thread(cx),
+            ))
+        })
+        .when(!project_menu_open && can_review, |this| {
             this.child(thread_menu_item(
                 "thread-menu-review",
                 "Review changes",
@@ -808,7 +880,7 @@ fn thread_overflow_dropdown(
                 |app, cx| app.review_selected_thread(cx),
             ))
         })
-        .when(can_compact, |this| {
+        .when(!project_menu_open && can_compact, |this| {
             this.child(thread_menu_item(
                 "thread-menu-compact",
                 "Compact",
@@ -818,21 +890,80 @@ fn thread_overflow_dropdown(
                 |app, cx| app.compact_selected_thread(cx),
             ))
         })
+        .when(!project_menu_open, |this| {
+            this.child(
+                div()
+                    .h(px(1.0))
+                    .mx(px(6.0))
+                    .my(px(3.0))
+                    .bg(colors.border_subtle),
+            )
+        })
+        .when(!project_menu_open, |this| {
+            this.child(thread_menu_item(
+                "thread-menu-delete",
+                "Delete",
+                "icons/delete.svg",
+                true,
+                cx,
+                |app, cx| app.delete_selected_thread(cx),
+            ))
+        })
+}
+
+fn thread_project_menu_item(
+    project_id: Option<String>,
+    label: String,
+    selected: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let element_id = SharedString::from(match project_id.as_deref() {
+        Some(project_id) => format!("thread-menu-project-{project_id}"),
+        None => "thread-menu-project-none".to_owned(),
+    });
+    div()
+        .id(element_id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(10.0))
+        .py(px(7.0))
+        .rounded(px(7.0))
+        .cursor_pointer()
+        .bg(if selected {
+            theme::hex_alpha(0xffffff, 0.06)
+        } else {
+            theme::transparent()
+        })
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.assign_selected_thread_to_project(project_id.clone(), cx);
+        }))
         .child(
             div()
-                .h(px(1.0))
-                .mx(px(6.0))
-                .my(px(3.0))
-                .bg(colors.border_subtle),
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex_shrink_0()
+                .when(selected, |this| {
+                    this.child(
+                        Icon::empty()
+                            .path("icons/check.svg")
+                            .with_size(px(14.0))
+                            .text_color(colors.text_secondary),
+                    )
+                }),
         )
-        .child(thread_menu_item(
-            "thread-menu-delete",
-            "Delete",
-            "icons/delete.svg",
-            true,
-            cx,
-            |app, cx| app.delete_selected_thread(cx),
-        ))
+        .child(
+            div()
+                .min_w_0()
+                .text_sm()
+                .text_color(colors.text)
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .child(label),
+        )
 }
 
 fn thread_menu_item(
@@ -2404,35 +2535,6 @@ fn display_body_light(body: &str, streaming: bool, expanded: bool) -> (String, b
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transcript_starts_with_one_bounded_page() {
-        assert_eq!(transcript_tail_range(279, 16), 263..279);
-        assert_eq!(transcript_tail_range(8, 16), 0..8);
-    }
-
-    #[test]
-    fn transcript_expansion_never_exceeds_available_history() {
-        assert_eq!(transcript_tail_range(35, 32), 3..35);
-        assert_eq!(transcript_tail_range(20, usize::MAX), 0..20);
-    }
-
-    #[test]
-    fn long_message_preview_expands_without_unbounded_layout() {
-        let body = "a".repeat(DISPLAY_BODY_CAP + 64);
-        let (preview, truncated) = display_body_light(&body, false, false);
-        assert!(truncated);
-        assert_eq!(preview.chars().count(), DISPLAY_BODY_CAP + 1);
-
-        let (expanded, still_truncated) = display_body_light(&body, false, true);
-        assert!(!still_truncated);
-        assert_eq!(expanded, body);
-    }
-}
-
 fn strip_leading_number(line: &str) -> String {
     let trimmed = line.trim();
     // "1. foo" or "1) foo" or "1 foo"
@@ -2500,5 +2602,34 @@ fn diff_line_color(line: &str, colors: theme::CodexColors) -> gpui::Hsla {
         colors.diff_del
     } else {
         colors.text_secondary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_starts_with_one_bounded_page() {
+        assert_eq!(transcript_tail_range(279, 16), 263..279);
+        assert_eq!(transcript_tail_range(8, 16), 0..8);
+    }
+
+    #[test]
+    fn transcript_expansion_never_exceeds_available_history() {
+        assert_eq!(transcript_tail_range(35, 32), 3..35);
+        assert_eq!(transcript_tail_range(20, usize::MAX), 0..20);
+    }
+
+    #[test]
+    fn long_message_preview_expands_without_unbounded_layout() {
+        let body = "a".repeat(DISPLAY_BODY_CAP + 64);
+        let (preview, truncated) = display_body_light(&body, false, false);
+        assert!(truncated);
+        assert_eq!(preview.chars().count(), DISPLAY_BODY_CAP + 1);
+
+        let (expanded, still_truncated) = display_body_light(&body, false, true);
+        assert!(!still_truncated);
+        assert_eq!(expanded, body);
     }
 }

@@ -45,11 +45,15 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   dates grouped as Today, Yesterday, or full weekday. Mitsuro RFC 3339 values
   are normalized at the HTTP adapter boundary; Codex epoch values flow through unchanged.
   Missing or invalid timestamps remain explicitly grouped as Earlier.
-- Codex-surface Projects also follow the native-host contract. GPUI persists only a
-  stable project name and canonical folder roots, then filters each backend's real
-  session catalog by its authoritative `working_dir`. The same saved project works after
-  switching between Mitsuro HTTP and Codex stdio; removing it keeps all server threads
-  and files. Fixture mode cannot create or select projects.
+- Codex-surface Projects also follow the native-host contract. GPUI persists a stable
+  project name, canonical folder roots, and backend-qualified membership overrides for
+  real session ids. Authoritative `working_dir` supplies the default grouping; the
+  thread menu can move an existing chat to another saved project or to No project
+  without changing its server workspace, permissions, transcript, or files. The same
+  saved projects work after switching between Mitsuro HTTP and Codex stdio, while each
+  backend's assignments remain isolated. Removing a project clears its local overrides
+  but keeps all server threads and files. Fixture mode cannot create, select, or receive
+  project membership.
 - Codex plugin installation and removal use typed app-server methods and refresh the
   live marketplace afterward. Mitsuro and fixture extension inventories are read-only;
   the desktop never simulates a successful mutation. Marketplace search filters live

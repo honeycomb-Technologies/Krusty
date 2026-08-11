@@ -557,17 +557,6 @@ fn directory_list(
         })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn large_directories_have_a_bounded_render_budget() {
-        assert_eq!(DIRECTORY_RENDER_LIMIT, 200);
-        assert_eq!(312usize.saturating_sub(DIRECTORY_RENDER_LIMIT), 112);
-    }
-}
-
 fn fuzzy_list(
     _app: &MitsuroApp,
     results: &[FuzzyFileSearchResult],
@@ -865,4 +854,15 @@ fn status_footer(
                     .unwrap_or_else(|| "fs/readDirectory · fuzzyFileSearch".into()),
             ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_directories_have_a_bounded_render_budget() {
+        assert_eq!(DIRECTORY_RENDER_LIMIT, 200);
+        assert_eq!(312usize.saturating_sub(DIRECTORY_RENDER_LIMIT), 112);
+    }
 }

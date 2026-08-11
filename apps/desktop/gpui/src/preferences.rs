@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 7;
+const CURRENT_VERSION: u32 = 8;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 const MAX_PINNED_SESSIONS_PER_BACKEND: usize = 200;
 const MAX_LOCAL_PROJECTS: usize = 50;
 const MAX_PROJECT_ROOTS: usize = 8;
+const MAX_PROJECT_MEMBERSHIPS_PER_BACKEND: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +62,14 @@ pub struct DesktopPreferences {
     /// authoritative working directory and never cache server-owned thread content.
     #[serde(default)]
     pub local_projects: Vec<DesktopProject>,
+    /// Explicit native-host membership overrides keyed by backend and durable
+    /// server session id. Values are local project ids, never thread content.
+    #[serde(default)]
+    pub project_assignments_by_backend: HashMap<BackendKind, HashMap<String, String>>,
+    /// Durable sessions explicitly removed from cwd-derived project grouping.
+    /// This mirrors the reference host's separate projectless-thread identity set.
+    #[serde(default)]
+    pub projectless_sessions_by_backend: HashMap<BackendKind, Vec<String>>,
 }
 
 impl Default for DesktopPreferences {
@@ -78,6 +87,8 @@ impl Default for DesktopPreferences {
             plan_by_backend: HashMap::new(),
             pinned_sessions_by_backend: HashMap::new(),
             local_projects: Vec::new(),
+            project_assignments_by_backend: HashMap::new(),
+            projectless_sessions_by_backend: HashMap::new(),
         }
     }
 }
@@ -111,6 +122,7 @@ impl DesktopPreferences {
                     .pinned_sessions_by_backend
                     .retain(|_, ids| !ids.is_empty());
                 sanitize_local_projects(&mut preferences.local_projects);
+                sanitize_project_memberships(&mut preferences);
                 preferences.version = CURRENT_VERSION;
                 Ok(preferences)
             }
@@ -233,6 +245,92 @@ impl DesktopPreferences {
             .map(|(project, _)| project)
     }
 
+    pub fn project_for_session(
+        &self,
+        session: &BackendSessionId,
+        working_dir: Option<&str>,
+    ) -> Option<&DesktopProject> {
+        if session.backend == BackendKind::Fixture
+            || self
+                .projectless_sessions_by_backend
+                .get(&session.backend)
+                .is_some_and(|ids| ids.iter().any(|id| id == &session.raw))
+        {
+            return None;
+        }
+        if let Some(project_id) = self
+            .project_assignments_by_backend
+            .get(&session.backend)
+            .and_then(|assignments| assignments.get(&session.raw))
+        {
+            if let Some(project) = self.project(project_id) {
+                return Some(project);
+            }
+        }
+        working_dir.and_then(|path| self.project_for_path(path))
+    }
+
+    pub fn set_session_project(
+        &mut self,
+        session: &BackendSessionId,
+        working_dir: Option<&str>,
+        project_id: Option<&str>,
+    ) -> bool {
+        if session.backend == BackendKind::Fixture || session.raw.trim().is_empty() {
+            return false;
+        }
+        if let Some(project_id) = project_id {
+            if self.project(project_id).is_none() {
+                return false;
+            }
+        }
+
+        if let Some(assignments) = self
+            .project_assignments_by_backend
+            .get_mut(&session.backend)
+        {
+            assignments.remove(&session.raw);
+            if assignments.is_empty() {
+                self.project_assignments_by_backend.remove(&session.backend);
+            }
+        }
+        if let Some(ids) = self
+            .projectless_sessions_by_backend
+            .get_mut(&session.backend)
+        {
+            ids.retain(|id| id != &session.raw);
+            if ids.is_empty() {
+                self.projectless_sessions_by_backend
+                    .remove(&session.backend);
+            }
+        }
+
+        match project_id {
+            Some(project_id)
+                if self
+                    .project_for_path(working_dir.unwrap_or_default())
+                    .is_none_or(|project| project.id != project_id) =>
+            {
+                let assignments = self
+                    .project_assignments_by_backend
+                    .entry(session.backend)
+                    .or_default();
+                assignments.insert(session.raw.clone(), project_id.to_owned());
+                bound_project_assignments(assignments);
+            }
+            Some(_) => {}
+            None => {
+                let ids = self
+                    .projectless_sessions_by_backend
+                    .entry(session.backend)
+                    .or_default();
+                ids.insert(0, session.raw.clone());
+                dedupe_and_bound_session_ids(ids);
+            }
+        }
+        true
+    }
+
     pub fn add_project(&mut self, project: DesktopProject) {
         if project.id.trim().is_empty()
             || project.name.trim().is_empty()
@@ -258,6 +356,11 @@ impl DesktopPreferences {
     pub fn remove_project(&mut self, project_id: &str) {
         self.local_projects
             .retain(|project| project.id != project_id);
+        for assignments in self.project_assignments_by_backend.values_mut() {
+            assignments.retain(|_, assigned_project_id| assigned_project_id != project_id);
+        }
+        self.project_assignments_by_backend
+            .retain(|_, assignments| !assignments.is_empty());
     }
 }
 
@@ -285,6 +388,63 @@ fn sanitize_local_projects(projects: &mut Vec<DesktopProject>) {
         true
     });
     projects.truncate(MAX_LOCAL_PROJECTS);
+}
+
+fn sanitize_project_memberships(preferences: &mut DesktopPreferences) {
+    let valid_projects = preferences
+        .local_projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    preferences
+        .project_assignments_by_backend
+        .retain(|backend, assignments| {
+            if *backend == BackendKind::Fixture {
+                return false;
+            }
+            assignments.retain(|session_id, project_id| {
+                !session_id.trim().is_empty() && valid_projects.contains(project_id)
+            });
+            bound_project_assignments(assignments);
+            !assignments.is_empty()
+        });
+    preferences
+        .projectless_sessions_by_backend
+        .retain(|backend, ids| {
+            if *backend == BackendKind::Fixture {
+                return false;
+            }
+            dedupe_and_bound_session_ids(ids);
+            if let Some(assignments) = preferences.project_assignments_by_backend.get_mut(backend) {
+                for id in ids.iter() {
+                    assignments.remove(id);
+                }
+            }
+            !ids.is_empty()
+        });
+    preferences
+        .project_assignments_by_backend
+        .retain(|_, assignments| !assignments.is_empty());
+}
+
+fn bound_project_assignments(assignments: &mut HashMap<String, String>) {
+    if assignments.len() <= MAX_PROJECT_MEMBERSHIPS_PER_BACKEND {
+        return;
+    }
+    let mut session_ids = assignments.keys().cloned().collect::<Vec<_>>();
+    session_ids.sort();
+    for session_id in session_ids
+        .into_iter()
+        .skip(MAX_PROJECT_MEMBERSHIPS_PER_BACKEND)
+    {
+        assignments.remove(&session_id);
+    }
+}
+
+fn dedupe_and_bound_session_ids(ids: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+    ids.truncate(MAX_PROJECT_MEMBERSHIPS_PER_BACKEND);
 }
 
 fn reasoning_key(backend: BackendKind, model_id: &str) -> String {
@@ -494,6 +654,115 @@ mod tests {
             Some("parent")
         );
         assert!(state.project_for_path("/workspace-other").is_none());
+    }
+
+    #[test]
+    fn explicit_project_membership_overrides_cwd_and_is_backend_scoped() {
+        let mut state = DesktopPreferences::default();
+        state.add_project(DesktopProject {
+            id: "project-a".into(),
+            name: "Project A".into(),
+            root_paths: vec!["/workspace/a".into()],
+        });
+        state.add_project(DesktopProject {
+            id: "project-b".into(),
+            name: "Project B".into(),
+            root_paths: vec!["/workspace/b".into()],
+        });
+        let mitsuro = BackendSessionId::new(BackendKind::MitsuroHttp, "same-id");
+        let codex = BackendSessionId::new(BackendKind::CodexStdio, "same-id");
+
+        assert_eq!(
+            state
+                .project_for_session(&mitsuro, Some("/workspace/a/src"))
+                .map(|project| project.id.as_str()),
+            Some("project-a")
+        );
+        assert!(state.set_session_project(&mitsuro, Some("/workspace/a/src"), Some("project-b")));
+        assert_eq!(
+            state
+                .project_for_session(&mitsuro, Some("/workspace/a/src"))
+                .map(|project| project.id.as_str()),
+            Some("project-b")
+        );
+        assert_eq!(
+            state
+                .project_for_session(&codex, Some("/workspace/a/src"))
+                .map(|project| project.id.as_str()),
+            Some("project-a")
+        );
+
+        assert!(state.set_session_project(&codex, Some("/workspace/a/src"), None));
+        assert!(state
+            .project_for_session(&codex, Some("/workspace/a/src"))
+            .is_none());
+
+        assert!(state.set_session_project(&mitsuro, Some("/workspace/a/src"), Some("project-a")));
+        assert_eq!(
+            state
+                .project_for_session(&mitsuro, Some("/workspace/a/src"))
+                .map(|project| project.id.as_str()),
+            Some("project-a")
+        );
+        assert!(!state
+            .project_assignments_by_backend
+            .contains_key(&BackendKind::MitsuroHttp));
+
+        assert!(state.set_session_project(&mitsuro, Some("/workspace/a/src"), Some("project-b")));
+        state.remove_project("project-b");
+        assert!(state.project("project-b").is_none());
+        assert!(!state
+            .project_assignments_by_backend
+            .contains_key(&BackendKind::MitsuroHttp));
+        assert_eq!(
+            state
+                .project_for_session(&mitsuro, Some("/workspace/a/src"))
+                .map(|project| project.id.as_str()),
+            Some("project-a")
+        );
+    }
+
+    #[test]
+    fn loading_sanitizes_project_membership_and_projectless_wins() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 7,
+                "local_projects": [
+                    {"id":"project-a","name":"Project A","rootPaths":["/workspace/a"]}
+                ],
+                "project_assignments_by_backend": {
+                    "codex-stdio": {
+                        "thread-1": "project-a",
+                        "thread-2": "missing-project",
+                        "": "project-a"
+                    },
+                    "fixture": {"fixture-thread": "project-a"}
+                },
+                "projectless_sessions_by_backend": {
+                    "codex-stdio": ["thread-1", "thread-1", ""],
+                    "fixture": ["fixture-thread"]
+                }
+            }"#,
+        )
+        .expect("write preferences");
+
+        let restored = DesktopPreferences::load(&path).expect("load preferences");
+        assert_eq!(restored.version, CURRENT_VERSION);
+        assert!(!restored
+            .project_assignments_by_backend
+            .contains_key(&BackendKind::CodexStdio));
+        assert_eq!(
+            restored
+                .projectless_sessions_by_backend
+                .get(&BackendKind::CodexStdio),
+            Some(&vec!["thread-1".to_owned()])
+        );
+        assert!(!restored
+            .projectless_sessions_by_backend
+            .contains_key(&BackendKind::Fixture));
     }
 
     #[test]
