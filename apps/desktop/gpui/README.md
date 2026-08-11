@@ -84,8 +84,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   hides editing because its HTTP API has no destructive turn rollback.
 - Mitsuro Work is a read-only projection of `/api/hive/current`; Hive dispatch and
   task mutations are deliberately unavailable in GPUI for now.
-- Scheduled reads `/api/hive/schedules`; create, pause, resume, and delete are not
-  exposed until their product interaction and approval semantics are designed.
+- Scheduled reads `/api/hive/schedules` and exposes real Mitsuro pause, resume, and
+  cancellation controls. Every mutation sends the schedule revision through `If-Match`
+  plus a unique idempotency key, refreshes the authoritative catalog after success, and
+  requires a second click before cancellation. New schedule creation/replacement remains
+  unavailable until the native form can collect the complete recurrence contract.
 - Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio launches
   standalone commands through the current sandboxed `command/exec*` family, including
   streamed stdout/stderr, stdin, resize, termination, and the process-exit response.

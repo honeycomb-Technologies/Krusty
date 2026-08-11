@@ -116,6 +116,7 @@ pub struct BackendCapabilities {
     pub remote_control: bool,
     pub hive: bool,
     pub schedules: bool,
+    pub schedule_mutations: bool,
     pub sites: bool,
     pub archive: bool,
     pub fork: bool,
@@ -167,6 +168,7 @@ impl BackendCapabilities {
             remote_control: true,
             hive: false,
             schedules: false,
+            schedule_mutations: false,
             sites: false,
             archive: true,
             fork: true,
@@ -221,6 +223,7 @@ impl BackendCapabilities {
             remote_control: false,
             hive: true,
             schedules: true,
+            schedule_mutations: true,
             sites: false,
             archive: false,
             fork: false,
@@ -1203,6 +1206,9 @@ mod tests {
     fn capabilities_do_not_claim_unsupported_cross_backend_features() {
         assert!(!BackendCapabilities::mitsuro().archive);
         assert!(!BackendCapabilities::codex().hive);
+        assert!(BackendCapabilities::mitsuro().schedules);
+        assert!(BackendCapabilities::mitsuro().schedule_mutations);
+        assert!(!BackendCapabilities::codex().schedule_mutations);
         assert!(!BackendCapabilities::mitsuro().processes);
         assert!(BackendCapabilities::codex().command_exec);
         assert!(!BackendCapabilities::mitsuro().command_exec);

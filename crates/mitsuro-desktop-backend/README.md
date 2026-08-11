@@ -33,8 +33,11 @@ for Mitsuro instead of substituting fixture output. Codex stdio uses the current
 `command/exec/terminate` contract for standalone interactive commands. The initial
 request intentionally has no generic client timeout because app-server resolves it only
 after process exit; the request itself carries explicit server timeout/output policy.
-Hive current state, global schedules, and background processes are
-read-only product surfaces in GPUI; their mutation routes are intentionally not exposed.
+Hive current state remains read-only in GPUI. Global schedules expose typed pause,
+resume, and cancellation through the transport-neutral product boundary with revision
+and idempotency headers; creation/replacement is not yet exposed. Background processes
+already tracked by Mitsuro can be terminated, but the server still has no interactive
+PTY contract for this client.
 
 ## Transport assumptions (Codex app-server)
 

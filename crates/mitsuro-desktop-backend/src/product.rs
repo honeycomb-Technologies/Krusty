@@ -409,6 +409,29 @@ pub struct ProductSchedule {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductScheduleAction {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductScheduleMutation {
+    pub schedule_id: String,
+    pub revision: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductScheduleMutationRequest {
+    pub session_id: String,
+    pub schedule_id: String,
+    pub revision: u64,
+    pub action: ProductScheduleAction,
+    pub idempotency_key: String,
+}
+
 #[async_trait]
 pub trait ProductBackend: Send + Sync {
     fn backend_kind(&self) -> BackendKind;
@@ -469,6 +492,11 @@ pub trait ProductBackend: Send + Sync {
     async fn hive_snapshot(&self) -> Result<ProductHiveSnapshot>;
 
     async fn list_schedules(&self) -> Result<Vec<ProductSchedule>>;
+
+    async fn mutate_schedule(
+        &self,
+        request: ProductScheduleMutationRequest,
+    ) -> Result<ProductScheduleMutation>;
 }
 
 impl DesktopBackend {
@@ -1351,6 +1379,58 @@ impl ProductBackend for DesktopBackend {
             })
             .collect())
     }
+
+    async fn mutate_schedule(
+        &self,
+        request: ProductScheduleMutationRequest,
+    ) -> Result<ProductScheduleMutation> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive schedule mutations".to_owned(),
+            ));
+        };
+        let response = match request.action {
+            ProductScheduleAction::Pause => {
+                backend
+                    .client()
+                    .pause_hive_schedule(
+                        &request.session_id,
+                        &request.schedule_id,
+                        request.revision,
+                        Some(&request.idempotency_key),
+                    )
+                    .await
+            }
+            ProductScheduleAction::Resume => {
+                backend
+                    .client()
+                    .resume_hive_schedule(
+                        &request.session_id,
+                        &request.schedule_id,
+                        request.revision,
+                        Some(&request.idempotency_key),
+                    )
+                    .await
+            }
+            ProductScheduleAction::Cancel => {
+                backend
+                    .client()
+                    .cancel_hive_schedule(
+                        &request.session_id,
+                        &request.schedule_id,
+                        request.revision,
+                        Some(&request.idempotency_key),
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(ProductScheduleMutation {
+            schedule_id: response.schedule_id,
+            revision: response.revision,
+            status: response.status,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1968,6 +2048,70 @@ mod tests {
             .await
             .expect_err("mismatched origin must fail");
         assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn codex_product_schedule_mutation_is_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let error = backend
+            .mutate_schedule(ProductScheduleMutationRequest {
+                session_id: "session-7".to_owned(),
+                schedule_id: "schedule-7".to_owned(),
+                revision: 3,
+                action: ProductScheduleAction::Pause,
+                idempotency_key: "request-7".to_owned(),
+            })
+            .await
+            .expect_err("Codex must not claim Mitsuro schedule mutation support");
+        assert!(matches!(error, AgentError::NotImplemented(_)));
+        assert!(error.to_string().contains("Hive schedule mutations"));
+    }
+
+    #[tokio::test]
+    async fn mitsuro_product_schedule_mutation_preserves_authoritative_response() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 4096];
+            let size = socket.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request
+                .starts_with("POST /api/hive/sessions/session-7/schedules/schedule-7/resume "));
+            let headers = request.to_ascii_lowercase();
+            assert!(headers.contains("if-match: \"3\""));
+            assert!(headers.contains("idempotency-key: request-7"));
+            let body = r#"{"schedule_id":"schedule-7","revision":4,"status":"enabled"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write response");
+        });
+
+        let mitsuro = crate::MitsuroServerBackend::from_url(format!("http://{address}"), None)
+            .expect("Mitsuro backend");
+        let backend = DesktopBackend::Mitsuro(Arc::new(mitsuro));
+        let response = backend
+            .mutate_schedule(ProductScheduleMutationRequest {
+                session_id: "session-7".to_owned(),
+                schedule_id: "schedule-7".to_owned(),
+                revision: 3,
+                action: ProductScheduleAction::Resume,
+                idempotency_key: "request-7".to_owned(),
+            })
+            .await
+            .expect("product mutation response");
+        assert_eq!(response.schedule_id, "schedule-7");
+        assert_eq!(response.revision, 4);
+        assert_eq!(response.status, "enabled");
+        server.join().expect("test server join");
     }
 
     #[test]

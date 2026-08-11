@@ -3348,7 +3348,7 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                 .child(backend_choice_row(
                     BackendKind::MitsuroHttp,
                     "Mitsuro server",
-                    "Sessions and streamed turns over HTTP/SSE; Hive, schedules, and process catalogs are currently read-only",
+                    "Sessions and streamed turns over HTTP/SSE; Hive is read-only, schedules support pause/resume/cancel, and process catalogs support termination",
                     active,
                     app.connection(),
                     cx,

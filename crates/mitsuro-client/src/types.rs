@@ -145,6 +145,14 @@ pub struct HiveScheduleSummary {
     pub controller_session_id: String,
 }
 
+/// Response returned by Hive schedule create/status mutation routes.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleMutationResponse {
+    pub schedule_id: String,
+    pub revision: u64,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,

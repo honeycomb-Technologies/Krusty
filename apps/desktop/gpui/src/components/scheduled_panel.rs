@@ -1,4 +1,4 @@
-//! Scheduled tasks destination with a read-only Mitsuro Hive schedule catalog.
+//! Scheduled tasks destination backed by the Mitsuro Hive schedule control plane.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -7,8 +7,9 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::{MitsuroApp, SurfaceDataState};
+use crate::app::{schedule_toggle_action, MitsuroApp, SurfaceDataState};
 use crate::theme;
+use mitsuro_desktop_backend::{ProductSchedule, ProductScheduleAction};
 
 #[derive(Clone, Copy)]
 struct ScheduleItem {
@@ -87,7 +88,8 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                 .gap(px(18.0))
                 .child(match state {
                     SurfaceDataState::Live => {
-                        live_tasks_section(live_tasks.as_deref().unwrap_or(&[])).into_any_element()
+                        live_tasks_section(live_tasks.as_deref().unwrap_or(&[]), app, cx)
+                            .into_any_element()
                     }
                     SurfaceDataState::Fixture if show_tasks => {
                         tasks_section(&enabled, cx).into_any_element()
@@ -119,7 +121,7 @@ fn header(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let subtitle = match state {
-        SurfaceDataState::Live => "Mitsuro Hive schedules · live catalog · read-only",
+        SurfaceDataState::Live => "Mitsuro Hive schedules · live catalog and controls",
         SurfaceDataState::Fixture if show_tasks => "Explicit fixture tasks",
         SurfaceDataState::Fixture => "Explicit fixture suggestions",
         SurfaceDataState::Loading => "Waiting for backend data",
@@ -248,8 +250,15 @@ fn state_notice(title: &str, detail: &str) -> impl IntoElement {
         )
 }
 
-fn live_tasks_section(tasks: &[mitsuro_desktop_backend::ProductSchedule]) -> impl IntoElement {
+fn live_tasks_section(
+    tasks: &[ProductSchedule],
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
+    let mutations_available = app.schedule_mutations_available();
+    let active_mutation = app.schedule_mutation_id().map(str::to_owned);
+    let cancel_confirmation = app.schedule_cancel_confirmation().map(str::to_owned);
     div()
         .id("scheduled-live-tasks")
         .flex()
@@ -287,6 +296,13 @@ fn live_tasks_section(tasks: &[mitsuro_desktop_backend::ProductSchedule]) -> imp
             } else {
                 schedule.summary.clone()
             };
+            let schedule_for_toggle = schedule.clone();
+            let schedule_for_cancel = schedule.clone();
+            let toggle_action = schedule_toggle_action(&schedule.status);
+            let is_terminal = toggle_action.is_none();
+            let any_mutation = active_mutation.is_some();
+            let is_mutating = active_mutation.as_deref() == Some(schedule.id.as_str());
+            let confirming_cancel = cancel_confirmation.as_deref() == Some(schedule.id.as_str());
             div()
                 .id(("live-schedule", index))
                 .flex()
@@ -304,6 +320,7 @@ fn live_tasks_section(tasks: &[mitsuro_desktop_backend::ProductSchedule]) -> imp
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
                         .min_w_0()
                         .gap(px(2.0))
                         .child(
@@ -322,15 +339,117 @@ fn live_tasks_section(tasks: &[mitsuro_desktop_backend::ProductSchedule]) -> imp
                 )
                 .child(
                     div()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(999.0))
-                        .bg(theme::hex_alpha(0xffffff, 0.06))
-                        .text_xs()
-                        .text_color(colors.text_secondary)
-                        .child("read-only"),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(is_mutating, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.text_tertiary)
+                                    .child("Updating…"),
+                            )
+                        })
+                        .when(mutations_available && !is_terminal, |this| {
+                            let action =
+                                toggle_action.expect("non-terminal schedule has a toggle action");
+                            this.child(schedule_action_button(
+                                ("schedule-toggle", index),
+                                if action == ProductScheduleAction::Resume {
+                                    "Resume"
+                                } else {
+                                    "Pause"
+                                },
+                                !any_mutation,
+                                false,
+                                cx,
+                                move |app, _, _, cx| {
+                                    app.mutate_schedule(schedule_for_toggle.clone(), action, cx);
+                                },
+                            ))
+                            .child(schedule_action_button(
+                                ("schedule-cancel", index),
+                                if confirming_cancel {
+                                    "Confirm cancel"
+                                } else {
+                                    "Cancel"
+                                },
+                                !any_mutation,
+                                confirming_cancel,
+                                cx,
+                                move |app, _, _, cx| {
+                                    app.mutate_schedule(
+                                        schedule_for_cancel.clone(),
+                                        ProductScheduleAction::Cancel,
+                                        cx,
+                                    );
+                                },
+                            ))
+                        })
+                        .when(!mutations_available || is_terminal, |this| {
+                            this.child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(999.0))
+                                    .bg(theme::hex_alpha(0xffffff, 0.06))
+                                    .text_xs()
+                                    .text_color(colors.text_secondary)
+                                    .child(if is_terminal {
+                                        schedule.status.clone()
+                                    } else {
+                                        "Unavailable".to_owned()
+                                    }),
+                            )
+                        }),
                 )
         }))
+}
+
+fn schedule_action_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    enabled: bool,
+    destructive: bool,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &gpui::ClickEvent, &mut gpui::Window, &mut Context<MitsuroApp>)
+        + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(7.0))
+        .bg(if destructive {
+            theme::hex_alpha(0xef4444, 0.14)
+        } else {
+            colors.bg_button_secondary
+        })
+        .border_1()
+        .border_color(if destructive {
+            theme::hex_alpha(0xef4444, 0.38)
+        } else {
+            colors.border
+        })
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if destructive {
+            theme::hex(0xfca5a5)
+        } else if enabled {
+            colors.text_secondary
+        } else {
+            colors.text_tertiary
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(on_click))
+        })
+        .child(label)
 }
 
 fn tasks_section(enabled: &[bool], cx: &mut Context<MitsuroApp>) -> impl IntoElement {

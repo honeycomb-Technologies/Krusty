@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, IF_MATCH};
 use reqwest::{Client, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -10,12 +10,13 @@ use serde_json::Value;
 use crate::sse::{chat_stream_from_response, ChatEventStream};
 use crate::{
     BackgroundProcess, ChatRequest, CreateSessionRequest, ExtensionOverview, FileResponse,
-    FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleSummary, McpServer,
-    ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse, OAuthStartRequest,
-    OAuthStartResponse, OAuthStatusResponse, ProviderStatus, ServerAccessResponse,
-    ServerStatusResponse, SessionInfo, SessionStateOptions, SessionStateResponse,
-    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, SteerRequest,
-    SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest, UpdateSessionRequest,
+    FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleMutationResponse,
+    HiveScheduleSummary, McpServer, ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse,
+    OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse, ProviderStatus,
+    ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateOptions,
+    SessionStateResponse, SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo,
+    SteerRequest, SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest,
+    UpdateSessionRequest,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -244,6 +245,99 @@ impl MitsuroClient {
 
     pub async fn list_hive_schedules(&self) -> Result<Vec<HiveScheduleSummary>> {
         self.get_json("/hive/schedules").await
+    }
+
+    pub async fn pause_hive_schedule(
+        &self,
+        session_id: &str,
+        schedule_id: &str,
+        revision: u64,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        self.mutate_hive_schedule_status(
+            reqwest::Method::POST,
+            session_id,
+            schedule_id,
+            Some("pause"),
+            revision,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn resume_hive_schedule(
+        &self,
+        session_id: &str,
+        schedule_id: &str,
+        revision: u64,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        self.mutate_hive_schedule_status(
+            reqwest::Method::POST,
+            session_id,
+            schedule_id,
+            Some("resume"),
+            revision,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn cancel_hive_schedule(
+        &self,
+        session_id: &str,
+        schedule_id: &str,
+        revision: u64,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        self.mutate_hive_schedule_status(
+            reqwest::Method::DELETE,
+            session_id,
+            schedule_id,
+            None,
+            revision,
+            idempotency_key,
+        )
+        .await
+    }
+
+    async fn mutate_hive_schedule_status(
+        &self,
+        method: reqwest::Method,
+        session_id: &str,
+        schedule_id: &str,
+        action: Option<&str>,
+        revision: u64,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        let mut url = reqwest::Url::parse(&self.api_url("/hive/sessions"))
+            .context("building Mitsuro Hive schedule mutation URL")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("Mitsuro Hive endpoint cannot be a base URL"))?;
+            segments
+                .push(session_id)
+                .push("schedules")
+                .push(schedule_id);
+            if let Some(action) = action {
+                segments.push(action);
+            }
+        }
+        let url = url.to_string();
+        let mut request = self
+            .http
+            .request(method, &url)
+            .header(ACCEPT, "application/json")
+            .header(IF_MATCH, format!("\"{revision}\""));
+        if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+            request = request.header("Idempotency-Key", key);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("mutating Hive schedule at {url}"))?;
+        decode_json_response(response, &url).await
     }
 
     pub async fn server_access(&self) -> Result<ServerAccessResponse> {
@@ -531,6 +625,73 @@ mod tests {
             .kill_process("process-1")
             .await
             .expect("empty successful process kill response");
+        server.join().expect("test server join");
+    }
+
+    #[tokio::test]
+    async fn hive_schedule_status_mutations_are_scoped_revisioned_and_idempotent() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let expected = [
+                ("POST", "pause", "paused", 8_u64),
+                ("POST", "resume", "enabled", 9_u64),
+                ("DELETE", "", "cancelled", 10_u64),
+            ];
+            for (method, action, status, revision) in expected {
+                let (mut socket, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 4096];
+                let size = socket.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..size]);
+                let suffix = if action.is_empty() {
+                    String::new()
+                } else {
+                    format!("/{action}")
+                };
+                assert!(request.starts_with(&format!(
+                    "{method} /api/hive/sessions/session%20one/schedules/schedule%2Fone{suffix} "
+                )));
+                let headers = request.to_ascii_lowercase();
+                assert!(headers.contains(&format!("if-match: \"{}\"", revision - 1)));
+                assert!(headers.contains("idempotency-key: mutation-key"));
+                let body = format!(
+                    r#"{{"schedule_id":"schedule/one","revision":{revision},"status":"{status}"}}"#
+                );
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        let paused = client
+            .pause_hive_schedule("session one", "schedule/one", 7, Some("mutation-key"))
+            .await
+            .expect("pause response");
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.revision, 8);
+
+        let resumed = client
+            .resume_hive_schedule("session one", "schedule/one", 8, Some("mutation-key"))
+            .await
+            .expect("resume response");
+        assert_eq!(resumed.status, "enabled");
+        assert_eq!(resumed.revision, 9);
+
+        let cancelled = client
+            .cancel_hive_schedule("session one", "schedule/one", 9, Some("mutation-key"))
+            .await
+            .expect("cancel response");
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.revision, 10);
         server.join().expect("test server join");
     }
 

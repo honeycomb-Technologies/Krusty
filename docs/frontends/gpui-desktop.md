@@ -67,7 +67,7 @@ backend or are shown as unavailable.
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
-| Hive/schedules | Live read-only projections; mutations disabled | Unsupported | Typed fixture UI |
+| Hive/schedules | Live Hive projection and global schedule catalog; pause/resume plus confirmed cancellation use revisioned, idempotent server mutations; creation/replacement still unavailable | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
@@ -220,6 +220,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   maps to its typed permission contract. Transport-only Mitsuro metadata is skipped from
   Codex JSON, and cross-backend access variants are rejected before I/O.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
+- Mitsuro schedule rows use the real per-session Hive control-plane routes for pause,
+  resume, and cancellation. The client sends the current revision as `If-Match`, adds a
+  unique idempotency key, serializes mutations, requires cancellation confirmation, and
+  re-reads the global catalog after success. Codex remains explicitly unsupported.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
 - Opening a persisted Codex conversation uses `thread/resume`, matching the reference

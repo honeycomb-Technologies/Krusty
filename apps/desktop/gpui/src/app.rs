@@ -52,11 +52,12 @@ use mitsuro_desktop_backend::{
     PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
     ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
     ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
-    ProductReviewTarget, ProductSchedule, ProductSkill, ProductSpeedMode, ProductSteer,
-    ProductTurn, ProductWorkMode, RealtimeEvent, RealtimeOutputModality, RealtimeVoice,
-    RealtimeVoicesList, ReasoningEffortOption, RemoteControlClient, RemoteControlClientsListParams,
-    RemoteControlClientsRevokeParams, RemoteControlConnectionStatus, RemoteControlDisableParams,
-    RemoteControlEnableParams, RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
+    ProductReviewTarget, ProductSchedule, ProductScheduleAction, ProductScheduleMutationRequest,
+    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
+    RemoteControlClient, RemoteControlClientsListParams, RemoteControlClientsRevokeParams,
+    RemoteControlConnectionStatus, RemoteControlDisableParams, RemoteControlEnableParams,
+    RemoteControlPairingStartParams, RemoteControlPairingStartResponse,
     RemoteControlPairingStatusParams, RemoteControlStatusChangedNotification,
     RemoteControlStatusReadResponse, SessionDelegationProjection, SessionSummary, SkillMetadata,
     SkillsConfigWriteParams, SkillsListParams, ThreadArchiveParams, ThreadBackgroundTerminal,
@@ -765,6 +766,20 @@ impl SurfaceDataState {
     }
 }
 
+pub(crate) fn schedule_toggle_action(status: &str) -> Option<ProductScheduleAction> {
+    if status.eq_ignore_ascii_case("enabled") {
+        Some(ProductScheduleAction::Pause)
+    } else if status.eq_ignore_ascii_case("paused") {
+        Some(ProductScheduleAction::Resume)
+    } else {
+        None
+    }
+}
+
+fn schedule_cancel_confirmation_required(current: Option<&str>, schedule_id: &str) -> bool {
+    current != Some(schedule_id)
+}
+
 /// How Send should produce an assistant reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendMode {
@@ -1290,6 +1305,10 @@ pub struct MitsuroApp {
     scheduled_enabled: Vec<bool>,
     /// Some, including an empty vec, means the Mitsuro Hive schedule API is live.
     scheduled_tasks: Option<Vec<ProductSchedule>>,
+    /// Schedule id currently being changed through the Mitsuro control plane.
+    schedule_mutation_in_progress: Option<String>,
+    /// Destructive cancellation requires the same schedule to be selected twice.
+    schedule_cancel_confirmation: Option<String>,
     /// Plugins marketplace category filter (Public / Personal / MCP).
     plugins_filter: PluginsFilter,
     /// Plugins surface top tab (Plugins | Skills).
@@ -1682,6 +1701,8 @@ impl MitsuroApp {
             scheduled_show_tasks: false,
             scheduled_enabled: vec![true, true],
             scheduled_tasks: None,
+            schedule_mutation_in_progress: None,
+            schedule_cancel_confirmation: None,
             plugins_filter: PluginsFilter::Public,
             plugins_surface_tab: PluginsSurfaceTab::Plugins,
             pending_start_thread: {
@@ -1993,7 +2014,7 @@ impl MitsuroApp {
             ProductMode::Sites => "Sites · unavailable on selected backend".into(),
             ProductMode::Scheduled => match self.scheduled_state() {
                 SurfaceDataState::Live => format!(
-                    "Hive schedules · {} task(s) · read-only",
+                    "Hive schedules · {} task(s)",
                     self.scheduled_tasks.as_ref().map_or(0, Vec::len)
                 )
                 .into(),
@@ -3919,10 +3940,25 @@ impl MitsuroApp {
         self.scheduled_tasks.as_deref()
     }
 
+    pub fn schedule_mutations_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().schedule_mutations)
+    }
+
+    pub fn schedule_mutation_id(&self) -> Option<&str> {
+        self.schedule_mutation_in_progress.as_deref()
+    }
+
+    pub fn schedule_cancel_confirmation(&self) -> Option<&str> {
+        self.schedule_cancel_confirmation.as_deref()
+    }
+
     pub fn set_scheduled_show_tasks(&mut self, show: bool, cx: &mut Context<Self>) {
         if !self.is_explicit_fixture() {
-            self.status_line =
-                "Scheduled tasks are read-only or unsupported by this backend.".into();
+            self.status_line = "Fixture task switching is unavailable for this backend.".into();
             cx.notify();
             return;
         }
@@ -3970,6 +4006,146 @@ impl MitsuroApp {
             .into();
             cx.notify();
         }
+    }
+
+    pub fn mutate_schedule(
+        &mut self,
+        schedule: ProductSchedule,
+        action: ProductScheduleAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.schedule_mutation_in_progress.is_some() {
+            self.status_line = "Scheduled · another change is still in progress".into();
+            cx.notify();
+            return;
+        }
+        if action == ProductScheduleAction::Cancel
+            && schedule_cancel_confirmation_required(
+                self.schedule_cancel_confirmation.as_deref(),
+                &schedule.id,
+            )
+        {
+            self.schedule_cancel_confirmation = Some(schedule.id.clone());
+            self.status_line = format!(
+                "Scheduled · select Cancel again to permanently cancel {}",
+                schedule.title
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+        self.schedule_cancel_confirmation = None;
+
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Scheduled · changes require a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().schedule_mutations {
+            self.status_line =
+                "Scheduled · the selected backend does not expose schedule changes".into();
+            cx.notify();
+            return;
+        }
+
+        let generation = self.backend_generation;
+        let schedule_id = schedule.id.clone();
+        let title = schedule.title.clone();
+        let action_label = match action {
+            ProductScheduleAction::Pause => "pausing",
+            ProductScheduleAction::Resume => "resuming",
+            ProductScheduleAction::Cancel => "cancelling",
+        };
+        let request = ProductScheduleMutationRequest {
+            session_id: schedule.session_id,
+            schedule_id: schedule_id.clone(),
+            revision: schedule.revision,
+            action,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        self.schedule_mutation_in_progress = Some(schedule_id);
+        self.status_line = format!("Scheduled · {action_label} {title}…").into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .mutate_schedule(request)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.schedule_mutation_in_progress = None;
+                match result {
+                    Ok(response) => {
+                        if let Some(schedule) = app.scheduled_tasks.as_mut().and_then(|tasks| {
+                            tasks
+                                .iter_mut()
+                                .find(|schedule| schedule.id == response.schedule_id)
+                        }) {
+                            schedule.status = response.status.clone();
+                            schedule.revision = response.revision;
+                        }
+                        app.status_line =
+                            format!("Scheduled · {title} is {}", response.status).into();
+                        app.refresh_schedules_after_mutation(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Scheduled · could not update {title} · {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_schedules_after_mutation(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !backend.capabilities().schedules {
+            return;
+        }
+        let generation = self.backend_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .list_schedules()
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(schedules) => app.scheduled_tasks = Some(schedules),
+                    Err(error) => {
+                        app.status_line = format!(
+                            "Scheduled · change applied, but catalog refresh failed: {error}"
+                        )
+                        .into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn plugins_filter(&self) -> PluginsFilter {
@@ -12547,6 +12723,8 @@ impl MitsuroApp {
         }
         self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
         self.scheduled_tasks = None;
+        self.schedule_mutation_in_progress = None;
+        self.schedule_cancel_confirmation = None;
         self.background_processes.clear();
         self.background_processes_state = if kind == BackendKind::MitsuroHttp {
             SurfaceDataState::Loading
@@ -14692,6 +14870,30 @@ mod tests {
         assert!(!valid_file_child_name("../escape"));
         assert_eq!(duplicate_file_name("/tmp/notes.txt"), "notes copy.txt");
         assert_eq!(duplicate_file_name("/tmp/LICENSE"), "LICENSE copy");
+    }
+
+    #[test]
+    fn live_schedule_controls_follow_authoritative_status_and_confirm_cancellation() {
+        assert_eq!(
+            schedule_toggle_action("enabled"),
+            Some(ProductScheduleAction::Pause)
+        );
+        assert_eq!(
+            schedule_toggle_action("PAUSED"),
+            Some(ProductScheduleAction::Resume)
+        );
+        assert_eq!(schedule_toggle_action("completed"), None);
+        assert_eq!(schedule_toggle_action("cancelled"), None);
+        assert_eq!(schedule_toggle_action("future-status"), None);
+        assert!(schedule_cancel_confirmation_required(None, "schedule-1"));
+        assert!(schedule_cancel_confirmation_required(
+            Some("schedule-2"),
+            "schedule-1"
+        ));
+        assert!(!schedule_cancel_confirmation_required(
+            Some("schedule-1"),
+            "schedule-1"
+        ));
     }
 
     #[test]

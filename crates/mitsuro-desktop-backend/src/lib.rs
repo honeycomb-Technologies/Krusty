@@ -187,9 +187,10 @@ pub use product::{
     MessageRole, ProductAccessMode, ProductAttachment, ProductBackend, ProductDirectoryEntry,
     ProductExtension, ProductFile, ProductFileMatch, ProductHiveRun, ProductHiveSnapshot,
     ProductHiveStatus, ProductMcpServer, ProductModel, ProductProcess, ProductReasoningEffort,
-    ProductReview, ProductReviewStart, ProductReviewTarget, ProductSchedule, ProductSkill,
-    ProductSpeedMode, ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode,
-    SessionConversation, SessionSummary,
+    ProductReview, ProductReviewStart, ProductReviewTarget, ProductSchedule, ProductScheduleAction,
+    ProductScheduleMutation, ProductScheduleMutationRequest, ProductSkill, ProductSpeedMode,
+    ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode, SessionConversation,
+    SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,
