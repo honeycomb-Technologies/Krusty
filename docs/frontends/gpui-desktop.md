@@ -67,7 +67,8 @@ backend or are shown as unavailable.
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
-| Hive/schedules | Live Hive projection and global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
+| Hive Work | Live catalog plus per-session task/runtime detail; typed dispatch, message, pause/resume, priority, crew, and confirmed cancellation, with idempotent writes and authoritative refresh | Unsupported; no Mitsuro Hive control plane | Local goal/plan behavior only in explicit fixture mode |
+| Hive schedules | Live global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
@@ -226,6 +227,13 @@ work, not as feature completion; the matrix test must change with each typed ada
   maps to its typed permission contract. Transport-only Mitsuro metadata is skipped from
   Codex JSON, and cross-backend access variants are rejected before I/O.
 - Mitsuro uses the canonical `mitsuro-client` HTTP/SSE implementation.
+- Work uses typed Mitsuro Hive control-plane adapters end to end. Catalog rows come from
+  `/api/hive/current`; selecting a row loads `/api/hive/sessions/:id/status`, including
+  the exact autonomous tasks, runtime error/wake state, cadence, crew, and priority.
+  Dispatch and message/pause/resume/priority/crew/delete writes use unique idempotency
+  keys, serialize in the native UI, and refresh server-owned state after success.
+  Cancellation is armed on the first click and executed only on the second. No live row
+  is padded with aggregate or fixture plan items, and Codex remains capability-gated.
 - Mitsuro schedule rows use the real per-session Hive control-plane routes for pause,
   resume, and cancellation. The client sends the current revision as `If-Match`, adds a
   unique idempotency key, serializes mutations, requires cancellation confirmation, and

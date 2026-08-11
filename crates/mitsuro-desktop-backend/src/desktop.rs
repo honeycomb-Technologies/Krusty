@@ -115,6 +115,7 @@ pub struct BackendCapabilities {
     pub account_credit_nudge: bool,
     pub remote_control: bool,
     pub hive: bool,
+    pub hive_mutations: bool,
     pub schedules: bool,
     pub schedule_mutations: bool,
     pub sites: bool,
@@ -167,6 +168,7 @@ impl BackendCapabilities {
             account_credit_nudge: true,
             remote_control: true,
             hive: false,
+            hive_mutations: false,
             schedules: false,
             schedule_mutations: false,
             sites: false,
@@ -222,6 +224,7 @@ impl BackendCapabilities {
             account_credit_nudge: false,
             remote_control: false,
             hive: true,
+            hive_mutations: true,
             schedules: true,
             schedule_mutations: true,
             sites: false,
@@ -1206,6 +1209,8 @@ mod tests {
     fn capabilities_do_not_claim_unsupported_cross_backend_features() {
         assert!(!BackendCapabilities::mitsuro().archive);
         assert!(!BackendCapabilities::codex().hive);
+        assert!(BackendCapabilities::mitsuro().hive_mutations);
+        assert!(!BackendCapabilities::codex().hive_mutations);
         assert!(BackendCapabilities::mitsuro().schedules);
         assert!(BackendCapabilities::mitsuro().schedule_mutations);
         assert!(!BackendCapabilities::codex().schedule_mutations);

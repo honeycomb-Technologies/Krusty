@@ -4,19 +4,20 @@ use std::time::Duration;
 use anyhow::{anyhow, Context as _, Result};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, IF_MATCH};
 use reqwest::{Client, Response};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 use crate::sse::{chat_stream_from_response, ChatEventStream};
 use crate::{
     BackgroundProcess, ChatRequest, CreateSessionRequest, ExtensionOverview, FileResponse,
-    FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleMutationResponse,
-    HiveScheduleSummary, HiveScheduleWriteRequest, McpServer, ModelsResponse, OAuthExchangeRequest,
-    OAuthExchangeResponse, OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse,
-    ProviderStatus, ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateOptions,
-    SessionStateResponse, SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo,
-    SteerRequest, SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest,
-    UpdateSessionRequest,
+    FileTreeResponse, HealthResponse, HiveCrewRequest, HiveCurrentResponse, HiveDispatchRequest,
+    HiveDispatchResponse, HiveMessageRequest, HivePriorityRequest, HiveRunPriority,
+    HiveScheduleMutationResponse, HiveScheduleSummary, HiveScheduleWriteRequest, HiveSessionStatus,
+    McpServer, ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse, OAuthStartRequest,
+    OAuthStartResponse, OAuthStatusResponse, ProviderStatus, ServerAccessResponse,
+    ServerStatusResponse, SessionInfo, SessionStateOptions, SessionStateResponse,
+    SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo, SteerRequest,
+    SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest, UpdateSessionRequest,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -243,6 +244,121 @@ impl MitsuroClient {
         self.get_json("/hive/current").await
     }
 
+    pub async fn dispatch_hive(
+        &self,
+        request: &HiveDispatchRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveDispatchResponse> {
+        let url = self.api_url("/hive/dispatch");
+        let mut builder = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json")
+            .json(request);
+        if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+            builder = builder.header("Idempotency-Key", key);
+        }
+        let response = builder
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        decode_json_response(response, &url).await
+    }
+
+    pub async fn hive_session_status(&self, session_id: &str) -> Result<HiveSessionStatus> {
+        let url = self.hive_session_url(session_id, &["status"])?;
+        self.get_json_at(&url).await
+    }
+
+    pub async fn send_hive_message(
+        &self,
+        session_id: &str,
+        message: impl Into<String>,
+        idempotency_key: Option<&str>,
+    ) -> Result<SimpleOkResponse> {
+        self.post_hive_session_json(
+            session_id,
+            "message",
+            &HiveMessageRequest {
+                message: message.into(),
+            },
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn pause_hive_session(
+        &self,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<SimpleOkResponse> {
+        self.post_hive_session_json(session_id, "pause", &serde_json::json!({}), idempotency_key)
+            .await
+    }
+
+    pub async fn resume_hive_session(
+        &self,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<SimpleOkResponse> {
+        self.post_hive_session_json(
+            session_id,
+            "resume",
+            &serde_json::json!({}),
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn set_hive_priority(
+        &self,
+        session_id: &str,
+        priority: HiveRunPriority,
+        idempotency_key: Option<&str>,
+    ) -> Result<SimpleOkResponse> {
+        self.post_hive_session_json(
+            session_id,
+            "priority",
+            &HivePriorityRequest { priority },
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn set_hive_crew(
+        &self,
+        session_id: &str,
+        crew_slug: Option<String>,
+        idempotency_key: Option<&str>,
+    ) -> Result<SimpleOkResponse> {
+        self.post_hive_session_json(
+            session_id,
+            "crew",
+            &HiveCrewRequest { crew_slug },
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn cancel_hive_session(
+        &self,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        let url = self.hive_session_url(session_id, &[])?;
+        let mut builder = self.http.delete(&url).header(ACCEPT, "application/json");
+        if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+            builder = builder.header("Idempotency-Key", key);
+        }
+        let response = builder
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        ensure_success(response).await?;
+        Ok(())
+    }
+
     pub async fn list_hive_schedules(&self) -> Result<Vec<HiveScheduleSummary>> {
         self.get_json("/hive/schedules").await
     }
@@ -412,6 +528,49 @@ impl MitsuroClient {
             .send()
             .await
             .with_context(|| format!("writing Hive schedule at {url}"))?;
+        decode_json_response(response, &url).await
+    }
+
+    fn hive_session_url(&self, session_id: &str, suffix: &[&str]) -> Result<String> {
+        let mut url = reqwest::Url::parse(&self.api_url("/hive/sessions"))
+            .context("building Mitsuro Hive session URL")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("Mitsuro Hive endpoint cannot be a base URL"))?;
+            segments.push(session_id);
+            for segment in suffix {
+                segments.push(segment);
+            }
+        }
+        Ok(url.to_string())
+    }
+
+    async fn post_hive_session_json<T, B>(
+        &self,
+        session_id: &str,
+        action: &str,
+        body: &B,
+        idempotency_key: Option<&str>,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        let url = self.hive_session_url(session_id, &[action])?;
+        let mut builder = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json")
+            .json(body);
+        if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+            builder = builder.header("Idempotency-Key", key);
+        }
+        let response = builder
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
         decode_json_response(response, &url).await
     }
 
@@ -863,6 +1022,133 @@ mod tests {
             .await
             .expect("replace response");
         assert_eq!(replaced.revision, 1);
+        server.join().expect("test server join");
+    }
+
+    #[tokio::test]
+    async fn hive_session_controls_are_typed_scoped_and_idempotent() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let expected = [
+                ("POST", "/api/hive/dispatch", "\"task\":\"Ship Work\""),
+                ("GET", "/api/hive/sessions/session%2Fone/status", ""),
+                (
+                    "POST",
+                    "/api/hive/sessions/session%2Fone/message",
+                    "\"message\":\"Focus on tests\"",
+                ),
+                ("POST", "/api/hive/sessions/session%2Fone/pause", "{}"),
+                ("POST", "/api/hive/sessions/session%2Fone/resume", "{}"),
+                (
+                    "POST",
+                    "/api/hive/sessions/session%2Fone/priority",
+                    "\"priority\":\"high\"",
+                ),
+                (
+                    "POST",
+                    "/api/hive/sessions/session%2Fone/crew",
+                    "\"crew_slug\":\"release\"",
+                ),
+                ("DELETE", "/api/hive/sessions/session%2Fone", ""),
+            ];
+            for (index, (method, path, body_fragment)) in expected.into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let size = socket.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(request.starts_with(&format!("{method} {path} ")));
+                if !body_fragment.is_empty() {
+                    assert!(request.contains(body_fragment), "request was {request}");
+                }
+                if method != "GET" {
+                    assert!(request
+                        .to_ascii_lowercase()
+                        .contains("idempotency-key: work-key"));
+                }
+                let (status, body) = match index {
+                    0 => (
+                        "201 Created",
+                        r#"{"session_id":"session/one","status":"started"}"#,
+                    ),
+                    1 => (
+                        "200 OK",
+                        r#"{"session_id":"session/one","session_type":"hive","title":"Ship Work","tasks":[{"id":"task-1","session_id":"session/one","subject":"Implement","description":"Wire controls","status":"in_progress","owner":"release","blocked_by":[],"created_at":"2026-08-10T00:00:00Z","updated_at":"2026-08-10T00:01:00Z","completed_at":null,"result":null}],"agent_state":"running","runtime":{"session_id":"session/one","status":"running","next_wake_at":null,"sleep_reason":null,"last_error":null,"current_run_id":"run-1","last_wake_reason":"dispatch","crew_slug":"release","priority":"high","updated_at":"2026-08-10T00:01:00Z"},"cadence":{"tick_interval_secs":30,"max_ticks":1000}}"#,
+                    ),
+                    7 => ("204 No Content", ""),
+                    _ => ("200 OK", r#"{"ok":true}"#),
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        let dispatch = client
+            .dispatch_hive(
+                &HiveDispatchRequest {
+                    task: "Ship Work".into(),
+                    project_dir: Some("/workspace".into()),
+                    model: Some("gpt-5.5".into()),
+                    model_key: Some(crate::ModelKey {
+                        provider: "openai".into(),
+                        model_id: "gpt-5.5".into(),
+                        auth_scope: Some("chatgpt".into()),
+                        api_format: "responses".into(),
+                    }),
+                    start_at: None,
+                    priority: Some(HiveRunPriority::High),
+                    crew_slug: Some("release".into()),
+                },
+                Some("work-key"),
+            )
+            .await
+            .expect("dispatch");
+        assert_eq!(dispatch.session_id, "session/one");
+
+        let status = client
+            .hive_session_status("session/one")
+            .await
+            .expect("status");
+        assert_eq!(status.tasks[0].subject, "Implement");
+        assert_eq!(
+            status.runtime.as_ref().map(|runtime| runtime.priority),
+            Some(HiveRunPriority::High)
+        );
+
+        client
+            .send_hive_message("session/one", "Focus on tests", Some("work-key"))
+            .await
+            .expect("message");
+        client
+            .pause_hive_session("session/one", Some("work-key"))
+            .await
+            .expect("pause");
+        client
+            .resume_hive_session("session/one", Some("work-key"))
+            .await
+            .expect("resume");
+        client
+            .set_hive_priority("session/one", HiveRunPriority::High, Some("work-key"))
+            .await
+            .expect("priority");
+        client
+            .set_hive_crew("session/one", Some("release".into()), Some("work-key"))
+            .await
+            .expect("crew");
+        client
+            .cancel_hive_session("session/one", Some("work-key"))
+            .await
+            .expect("cancel");
         server.join().expect("test server join");
     }
 

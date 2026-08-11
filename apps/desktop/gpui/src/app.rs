@@ -51,7 +51,9 @@ use mitsuro_desktop_backend::{
     PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
     PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
     ProductAccessMode, ProductAttachment, ProductBackend, ProductDstFoldPolicy,
-    ProductDstGapPolicy, ProductDstPolicy, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
+    ProductDstGapPolicy, ProductDstPolicy, ProductExtension, ProductFileMatch,
+    ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
+    ProductHiveSessionDetail, ProductHiveSessionMutationRequest, ProductHiveSnapshot,
     ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
     ProductMonthlyDayPolicy, ProductOverlapPolicy, ProductProcess, ProductRetryJitter,
     ProductRetryPolicy, ProductReview, ProductReviewTarget, ProductSchedule, ProductScheduleAction,
@@ -83,8 +85,8 @@ use crate::browser::{create_default_host, BrowserHost, DesktopBrowserHost};
 use crate::components;
 use crate::demo::{
     self, DemoAudioAttachment, DemoAudioSource, DemoGoal, DemoGoalStatus, DemoImageAttachment,
-    DemoImageSource, DemoMessage, DemoMessageKind, DemoPlanItem, DemoReferenceAttachment,
-    DemoReferenceKind, DemoThread, ThreadSurface,
+    DemoImageSource, DemoMessage, DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind,
+    DemoThread, ThreadSurface,
 };
 use crate::preferences::DesktopPreferences;
 use crate::theme;
@@ -821,6 +823,59 @@ pub struct ScheduleEditorInputs {
     pub retry_max: Entity<InputState>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiveDispatchEditorState {
+    pub priority: ProductHivePriority,
+    pub submitting: bool,
+}
+
+#[derive(Clone)]
+pub struct HiveWorkInputs {
+    pub task: Entity<InputState>,
+    pub project_dir: Entity<InputState>,
+    pub start_at: Entity<InputState>,
+    pub crew_slug: Entity<InputState>,
+    pub message: Entity<InputState>,
+    pub crew_update: Entity<InputState>,
+}
+
+pub(crate) fn hive_goal_status(runtime_status: Option<&str>, agent_state: &str) -> DemoGoalStatus {
+    let status = runtime_status.unwrap_or(agent_state);
+    match status {
+        "running" | "streaming" | "tool_executing" => DemoGoalStatus::Active,
+        "paused" | "sleeping" | "scheduled" | "waiting" | "awaiting_input" => {
+            DemoGoalStatus::Paused
+        }
+        "error" | "failed" | "blocked" => DemoGoalStatus::Blocked,
+        "idle" | "cancelled" | "complete" | "completed" | "succeeded" => DemoGoalStatus::Complete,
+        _ => DemoGoalStatus::Active,
+    }
+}
+
+pub(crate) fn hive_session_toggle_action(
+    runtime_status: Option<&str>,
+) -> Option<ProductHiveSessionAction> {
+    match runtime_status {
+        Some("running" | "sleeping" | "awaiting_input") => Some(ProductHiveSessionAction::Pause),
+        Some("paused" | "error" | "idle") => Some(ProductHiveSessionAction::Resume),
+        _ => None,
+    }
+}
+
+fn hive_cancel_confirmation_required(current: Option<&str>, session_id: &str) -> bool {
+    current != Some(session_id)
+}
+
+fn valid_hive_crew_slug(value: &str) -> bool {
+    value.len() <= 64
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '-'
+                || character == '_'
+        })
+}
+
 fn schedule_editor_model_key(
     mode: &ScheduleEditorMode,
     model: &Option<String>,
@@ -1156,10 +1211,23 @@ pub struct MitsuroApp {
     /// Work-mode goals (local list + optional `thread/goal/*` for linked threads).
     goals: Vec<DemoGoal>,
     selected_goal: Option<String>,
-    /// True when Work rows are a read-only projection of Mitsuro Hive runs.
+    /// True when Work rows project authoritative Mitsuro Hive runs.
     goals_are_live_hive: bool,
-    /// Native Hive status retained separately from its Work-row projection.
+    /// Native Hive catalog and selected-session detail retained separately from
+    /// the compact Work-row projection.
     hive_snapshot: Option<ProductHiveSnapshot>,
+    hive_snapshot_state: SurfaceDataState,
+    hive_session_detail: Option<ProductHiveSessionDetail>,
+    hive_detail_state: SurfaceDataState,
+    hive_mutation_in_progress: Option<String>,
+    hive_cancel_confirmation: Option<String>,
+    hive_dispatch_editor: Option<HiveDispatchEditorState>,
+    hive_task_input: Entity<InputState>,
+    hive_project_dir_input: Entity<InputState>,
+    hive_start_at_input: Entity<InputState>,
+    hive_crew_slug_input: Entity<InputState>,
+    hive_message_input: Entity<InputState>,
+    hive_crew_update_input: Entity<InputState>,
     /// Models from `model/list` (or fixture demo catalog).
     models: Vec<ModelInfo>,
     /// Selected model id (matches [`ModelInfo::id`]).
@@ -1541,6 +1609,33 @@ impl MitsuroApp {
                 .placeholder("Empty file — type to edit…")
                 .multi_line(true)
         });
+        let hive_task_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("What should Hive accomplish?")
+                .multi_line(true)
+        });
+        let hive_project_dir_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Absolute workspace path")
+                .default_value(
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )
+        });
+        let hive_start_at_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Optional RFC3339 start time"));
+        let hive_crew_slug_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Optional crew slug"));
+        let hive_message_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Send direction to this Hive run")
+                .multi_line(true)
+        });
+        let hive_crew_update_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Crew slug · blank removes assignment")
+        });
         let schedule_session_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Hive session id"));
         let schedule_title_input =
@@ -1753,6 +1848,18 @@ impl MitsuroApp {
             selected_goal: None,
             goals_are_live_hive: false,
             hive_snapshot: None,
+            hive_snapshot_state: SurfaceDataState::Loading,
+            hive_session_detail: None,
+            hive_detail_state: SurfaceDataState::Loading,
+            hive_mutation_in_progress: None,
+            hive_cancel_confirmation: None,
+            hive_dispatch_editor: None,
+            hive_task_input,
+            hive_project_dir_input,
+            hive_start_at_input,
+            hive_crew_slug_input,
+            hive_message_input,
+            hive_crew_update_input,
             models: Vec::new(),
             selected_model_id: None,
             selected_reasoning_effort: None,
@@ -1984,7 +2091,9 @@ impl MitsuroApp {
         match (&self.connection, self.active_backend_kind()) {
             (UiConnection::Connecting, _) => SurfaceDataState::Loading,
             (UiConnection::Error { .. }, _) => SurfaceDataState::Error,
-            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => SurfaceDataState::Live,
+            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => {
+                self.hive_snapshot_state
+            }
             _ => SurfaceDataState::Unsupported,
         }
     }
@@ -2128,7 +2237,7 @@ impl MitsuroApp {
                         .as_ref()
                         .map(|snapshot| snapshot.status.running_count)
                         .unwrap_or(0);
-                    format!("Hive · {n} run(s) · {running} running · read-only").into()
+                    format!("Hive · {n} run(s) · {running} running · live controls").into()
                 } else {
                     format!("Work · {n} goal(s)").into()
                 }
@@ -2232,6 +2341,9 @@ impl MitsuroApp {
         if matches!(mode, ProductMode::Terminal) {
             self.refresh_terminal_backgrounds(cx);
         }
+        if matches!(mode, ProductMode::Work) {
+            self.refresh_hive(cx);
+        }
         if matches!(mode, ProductMode::Computer) {
             if self.environments.is_empty() {
                 self.refresh_environments(window, cx);
@@ -2328,6 +2440,513 @@ impl MitsuroApp {
         });
     }
 
+    pub fn goals_are_live_hive(&self) -> bool {
+        self.goals_are_live_hive
+    }
+
+    pub fn hive_snapshot(&self) -> Option<&ProductHiveSnapshot> {
+        self.hive_snapshot.as_ref()
+    }
+
+    pub fn hive_session_detail(&self) -> Option<&ProductHiveSessionDetail> {
+        self.hive_session_detail.as_ref()
+    }
+
+    pub fn hive_detail_state(&self) -> SurfaceDataState {
+        self.hive_detail_state
+    }
+
+    pub fn hive_mutations_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().hive_mutations)
+    }
+
+    pub fn hive_mutation_id(&self) -> Option<&str> {
+        self.hive_mutation_in_progress.as_deref()
+    }
+
+    pub fn hive_cancel_confirmation(&self) -> Option<&str> {
+        self.hive_cancel_confirmation.as_deref()
+    }
+
+    pub fn hive_dispatch_editor(&self) -> Option<&HiveDispatchEditorState> {
+        self.hive_dispatch_editor.as_ref()
+    }
+
+    pub fn hive_work_inputs(&self) -> HiveWorkInputs {
+        HiveWorkInputs {
+            task: self.hive_task_input.clone(),
+            project_dir: self.hive_project_dir_input.clone(),
+            start_at: self.hive_start_at_input.clone(),
+            crew_slug: self.hive_crew_slug_input.clone(),
+            message: self.hive_message_input.clone(),
+            crew_update: self.hive_crew_update_input.clone(),
+        }
+    }
+
+    pub fn refresh_hive_now(&mut self, cx: &mut Context<Self>) {
+        self.refresh_hive(cx);
+    }
+
+    fn refresh_hive(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.live_backend() else {
+            if !self.is_explicit_fixture() {
+                self.hive_snapshot_state = SurfaceDataState::Unsupported;
+                self.hive_detail_state = SurfaceDataState::Unsupported;
+            }
+            return;
+        };
+        if !backend.capabilities().hive {
+            self.hive_snapshot_state = SurfaceDataState::Unsupported;
+            self.hive_detail_state = SurfaceDataState::Unsupported;
+            return;
+        }
+        let generation = self.backend_generation;
+        if self.hive_snapshot.is_none() {
+            self.hive_snapshot_state = SurfaceDataState::Loading;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .hive_snapshot()
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        let previous_selection = app.selected_goal.clone();
+                        app.goals_are_live_hive = true;
+                        app.goals = hive_goals_from_snapshot(&snapshot);
+                        app.selected_goal = previous_selection
+                            .filter(|selected| app.goals.iter().any(|goal| &goal.id == selected))
+                            .or_else(|| app.goals.first().map(|goal| goal.id.clone()));
+                        app.hive_snapshot = Some(snapshot);
+                        app.hive_snapshot_state = SurfaceDataState::Live;
+                        if app.selected_goal.is_some() {
+                            app.refresh_selected_hive_session(cx);
+                        } else {
+                            app.hive_session_detail = None;
+                            app.hive_detail_state = SurfaceDataState::Live;
+                            cx.notify();
+                        }
+                    }
+                    Err(error) => {
+                        app.hive_snapshot_state = SurfaceDataState::Error;
+                        app.status_line = format!("Hive · catalog refresh failed · {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_selected_hive_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.selected_goal.clone() else {
+            self.hive_session_detail = None;
+            self.hive_detail_state = SurfaceDataState::Live;
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.hive_session_detail = None;
+            self.hive_detail_state = SurfaceDataState::Unsupported;
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().hive {
+            self.hive_session_detail = None;
+            self.hive_detail_state = SurfaceDataState::Unsupported;
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        self.hive_detail_state = SurfaceDataState::Loading;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let requested_id = session_id.clone();
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .read_hive_session(session_id)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation
+                    || app.selected_goal.as_deref() != Some(requested_id.as_str())
+                {
+                    return;
+                }
+                match result {
+                    Ok(detail) => {
+                        app.hive_session_detail = Some(detail);
+                        app.hive_detail_state = SurfaceDataState::Live;
+                    }
+                    Err(error) => {
+                        app.hive_session_detail = None;
+                        app.hive_detail_state = SurfaceDataState::Error;
+                        app.status_line =
+                            format!("Hive · could not load {requested_id} · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn open_hive_dispatch_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.hive_mutations_available() {
+            self.status_line = "Hive · dispatch requires a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        }
+        let workspace = std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        Self::set_schedule_input(&self.hive_task_input, "", window, cx);
+        Self::set_schedule_input(&self.hive_project_dir_input, workspace, window, cx);
+        Self::set_schedule_input(&self.hive_start_at_input, "", window, cx);
+        Self::set_schedule_input(&self.hive_crew_slug_input, "", window, cx);
+        self.hive_cancel_confirmation = None;
+        self.hive_dispatch_editor = Some(HiveDispatchEditorState {
+            priority: ProductHivePriority::Normal,
+            submitting: false,
+        });
+        self.status_line = "Hive · preparing a real autonomous run".into();
+        cx.notify();
+    }
+
+    pub fn close_hive_dispatch_editor(&mut self, cx: &mut Context<Self>) {
+        if self
+            .hive_dispatch_editor
+            .as_ref()
+            .is_some_and(|editor| editor.submitting)
+        {
+            self.status_line = "Hive · dispatch is still in progress".into();
+        } else {
+            self.hive_dispatch_editor = None;
+            self.status_line = "Hive · dispatch cancelled".into();
+        }
+        cx.notify();
+    }
+
+    pub fn set_hive_dispatch_priority(
+        &mut self,
+        priority: ProductHivePriority,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.hive_dispatch_editor {
+            editor.priority = priority;
+            cx.notify();
+        }
+    }
+
+    pub fn submit_hive_dispatch(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.hive_dispatch_editor.clone() else {
+            return;
+        };
+        if editor.submitting || self.hive_mutation_in_progress.is_some() {
+            self.status_line = "Hive · another control-plane change is in progress".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Hive · dispatch requires a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().hive_mutations {
+            self.status_line = "Hive · this backend does not support dispatch".into();
+            cx.notify();
+            return;
+        }
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let task = value(&self.hive_task_input);
+        let project_dir = value(&self.hive_project_dir_input);
+        let start_at = value(&self.hive_start_at_input);
+        let crew_slug = value(&self.hive_crew_slug_input);
+        if task.is_empty() {
+            self.status_line = "Hive · task is required".into();
+            cx.notify();
+            return;
+        }
+        if !project_dir.is_empty() && !Path::new(&project_dir).is_absolute() {
+            self.status_line = "Hive · workspace path must be absolute".into();
+            cx.notify();
+            return;
+        }
+        if !start_at.is_empty() {
+            match chrono::DateTime::parse_from_rfc3339(&start_at) {
+                Ok(at) if at.with_timezone(&chrono::Utc) > chrono::Utc::now() => {}
+                Ok(_) => {
+                    self.status_line = "Hive · start time must be in the future".into();
+                    cx.notify();
+                    return;
+                }
+                Err(_) => {
+                    self.status_line = "Hive · start time must use RFC3339".into();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        if !crew_slug.is_empty() && !valid_hive_crew_slug(&crew_slug) {
+            self.status_line =
+                "Hive · crew uses lowercase letters, digits, dash, or underscore".into();
+            cx.notify();
+            return;
+        }
+        let optional = |value: String| (!value.is_empty()).then_some(value);
+        let model = self.selected_model_slug();
+        let request = ProductHiveDispatchRequest {
+            task: task.clone(),
+            project_dir: optional(project_dir),
+            model,
+            // Mitsuro resolves the exact selected catalog model from its canonical
+            // model id. A provider key is optional on this route.
+            model_key: None,
+            start_at: optional(start_at),
+            priority: editor.priority,
+            crew_slug: optional(crew_slug),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        let generation = self.backend_generation;
+        self.hive_mutation_in_progress = Some("__dispatch__".into());
+        if let Some(editor) = &mut self.hive_dispatch_editor {
+            editor.submitting = true;
+        }
+        self.status_line = format!("Hive · dispatching {task}…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .dispatch_hive(request)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.hive_mutation_in_progress = None;
+                match result {
+                    Ok(response) => {
+                        app.hive_dispatch_editor = None;
+                        app.selected_goal = Some(response.session_id.clone());
+                        app.status_line = format!(
+                            "Hive · {task} dispatched · {} ({})",
+                            response.session_id, response.status
+                        )
+                        .into();
+                        app.refresh_hive(cx);
+                    }
+                    Err(error) => {
+                        if let Some(editor) = &mut app.hive_dispatch_editor {
+                            editor.submitting = false;
+                        }
+                        app.status_line = format!("Hive · dispatch failed · {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn submit_hive_message(&mut self, cx: &mut Context<Self>) {
+        let message = self.hive_message_input.read(cx).value().trim().to_owned();
+        if message.is_empty() {
+            self.status_line = "Hive · enter a message for the selected run".into();
+            cx.notify();
+            return;
+        }
+        self.begin_hive_mutation(
+            ProductHiveSessionAction::Message(message),
+            "message",
+            Some(self.hive_message_input.clone()),
+            cx,
+        );
+    }
+
+    pub fn toggle_selected_hive_session(&mut self, cx: &mut Context<Self>) {
+        let action = self
+            .hive_session_detail
+            .as_ref()
+            .and_then(|detail| hive_session_toggle_action(detail.runtime_status.as_deref()));
+        let Some(action) = action else {
+            self.status_line = "Hive · this run has no pause or resume action".into();
+            cx.notify();
+            return;
+        };
+        let label = if matches!(action, ProductHiveSessionAction::Pause) {
+            "pause"
+        } else {
+            "resume"
+        };
+        self.begin_hive_mutation(action, label, None, cx);
+    }
+
+    pub fn set_selected_hive_priority(
+        &mut self,
+        priority: ProductHivePriority,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_hive_mutation(
+            ProductHiveSessionAction::SetPriority(priority),
+            "priority",
+            None,
+            cx,
+        );
+    }
+
+    pub fn submit_selected_hive_crew(&mut self, cx: &mut Context<Self>) {
+        let crew = self
+            .hive_crew_update_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if !crew.is_empty() && !valid_hive_crew_slug(&crew) {
+            self.status_line =
+                "Hive · crew uses lowercase letters, digits, dash, or underscore".into();
+            cx.notify();
+            return;
+        }
+        self.begin_hive_mutation(
+            ProductHiveSessionAction::SetCrew((!crew.is_empty()).then_some(crew)),
+            "crew",
+            Some(self.hive_crew_update_input.clone()),
+            cx,
+        );
+    }
+
+    pub fn cancel_selected_hive_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.selected_goal.clone() else {
+            return;
+        };
+        if hive_cancel_confirmation_required(self.hive_cancel_confirmation.as_deref(), &session_id)
+        {
+            self.hive_cancel_confirmation = Some(session_id);
+            self.status_line = "Hive · click Cancel run again to permanently delete it".into();
+            cx.notify();
+            return;
+        }
+        self.begin_hive_mutation(ProductHiveSessionAction::Cancel, "cancel", None, cx);
+    }
+
+    fn begin_hive_mutation(
+        &mut self,
+        action: ProductHiveSessionAction,
+        label: &'static str,
+        clear_input: Option<Entity<InputState>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hive_mutation_in_progress.is_some() {
+            self.status_line = "Hive · another control-plane change is in progress".into();
+            cx.notify();
+            return;
+        }
+        let Some(session_id) = self.selected_goal.clone() else {
+            self.status_line = "Hive · select a run first".into();
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Hive · controls require a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().hive_mutations {
+            self.status_line = "Hive · this backend does not support run controls".into();
+            cx.notify();
+            return;
+        }
+        let generation = self.backend_generation;
+        let destructive = matches!(action, ProductHiveSessionAction::Cancel);
+        let request = ProductHiveSessionMutationRequest {
+            session_id: session_id.clone(),
+            action,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        self.hive_mutation_in_progress = Some(format!("{session_id}:{label}"));
+        self.status_line = format!("Hive · applying {label} to {session_id}…").into();
+        let window_handle = self.window_handle;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .mutate_hive_session(request)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let cleared = this
+                .update(cx, |app, cx| {
+                    if app.backend_generation != generation {
+                        return None;
+                    }
+                    app.hive_mutation_in_progress = None;
+                    match result {
+                        Ok(()) => {
+                            app.hive_cancel_confirmation = None;
+                            if destructive {
+                                app.selected_goal = None;
+                                app.hive_session_detail = None;
+                                app.hive_detail_state = SurfaceDataState::Loading;
+                            }
+                            app.status_line =
+                                format!("Hive · {label} applied to {session_id}").into();
+                            app.refresh_hive(cx);
+                            clear_input
+                        }
+                        Err(error) => {
+                            app.status_line =
+                                format!("Hive · {label} failed for {session_id} · {error}").into();
+                            cx.notify();
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(input) = cleared {
+                let _ = window_handle.update(cx, move |_root, window, cx| {
+                    input.update(cx, |state, cx| state.set_value("", window, cx));
+                });
+            }
+        })
+        .detach();
+    }
+
     pub fn goals(&self) -> &[DemoGoal] {
         &self.goals
     }
@@ -2343,16 +2962,25 @@ impl MitsuroApp {
 
     pub fn select_goal(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected_goal = Some(id.clone());
+        self.hive_cancel_confirmation = None;
         let thread_id = self
             .goals
             .iter()
             .find(|g| g.id == id)
             .and_then(|g| g.thread_id.clone());
         if let Some(g) = self.goals.iter().find(|g| g.id == id) {
-            self.status_line = format!("Work · {}", g.objective).into();
+            self.status_line = if self.goals_are_live_hive {
+                format!("Hive · {}", g.objective).into()
+            } else {
+                format!("Work · {}", g.objective).into()
+            };
         }
-        // Best-effort `thread/goal/get` for linked threads (fixture or live).
-        if let Some(tid) = thread_id.filter(|_| !self.goals_are_live_hive) {
+        if self.goals_are_live_hive {
+            self.hive_session_detail = None;
+            self.hive_detail_state = SurfaceDataState::Loading;
+            self.refresh_selected_hive_session(cx);
+        } else if let Some(tid) = thread_id {
+            // Best-effort `thread/goal/get` for fixture-linked goals.
             self.dispatch_goal_get(tid, cx);
         }
         cx.notify();
@@ -13523,6 +14151,8 @@ impl MitsuroApp {
                 }
                 app.goals = demo::demo_goals();
                 app.selected_goal = app.goals.first().map(|goal| goal.id.clone());
+                app.hive_snapshot_state = SurfaceDataState::Fixture;
+                app.hive_detail_state = SurfaceDataState::Fixture;
                 app.environments = fixture_demo_environments();
                 app.environments_state = SurfaceDataState::Fixture;
                 app.selected_environment_id = app
@@ -13630,6 +14260,16 @@ impl MitsuroApp {
         self.selected_goal = None;
         self.goals_are_live_hive = false;
         self.hive_snapshot = None;
+        self.hive_snapshot_state = if kind == BackendKind::MitsuroHttp {
+            SurfaceDataState::Loading
+        } else {
+            SurfaceDataState::Unsupported
+        };
+        self.hive_session_detail = None;
+        self.hive_detail_state = self.hive_snapshot_state;
+        self.hive_mutation_in_progress = None;
+        self.hive_cancel_confirmation = None;
+        self.hive_dispatch_editor = None;
         self.environments.clear();
         self.environment_add_in_progress = false;
         self.environments_state = SurfaceDataState::Loading;
@@ -14006,14 +14646,27 @@ impl MitsuroApp {
                                     app.selected_goal =
                                         app.goals.first().map(|goal| goal.id.clone());
                                     app.hive_snapshot = Some(hive);
+                                    app.hive_snapshot_state = SurfaceDataState::Live;
+                                    app.hive_detail_state = if app.selected_goal.is_some() {
+                                        SurfaceDataState::Loading
+                                    } else {
+                                        SurfaceDataState::Live
+                                    };
                                 }
                                 None => {
                                     app.goals.clear();
                                     app.selected_goal = None;
                                     app.hive_snapshot = None;
+                                    app.hive_snapshot_state = SurfaceDataState::Error;
+                                    app.hive_detail_state = SurfaceDataState::Error;
                                 }
                             }
-                            // Some(empty) intentionally keeps the live, mutation-disabled schedule
+                            if app.active_mode == ProductMode::Work
+                                && app.selected_goal.is_some()
+                            {
+                                app.refresh_selected_hive_session(cx);
+                            }
+                            // Some(empty) intentionally keeps the live schedule
                             // surface instead of silently falling back to fixture suggestions.
                             app.scheduled_tasks = Some(schedules.unwrap_or_default());
                         } else {
@@ -14023,6 +14676,9 @@ impl MitsuroApp {
                             app.selected_goal = None;
                             app.goals_are_live_hive = false;
                             app.hive_snapshot = None;
+                            app.hive_snapshot_state = SurfaceDataState::Unsupported;
+                            app.hive_session_detail = None;
+                            app.hive_detail_state = SurfaceDataState::Unsupported;
                             app.scheduled_tasks = None;
                         }
                         let auth_note = if has_auth { "auth" } else { "no auth" };
@@ -14529,50 +15185,18 @@ fn hive_goals_from_snapshot(snapshot: &ProductHiveSnapshot) -> Vec<DemoGoal> {
         .runs
         .iter()
         .map(|run| {
-            let status = match run.agent_state.as_str() {
-                "paused" | "sleeping" | "scheduled" | "waiting" => DemoGoalStatus::Paused,
-                "failed" | "blocked" => DemoGoalStatus::Blocked,
-                "complete" | "completed" | "succeeded" => DemoGoalStatus::Complete,
-                _ => DemoGoalStatus::Active,
-            };
-            let mut plan_items = Vec::new();
-            for (label, count, done) in [
-                ("Completed tasks", run.completed_tasks, true),
-                ("In-progress tasks", run.in_progress_tasks, false),
-                ("Pending tasks", run.pending_tasks, false),
-                ("Blocked tasks", run.blocked_tasks, false),
-                ("Failed tasks", run.failed_tasks, false),
-            ] {
-                if count > 0 {
-                    plan_items.push(DemoPlanItem {
-                        id: format!(
-                            "{}-{}",
-                            run.session_id,
-                            label.to_lowercase().replace(' ', "-")
-                        ),
-                        title: format!("{label}: {count}"),
-                        done,
-                    });
-                }
-            }
-            if plan_items.is_empty() {
-                plan_items.push(DemoPlanItem {
-                    id: format!("{}-idle", run.session_id),
-                    title: "No queued tasks".to_owned(),
-                    done: true,
-                });
-            }
+            let status = hive_goal_status(run.runtime_status.as_deref(), &run.agent_state);
             DemoGoal {
                 id: run.session_id.clone(),
-                objective: run
-                    .diagnostic_summary
-                    .clone()
-                    .filter(|summary| !summary.is_empty())
-                    .unwrap_or_else(|| run.title.clone()),
+                objective: run.title.clone(),
                 status,
-                plan_items,
+                // Live task rows come only from `/hive/sessions/:id/status`.
+                // Never manufacture aggregate pseudo-plan items from counters.
+                plan_items: Vec::new(),
                 thread_id: Some(run.session_id.clone()),
-                updated_at: None,
+                updated_at: chrono::DateTime::parse_from_rfc3339(&run.updated_at)
+                    .ok()
+                    .map(|time| time.timestamp()),
             }
         })
         .collect()
@@ -15864,6 +16488,74 @@ mod tests {
         ));
         assert_eq!(ScheduleRecurrenceKind::Once.label(), "Once");
         assert_eq!(ScheduleRecurrenceKind::Monthly.label(), "Monthly");
+    }
+
+    #[test]
+    fn live_hive_status_prefers_runtime_and_controls_follow_it() {
+        assert_eq!(
+            hive_goal_status(Some("error"), "idle"),
+            DemoGoalStatus::Blocked
+        );
+        assert_eq!(
+            hive_goal_status(Some("paused"), "streaming"),
+            DemoGoalStatus::Paused
+        );
+        assert_eq!(
+            hive_session_toggle_action(Some("running")),
+            Some(ProductHiveSessionAction::Pause)
+        );
+        assert_eq!(
+            hive_session_toggle_action(Some("error")),
+            Some(ProductHiveSessionAction::Resume)
+        );
+        assert_eq!(hive_session_toggle_action(Some("cancelled")), None);
+        assert!(hive_cancel_confirmation_required(None, "hive-1"));
+        assert!(!hive_cancel_confirmation_required(Some("hive-1"), "hive-1"));
+    }
+
+    #[test]
+    fn live_hive_projection_never_invents_aggregate_plan_rows() {
+        let snapshot = ProductHiveSnapshot {
+            status: mitsuro_desktop_backend::ProductHiveStatus {
+                home_status: "failed".into(),
+                total_count: 1,
+                running_count: 0,
+                sleeping_count: 0,
+                scheduled_count: 0,
+                paused_count: 0,
+                failed_count: 1,
+                idle_count: 0,
+                pending_approvals_count: 0,
+                next_wake_at: None,
+            },
+            runs: vec![mitsuro_desktop_backend::ProductHiveRun {
+                session_id: "hive-1".into(),
+                title: "Authoritative title".into(),
+                updated_at: "2026-08-10T00:00:00Z".into(),
+                project_dir: Some("/workspace".into()),
+                target_branch: Some("main".into()),
+                agent_state: "idle".into(),
+                runtime_status: Some("error".into()),
+                next_wake_at: None,
+                sleep_reason: None,
+                last_error: Some("provider unavailable".into()),
+                current_run_id: Some("run-1".into()),
+                crew_slug: Some("release".into()),
+                priority: ProductHivePriority::High,
+                pending_tasks: 2,
+                in_progress_tasks: 1,
+                completed_tasks: 3,
+                failed_tasks: 1,
+                blocked_tasks: 0,
+                diagnostic_summary: Some("Do not replace the title".into()),
+            }],
+        };
+
+        let goals = hive_goals_from_snapshot(&snapshot);
+        assert_eq!(goals[0].objective, "Authoritative title");
+        assert_eq!(goals[0].status, DemoGoalStatus::Blocked);
+        assert!(goals[0].plan_items.is_empty());
+        assert_eq!(goals[0].updated_at, Some(1_786_320_000));
     }
 
     #[test]

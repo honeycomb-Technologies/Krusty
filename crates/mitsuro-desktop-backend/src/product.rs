@@ -380,6 +380,13 @@ pub struct ProductHiveRun {
     pub project_dir: Option<String>,
     pub target_branch: Option<String>,
     pub agent_state: String,
+    pub runtime_status: Option<String>,
+    pub next_wake_at: Option<String>,
+    pub sleep_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub current_run_id: Option<String>,
+    pub crew_slug: Option<String>,
+    pub priority: ProductHivePriority,
     pub pending_tasks: usize,
     pub in_progress_tasks: usize,
     pub completed_tasks: usize,
@@ -392,6 +399,79 @@ pub struct ProductHiveRun {
 pub struct ProductHiveSnapshot {
     pub status: ProductHiveStatus,
     pub runs: Vec<ProductHiveRun>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProductHivePriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductHiveTask {
+    pub id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+    pub owner: Option<String>,
+    pub blocked_by: Vec<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductHiveSessionDetail {
+    pub session_id: String,
+    pub title: String,
+    pub agent_state: String,
+    pub runtime_status: Option<String>,
+    pub next_wake_at: Option<String>,
+    pub sleep_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub current_run_id: Option<String>,
+    pub crew_slug: Option<String>,
+    pub priority: ProductHivePriority,
+    pub tick_interval_secs: u64,
+    pub max_ticks: usize,
+    pub tasks: Vec<ProductHiveTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductHiveDispatchRequest {
+    pub task: String,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub model_key: Option<ProductModelKey>,
+    pub start_at: Option<String>,
+    pub priority: ProductHivePriority,
+    pub crew_slug: Option<String>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductHiveDispatch {
+    pub session_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductHiveSessionAction {
+    Message(String),
+    Pause,
+    Resume,
+    Cancel,
+    SetPriority(ProductHivePriority),
+    SetCrew(Option<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductHiveSessionMutationRequest {
+    pub session_id: String,
+    pub action: ProductHiveSessionAction,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,6 +666,35 @@ pub struct ProductScheduleReplaceRequest {
     pub revision: u64,
     pub definition: ProductScheduleDefinition,
     pub idempotency_key: String,
+}
+
+fn product_hive_priority_from_mitsuro(
+    priority: mitsuro_client::HiveRunPriority,
+) -> ProductHivePriority {
+    match priority {
+        mitsuro_client::HiveRunPriority::Low => ProductHivePriority::Low,
+        mitsuro_client::HiveRunPriority::Normal => ProductHivePriority::Normal,
+        mitsuro_client::HiveRunPriority::High => ProductHivePriority::High,
+    }
+}
+
+fn product_hive_priority_to_mitsuro(
+    priority: ProductHivePriority,
+) -> mitsuro_client::HiveRunPriority {
+    match priority {
+        ProductHivePriority::Low => mitsuro_client::HiveRunPriority::Low,
+        ProductHivePriority::Normal => mitsuro_client::HiveRunPriority::Normal,
+        ProductHivePriority::High => mitsuro_client::HiveRunPriority::High,
+    }
+}
+
+fn product_model_key_to_mitsuro(key: ProductModelKey) -> mitsuro_client::ModelKey {
+    mitsuro_client::ModelKey {
+        provider: key.provider,
+        model_id: key.model_id,
+        auth_scope: key.auth_scope,
+        api_format: key.api_format,
+    }
 }
 
 fn product_recurrence_from_mitsuro(
@@ -831,6 +940,15 @@ pub trait ProductBackend: Send + Sync {
     async fn terminate_background_process(&self, process_id: String) -> Result<()>;
 
     async fn hive_snapshot(&self) -> Result<ProductHiveSnapshot>;
+
+    async fn dispatch_hive(
+        &self,
+        request: ProductHiveDispatchRequest,
+    ) -> Result<ProductHiveDispatch>;
+
+    async fn read_hive_session(&self, session_id: String) -> Result<ProductHiveSessionDetail>;
+
+    async fn mutate_hive_session(&self, request: ProductHiveSessionMutationRequest) -> Result<()>;
 
     async fn list_schedules(&self) -> Result<Vec<ProductSchedule>>;
 
@@ -1684,22 +1802,217 @@ impl ProductBackend for DesktopBackend {
             runs: current
                 .runs
                 .into_iter()
-                .map(|run| ProductHiveRun {
-                    session_id: run.session_id,
-                    title: run.title,
-                    updated_at: run.updated_at,
-                    project_dir: run.project_dir,
-                    target_branch: run.target_branch,
-                    agent_state: run.agent_state,
-                    pending_tasks: run.pending_tasks,
-                    in_progress_tasks: run.in_progress_tasks,
-                    completed_tasks: run.completed_tasks,
-                    failed_tasks: run.failed_tasks,
-                    blocked_tasks: run.blocked_tasks,
-                    diagnostic_summary: run.diagnostic.map(|diagnostic| diagnostic.summary),
+                .map(|run| {
+                    let (
+                        runtime_status,
+                        next_wake_at,
+                        sleep_reason,
+                        last_error,
+                        current_run_id,
+                        crew_slug,
+                        priority,
+                    ) = match run.runtime {
+                        Some(runtime) => (
+                            Some(runtime.status),
+                            runtime.next_wake_at,
+                            runtime.sleep_reason,
+                            runtime.last_error,
+                            runtime.current_run_id,
+                            runtime.crew_slug,
+                            product_hive_priority_from_mitsuro(runtime.priority),
+                        ),
+                        None => (
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            ProductHivePriority::Normal,
+                        ),
+                    };
+                    ProductHiveRun {
+                        session_id: run.session_id,
+                        title: run.title,
+                        updated_at: run.updated_at,
+                        project_dir: run.project_dir,
+                        target_branch: run.target_branch,
+                        agent_state: run.agent_state,
+                        runtime_status,
+                        next_wake_at,
+                        sleep_reason,
+                        last_error,
+                        current_run_id,
+                        crew_slug,
+                        priority,
+                        pending_tasks: run.pending_tasks,
+                        in_progress_tasks: run.in_progress_tasks,
+                        completed_tasks: run.completed_tasks,
+                        failed_tasks: run.failed_tasks,
+                        blocked_tasks: run.blocked_tasks,
+                        diagnostic_summary: run.diagnostic.map(|diagnostic| diagnostic.summary),
+                    }
                 })
                 .collect(),
         })
+    }
+
+    async fn dispatch_hive(
+        &self,
+        request: ProductHiveDispatchRequest,
+    ) -> Result<ProductHiveDispatch> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive dispatch".to_owned(),
+            ));
+        };
+        let idempotency_key = request.idempotency_key;
+        let request = mitsuro_client::HiveDispatchRequest {
+            task: request.task,
+            project_dir: request.project_dir,
+            model: request.model,
+            model_key: request.model_key.map(product_model_key_to_mitsuro),
+            start_at: request.start_at,
+            priority: Some(product_hive_priority_to_mitsuro(request.priority)),
+            crew_slug: request.crew_slug,
+        };
+        let response = backend
+            .client()
+            .dispatch_hive(&request, Some(&idempotency_key))
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(ProductHiveDispatch {
+            session_id: response.session_id,
+            status: response.status,
+        })
+    }
+
+    async fn read_hive_session(&self, session_id: String) -> Result<ProductHiveSessionDetail> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive session details".to_owned(),
+            ));
+        };
+        let response = backend
+            .client()
+            .hive_session_status(&session_id)
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        let (
+            runtime_status,
+            next_wake_at,
+            sleep_reason,
+            last_error,
+            current_run_id,
+            crew_slug,
+            priority,
+        ) = match response.runtime {
+            Some(runtime) => (
+                Some(runtime.status),
+                runtime.next_wake_at,
+                runtime.sleep_reason,
+                runtime.last_error,
+                runtime.current_run_id,
+                runtime.crew_slug,
+                product_hive_priority_from_mitsuro(runtime.priority),
+            ),
+            None => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ProductHivePriority::Normal,
+            ),
+        };
+        Ok(ProductHiveSessionDetail {
+            session_id: response.session_id,
+            title: response.title,
+            agent_state: response.agent_state,
+            runtime_status,
+            next_wake_at,
+            sleep_reason,
+            last_error,
+            current_run_id,
+            crew_slug,
+            priority,
+            tick_interval_secs: response.cadence.tick_interval_secs,
+            max_ticks: response.cadence.max_ticks,
+            tasks: response
+                .tasks
+                .into_iter()
+                .map(|task| ProductHiveTask {
+                    id: task.id,
+                    subject: task.subject,
+                    description: task.description,
+                    status: task.status,
+                    owner: task.owner,
+                    blocked_by: task.blocked_by,
+                    updated_at: task.updated_at,
+                    completed_at: task.completed_at,
+                    result: task.result,
+                })
+                .collect(),
+        })
+    }
+
+    async fn mutate_hive_session(&self, request: ProductHiveSessionMutationRequest) -> Result<()> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive session controls".to_owned(),
+            ));
+        };
+        let key = Some(request.idempotency_key.as_str());
+        match request.action {
+            ProductHiveSessionAction::Message(message) => {
+                backend
+                    .client()
+                    .send_hive_message(&request.session_id, message, key)
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+            ProductHiveSessionAction::Pause => {
+                backend
+                    .client()
+                    .pause_hive_session(&request.session_id, key)
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+            ProductHiveSessionAction::Resume => {
+                backend
+                    .client()
+                    .resume_hive_session(&request.session_id, key)
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+            ProductHiveSessionAction::Cancel => {
+                backend
+                    .client()
+                    .cancel_hive_session(&request.session_id, key)
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+            ProductHiveSessionAction::SetPriority(priority) => {
+                backend
+                    .client()
+                    .set_hive_priority(
+                        &request.session_id,
+                        product_hive_priority_to_mitsuro(priority),
+                        key,
+                    )
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+            ProductHiveSessionAction::SetCrew(crew_slug) => {
+                backend
+                    .client()
+                    .set_hive_crew(&request.session_id, crew_slug, key)
+                    .await
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
     async fn list_schedules(&self) -> Result<Vec<ProductSchedule>> {
@@ -2571,6 +2884,178 @@ mod tests {
             .await
             .expect_err("Codex must reject Mitsuro schedule replacement");
         assert!(matches!(replace_error, AgentError::NotImplemented(_)));
+    }
+
+    fn hive_dispatch_request() -> ProductHiveDispatchRequest {
+        ProductHiveDispatchRequest {
+            task: "Ship the native Work surface".into(),
+            project_dir: Some("/workspace".into()),
+            model: Some("gpt-5.5".into()),
+            model_key: Some(ProductModelKey {
+                provider: "openai".into(),
+                model_id: "gpt-5.5".into(),
+                auth_scope: Some("chatgpt".into()),
+                api_format: "responses".into(),
+            }),
+            start_at: None,
+            priority: ProductHivePriority::High,
+            crew_slug: Some("release".into()),
+            idempotency_key: "hive-key".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_product_hive_operations_are_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let dispatch_error = backend
+            .dispatch_hive(hive_dispatch_request())
+            .await
+            .expect_err("Codex must reject Mitsuro Hive dispatch");
+        assert!(matches!(dispatch_error, AgentError::NotImplemented(_)));
+
+        let detail_error = backend
+            .read_hive_session("session-7".into())
+            .await
+            .expect_err("Codex must reject Mitsuro Hive details");
+        assert!(matches!(detail_error, AgentError::NotImplemented(_)));
+
+        let mutation_error = backend
+            .mutate_hive_session(ProductHiveSessionMutationRequest {
+                session_id: "session-7".into(),
+                action: ProductHiveSessionAction::Pause,
+                idempotency_key: "hive-key".into(),
+            })
+            .await
+            .expect_err("Codex must reject Mitsuro Hive controls");
+        assert!(matches!(mutation_error, AgentError::NotImplemented(_)));
+    }
+
+    #[tokio::test]
+    async fn mitsuro_product_hive_contract_preserves_authoritative_state_and_controls() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let expected = [
+                ("GET", "/api/hive/current"),
+                ("POST", "/api/hive/dispatch"),
+                ("GET", "/api/hive/sessions/session-7/status"),
+                ("POST", "/api/hive/sessions/session-7/message"),
+                ("POST", "/api/hive/sessions/session-7/pause"),
+                ("POST", "/api/hive/sessions/session-7/resume"),
+                ("POST", "/api/hive/sessions/session-7/priority"),
+                ("POST", "/api/hive/sessions/session-7/crew"),
+                ("DELETE", "/api/hive/sessions/session-7"),
+            ];
+            for (index, (method, path)) in expected.into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 16 * 1024];
+                let size = socket.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(
+                    request.starts_with(&format!("{method} {path} ")),
+                    "request was {request}"
+                );
+                let headers = request.to_ascii_lowercase();
+                if method != "GET" {
+                    assert!(headers.contains("idempotency-key: hive-key"));
+                }
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                match index {
+                    1 => {
+                        let body: serde_json::Value =
+                            serde_json::from_str(body).expect("dispatch JSON");
+                        assert_eq!(body["task"], "Ship the native Work surface");
+                        assert_eq!(body["project_dir"], "/workspace");
+                        assert_eq!(body["model"], "gpt-5.5");
+                        assert_eq!(body["model_key"]["provider"], "openai");
+                        assert_eq!(body["priority"], "high");
+                        assert_eq!(body["crew_slug"], "release");
+                    }
+                    3 => assert!(body.contains("\"message\":\"Focus on validation\"")),
+                    4 | 5 => assert_eq!(body, "{}"),
+                    6 => assert!(body.contains("\"priority\":\"low\"")),
+                    7 => assert!(body.contains("\"crew_slug\":null")),
+                    _ => {}
+                }
+
+                let (status, response_body) = match index {
+                    0 => (
+                        "200 OK",
+                        r#"{"status":{"home_status":"failed","total_count":1,"running_count":0,"sleeping_count":0,"scheduled_count":0,"paused_count":0,"failed_count":1,"idle_count":0,"pending_approvals_count":0,"next_wake_at":null},"diagnostics":{},"runs":[{"session_id":"session-7","title":"Native Work","updated_at":"2026-08-10T00:02:00Z","project_dir":"/workspace","target_branch":"main","agent_state":"idle","runtime":{"session_id":"session-7","status":"error","next_wake_at":null,"sleep_reason":null,"last_error":"provider unavailable","current_run_id":"run-7","last_wake_reason":"dispatch","crew_slug":"release","priority":"high","updated_at":"2026-08-10T00:02:00Z"},"pending_tasks":0,"in_progress_tasks":0,"completed_tasks":1,"failed_tasks":1,"blocked_tasks":0,"diagnostic":{"kind":"runtime","severity":"error","summary":"Provider failed","detail":"provider unavailable"}}],"approvals":[]}"#,
+                    ),
+                    1 => (
+                        "201 Created",
+                        r#"{"session_id":"session-7","status":"started"}"#,
+                    ),
+                    2 => (
+                        "200 OK",
+                        r#"{"session_id":"session-7","session_type":"hive","title":"Native Work","tasks":[{"id":"task-7","session_id":"session-7","subject":"Wire controls","description":"Use the authoritative API","status":"in_progress","owner":"release","blocked_by":["task-6"],"created_at":"2026-08-10T00:00:00Z","updated_at":"2026-08-10T00:01:00Z","completed_at":null,"result":null}],"agent_state":"idle","runtime":{"session_id":"session-7","status":"paused","next_wake_at":null,"sleep_reason":"manual_pause","last_error":null,"current_run_id":null,"last_wake_reason":"pause","crew_slug":"release","priority":"high","updated_at":"2026-08-10T00:01:00Z"},"cadence":{"tick_interval_secs":30,"max_ticks":1000}}"#,
+                    ),
+                    8 => ("204 No Content", ""),
+                    _ => ("200 OK", r#"{"ok":true}"#),
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{response_body}",
+                            response_body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        let mitsuro = crate::MitsuroServerBackend::from_url(format!("http://{address}"), None)
+            .expect("Mitsuro backend");
+        let backend = DesktopBackend::Mitsuro(Arc::new(mitsuro));
+
+        let snapshot = backend.hive_snapshot().await.expect("Hive snapshot");
+        assert_eq!(snapshot.runs[0].agent_state, "idle");
+        assert_eq!(snapshot.runs[0].runtime_status.as_deref(), Some("error"));
+        assert_eq!(
+            snapshot.runs[0].last_error.as_deref(),
+            Some("provider unavailable")
+        );
+        assert_eq!(snapshot.runs[0].priority, ProductHivePriority::High);
+
+        let dispatch = backend
+            .dispatch_hive(hive_dispatch_request())
+            .await
+            .expect("Hive dispatch");
+        assert_eq!(dispatch.session_id, "session-7");
+        assert_eq!(dispatch.status, "started");
+
+        let detail = backend
+            .read_hive_session("session-7".into())
+            .await
+            .expect("Hive detail");
+        assert_eq!(detail.runtime_status.as_deref(), Some("paused"));
+        assert_eq!(detail.sleep_reason.as_deref(), Some("manual_pause"));
+        assert_eq!(detail.tasks.len(), 1);
+        assert_eq!(detail.tasks[0].subject, "Wire controls");
+        assert_eq!(detail.tasks[0].blocked_by, ["task-6"]);
+
+        for action in [
+            ProductHiveSessionAction::Message("Focus on validation".into()),
+            ProductHiveSessionAction::Pause,
+            ProductHiveSessionAction::Resume,
+            ProductHiveSessionAction::SetPriority(ProductHivePriority::Low),
+            ProductHiveSessionAction::SetCrew(None),
+            ProductHiveSessionAction::Cancel,
+        ] {
+            backend
+                .mutate_hive_session(ProductHiveSessionMutationRequest {
+                    session_id: "session-7".into(),
+                    action,
+                    idempotency_key: "hive-key".into(),
+                })
+                .await
+                .expect("Hive mutation");
+        }
+        server.join().expect("test server join");
     }
 
     #[tokio::test]

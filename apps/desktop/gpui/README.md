@@ -82,8 +82,13 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   remote, embedded, skill, and mention input. Cancel is local and non-destructive.
   Navigation/backend switching is held during the rollback/resubmit boundary. Mitsuro
   hides editing because its HTTP API has no destructive turn rollback.
-- Mitsuro Work is a read-only projection of `/api/hive/current`; Hive dispatch and
-  task mutations are deliberately unavailable in GPUI for now.
+- Mitsuro Work reads the authoritative `/api/hive/current` catalog and the selected
+  session's `/api/hive/sessions/:id/status` detail. The native screen renders real task
+  rows rather than counter-derived pseudo-plan items, prefers runtime state over stale
+  agent state, and exposes typed dispatch, message, pause/resume, priority, crew, and
+  confirmed cancellation controls. Each write carries a unique idempotency key and
+  refreshes both the catalog and selected-session detail after success. Codex renders an
+  explicit unsupported state because app-server has no Mitsuro Hive control plane.
 - Scheduled reads `/api/hive/schedules` and exposes real Mitsuro pause, resume, and
   cancellation controls. Every mutation sends the schedule revision through `If-Match`
   plus a unique idempotency key, refreshes the authoritative catalog after success, and

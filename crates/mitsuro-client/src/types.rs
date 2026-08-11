@@ -111,13 +111,109 @@ pub struct HiveCurrentRun {
     pub project_dir: Option<String>,
     pub target_branch: Option<String>,
     pub agent_state: String,
-    pub runtime: Option<Value>,
+    pub runtime: Option<HiveRuntimeState>,
     pub pending_tasks: usize,
     pub in_progress_tasks: usize,
     pub completed_tasks: usize,
     pub failed_tasks: usize,
     pub blocked_tasks: usize,
     pub diagnostic: Option<HiveRunDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveRunPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveRuntimeState {
+    pub session_id: String,
+    pub status: String,
+    pub next_wake_at: Option<String>,
+    pub sleep_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub current_run_id: Option<String>,
+    pub last_wake_reason: Option<String>,
+    pub crew_slug: Option<String>,
+    #[serde(default)]
+    pub priority: HiveRunPriority,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveTask {
+    pub id: String,
+    pub session_id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveCadence {
+    pub tick_interval_secs: u64,
+    pub max_ticks: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveSessionStatus {
+    pub session_id: String,
+    pub session_type: String,
+    pub title: String,
+    #[serde(default)]
+    pub tasks: Vec<HiveTask>,
+    pub agent_state: String,
+    pub runtime: Option<HiveRuntimeState>,
+    pub cadence: HiveCadence,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveDispatchRequest {
+    pub task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<HiveRunPriority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crew_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveDispatchResponse {
+    pub session_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveMessageRequest {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HivePriorityRequest {
+    pub priority: HiveRunPriority,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveCrewRequest {
+    pub crew_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1732,9 +1828,9 @@ mod tests {
     use super::{
         ChatStreamEvent, ContentBlock, DelegatedProgressStatus, DelegatedRunRole,
         DelegationEventKind, DelegationExecutionMode, DelegationParentContinuationState, FastMode,
-        HiveCurrentResponse, HiveScheduleRecurrence, HiveScheduleSummary, ModelInfo,
-        ReasoningControl, ReasoningEffort, SessionStateResponse, SessionType, SteerRequest,
-        ThinkingLevel,
+        HiveCurrentResponse, HiveRunPriority, HiveScheduleRecurrence, HiveScheduleSummary,
+        ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse, SessionType,
+        SteerRequest, ThinkingLevel,
     };
     use serde_json::json;
 
@@ -1766,7 +1862,12 @@ mod tests {
             "runs": [{
                 "session_id": "hive-1", "title": "Audit", "updated_at": "now",
                 "project_dir": null, "target_branch": null, "agent_state": "idle",
-                "runtime": null, "pending_tasks": 0, "in_progress_tasks": 0,
+                "runtime": {
+                    "session_id": "hive-1", "status": "error", "next_wake_at": null,
+                    "sleep_reason": null, "last_error": "provider unavailable",
+                    "current_run_id": "run-1", "last_wake_reason": "dispatch",
+                    "crew_slug": "release", "priority": "high", "updated_at": "now"
+                }, "pending_tasks": 0, "in_progress_tasks": 0,
                 "completed_tasks": 2, "failed_tasks": 0, "blocked_tasks": 0,
                 "cadence": {"tick_interval_secs": 60, "max_ticks": 10},
                 "diagnostic": null
@@ -1775,6 +1876,10 @@ mod tests {
         }))
         .expect("Hive current response");
         assert_eq!(current.runs[0].session_id, "hive-1");
+        let runtime = current.runs[0].runtime.as_ref().expect("typed runtime");
+        assert_eq!(runtime.status, "error");
+        assert_eq!(runtime.last_error.as_deref(), Some("provider unavailable"));
+        assert_eq!(runtime.priority, HiveRunPriority::High);
 
         let schedules: Vec<HiveScheduleSummary> = serde_json::from_value(json!([{
             "id": "schedule-1", "controller_id": "controller-1", "title": "Sweep",

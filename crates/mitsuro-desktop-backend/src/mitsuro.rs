@@ -1769,7 +1769,16 @@ mod tests {
             .list_processes()
             .await
             .expect("process list");
-        backend.client().hive_current().await.expect("Hive current");
+        let hive = backend.client().hive_current().await.expect("Hive current");
+        if let Some(run) = hive.runs.first() {
+            let detail = backend
+                .client()
+                .hive_session_status(&run.session_id)
+                .await
+                .expect("Hive session detail");
+            assert_eq!(detail.session_id, run.session_id);
+            assert_eq!(detail.session_type, "hive");
+        }
         backend
             .client()
             .list_hive_schedules()
