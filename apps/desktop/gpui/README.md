@@ -105,6 +105,12 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Secondary Settings actions without an implementation are non-interactive and labeled
   `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
   separate live implementations.
+- Generic Settings controls are fail-closed rather than decorative. Send shortcut,
+  sidebar profile-name visibility, and archived-recents visibility are the only generic
+  controls currently allowed to mutate the privacy-safe desktop preference file; each
+  changes runtime behavior immediately. Full access and realtime voice keep their
+  specialized live paths. All remaining reference controls are dimmed, explicitly
+  unavailable, non-hovering, and non-clickable.
 - Account and Usage render protocol data only when the connected backend supplies a
   complete snapshot. Mitsuro HTTP shows an explicit unsupported state; it does not show
   sample identities, plans, credits, limits, or billing history.

@@ -337,91 +337,45 @@ const SETTINGS_SECTIONS: [SettingsSection; 21] = [
     SettingsSection::ArchivedChats,
 ];
 
+fn runtime_wired_settings_toggle(key: &str) -> bool {
+    matches!(key, "profile_show_name" | "archived_show_in_recents")
+}
+
+fn runtime_wired_settings_choice(key: &str) -> bool {
+    key == "send_shortcut"
+}
+
+fn retain_runtime_wired_settings(preferences: &mut DesktopPreferences) {
+    preferences
+        .settings_toggles
+        .retain(|key, _| runtime_wired_settings_toggle(key) || key == "full_access");
+    preferences
+        .settings_choices
+        .retain(|key, _| runtime_wired_settings_choice(key) || key == "voice_output");
+}
+
+fn composer_enter_should_send(send_shortcut: &str, secondary: bool) -> bool {
+    match send_shortcut {
+        "Ctrl+Enter" => secondary,
+        _ => !secondary,
+    }
+}
+
 fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
     let mut m = std::collections::HashMap::new();
-    // General
+    // Controls with an observable desktop runtime effect. Reference controls
+    // without an implementation render disabled and are not persisted.
     m.insert("full_access".into(), true);
-    m.insert("bottom_panel".into(), true);
-    m.insert("suggested_prompts".into(), true);
-    m.insert("show_context_usage".into(), false);
-    m.insert("popout_standalone".into(), false);
-    // Linux desktop
-    m.insert("compact_prompt".into(), true);
-    m.insert("system_tray".into(), true);
-    m.insert("warm_start".into(), true);
-    m.insert("install_updates_on_close".into(), false);
-    // Appearance
-    m.insert("use_system_theme".into(), false);
-    m.insert("reduce_motion".into(), false);
-    m.insert("high_contrast".into(), false);
-    m.insert("translucent_sidebar".into(), true);
-    // Voice
-    m.insert("voice_auto_send".into(), true);
-    m.insert("voice_noise_suppression".into(), true);
-    m.insert("voice_push_to_talk".into(), true);
-    m.insert("voice_auto_start".into(), false);
-    // Pets / personalization / import
-    m.insert("pets_enabled".into(), false);
-    m.insert("pets_react".into(), true);
-    m.insert("remember_project_prefs".into(), true);
-    m.insert("enable_local_memories".into(), true);
-    m.insert("memory_from_tools".into(), false);
-    m.insert("import_archived".into(), false);
-    // Plugins / browser / hooks / git / worktrees
-    m.insert("plugins_auto_update".into(), true);
-    m.insert("browser_persist_cookies".into(), true);
-    m.insert("hooks_enabled".into(), false);
-    m.insert("auto_reconnect".into(), true);
-    m.insert("git_auto_stage".into(), false);
-    m.insert("git_sign_commits".into(), false);
-    m.insert("git_pr_helper".into(), true);
-    m.insert("git_force_push".into(), false);
-    m.insert("worktrees_enabled".into(), true);
-    m.insert("worktrees_auto_prune".into(), true);
     m.insert("archived_show_in_recents".into(), false);
-    m.insert("prefer_agents_md".into(), true);
-    m.insert("env_prefer_local".into(), true);
-    m.insert("emacs_bindings".into(), false);
     m.insert("profile_show_name".into(), true);
     m
 }
 
 fn default_settings_choices() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
-    m.insert("file_open_dest".into(), "Zed".into());
-    m.insert("language".into(), "Auto detect".into());
-    m.insert("terminal_location".into(), "Bottom".into());
-    m.insert("speed".into(), "Fast".into());
     m.insert("send_shortcut".into(), "Enter".into());
-    m.insert("follow_up".into(), "Queue".into());
-    m.insert("theme".into(), "Dark".into());
-    m.insert("density".into(), "Comfortable".into());
-    m.insert("font_size".into(), "Default".into());
-    m.insert("font_scale".into(), "100%".into());
-    m.insert("code_font".into(), "JetBrains Mono".into());
-    m.insert("code_font_size".into(), "13px".into());
-    m.insert("accent_color".into(), "Blue".into());
-    m.insert("voice_input".into(), "System default".into());
     // Reverse voice names (settings.general.realtimeVoice.voice.*) — Sol default.
     m.insert("voice_output".into(), "Sol".into());
-    // Reverse personality: Friendly | Pragmatic.
-    m.insert("personality".into(), "Friendly".into());
-    m.insert("reduce_motion".into(), "Off".into());
-    m.insert("diff_markers".into(), "Color".into());
-    m.insert("contrast".into(), "Default".into());
-    m.insert("ui_font".into(), "Inter".into());
-    m.insert("ui_font_size".into(), "14px".into());
-    m.insert("review_delivery".into(), "Inline".into());
-    m.insert("pet_kind".into(), "Fox".into());
-    m.insert("pet_size".into(), "Medium".into());
-    m.insert("pet_position".into(), "Bottom-right".into());
-    m.insert("browser_engine".into(), "System".into());
-    m.insert("default_browser".into(), "System default".into());
-    m.insert("browser_approval".into(), "Always ask".into());
-    m.insert("git_default_branch".into(), "main".into());
-    m.insert("git_pr_merge".into(), "Squash".into());
-    m.insert("worktree_strategy".into(), "Git worktree".into());
-    m.insert("worktree_keep_count".into(), "5".into());
     m
 }
 
@@ -1441,14 +1395,19 @@ pub struct MitsuroApp {
 
 impl MitsuroApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let preferences = DesktopPreferences::load_default().unwrap_or_else(|error| {
+        let mut preferences = DesktopPreferences::load_default().unwrap_or_else(|error| {
             eprintln!("[mitsuro] desktop preference load failed: {error}");
             DesktopPreferences::default()
         });
+        retain_runtime_wired_settings(&mut preferences);
         let mut settings_toggles = default_settings_toggles();
         settings_toggles.extend(preferences.settings_toggles.clone());
         let mut settings_choices = default_settings_choices();
         settings_choices.extend(preferences.settings_choices.clone());
+        let show_archived = settings_toggles
+            .get("archived_show_in_recents")
+            .copied()
+            .unwrap_or(false);
         let composer_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Do anything")
@@ -1458,11 +1417,17 @@ impl MitsuroApp {
         cx.subscribe_in(
             &composer_input,
             window,
-            |app, _input, event: &InputEvent, _window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let _ = app;
-                    cx.notify();
+            |app, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { secondary }
+                    if composer_enter_should_send(
+                        &app.settings_choice("send_shortcut", "Enter"),
+                        *secondary,
+                    ) =>
+                {
+                    app.submit_composer(input, window, cx);
                 }
+                _ => {}
             },
         )
         .detach();
@@ -1878,7 +1843,7 @@ impl MitsuroApp {
             active_turn_thread_id: None,
             active_turn_id: None,
             turn_cancel: None,
-            show_archived: false,
+            show_archived,
             pending_approval: None,
             fixture_resume: None,
             live_approval_bridge: None,
@@ -5132,15 +5097,31 @@ impl MitsuroApp {
         self.settings_toggles.get(key).copied().unwrap_or(default)
     }
 
+    pub fn settings_toggle_is_runtime_wired(key: &str) -> bool {
+        runtime_wired_settings_toggle(key)
+    }
+
     pub fn flip_settings_toggle(&mut self, key: &str, default: bool, cx: &mut Context<Self>) {
+        if !runtime_wired_settings_toggle(key) {
+            self.status_line = format!(
+                "Settings · {} · unavailable in this build",
+                self.settings_section.label()
+            )
+            .into();
+            cx.notify();
+            return;
+        }
         let next = !self.settings_toggle(key, default);
         self.settings_toggles.insert(key.to_string(), next);
         self.preferences
             .settings_toggles
             .insert(key.to_string(), next);
+        if key == "archived_show_in_recents" {
+            self.show_archived = next;
+        }
         self.save_preferences_best_effort();
         self.status_line = format!(
-            "Settings · {} · {} · saved locally (runtime wiring unchanged)",
+            "Settings · {} · {} · applied on this device",
             self.settings_section.label(),
             if next { "on" } else { "off" }
         )
@@ -5198,6 +5179,10 @@ impl MitsuroApp {
             .get(key)
             .cloned()
             .unwrap_or_else(|| default.to_string())
+    }
+
+    pub fn settings_choice_is_runtime_wired(key: &str) -> bool {
+        runtime_wired_settings_choice(key)
     }
 
     pub fn realtime_voices_state(&self) -> SurfaceDataState {
@@ -5573,6 +5558,15 @@ impl MitsuroApp {
         value: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
+        if !runtime_wired_settings_choice(key) {
+            self.status_line = format!(
+                "Settings · {} · unavailable in this build",
+                self.settings_section.label()
+            )
+            .into();
+            cx.notify();
+            return;
+        }
         let value = value.into();
         self.settings_choices.insert(key.to_string(), value.clone());
         self.preferences
@@ -5580,7 +5574,7 @@ impl MitsuroApp {
             .insert(key.to_string(), value.clone());
         self.save_preferences_best_effort();
         self.status_line = format!(
-            "Settings · {} · {value} · saved locally (runtime wiring unchanged)",
+            "Settings · {} · {value} · applied on this device",
             self.settings_section.label()
         )
         .into();
@@ -9853,6 +9847,10 @@ impl MitsuroApp {
         SharedString::from("Account")
     }
 
+    pub fn profile_name_visible_in_sidebar(&self) -> bool {
+        self.settings_toggle("profile_show_name", true)
+    }
+
     /// Plan chip for profile footer (e.g. "Pro"). Empty when unknown.
     pub fn profile_plan_label(&self) -> Option<SharedString> {
         self.account
@@ -11347,6 +11345,12 @@ impl MitsuroApp {
         }
 
         if self.turn_in_progress {
+            if !self.can_steer_active_turn() {
+                self.status_line =
+                    "Follow-up unavailable · the active turn is not currently steerable.".into();
+                cx.notify();
+                return;
+            }
             if !self.composer_attachments.is_empty() {
                 self.status_line = "Attachments cannot steer an active turn.".into();
                 cx.notify();
@@ -15793,6 +15797,47 @@ mod tests {
         assert!(!valid_file_child_name("../escape"));
         assert_eq!(duplicate_file_name("/tmp/notes.txt"), "notes copy.txt");
         assert_eq!(duplicate_file_name("/tmp/LICENSE"), "LICENSE copy");
+    }
+
+    #[test]
+    fn generic_settings_only_advertise_observable_runtime_effects() {
+        assert!(runtime_wired_settings_toggle("profile_show_name"));
+        assert!(runtime_wired_settings_toggle("archived_show_in_recents"));
+        assert!(!runtime_wired_settings_toggle("theme"));
+        assert!(!runtime_wired_settings_toggle("worktrees_enabled"));
+        assert!(runtime_wired_settings_choice("send_shortcut"));
+        assert!(!runtime_wired_settings_choice("follow_up"));
+        assert!(!runtime_wired_settings_choice("accent_color"));
+    }
+
+    #[test]
+    fn legacy_decorative_settings_are_not_loaded_into_product_state() {
+        let mut preferences = DesktopPreferences::default();
+        preferences.settings_toggles.extend([
+            ("profile_show_name".into(), false),
+            ("theme_animation".into(), true),
+            ("full_access".into(), false),
+        ]);
+        preferences.settings_choices.extend([
+            ("send_shortcut".into(), "Ctrl+Enter".into()),
+            ("theme".into(), "Light".into()),
+            ("voice_output".into(), "Sol".into()),
+        ]);
+
+        retain_runtime_wired_settings(&mut preferences);
+
+        assert_eq!(preferences.settings_toggles.len(), 2);
+        assert_eq!(preferences.settings_choices.len(), 2);
+        assert!(!preferences.settings_toggles.contains_key("theme_animation"));
+        assert!(!preferences.settings_choices.contains_key("theme"));
+    }
+
+    #[test]
+    fn composer_send_shortcut_matches_primary_and_secondary_enter() {
+        assert!(composer_enter_should_send("Enter", false));
+        assert!(!composer_enter_should_send("Enter", true));
+        assert!(!composer_enter_should_send("Ctrl+Enter", false));
+        assert!(composer_enter_should_send("Ctrl+Enter", true));
     }
 
     #[test]

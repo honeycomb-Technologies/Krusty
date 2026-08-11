@@ -287,8 +287,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("state.json");
         let mut state = DesktopPreferences::default();
-        state.settings_toggles.insert("reduce_motion".into(), true);
-        state.settings_choices.insert("theme".into(), "Dark".into());
+        state
+            .settings_toggles
+            .insert("profile_show_name".into(), false);
+        state
+            .settings_choices
+            .insert("send_shortcut".into(), "Ctrl+Enter".into());
         state.save(&path).expect("save");
 
         let restored = DesktopPreferences::load(&path).expect("load");

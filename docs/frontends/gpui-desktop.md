@@ -74,7 +74,7 @@ backend or are shown as unavailable.
 | Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
 | Remote Control | Unsupported; explicit capability boundary | Live status, enable/disable, pairing, authorized-device list/revoke, and status lifecycle | Explicit fixture state; no invented devices |
 | External-agent import | Unsupported; explicit capability boundary | Live Claude Code/Cursor detection, explicit review/confirmation, import lifecycle, and completed history | Explicit fixture state; no invented sources or history |
-| Settings writes | Desktop preferences persist locally; server config writes unsupported | Permission profiles, requirements, and provider capabilities are live reads; the Full access preference only controls composer visibility; MCP add persists through typed config write/reload; other server settings unsupported | Same local persistence boundary |
+| Settings writes | Only controls with an observable local/runtime effect are interactive; server config writes unsupported | Send shortcut, sidebar-name visibility, archived-recents visibility, and Full access availability persist locally; permission profiles, requirements, provider capabilities, and MCP config use live typed contracts; remaining reference controls render disabled | Same explicit capability boundary; no decorative preference mutations |
 | Experimental features | Unsupported; explicit capability boundary | User-facing beta catalog from `experimentalFeature/list`; atomic persistent toggles through `config/batchWrite` and effective-state refresh | Explicit fixture state; no invented toggles |
 
 Unsupported operations must return `NotImplemented` or be disabled through
@@ -138,6 +138,12 @@ work, not as feature completion; the matrix test must change with each typed ada
   canonical `features.<name>` key through typed `config/batchWrite` with user-config
   reload, then refresh effective enablement. Mitsuro and fixture modes never inherit
   or synthesize Codex feature flags.
+- Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
+  visibility, and archived-recents visibility can mutate the privacy-safe local
+  preference store; Full access and realtime voice retain their specialized live paths.
+  Reference controls without a runtime contract remain visible for parity but have no
+  pointer, hover, or click affordance, display an unavailable label, and cannot add
+  decorative values to the preference file.
 - MCP servers advertising `notLoggedIn` expose a real Codex sign-in action. GPUI sends
   typed `mcpServer/oauth/login`, opens only the returned authorization URL, tracks the
   server name until `mcpServer/oauthLogin/completed`, and refreshes the live catalog.

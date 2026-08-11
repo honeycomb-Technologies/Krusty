@@ -38,6 +38,7 @@ pub fn sidebar(
     let switcher_label = mode.mode_switcher_label();
     let new_label = "New chat";
     let profile_name = app.profile_display_name().to_string();
+    let profile_name_visible = app.profile_name_visible_in_sidebar();
     let profile_plan = app.profile_plan_label().map(|p| p.to_string());
     let _ = search; // search field still wired via InputState; icon opens focus
 
@@ -354,7 +355,12 @@ pub fn sidebar(
                 .child(Input::new(search).appearance(false)),
         )
         // ── Profile footer (bar: avatar · name · plan · circular ? → Settings) ──
-        .child(profile_footer(&profile_name, profile_plan.as_deref(), cx))
+        .child(profile_footer(
+            &profile_name,
+            profile_plan.as_deref(),
+            profile_name_visible,
+            cx,
+        ))
 }
 
 /// Dense account row: initials avatar · name + plan · circular help `?`.
@@ -362,6 +368,7 @@ pub fn sidebar(
 fn profile_footer(
     profile_name: &str,
     plan_label: Option<&str>,
+    show_name: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -397,33 +404,36 @@ fn profile_footer(
                 .text_color(colors.text_secondary)
                 .child(crate::app::profile_initials_from_name(profile_name)),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .child(profile_name.to_string()),
-                )
-                .when_some(plan, |this, plan| {
-                    this.child(
+        .when(show_name, |this| {
+            this.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
                         div()
-                            .text_xs()
-                            .text_color(colors.text_tertiary)
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(colors.text)
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .child(plan),
+                            .child(profile_name.to_string()),
                     )
-                }),
-        )
+                    .when_some(plan, |this, plan| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(plan),
+                        )
+                    }),
+            )
+        })
+        .when(!show_name, |this| this.child(div().flex_1()))
         .child(
             // Bar silhouette: circular outlined help `?` (not chevron square).
             div()

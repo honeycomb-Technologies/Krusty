@@ -351,7 +351,7 @@ fn settings_scope_notice(section: SettingsSection) -> impl IntoElement {
             "Account and usage data come from the connected backend. Unsupported account actions are labeled before use."
         }
         _ => {
-            "Preferences below are saved on this device. They do not change Mitsuro server or ChatGPT / Codex configuration unless a row is explicitly labeled live."
+            "Implemented controls apply immediately on this device or use the labeled backend. Remaining reference controls are visible but disabled until they have a real runtime contract."
         }
     };
     div()
@@ -512,10 +512,10 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
                 .child(card_divider())
                 .child(segment_row(
                     "Follow-up behavior",
-                    "Queue follow-ups while Mitsuro runs or steer the current run. Press Ctrl+e to do the opposite for one message",
+                    "Active-turn messages use backend-native steering; queued follow-ups are not implemented",
                     "follow_up",
                     &["Queue", "Steer"],
-                    "Queue",
+                    "Steer",
                     app,
                     cx,
                 )),
@@ -1118,8 +1118,8 @@ fn appearance_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         )
 }
 
-/// 8 clickable accent color circles (fixture only — selection stored in settings_choices).
-fn accent_swatch_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+/// Reference accent palette. Disabled until the shell has a runtime theme contract.
+fn accent_swatch_row(app: &MitsuroApp, _cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     let current = app.settings_choice("accent_color", "Blue");
     // Name + hex pairs — Codex-like accent palette.
@@ -1156,12 +1156,9 @@ fn accent_swatch_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                         .text_color(colors.text)
                         .child("Accent color"),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.text_tertiary)
-                        .child("Highlight color for selection and focus rings"),
-                ),
+                .child(div().text_xs().text_color(colors.text_tertiary).child(
+                    "Highlight color for selection and focus rings · Unavailable in this build",
+                )),
         )
         .child(
             div()
@@ -1169,9 +1166,9 @@ fn accent_swatch_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
+                .opacity(0.45)
                 .children(SWATCHES.iter().map(|(name, hex)| {
                     let selected = current.as_str() == *name;
-                    let name_owned = (*name).to_string();
                     let swatch_id = format!("accent-swatch-{name}");
                     div()
                         .id(SharedId(swatch_id))
@@ -1185,18 +1182,6 @@ fn accent_swatch_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                         } else {
                             theme::hex_alpha(0xffffff, 0.12)
                         })
-                        .when(selected, |s| {
-                            s.shadow(vec![gpui::BoxShadow {
-                                color: theme::hex_alpha(*hex, 0.45),
-                                offset: gpui::point(px(0.0), px(0.0)),
-                                blur_radius: px(8.0),
-                                spread_radius: px(1.0),
-                            }])
-                        })
-                        .hover(|s| s.opacity(0.9))
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.set_settings_choice("accent_color", name_owned.clone(), cx);
-                        }))
                 })),
         )
 }
@@ -4538,9 +4523,14 @@ fn toggle_row(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
+    let wired = MitsuroApp::settings_toggle_is_runtime_wired(key);
     let on = app.settings_toggle(key, default);
     let title = title.to_string();
-    let subtitle = subtitle.to_string();
+    let subtitle = if wired {
+        subtitle.to_string()
+    } else {
+        format!("{subtitle} · Unavailable in this build")
+    };
     let row_id = format!("toggle-{key}");
     div()
         .id(SharedId(row_id))
@@ -4551,11 +4541,13 @@ fn toggle_row(
         .gap(px(16.0))
         .px(px(14.0))
         .py(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            app.flip_settings_toggle(key, default, cx);
-        }))
+        .when(wired, |this| {
+            this.cursor_pointer()
+                .hover(|s| s.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.flip_settings_toggle(key, default, cx);
+                }))
+        })
         .child(
             div()
                 .flex()
@@ -4577,7 +4569,11 @@ fn toggle_row(
                         .child(subtitle),
                 ),
         )
-        .child(toggle_switch(on))
+        .child(
+            div()
+                .when(!wired, |this| this.opacity(0.45))
+                .child(toggle_switch(wired && on)),
+        )
 }
 
 fn toggle_switch(on: bool) -> impl IntoElement {
@@ -4611,9 +4607,14 @@ fn select_row(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
+    let wired = MitsuroApp::settings_choice_is_runtime_wired(key);
     let current = app.settings_choice(key, default);
     let title = title.to_string();
-    let subtitle = subtitle.to_string();
+    let subtitle = if wired {
+        subtitle.to_string()
+    } else {
+        format!("{subtitle} · Unavailable in this build")
+    };
     let label = current;
     let row_id = format!("select-{key}");
     // Cycle on click through options
@@ -4627,14 +4628,16 @@ fn select_row(
         .gap(px(16.0))
         .px(px(14.0))
         .py(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            let cur = app.settings_choice(key, default);
-            let idx = opts.iter().position(|o| *o == cur.as_str()).unwrap_or(0);
-            let next = opts[(idx + 1) % opts.len()];
-            app.set_settings_choice(key, next, cx);
-        }))
+        .when(wired, |this| {
+            this.cursor_pointer()
+                .hover(|s| s.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    let cur = app.settings_choice(key, default);
+                    let idx = opts.iter().position(|o| *o == cur.as_str()).unwrap_or(0);
+                    let next = opts[(idx + 1) % opts.len()];
+                    app.set_settings_choice(key, next, cx);
+                }))
+        })
         .child(
             div()
                 .flex()
@@ -4668,6 +4671,7 @@ fn select_row(
                 .bg(colors.bg_button_secondary)
                 .border_1()
                 .border_color(colors.border)
+                .when(!wired, |this| this.opacity(0.45))
                 // Bar Default file open destination: folder glyph + value ▾.
                 .when(key == "file_open_dest", |s| {
                     s.child(
@@ -4701,9 +4705,14 @@ fn segment_row(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
+    let wired = MitsuroApp::settings_choice_is_runtime_wired(key);
     let current = app.settings_choice(key, default);
     let title = title.to_string();
-    let subtitle = subtitle.to_string();
+    let subtitle = if wired {
+        subtitle.to_string()
+    } else {
+        format!("{subtitle} · Unavailable in this build")
+    };
     let row_id = format!("segment-{key}");
     div()
         .id(SharedId(row_id))
@@ -4744,6 +4753,7 @@ fn segment_row(
                 .p(px(2.0))
                 .rounded(px(8.0))
                 .bg(colors.bg_button_secondary)
+                .when(!wired, |this| this.opacity(0.45))
                 .children(
                     options
                         .iter()
@@ -4756,11 +4766,14 @@ fn segment_row(
                                 .px(px(10.0))
                                 .py(px(4.0))
                                 .rounded(px(6.0))
-                                .cursor_pointer()
                                 .when(selected, |s| s.bg(colors.bg_elevated))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.set_settings_choice(key, value.clone(), cx);
-                                }))
+                                .when(wired, |this| {
+                                    this.cursor_pointer().on_click(cx.listener(
+                                        move |app, _, _, cx| {
+                                            app.set_settings_choice(key, value.clone(), cx);
+                                        },
+                                    ))
+                                })
                                 .child(
                                     div()
                                         .text_xs()
@@ -5092,17 +5105,13 @@ fn color_chip_row(
     key: &'static str,
     default_hex: u32,
     app: &MitsuroApp,
-    cx: &mut Context<MitsuroApp>,
+    _cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let label = app.settings_choice(key, &format!("#{default_hex:06x}"));
     let title = title.to_string();
-    let subtitle = subtitle.to_string();
+    let subtitle = format!("{subtitle} · Unavailable in this build");
     let row_id = format!("color-{key}");
-    // Cycle through a small palette on click (fixture-only).
-    const PALETTE: &[&str] = &[
-        "#0d0d0d", "#1a1a1a", "#e8e8e8", "#f5f5f5", "#0f172a", "#111827",
-    ];
     div()
         .id(SharedId(row_id))
         .flex()
@@ -5112,14 +5121,6 @@ fn color_chip_row(
         .gap(px(16.0))
         .px(px(14.0))
         .py(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| {
-            let cur = app.settings_choice(key, &format!("#{default_hex:06x}"));
-            let idx = PALETTE.iter().position(|c| *c == cur.as_str()).unwrap_or(0);
-            let next = PALETTE[(idx + 1) % PALETTE.len()];
-            app.set_settings_choice(key, next, cx);
-        }))
         .child(
             div()
                 .flex()
@@ -5147,6 +5148,7 @@ fn color_chip_row(
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
+                .opacity(0.45)
                 .child(
                     div()
                         .size(px(22.0))
