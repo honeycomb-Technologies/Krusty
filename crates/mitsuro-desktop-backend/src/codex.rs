@@ -3726,19 +3726,26 @@ mod integration_tests {
             })
             .await
             .expect("thread/list");
-        // Data may be empty but must deserialize. If one persisted thread is
-        // available, exercise the exact non-mutating open/close lifecycle.
-        let persisted_thread_id = list.threads().first().map(|thread| thread.id.clone());
-        if let Some(thread_id) = persisted_thread_id {
-            let resumed = backend
+        // Data may be empty but must deserialize. Exercise the exact non-mutating
+        // open/close lifecycle against the first idle persisted thread. A live
+        // desktop task can legitimately own a writer for any listed thread.
+        for thread in list.threads() {
+            let thread_id = thread.id.clone();
+            match backend
                 .resume_thread(ThreadResumeParams::new(thread_id.clone()))
                 .await
-                .expect("thread/resume persisted thread");
-            assert_eq!(resumed.summary().id, thread_id);
-            backend
-                .unsubscribe_thread(ThreadUnsubscribeParams::new(thread_id))
-                .await
-                .expect("thread/unsubscribe persisted thread");
+            {
+                Ok(resumed) => {
+                    assert_eq!(resumed.summary().id, thread_id);
+                    backend
+                        .unsubscribe_thread(ThreadUnsubscribeParams::new(thread_id))
+                        .await
+                        .expect("thread/unsubscribe persisted thread");
+                    break;
+                }
+                Err(AgentError::Rpc { message, .. }) if message.contains("active writer") => {}
+                Err(error) => panic!("thread/resume persisted thread: {error}"),
+            }
         }
 
         // ephemeral thread/start — no model turn
