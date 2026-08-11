@@ -1,6 +1,6 @@
 //! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -50,10 +50,14 @@ use mitsuro_desktop_backend::{
     PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
     PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
     PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductAccessMode, ProductAttachment, ProductBackend, ProductExtension, ProductFileMatch,
-    ProductHiveSnapshot, ProductMcpServer, ProductModel, ProductProcess, ProductReview,
-    ProductReviewTarget, ProductSchedule, ProductScheduleAction, ProductScheduleMutationRequest,
-    ProductSkill, ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
+    ProductAccessMode, ProductAttachment, ProductBackend, ProductDstFoldPolicy,
+    ProductDstGapPolicy, ProductDstPolicy, ProductExtension, ProductFileMatch, ProductHiveSnapshot,
+    ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
+    ProductMonthlyDayPolicy, ProductOverlapPolicy, ProductProcess, ProductRetryJitter,
+    ProductRetryPolicy, ProductReview, ProductReviewTarget, ProductSchedule, ProductScheduleAction,
+    ProductScheduleCreateRequest, ProductScheduleDefinition, ProductScheduleMutationRequest,
+    ProductScheduleRecurrence, ProductScheduleReplaceRequest, ProductScheduleWeekday, ProductSkill,
+    ProductSpeedMode, ProductSteer, ProductTurn, ProductWorkMode, RealtimeEvent,
     RealtimeOutputModality, RealtimeVoice, RealtimeVoicesList, ReasoningEffortOption,
     RemoteControlClient, RemoteControlClientsListParams, RemoteControlClientsRevokeParams,
     RemoteControlConnectionStatus, RemoteControlDisableParams, RemoteControlEnableParams,
@@ -780,6 +784,103 @@ fn schedule_cancel_confirmation_required(current: Option<&str>, schedule_id: &st
     current != Some(schedule_id)
 }
 
+fn default_schedule_timezone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|value| value.parse::<chrono_tz::Tz>().is_ok())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/timezone")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| value.parse::<chrono_tz::Tz>().is_ok())
+        })
+        .unwrap_or_else(|| "UTC".to_owned())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduleRecurrenceKind {
+    Once,
+    Daily,
+    Weekdays,
+    Weekly,
+    Monthly,
+}
+
+impl ScheduleRecurrenceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Once => "Once",
+            Self::Daily => "Daily",
+            Self::Weekdays => "Weekdays",
+            Self::Weekly => "Weekly",
+            Self::Monthly => "Monthly",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScheduleEditorMode {
+    Create,
+    Replace {
+        session_id: String,
+        schedule_id: String,
+        revision: u64,
+        original_model: Option<String>,
+        model_key: Option<ProductModelKey>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleEditorState {
+    pub mode: ScheduleEditorMode,
+    pub recurrence_kind: ScheduleRecurrenceKind,
+    pub weekdays: BTreeSet<ProductScheduleWeekday>,
+    pub monthly_day_policy: ProductMonthlyDayPolicy,
+    pub dst_gap_policy: ProductDstGapPolicy,
+    pub dst_fold_policy: ProductDstFoldPolicy,
+    pub misfire_policy: ProductMisfirePolicy,
+    pub overlap_policy: ProductOverlapPolicy,
+    pub retry_jitter: ProductRetryJitter,
+    pub advanced_open: bool,
+    pub submitting: bool,
+}
+
+#[derive(Clone)]
+pub struct ScheduleEditorInputs {
+    pub session: Entity<InputState>,
+    pub title: Entity<InputState>,
+    pub summary: Entity<InputState>,
+    pub objective: Entity<InputState>,
+    pub timezone: Entity<InputState>,
+    pub once_at: Entity<InputState>,
+    pub start_date: Entity<InputState>,
+    pub time: Entity<InputState>,
+    pub monthly_day: Entity<InputState>,
+    pub project_dir: Entity<InputState>,
+    pub model: Entity<InputState>,
+    pub crew_slug: Entity<InputState>,
+    pub priority: Entity<InputState>,
+    pub misfire_grace: Entity<InputState>,
+    pub catch_up_limit: Entity<InputState>,
+    pub retry_attempts: Entity<InputState>,
+    pub retry_base: Entity<InputState>,
+    pub retry_max: Entity<InputState>,
+}
+
+fn schedule_editor_model_key(
+    mode: &ScheduleEditorMode,
+    model: &Option<String>,
+) -> Option<ProductModelKey> {
+    match mode {
+        ScheduleEditorMode::Replace {
+            original_model,
+            model_key,
+            ..
+        } if model == original_model => model_key.clone(),
+        ScheduleEditorMode::Create | ScheduleEditorMode::Replace { .. } => None,
+    }
+}
+
 /// How Send should produce an assistant reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendMode {
@@ -1309,6 +1410,26 @@ pub struct MitsuroApp {
     schedule_mutation_in_progress: Option<String>,
     /// Destructive cancellation requires the same schedule to be selected twice.
     schedule_cancel_confirmation: Option<String>,
+    /// Native editor for a real Mitsuro schedule create or replacement request.
+    schedule_editor: Option<ScheduleEditorState>,
+    schedule_session_input: Entity<InputState>,
+    schedule_title_input: Entity<InputState>,
+    schedule_summary_input: Entity<InputState>,
+    schedule_objective_input: Entity<InputState>,
+    schedule_timezone_input: Entity<InputState>,
+    schedule_once_at_input: Entity<InputState>,
+    schedule_start_date_input: Entity<InputState>,
+    schedule_time_input: Entity<InputState>,
+    schedule_monthly_day_input: Entity<InputState>,
+    schedule_project_dir_input: Entity<InputState>,
+    schedule_model_input: Entity<InputState>,
+    schedule_crew_slug_input: Entity<InputState>,
+    schedule_priority_input: Entity<InputState>,
+    schedule_misfire_grace_input: Entity<InputState>,
+    schedule_catch_up_limit_input: Entity<InputState>,
+    schedule_retry_attempts_input: Entity<InputState>,
+    schedule_retry_base_input: Entity<InputState>,
+    schedule_retry_max_input: Entity<InputState>,
     /// Plugins marketplace category filter (Public / Personal / MCP).
     plugins_filter: PluginsFilter,
     /// Plugins surface top tab (Plugins | Skills).
@@ -1454,6 +1575,89 @@ impl MitsuroApp {
             InputState::new(window, cx)
                 .placeholder("Empty file — type to edit…")
                 .multi_line(true)
+        });
+        let schedule_session_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Hive session id"));
+        let schedule_title_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Schedule title"));
+        let schedule_summary_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Short summary"));
+        let schedule_objective_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("What should Mitsuro accomplish?")
+                .multi_line(true)
+        });
+        let schedule_timezone_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("IANA timezone")
+                .default_value(default_schedule_timezone())
+        });
+        let schedule_once_at_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("RFC3339 UTC instant")
+                .default_value(
+                    (chrono::Utc::now() + chrono::Duration::hours(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                )
+        });
+        let schedule_start_date_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("YYYY-MM-DD")
+                .default_value(chrono::Local::now().date_naive().to_string())
+        });
+        let schedule_time_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("HH:MM")
+                .default_value("09:00")
+        });
+        let schedule_monthly_day_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Day 1-31")
+                .default_value("1")
+        });
+        let schedule_project_dir_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Absolute workspace path (or inherit)")
+                .default_value(
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )
+        });
+        let schedule_model_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Model (blank inherits session)"));
+        let schedule_crew_slug_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Crew slug (optional)"));
+        let schedule_priority_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Priority")
+                .default_value("0")
+        });
+        let schedule_misfire_grace_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Grace seconds")
+                .default_value("300")
+        });
+        let schedule_catch_up_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Catch-up limit")
+                .default_value("3")
+        });
+        let schedule_retry_attempts_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Retry attempts")
+                .default_value("5")
+        });
+        let schedule_retry_base_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Base delay seconds")
+                .default_value("15")
+        });
+        let schedule_retry_max_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Max delay seconds")
+                .default_value("900")
         });
         let settings_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
@@ -1703,6 +1907,25 @@ impl MitsuroApp {
             scheduled_tasks: None,
             schedule_mutation_in_progress: None,
             schedule_cancel_confirmation: None,
+            schedule_editor: None,
+            schedule_session_input,
+            schedule_title_input,
+            schedule_summary_input,
+            schedule_objective_input,
+            schedule_timezone_input,
+            schedule_once_at_input,
+            schedule_start_date_input,
+            schedule_time_input,
+            schedule_monthly_day_input,
+            schedule_project_dir_input,
+            schedule_model_input,
+            schedule_crew_slug_input,
+            schedule_priority_input,
+            schedule_misfire_grace_input,
+            schedule_catch_up_limit_input,
+            schedule_retry_attempts_input,
+            schedule_retry_base_input,
+            schedule_retry_max_input,
             plugins_filter: PluginsFilter::Public,
             plugins_surface_tab: PluginsSurfaceTab::Plugins,
             pending_start_thread: {
@@ -3954,6 +4177,705 @@ impl MitsuroApp {
 
     pub fn schedule_cancel_confirmation(&self) -> Option<&str> {
         self.schedule_cancel_confirmation.as_deref()
+    }
+
+    pub fn schedule_editor(&self) -> Option<&ScheduleEditorState> {
+        self.schedule_editor.as_ref()
+    }
+
+    pub fn schedule_editor_inputs(&self) -> ScheduleEditorInputs {
+        ScheduleEditorInputs {
+            session: self.schedule_session_input.clone(),
+            title: self.schedule_title_input.clone(),
+            summary: self.schedule_summary_input.clone(),
+            objective: self.schedule_objective_input.clone(),
+            timezone: self.schedule_timezone_input.clone(),
+            once_at: self.schedule_once_at_input.clone(),
+            start_date: self.schedule_start_date_input.clone(),
+            time: self.schedule_time_input.clone(),
+            monthly_day: self.schedule_monthly_day_input.clone(),
+            project_dir: self.schedule_project_dir_input.clone(),
+            model: self.schedule_model_input.clone(),
+            crew_slug: self.schedule_crew_slug_input.clone(),
+            priority: self.schedule_priority_input.clone(),
+            misfire_grace: self.schedule_misfire_grace_input.clone(),
+            catch_up_limit: self.schedule_catch_up_limit_input.clone(),
+            retry_attempts: self.schedule_retry_attempts_input.clone(),
+            retry_base: self.schedule_retry_base_input.clone(),
+            retry_max: self.schedule_retry_max_input.clone(),
+        }
+    }
+
+    pub fn open_schedule_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.schedule_mutations_available() {
+            self.status_line = "Scheduled · creation requires a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        }
+        let session_id = self
+            .hive_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.runs.first())
+            .map(|run| run.session_id.clone())
+            .or_else(|| {
+                self.scheduled_tasks
+                    .as_ref()
+                    .and_then(|tasks| tasks.first())
+                    .map(|schedule| schedule.session_id.clone())
+            })
+            .unwrap_or_default();
+        let workspace = std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let start_date = chrono::Local::now().date_naive().to_string();
+        let once_at = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        Self::set_schedule_input(&self.schedule_session_input, session_id, window, cx);
+        Self::set_schedule_input(&self.schedule_title_input, "", window, cx);
+        Self::set_schedule_input(&self.schedule_summary_input, "", window, cx);
+        Self::set_schedule_input(&self.schedule_objective_input, "", window, cx);
+        Self::set_schedule_input(
+            &self.schedule_timezone_input,
+            default_schedule_timezone(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(&self.schedule_once_at_input, once_at, window, cx);
+        Self::set_schedule_input(&self.schedule_start_date_input, start_date, window, cx);
+        Self::set_schedule_input(&self.schedule_time_input, "09:00", window, cx);
+        Self::set_schedule_input(&self.schedule_monthly_day_input, "1", window, cx);
+        Self::set_schedule_input(&self.schedule_project_dir_input, workspace, window, cx);
+        Self::set_schedule_input(&self.schedule_model_input, "", window, cx);
+        Self::set_schedule_input(&self.schedule_crew_slug_input, "", window, cx);
+        Self::set_schedule_input(&self.schedule_priority_input, "0", window, cx);
+        Self::set_schedule_input(&self.schedule_misfire_grace_input, "300", window, cx);
+        Self::set_schedule_input(&self.schedule_catch_up_limit_input, "3", window, cx);
+        Self::set_schedule_input(&self.schedule_retry_attempts_input, "5", window, cx);
+        Self::set_schedule_input(&self.schedule_retry_base_input, "15", window, cx);
+        Self::set_schedule_input(&self.schedule_retry_max_input, "900", window, cx);
+        self.schedule_editor = Some(ScheduleEditorState {
+            mode: ScheduleEditorMode::Create,
+            recurrence_kind: ScheduleRecurrenceKind::Weekdays,
+            weekdays: BTreeSet::new(),
+            monthly_day_policy: ProductMonthlyDayPolicy::LastDay,
+            dst_gap_policy: ProductDstGapPolicy::ShiftForward,
+            dst_fold_policy: ProductDstFoldPolicy::First,
+            misfire_policy: ProductMisfirePolicy::FireOnce,
+            overlap_policy: ProductOverlapPolicy::QueueOne,
+            retry_jitter: ProductRetryJitter::Full,
+            advanced_open: false,
+            submitting: false,
+        });
+        self.status_line = "Scheduled · creating a real Mitsuro schedule".into();
+        cx.notify();
+    }
+
+    pub fn open_schedule_replacement(
+        &mut self,
+        schedule: ProductSchedule,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.schedule_mutation_in_progress.is_some() {
+            self.status_line = "Scheduled · another change is still in progress".into();
+            cx.notify();
+            return;
+        }
+        let original_model = schedule.model.clone();
+        let model_key = schedule.model_key.clone();
+        let (recurrence_kind, once_at, start_date, time, weekdays, monthly_day, monthly_policy) =
+            match schedule.recurrence.clone() {
+                ProductScheduleRecurrence::Once { at } => (
+                    ScheduleRecurrenceKind::Once,
+                    at,
+                    String::new(),
+                    String::new(),
+                    BTreeSet::new(),
+                    1,
+                    ProductMonthlyDayPolicy::LastDay,
+                ),
+                ProductScheduleRecurrence::Daily { start_date, time } => (
+                    ScheduleRecurrenceKind::Daily,
+                    String::new(),
+                    start_date,
+                    time,
+                    BTreeSet::new(),
+                    1,
+                    ProductMonthlyDayPolicy::LastDay,
+                ),
+                ProductScheduleRecurrence::Weekdays { start_date, time } => (
+                    ScheduleRecurrenceKind::Weekdays,
+                    String::new(),
+                    start_date,
+                    time,
+                    BTreeSet::new(),
+                    1,
+                    ProductMonthlyDayPolicy::LastDay,
+                ),
+                ProductScheduleRecurrence::Weekly {
+                    start_date,
+                    time,
+                    weekdays,
+                } => (
+                    ScheduleRecurrenceKind::Weekly,
+                    String::new(),
+                    start_date,
+                    time,
+                    weekdays.into_iter().collect(),
+                    1,
+                    ProductMonthlyDayPolicy::LastDay,
+                ),
+                ProductScheduleRecurrence::Monthly {
+                    start_date,
+                    time,
+                    day,
+                    invalid_day_policy,
+                } => (
+                    ScheduleRecurrenceKind::Monthly,
+                    String::new(),
+                    start_date,
+                    time,
+                    BTreeSet::new(),
+                    day,
+                    invalid_day_policy,
+                ),
+            };
+        Self::set_schedule_input(
+            &self.schedule_session_input,
+            schedule.session_id.clone(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(&self.schedule_title_input, schedule.title, window, cx);
+        Self::set_schedule_input(&self.schedule_summary_input, schedule.summary, window, cx);
+        Self::set_schedule_input(
+            &self.schedule_objective_input,
+            schedule.objective,
+            window,
+            cx,
+        );
+        Self::set_schedule_input(&self.schedule_timezone_input, schedule.timezone, window, cx);
+        Self::set_schedule_input(&self.schedule_once_at_input, once_at, window, cx);
+        Self::set_schedule_input(&self.schedule_start_date_input, start_date, window, cx);
+        Self::set_schedule_input(&self.schedule_time_input, time, window, cx);
+        Self::set_schedule_input(
+            &self.schedule_monthly_day_input,
+            monthly_day.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_project_dir_input,
+            schedule.project_dir.unwrap_or_default(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_model_input,
+            schedule.model.unwrap_or_default(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_crew_slug_input,
+            schedule.crew_slug.unwrap_or_default(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_priority_input,
+            schedule.priority.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_misfire_grace_input,
+            schedule.misfire.grace_secs.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_catch_up_limit_input,
+            schedule.misfire.catch_up_limit.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_retry_attempts_input,
+            schedule.retry.max_attempts.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_retry_base_input,
+            schedule.retry.base_delay_secs.to_string(),
+            window,
+            cx,
+        );
+        Self::set_schedule_input(
+            &self.schedule_retry_max_input,
+            schedule.retry.max_delay_secs.to_string(),
+            window,
+            cx,
+        );
+        self.schedule_editor = Some(ScheduleEditorState {
+            mode: ScheduleEditorMode::Replace {
+                session_id: schedule.session_id,
+                schedule_id: schedule.id,
+                revision: schedule.revision,
+                original_model,
+                model_key,
+            },
+            recurrence_kind,
+            weekdays,
+            monthly_day_policy: monthly_policy,
+            dst_gap_policy: schedule.dst_policy.gap,
+            dst_fold_policy: schedule.dst_policy.fold,
+            misfire_policy: schedule.misfire.policy,
+            overlap_policy: schedule.overlap_policy,
+            retry_jitter: schedule.retry.jitter,
+            advanced_open: false,
+            submitting: false,
+        });
+        self.status_line = "Scheduled · editing authoritative schedule settings".into();
+        cx.notify();
+    }
+
+    fn set_schedule_input(
+        input: &Entity<InputState>,
+        value: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = value.into();
+        input.update(cx, |state, cx| state.set_value(value, window, cx));
+    }
+
+    pub fn close_schedule_editor(&mut self, cx: &mut Context<Self>) {
+        if self
+            .schedule_editor
+            .as_ref()
+            .is_some_and(|editor| editor.submitting)
+        {
+            self.status_line = "Scheduled · wait for the current save to finish".into();
+        } else {
+            self.schedule_editor = None;
+            self.status_line = "Scheduled · editor closed".into();
+        }
+        cx.notify();
+    }
+
+    pub fn set_schedule_recurrence_kind(
+        &mut self,
+        kind: ScheduleRecurrenceKind,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.recurrence_kind = kind;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_schedule_weekday(
+        &mut self,
+        weekday: ProductScheduleWeekday,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            if !editor.weekdays.remove(&weekday) {
+                editor.weekdays.insert(weekday);
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_schedule_advanced(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.advanced_open = !editor.advanced_open;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_monthly_policy(
+        &mut self,
+        policy: ProductMonthlyDayPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.monthly_day_policy = policy;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_dst_gap(&mut self, policy: ProductDstGapPolicy, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.dst_gap_policy = policy;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_dst_fold(&mut self, policy: ProductDstFoldPolicy, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.dst_fold_policy = policy;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_misfire_policy(
+        &mut self,
+        policy: ProductMisfirePolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.misfire_policy = policy;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_overlap_policy(
+        &mut self,
+        policy: ProductOverlapPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.overlap_policy = policy;
+            cx.notify();
+        }
+    }
+
+    pub fn set_schedule_retry_jitter(
+        &mut self,
+        jitter: ProductRetryJitter,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.retry_jitter = jitter;
+            cx.notify();
+        }
+    }
+
+    pub fn submit_schedule_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.schedule_editor.clone() else {
+            return;
+        };
+        if editor.submitting || self.schedule_mutation_in_progress.is_some() {
+            self.status_line = "Scheduled · another change is still in progress".into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Scheduled · save requires a connected Mitsuro server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().schedule_mutations {
+            self.status_line = "Scheduled · this backend does not support schedule writes".into();
+            cx.notify();
+            return;
+        }
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let session_input = value(&self.schedule_session_input);
+        let session_id = match &editor.mode {
+            ScheduleEditorMode::Create => session_input,
+            ScheduleEditorMode::Replace { session_id, .. } => session_id.clone(),
+        };
+        let title = value(&self.schedule_title_input);
+        let summary = value(&self.schedule_summary_input);
+        let objective = value(&self.schedule_objective_input);
+        let timezone = value(&self.schedule_timezone_input);
+        if session_id.is_empty() || title.is_empty() || objective.is_empty() || timezone.is_empty()
+        {
+            self.status_line =
+                "Scheduled · session, title, objective, and timezone are required".into();
+            cx.notify();
+            return;
+        }
+        if title.len() > 512 || summary.len() > 8192 || objective.len() > 65_536 {
+            self.status_line =
+                "Scheduled · title, summary, or objective exceeds server limits".into();
+            cx.notify();
+            return;
+        }
+        if timezone.len() > 128 || timezone.parse::<chrono_tz::Tz>().is_err() {
+            self.status_line = "Scheduled · enter a valid IANA timezone".into();
+            cx.notify();
+            return;
+        }
+        let parse_date = || {
+            let value = value(&self.schedule_start_date_input);
+            chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .map(|date| date.to_string())
+                .map_err(|_| "start date must use YYYY-MM-DD")
+        };
+        let parse_time = || {
+            let value = value(&self.schedule_time_input);
+            chrono::NaiveTime::parse_from_str(&value, "%H:%M:%S")
+                .or_else(|_| chrono::NaiveTime::parse_from_str(&value, "%H:%M"))
+                .map(|time| time.format("%H:%M:%S").to_string())
+                .map_err(|_| "time must use HH:MM or HH:MM:SS")
+        };
+        let recurrence = match editor.recurrence_kind {
+            ScheduleRecurrenceKind::Once => {
+                let at = value(&self.schedule_once_at_input);
+                let parsed = match chrono::DateTime::parse_from_rfc3339(&at) {
+                    Ok(parsed) if parsed.with_timezone(&chrono::Utc) > chrono::Utc::now() => parsed,
+                    Ok(_) => {
+                        self.status_line =
+                            "Scheduled · one-time instant must be in the future".into();
+                        cx.notify();
+                        return;
+                    }
+                    Err(_) => {
+                        self.status_line = "Scheduled · one-time instant must be RFC3339".into();
+                        cx.notify();
+                        return;
+                    }
+                };
+                ProductScheduleRecurrence::Once {
+                    at: parsed
+                        .with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                }
+            }
+            ScheduleRecurrenceKind::Daily
+            | ScheduleRecurrenceKind::Weekdays
+            | ScheduleRecurrenceKind::Weekly
+            | ScheduleRecurrenceKind::Monthly => {
+                let start_date = match parse_date() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.status_line = format!("Scheduled · {error}").into();
+                        cx.notify();
+                        return;
+                    }
+                };
+                let time = match parse_time() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.status_line = format!("Scheduled · {error}").into();
+                        cx.notify();
+                        return;
+                    }
+                };
+                match editor.recurrence_kind {
+                    ScheduleRecurrenceKind::Daily => {
+                        ProductScheduleRecurrence::Daily { start_date, time }
+                    }
+                    ScheduleRecurrenceKind::Weekdays => {
+                        ProductScheduleRecurrence::Weekdays { start_date, time }
+                    }
+                    ScheduleRecurrenceKind::Weekly => {
+                        if editor.weekdays.is_empty() {
+                            self.status_line =
+                                "Scheduled · weekly recurrence needs at least one weekday".into();
+                            cx.notify();
+                            return;
+                        }
+                        ProductScheduleRecurrence::Weekly {
+                            start_date,
+                            time,
+                            weekdays: editor.weekdays.iter().copied().collect(),
+                        }
+                    }
+                    ScheduleRecurrenceKind::Monthly => {
+                        let day = match value(&self.schedule_monthly_day_input).parse::<u8>() {
+                            Ok(day @ 1..=31) => day,
+                            _ => {
+                                self.status_line =
+                                    "Scheduled · monthly day must be between 1 and 31".into();
+                                cx.notify();
+                                return;
+                            }
+                        };
+                        ProductScheduleRecurrence::Monthly {
+                            start_date,
+                            time,
+                            day,
+                            invalid_day_policy: editor.monthly_day_policy,
+                        }
+                    }
+                    ScheduleRecurrenceKind::Once => unreachable!(),
+                }
+            }
+        };
+        let project_dir = value(&self.schedule_project_dir_input);
+        if !project_dir.is_empty() && !Path::new(&project_dir).is_absolute() {
+            self.status_line = "Scheduled · workspace path must be absolute".into();
+            cx.notify();
+            return;
+        }
+        let crew_slug = value(&self.schedule_crew_slug_input);
+        if !crew_slug.is_empty()
+            && (crew_slug.len() > 64
+                || !crew_slug.chars().all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || character == '-'
+                        || character == '_'
+                }))
+        {
+            self.status_line =
+                "Scheduled · crew slug uses lowercase letters, digits, dash, or underscore".into();
+            cx.notify();
+            return;
+        }
+        let priority = match value(&self.schedule_priority_input).parse::<i32>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.status_line = "Scheduled · priority must be a signed integer".into();
+                cx.notify();
+                return;
+            }
+        };
+        let grace_secs = match value(&self.schedule_misfire_grace_input).parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.status_line = "Scheduled · misfire grace must be seconds".into();
+                cx.notify();
+                return;
+            }
+        };
+        let catch_up_limit = match value(&self.schedule_catch_up_limit_input).parse::<usize>() {
+            Ok(value) if value <= 10_000 => value,
+            _ => {
+                self.status_line = "Scheduled · catch-up limit must be between 0 and 10000".into();
+                cx.notify();
+                return;
+            }
+        };
+        let max_attempts = match value(&self.schedule_retry_attempts_input).parse::<u32>() {
+            Ok(value @ 1..=100) => value,
+            _ => {
+                self.status_line = "Scheduled · retry attempts must be between 1 and 100".into();
+                cx.notify();
+                return;
+            }
+        };
+        let base_delay_secs = match value(&self.schedule_retry_base_input).parse::<u64>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                self.status_line = "Scheduled · retry base delay must be positive".into();
+                cx.notify();
+                return;
+            }
+        };
+        let max_delay_secs = match value(&self.schedule_retry_max_input).parse::<u64>() {
+            Ok(value) if value >= base_delay_secs && value <= 604_800 => value,
+            _ => {
+                self.status_line =
+                    "Scheduled · retry max must be at least the base and at most 604800 seconds"
+                        .into();
+                cx.notify();
+                return;
+            }
+        };
+        let optional = |value: String| (!value.is_empty()).then_some(value);
+        let model = optional(value(&self.schedule_model_input));
+        let model_key = schedule_editor_model_key(&editor.mode, &model);
+        let definition = ProductScheduleDefinition {
+            title: title.clone(),
+            summary,
+            objective,
+            recurrence,
+            timezone,
+            dst_policy: ProductDstPolicy {
+                gap: editor.dst_gap_policy,
+                fold: editor.dst_fold_policy,
+            },
+            priority,
+            project_dir: optional(project_dir),
+            model,
+            model_key,
+            crew_slug: optional(crew_slug),
+            misfire: ProductMisfireConfig {
+                policy: editor.misfire_policy,
+                grace_secs,
+                catch_up_limit,
+            },
+            overlap_policy: editor.overlap_policy,
+            retry: ProductRetryPolicy {
+                max_attempts,
+                base_delay_secs,
+                max_delay_secs,
+                jitter: editor.retry_jitter,
+            },
+        };
+        let generation = self.backend_generation;
+        let marker = match &editor.mode {
+            ScheduleEditorMode::Create => "__create__".to_owned(),
+            ScheduleEditorMode::Replace { schedule_id, .. } => schedule_id.clone(),
+        };
+        self.schedule_mutation_in_progress = Some(marker);
+        if let Some(editor) = &mut self.schedule_editor {
+            editor.submitting = true;
+        }
+        self.status_line = format!("Scheduled · saving {title}…").into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        match editor.mode {
+                            ScheduleEditorMode::Create => {
+                                runner
+                                    .create_schedule(ProductScheduleCreateRequest {
+                                        session_id,
+                                        definition,
+                                        idempotency_key: uuid::Uuid::new_v4().to_string(),
+                                    })
+                                    .await
+                            }
+                            ScheduleEditorMode::Replace {
+                                session_id,
+                                schedule_id,
+                                revision,
+                                ..
+                            } => {
+                                runner
+                                    .replace_schedule(ProductScheduleReplaceRequest {
+                                        session_id,
+                                        schedule_id,
+                                        revision,
+                                        definition,
+                                        idempotency_key: uuid::Uuid::new_v4().to_string(),
+                                    })
+                                    .await
+                            }
+                        }
+                        .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.schedule_mutation_in_progress = None;
+                match result {
+                    Ok(response) => {
+                        app.schedule_editor = None;
+                        app.status_line = format!(
+                            "Scheduled · {title} saved at revision {} ({})",
+                            response.revision, response.status
+                        )
+                        .into();
+                        app.refresh_schedules_after_mutation(cx);
+                    }
+                    Err(error) => {
+                        if let Some(editor) = &mut app.schedule_editor {
+                            editor.submitting = false;
+                        }
+                        app.status_line =
+                            format!("Scheduled · could not save {title} · {error}").into();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn set_scheduled_show_tasks(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -12725,6 +13647,7 @@ impl MitsuroApp {
         self.scheduled_tasks = None;
         self.schedule_mutation_in_progress = None;
         self.schedule_cancel_confirmation = None;
+        self.schedule_editor = None;
         self.background_processes.clear();
         self.background_processes_state = if kind == BackendKind::MitsuroHttp {
             SurfaceDataState::Loading
@@ -14894,6 +15817,37 @@ mod tests {
             Some("schedule-1"),
             "schedule-1"
         ));
+        assert_eq!(ScheduleRecurrenceKind::Once.label(), "Once");
+        assert_eq!(ScheduleRecurrenceKind::Monthly.label(), "Monthly");
+    }
+
+    #[test]
+    fn schedule_replacement_preserves_exact_model_identity_only_while_model_is_unchanged() {
+        let key = ProductModelKey {
+            provider: "openai".into(),
+            model_id: "gpt-5.5".into(),
+            auth_scope: Some("chatgpt".into()),
+            api_format: "responses".into(),
+        };
+        let mode = ScheduleEditorMode::Replace {
+            session_id: "session-1".into(),
+            schedule_id: "schedule-1".into(),
+            revision: 2,
+            original_model: Some("gpt-5.5".into()),
+            model_key: Some(key.clone()),
+        };
+        assert_eq!(
+            schedule_editor_model_key(&mode, &Some("gpt-5.5".into())),
+            Some(key)
+        );
+        assert_eq!(
+            schedule_editor_model_key(&mode, &Some("gpt-5.6-sol".into())),
+            None
+        );
+        assert_eq!(
+            schedule_editor_model_key(&ScheduleEditorMode::Create, &None),
+            None
+        );
     }
 
     #[test]

@@ -67,7 +67,7 @@ backend or are shown as unavailable.
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
 | Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
-| Hive/schedules | Live Hive projection and global schedule catalog; pause/resume plus confirmed cancellation use revisioned, idempotent server mutations; creation/replacement still unavailable | Unsupported | Typed fixture UI |
+| Hive/schedules | Live Hive projection and global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
@@ -224,6 +224,10 @@ work, not as feature completion; the matrix test must change with each typed ada
   resume, and cancellation. The client sends the current revision as `If-Match`, adds a
   unique idempotency key, serializes mutations, requires cancellation confirmation, and
   re-reads the global catalog after success. Codex remains explicitly unsupported.
+- The native schedule editor creates and replaces schedules without reducing the server
+  contract: once/daily/weekdays/weekly/monthly recurrence, IANA timezone and DST behavior,
+  workspace/model/crew identity, priority, misfire, overlap, and retry policy are preserved.
+  Replacements retain the exact provider/auth/transport model key unless the model changes.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
 - Opening a persisted Codex conversation uses `thread/resume`, matching the reference

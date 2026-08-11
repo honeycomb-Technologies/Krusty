@@ -35,9 +35,10 @@ request intentionally has no generic client timeout because app-server resolves 
 after process exit; the request itself carries explicit server timeout/output policy.
 Hive current state remains read-only in GPUI. Global schedules expose typed pause,
 resume, and cancellation through the transport-neutral product boundary with revision
-and idempotency headers; creation/replacement is not yet exposed. Background processes
-already tracked by Mitsuro can be terminated, but the server still has no interactive
-PTY contract for this client.
+and idempotency headers. Creation and replacement preserve the complete typed recurrence,
+DST, execution identity, misfire, overlap, and retry contract. Background processes already
+tracked by Mitsuro can be terminated, but the server still has no interactive PTY contract
+for this client.
 
 ## Transport assumptions (Codex app-server)
 

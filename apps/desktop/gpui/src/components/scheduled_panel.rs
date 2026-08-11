@@ -5,11 +5,19 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
 };
+use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::{schedule_toggle_action, MitsuroApp, SurfaceDataState};
+use crate::app::{
+    schedule_toggle_action, MitsuroApp, ScheduleEditorInputs, ScheduleEditorMode,
+    ScheduleEditorState, ScheduleRecurrenceKind, SurfaceDataState,
+};
 use crate::theme;
-use mitsuro_desktop_backend::{ProductSchedule, ProductScheduleAction};
+use mitsuro_desktop_backend::{
+    ProductDstFoldPolicy, ProductDstGapPolicy, ProductMisfirePolicy, ProductMonthlyDayPolicy,
+    ProductOverlapPolicy, ProductRetryJitter, ProductSchedule, ProductScheduleAction,
+    ProductScheduleWeekday,
+};
 
 #[derive(Clone, Copy)]
 struct ScheduleItem {
@@ -65,6 +73,12 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
     let show_tasks = app.scheduled_show_tasks();
     let live_tasks = app.scheduled_tasks().map(|tasks| tasks.to_vec());
     let state = app.scheduled_state();
+    let mutations_available = app.schedule_mutations_available();
+    let editor = app.schedule_editor().cloned();
+    let editor_inputs = editor.as_ref().map(|_| app.schedule_editor_inputs());
+    let editor_element = editor
+        .zip(editor_inputs)
+        .map(|(editor, inputs)| schedule_editor(editor, inputs, cx).into_any_element());
 
     div()
         .id("scheduled-panel")
@@ -74,7 +88,7 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
         .min_w_0()
         .h_full()
         .bg(colors.bg_main)
-        .child(header(show_tasks, state, cx))
+        .child(header(show_tasks, state, mutations_available, cx))
         .child(
             div()
                 .id("scheduled-body")
@@ -86,6 +100,7 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                 .px(px(28.0))
                 .pb(px(28.0))
                 .gap(px(18.0))
+                .when_some(editor_element, |this, editor| this.child(editor))
                 .child(match state {
                     SurfaceDataState::Live => {
                         live_tasks_section(live_tasks.as_deref().unwrap_or(&[]), app, cx)
@@ -117,6 +132,7 @@ pub fn scheduled_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
 fn header(
     show_tasks: bool,
     state: SurfaceDataState,
+    mutations_available: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -188,11 +204,13 @@ fn header(
                 .h(px(32.0))
                 .px(px(14.0))
                 .rounded(px(999.0))
-                .bg(if state == SurfaceDataState::Fixture {
-                    colors.bg_button_primary
-                } else {
-                    colors.bg_button_secondary
-                })
+                .bg(
+                    if state == SurfaceDataState::Fixture || mutations_available {
+                        colors.bg_button_primary
+                    } else {
+                        colors.bg_button_secondary
+                    },
+                )
                 .when(state == SurfaceDataState::Fixture, |this| {
                     this.cursor_pointer()
                         .hover(|s| s.bg(colors.bg_button_primary_hover))
@@ -200,20 +218,31 @@ fn header(
                             app.request_schedule_creation(None, cx);
                         }))
                 })
+                .when(mutations_available, |this| {
+                    this.cursor_pointer()
+                        .hover(|s| s.bg(colors.bg_button_primary_hover))
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.open_schedule_creation(window, cx);
+                        }))
+                })
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(if state == SurfaceDataState::Fixture {
-                            colors.fg_button_primary
-                        } else {
-                            colors.text_tertiary
-                        })
-                        .child(if state == SurfaceDataState::Fixture {
-                            "Create"
-                        } else {
-                            "Unavailable"
-                        }),
+                        .text_color(
+                            if state == SurfaceDataState::Fixture || mutations_available {
+                                colors.fg_button_primary
+                            } else {
+                                colors.text_tertiary
+                            },
+                        )
+                        .child(
+                            if state == SurfaceDataState::Fixture || mutations_available {
+                                "Create"
+                            } else {
+                                "Unavailable"
+                            },
+                        ),
                 )
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -248,6 +277,723 @@ fn state_notice(title: &str, detail: &str) -> impl IntoElement {
                 .text_color(colors.text_tertiary)
                 .child(detail.to_string()),
         )
+}
+
+fn schedule_editor(
+    editor: ScheduleEditorState,
+    inputs: ScheduleEditorInputs,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let is_replace = matches!(editor.mode, ScheduleEditorMode::Replace { .. });
+    let submitting = editor.submitting;
+    let session_value = inputs.session.read(cx).value().to_string();
+    div()
+        .id("schedule-editor")
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .p(px(16.0))
+        .rounded(px(14.0))
+        .bg(colors.bg_elevated)
+        .border_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.text)
+                                .child(if is_replace {
+                                    "Edit schedule"
+                                } else {
+                                    "Create schedule"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child("Saved directly to the Mitsuro Hive control plane"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("schedule-editor-close")
+                        .px(px(9.0))
+                        .py(px(5.0))
+                        .rounded(px(7.0))
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .when(!submitting, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.close_schedule_editor(cx);
+                                }))
+                        })
+                        .child("Close"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(10.0))
+                .child(if is_replace {
+                    editor_readonly_field(
+                        "schedule-editor-session-fixed",
+                        "Hive session (fixed)",
+                        session_value,
+                    )
+                    .into_any_element()
+                } else {
+                    editor_input(
+                        "schedule-editor-session",
+                        "Hive session",
+                        &inputs.session,
+                        false,
+                        false,
+                    )
+                    .into_any_element()
+                })
+                .child(editor_input(
+                    "schedule-editor-title",
+                    "Title",
+                    &inputs.title,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-summary",
+                    "Summary",
+                    &inputs.summary,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-timezone",
+                    "Timezone",
+                    &inputs.timezone,
+                    false,
+                    false,
+                )),
+        )
+        .child(editor_input(
+            "schedule-editor-objective",
+            "Objective",
+            &inputs.objective,
+            true,
+            true,
+        ))
+        .child(editor_section_label("Recurrence"))
+        .child(
+            div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
+                [
+                    ScheduleRecurrenceKind::Once,
+                    ScheduleRecurrenceKind::Daily,
+                    ScheduleRecurrenceKind::Weekdays,
+                    ScheduleRecurrenceKind::Weekly,
+                    ScheduleRecurrenceKind::Monthly,
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    editor_chip(
+                        ("schedule-recurrence", index),
+                        kind.label(),
+                        editor.recurrence_kind == kind,
+                        cx,
+                        move |app, _, _, cx| app.set_schedule_recurrence_kind(kind, cx),
+                    )
+                }),
+            ),
+        )
+        .when(
+            editor.recurrence_kind == ScheduleRecurrenceKind::Once,
+            |this| {
+                this.child(editor_input(
+                    "schedule-editor-once-at",
+                    "Run once at (RFC3339)",
+                    &inputs.once_at,
+                    true,
+                    false,
+                ))
+            },
+        )
+        .when(
+            editor.recurrence_kind != ScheduleRecurrenceKind::Once,
+            |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(10.0))
+                        .child(editor_input(
+                            "schedule-editor-start-date",
+                            "Start date",
+                            &inputs.start_date,
+                            false,
+                            false,
+                        ))
+                        .child(editor_input(
+                            "schedule-editor-time",
+                            "Local time",
+                            &inputs.time,
+                            false,
+                            false,
+                        )),
+                )
+            },
+        )
+        .when(
+            editor.recurrence_kind == ScheduleRecurrenceKind::Weekly,
+            |this| {
+                this.child(editor_section_label("Run on")).child(
+                    div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
+                        [
+                            (ProductScheduleWeekday::Sunday, "Sun"),
+                            (ProductScheduleWeekday::Monday, "Mon"),
+                            (ProductScheduleWeekday::Tuesday, "Tue"),
+                            (ProductScheduleWeekday::Wednesday, "Wed"),
+                            (ProductScheduleWeekday::Thursday, "Thu"),
+                            (ProductScheduleWeekday::Friday, "Fri"),
+                            (ProductScheduleWeekday::Saturday, "Sat"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (weekday, label))| {
+                            editor_chip(
+                                ("schedule-weekday", index),
+                                label,
+                                editor.weekdays.contains(&weekday),
+                                cx,
+                                move |app, _, _, cx| {
+                                    app.toggle_schedule_weekday(weekday, cx);
+                                },
+                            )
+                        }),
+                    ),
+                )
+            },
+        )
+        .when(
+            editor.recurrence_kind == ScheduleRecurrenceKind::Monthly,
+            |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_end()
+                        .gap(px(10.0))
+                        .child(editor_input(
+                            "schedule-editor-monthly-day",
+                            "Day of month",
+                            &inputs.monthly_day,
+                            false,
+                            false,
+                        ))
+                        .child(editor_chip(
+                            "schedule-monthly-skip",
+                            "Skip short months",
+                            editor.monthly_day_policy == ProductMonthlyDayPolicy::Skip,
+                            cx,
+                            |app, _, _, cx| {
+                                app.set_schedule_monthly_policy(ProductMonthlyDayPolicy::Skip, cx);
+                            },
+                        ))
+                        .child(editor_chip(
+                            "schedule-monthly-last",
+                            "Use last day",
+                            editor.monthly_day_policy == ProductMonthlyDayPolicy::LastDay,
+                            cx,
+                            |app, _, _, cx| {
+                                app.set_schedule_monthly_policy(
+                                    ProductMonthlyDayPolicy::LastDay,
+                                    cx,
+                                );
+                            },
+                        )),
+                )
+            },
+        )
+        .child(editor_section_label("Execution"))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(10.0))
+                .child(editor_input(
+                    "schedule-editor-project",
+                    "Workspace",
+                    &inputs.project_dir,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-model",
+                    "Model",
+                    &inputs.model,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-crew",
+                    "Crew slug",
+                    &inputs.crew_slug,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-priority",
+                    "Priority",
+                    &inputs.priority,
+                    false,
+                    false,
+                )),
+        )
+        .child(
+            div()
+                .id("schedule-editor-advanced-toggle")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.accent)
+                .cursor_pointer()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.toggle_schedule_advanced(cx);
+                }))
+                .child(if editor.advanced_open {
+                    "Hide advanced policy"
+                } else {
+                    "Show advanced policy"
+                }),
+        )
+        .when(editor.advanced_open, |this| {
+            this.child(advanced_schedule_policy(&editor, &inputs, cx))
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id("schedule-editor-cancel")
+                        .h(px(32.0))
+                        .px(px(13.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .bg(colors.bg_button_secondary)
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .when(!submitting, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.close_schedule_editor(cx);
+                                }))
+                        })
+                        .child("Cancel"),
+                )
+                .child(
+                    div()
+                        .id("schedule-editor-submit")
+                        .h(px(32.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .bg(colors.bg_button_primary)
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.fg_button_primary)
+                        .when(!submitting, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_button_primary_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.submit_schedule_editor(cx);
+                                }))
+                        })
+                        .when(submitting, |this| this.opacity(0.6))
+                        .child(if submitting {
+                            "Saving…"
+                        } else if is_replace {
+                            "Save changes"
+                        } else {
+                            "Create schedule"
+                        }),
+                ),
+        )
+}
+
+fn advanced_schedule_policy(
+    editor: &ScheduleEditorState,
+    inputs: &ScheduleEditorInputs,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("schedule-editor-advanced")
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .p(px(12.0))
+        .rounded(px(10.0))
+        .bg(colors.bg_sidebar)
+        .border_1()
+        .border_color(colors.border)
+        .child(editor_policy_row(
+            "DST gap",
+            vec![
+                editor_chip(
+                    "schedule-dst-gap-shift",
+                    "Shift forward",
+                    editor.dst_gap_policy == ProductDstGapPolicy::ShiftForward,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_dst_gap(ProductDstGapPolicy::ShiftForward, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-dst-gap-skip",
+                    "Skip",
+                    editor.dst_gap_policy == ProductDstGapPolicy::Skip,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_dst_gap(ProductDstGapPolicy::Skip, cx);
+                    },
+                )
+                .into_any_element(),
+            ],
+        ))
+        .child(editor_policy_row(
+            "DST fold",
+            vec![
+                editor_chip(
+                    "schedule-dst-fold-first",
+                    "First",
+                    editor.dst_fold_policy == ProductDstFoldPolicy::First,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_dst_fold(ProductDstFoldPolicy::First, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-dst-fold-second",
+                    "Second",
+                    editor.dst_fold_policy == ProductDstFoldPolicy::Second,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_dst_fold(ProductDstFoldPolicy::Second, cx);
+                    },
+                )
+                .into_any_element(),
+            ],
+        ))
+        .child(editor_policy_row(
+            "Misfire",
+            vec![
+                editor_chip(
+                    "schedule-misfire-skip",
+                    "Skip",
+                    editor.misfire_policy == ProductMisfirePolicy::Skip,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_misfire_policy(ProductMisfirePolicy::Skip, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-misfire-once",
+                    "Fire once",
+                    editor.misfire_policy == ProductMisfirePolicy::FireOnce,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_misfire_policy(ProductMisfirePolicy::FireOnce, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-misfire-catch-up",
+                    "Catch up",
+                    editor.misfire_policy == ProductMisfirePolicy::CatchUp,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_misfire_policy(ProductMisfirePolicy::CatchUp, cx);
+                    },
+                )
+                .into_any_element(),
+            ],
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(10.0))
+                .child(editor_input(
+                    "schedule-editor-grace",
+                    "Misfire grace (seconds)",
+                    &inputs.misfire_grace,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-catch-up",
+                    "Catch-up limit",
+                    &inputs.catch_up_limit,
+                    false,
+                    false,
+                )),
+        )
+        .child(editor_policy_row(
+            "Overlap",
+            vec![
+                editor_chip(
+                    "schedule-overlap-skip",
+                    "Skip",
+                    editor.overlap_policy == ProductOverlapPolicy::Skip,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_overlap_policy(ProductOverlapPolicy::Skip, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-overlap-queue",
+                    "Queue one",
+                    editor.overlap_policy == ProductOverlapPolicy::QueueOne,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_overlap_policy(ProductOverlapPolicy::QueueOne, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-overlap-allow",
+                    "Allow",
+                    editor.overlap_policy == ProductOverlapPolicy::Allow,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_overlap_policy(ProductOverlapPolicy::Allow, cx);
+                    },
+                )
+                .into_any_element(),
+            ],
+        ))
+        .child(editor_policy_row(
+            "Retry jitter",
+            vec![
+                editor_chip(
+                    "schedule-retry-none",
+                    "None",
+                    editor.retry_jitter == ProductRetryJitter::None,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_retry_jitter(ProductRetryJitter::None, cx);
+                    },
+                )
+                .into_any_element(),
+                editor_chip(
+                    "schedule-retry-full",
+                    "Full",
+                    editor.retry_jitter == ProductRetryJitter::Full,
+                    cx,
+                    |app, _, _, cx| {
+                        app.set_schedule_retry_jitter(ProductRetryJitter::Full, cx);
+                    },
+                )
+                .into_any_element(),
+            ],
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(10.0))
+                .child(editor_input(
+                    "schedule-editor-attempts",
+                    "Retry attempts",
+                    &inputs.retry_attempts,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-retry-base",
+                    "Base delay (seconds)",
+                    &inputs.retry_base,
+                    false,
+                    false,
+                ))
+                .child(editor_input(
+                    "schedule-editor-retry-max",
+                    "Max delay (seconds)",
+                    &inputs.retry_max,
+                    false,
+                    false,
+                )),
+        )
+}
+
+fn editor_policy_row(title: &'static str, controls: Vec<gpui::AnyElement>) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_wrap()
+        .gap(px(6.0))
+        .child(
+            div()
+                .w(px(110.0))
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(title),
+        )
+        .children(controls)
+}
+
+fn editor_section_label(label: &'static str) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(colors.text_secondary)
+        .child(label)
+}
+
+fn editor_input(
+    id: &'static str,
+    label: &'static str,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    full_width: bool,
+    tall: bool,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .when(full_width, |this| this.w_full())
+        .when(!full_width, |this| this.w(px(250.0)))
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .flex()
+                .w_full()
+                .h(if tall { px(76.0) } else { px(34.0) })
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(colors.bg_sidebar)
+                .border_1()
+                .border_color(colors.border)
+                .child(Input::new(input).appearance(false).h(if tall {
+                    px(72.0)
+                } else {
+                    px(30.0)
+                })),
+        )
+}
+
+fn editor_readonly_field(id: &'static str, label: &'static str, value: String) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .w(px(250.0))
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(34.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(theme::hex_alpha(0xffffff, 0.025))
+                .border_1()
+                .border_color(colors.border)
+                .text_sm()
+                .text_color(colors.text_secondary)
+                .child(value),
+        )
+}
+
+fn editor_chip(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    selected: bool,
+    cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &gpui::ClickEvent, &mut gpui::Window, &mut Context<MitsuroApp>)
+        + 'static,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(7.0))
+        .bg(if selected {
+            colors.accent_soft
+        } else {
+            colors.bg_button_secondary
+        })
+        .border_1()
+        .border_color(if selected {
+            colors.accent
+        } else {
+            colors.border
+        })
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if selected {
+            colors.accent
+        } else {
+            colors.text_secondary
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.bg_hover))
+        .on_click(cx.listener(on_click))
+        .child(label)
 }
 
 fn live_tasks_section(
@@ -298,6 +1044,7 @@ fn live_tasks_section(
             };
             let schedule_for_toggle = schedule.clone();
             let schedule_for_cancel = schedule.clone();
+            let schedule_for_edit = schedule.clone();
             let toggle_action = schedule_toggle_action(&schedule.status);
             let is_terminal = toggle_action.is_none();
             let any_mutation = active_mutation.is_some();
@@ -355,6 +1102,20 @@ fn live_tasks_section(
                             let action =
                                 toggle_action.expect("non-terminal schedule has a toggle action");
                             this.child(schedule_action_button(
+                                ("schedule-edit", index),
+                                "Edit",
+                                !any_mutation,
+                                false,
+                                cx,
+                                move |app, _, window, cx| {
+                                    app.open_schedule_replacement(
+                                        schedule_for_edit.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .child(schedule_action_button(
                                 ("schedule-toggle", index),
                                 if action == ProductScheduleAction::Resume {
                                     "Resume"

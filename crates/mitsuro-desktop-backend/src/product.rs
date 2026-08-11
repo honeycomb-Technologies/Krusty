@@ -401,12 +401,353 @@ pub struct ProductSchedule {
     pub title: String,
     pub summary: String,
     pub objective: String,
+    pub recurrence: ProductScheduleRecurrence,
     pub next_fire_at: Option<String>,
+    pub last_scheduled_for: Option<String>,
     pub status: String,
     pub timezone: String,
+    pub dst_policy: ProductDstPolicy,
+    pub priority: i32,
     pub project_dir: Option<String>,
     pub model: Option<String>,
+    pub model_key: Option<ProductModelKey>,
+    pub model_catalog_revision: Option<String>,
+    pub crew_slug: Option<String>,
+    pub misfire: ProductMisfireConfig,
+    pub overlap_policy: ProductOverlapPolicy,
+    pub retry: ProductRetryPolicy,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductModelKey {
+    pub provider: String,
+    pub model_id: String,
+    pub auth_scope: Option<String>,
+    pub api_format: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProductScheduleWeekday {
+    Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductMonthlyDayPolicy {
+    Skip,
+    LastDay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductScheduleRecurrence {
+    Once {
+        at: String,
+    },
+    Daily {
+        start_date: String,
+        time: String,
+    },
+    Weekdays {
+        start_date: String,
+        time: String,
+    },
+    Weekly {
+        start_date: String,
+        time: String,
+        weekdays: Vec<ProductScheduleWeekday>,
+    },
+    Monthly {
+        start_date: String,
+        time: String,
+        day: u8,
+        invalid_day_policy: ProductMonthlyDayPolicy,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductDstGapPolicy {
+    ShiftForward,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductDstFoldPolicy {
+    First,
+    Second,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductDstPolicy {
+    pub gap: ProductDstGapPolicy,
+    pub fold: ProductDstFoldPolicy,
+}
+
+impl Default for ProductDstPolicy {
+    fn default() -> Self {
+        Self {
+            gap: ProductDstGapPolicy::ShiftForward,
+            fold: ProductDstFoldPolicy::First,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductMisfirePolicy {
+    Skip,
+    FireOnce,
+    CatchUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductMisfireConfig {
+    pub policy: ProductMisfirePolicy,
+    pub grace_secs: u64,
+    pub catch_up_limit: usize,
+}
+
+impl Default for ProductMisfireConfig {
+    fn default() -> Self {
+        Self {
+            policy: ProductMisfirePolicy::FireOnce,
+            grace_secs: 300,
+            catch_up_limit: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProductOverlapPolicy {
+    Skip,
+    #[default]
+    QueueOne,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductRetryJitter {
+    None,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductRetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay_secs: u64,
+    pub max_delay_secs: u64,
+    pub jitter: ProductRetryJitter,
+}
+
+impl Default for ProductRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 15,
+            max_delay_secs: 900,
+            jitter: ProductRetryJitter::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductScheduleDefinition {
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub recurrence: ProductScheduleRecurrence,
+    pub timezone: String,
+    pub dst_policy: ProductDstPolicy,
+    pub priority: i32,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub model_key: Option<ProductModelKey>,
+    pub crew_slug: Option<String>,
+    pub misfire: ProductMisfireConfig,
+    pub overlap_policy: ProductOverlapPolicy,
+    pub retry: ProductRetryPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductScheduleCreateRequest {
+    pub session_id: String,
+    pub definition: ProductScheduleDefinition,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductScheduleReplaceRequest {
+    pub session_id: String,
+    pub schedule_id: String,
+    pub revision: u64,
+    pub definition: ProductScheduleDefinition,
+    pub idempotency_key: String,
+}
+
+fn product_recurrence_from_mitsuro(
+    recurrence: mitsuro_client::HiveScheduleRecurrence,
+) -> ProductScheduleRecurrence {
+    match recurrence {
+        mitsuro_client::HiveScheduleRecurrence::Once { at } => {
+            ProductScheduleRecurrence::Once { at }
+        }
+        mitsuro_client::HiveScheduleRecurrence::Daily { start_date, time } => {
+            ProductScheduleRecurrence::Daily { start_date, time }
+        }
+        mitsuro_client::HiveScheduleRecurrence::Weekdays { start_date, time } => {
+            ProductScheduleRecurrence::Weekdays { start_date, time }
+        }
+        mitsuro_client::HiveScheduleRecurrence::Weekly {
+            start_date,
+            time,
+            weekdays,
+        } => ProductScheduleRecurrence::Weekly {
+            start_date,
+            time,
+            weekdays: weekdays
+                .into_iter()
+                .map(|weekday| match weekday {
+                    mitsuro_client::HiveScheduleWeekday::Sunday => ProductScheduleWeekday::Sunday,
+                    mitsuro_client::HiveScheduleWeekday::Monday => ProductScheduleWeekday::Monday,
+                    mitsuro_client::HiveScheduleWeekday::Tuesday => ProductScheduleWeekday::Tuesday,
+                    mitsuro_client::HiveScheduleWeekday::Wednesday => {
+                        ProductScheduleWeekday::Wednesday
+                    }
+                    mitsuro_client::HiveScheduleWeekday::Thursday => {
+                        ProductScheduleWeekday::Thursday
+                    }
+                    mitsuro_client::HiveScheduleWeekday::Friday => ProductScheduleWeekday::Friday,
+                    mitsuro_client::HiveScheduleWeekday::Saturday => {
+                        ProductScheduleWeekday::Saturday
+                    }
+                })
+                .collect(),
+        },
+        mitsuro_client::HiveScheduleRecurrence::Monthly {
+            start_date,
+            time,
+            day,
+            invalid_day_policy,
+        } => ProductScheduleRecurrence::Monthly {
+            start_date,
+            time,
+            day,
+            invalid_day_policy: match invalid_day_policy {
+                mitsuro_client::HiveMonthlyDayPolicy::Skip => ProductMonthlyDayPolicy::Skip,
+                mitsuro_client::HiveMonthlyDayPolicy::LastDay => ProductMonthlyDayPolicy::LastDay,
+            },
+        },
+    }
+}
+
+fn product_schedule_definition_to_mitsuro(
+    definition: ProductScheduleDefinition,
+) -> mitsuro_client::HiveScheduleWriteRequest {
+    let recurrence = match definition.recurrence {
+        ProductScheduleRecurrence::Once { at } => {
+            mitsuro_client::HiveScheduleRecurrence::Once { at }
+        }
+        ProductScheduleRecurrence::Daily { start_date, time } => {
+            mitsuro_client::HiveScheduleRecurrence::Daily { start_date, time }
+        }
+        ProductScheduleRecurrence::Weekdays { start_date, time } => {
+            mitsuro_client::HiveScheduleRecurrence::Weekdays { start_date, time }
+        }
+        ProductScheduleRecurrence::Weekly {
+            start_date,
+            time,
+            weekdays,
+        } => mitsuro_client::HiveScheduleRecurrence::Weekly {
+            start_date,
+            time,
+            weekdays: weekdays
+                .into_iter()
+                .map(|weekday| match weekday {
+                    ProductScheduleWeekday::Sunday => mitsuro_client::HiveScheduleWeekday::Sunday,
+                    ProductScheduleWeekday::Monday => mitsuro_client::HiveScheduleWeekday::Monday,
+                    ProductScheduleWeekday::Tuesday => mitsuro_client::HiveScheduleWeekday::Tuesday,
+                    ProductScheduleWeekday::Wednesday => {
+                        mitsuro_client::HiveScheduleWeekday::Wednesday
+                    }
+                    ProductScheduleWeekday::Thursday => {
+                        mitsuro_client::HiveScheduleWeekday::Thursday
+                    }
+                    ProductScheduleWeekday::Friday => mitsuro_client::HiveScheduleWeekday::Friday,
+                    ProductScheduleWeekday::Saturday => {
+                        mitsuro_client::HiveScheduleWeekday::Saturday
+                    }
+                })
+                .collect(),
+        },
+        ProductScheduleRecurrence::Monthly {
+            start_date,
+            time,
+            day,
+            invalid_day_policy,
+        } => mitsuro_client::HiveScheduleRecurrence::Monthly {
+            start_date,
+            time,
+            day,
+            invalid_day_policy: match invalid_day_policy {
+                ProductMonthlyDayPolicy::Skip => mitsuro_client::HiveMonthlyDayPolicy::Skip,
+                ProductMonthlyDayPolicy::LastDay => mitsuro_client::HiveMonthlyDayPolicy::LastDay,
+            },
+        },
+    };
+    mitsuro_client::HiveScheduleWriteRequest {
+        title: definition.title,
+        summary: definition.summary,
+        objective: definition.objective,
+        recurrence,
+        timezone: definition.timezone,
+        dst_policy: mitsuro_client::HiveDstPolicy {
+            gap: match definition.dst_policy.gap {
+                ProductDstGapPolicy::ShiftForward => mitsuro_client::HiveDstGapPolicy::ShiftForward,
+                ProductDstGapPolicy::Skip => mitsuro_client::HiveDstGapPolicy::Skip,
+            },
+            fold: match definition.dst_policy.fold {
+                ProductDstFoldPolicy::First => mitsuro_client::HiveDstFoldPolicy::First,
+                ProductDstFoldPolicy::Second => mitsuro_client::HiveDstFoldPolicy::Second,
+            },
+        },
+        priority: definition.priority,
+        project_dir: definition.project_dir,
+        model: definition.model,
+        model_key: definition.model_key.map(|key| mitsuro_client::ModelKey {
+            provider: key.provider,
+            model_id: key.model_id,
+            auth_scope: key.auth_scope,
+            api_format: key.api_format,
+        }),
+        crew_slug: definition.crew_slug,
+        misfire: mitsuro_client::HiveMisfireConfig {
+            policy: match definition.misfire.policy {
+                ProductMisfirePolicy::Skip => mitsuro_client::HiveMisfirePolicy::Skip,
+                ProductMisfirePolicy::FireOnce => mitsuro_client::HiveMisfirePolicy::FireOnce,
+                ProductMisfirePolicy::CatchUp => mitsuro_client::HiveMisfirePolicy::CatchUp,
+            },
+            grace_secs: definition.misfire.grace_secs,
+            catch_up_limit: definition.misfire.catch_up_limit,
+        },
+        overlap_policy: match definition.overlap_policy {
+            ProductOverlapPolicy::Skip => mitsuro_client::HiveOverlapPolicy::Skip,
+            ProductOverlapPolicy::QueueOne => mitsuro_client::HiveOverlapPolicy::QueueOne,
+            ProductOverlapPolicy::Allow => mitsuro_client::HiveOverlapPolicy::Allow,
+        },
+        retry: mitsuro_client::HiveRetryPolicy {
+            max_attempts: definition.retry.max_attempts,
+            base_delay_secs: definition.retry.base_delay_secs,
+            max_delay_secs: definition.retry.max_delay_secs,
+            jitter: match definition.retry.jitter {
+                ProductRetryJitter::None => mitsuro_client::HiveRetryJitter::None,
+                ProductRetryJitter::Full => mitsuro_client::HiveRetryJitter::Full,
+            },
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,6 +833,16 @@ pub trait ProductBackend: Send + Sync {
     async fn hive_snapshot(&self) -> Result<ProductHiveSnapshot>;
 
     async fn list_schedules(&self) -> Result<Vec<ProductSchedule>>;
+
+    async fn create_schedule(
+        &self,
+        request: ProductScheduleCreateRequest,
+    ) -> Result<ProductScheduleMutation>;
+
+    async fn replace_schedule(
+        &self,
+        request: ProductScheduleReplaceRequest,
+    ) -> Result<ProductScheduleMutation>;
 
     async fn mutate_schedule(
         &self,
@@ -1370,14 +1721,116 @@ impl ProductBackend for DesktopBackend {
                 title: schedule.title,
                 summary: schedule.summary,
                 objective: schedule.objective,
+                recurrence: product_recurrence_from_mitsuro(schedule.recurrence),
                 next_fire_at: schedule.next_fire_at,
+                last_scheduled_for: schedule.last_scheduled_for,
                 status: schedule.status,
                 timezone: schedule.timezone,
+                dst_policy: ProductDstPolicy {
+                    gap: match schedule.dst_policy.gap {
+                        mitsuro_client::HiveDstGapPolicy::ShiftForward => {
+                            ProductDstGapPolicy::ShiftForward
+                        }
+                        mitsuro_client::HiveDstGapPolicy::Skip => ProductDstGapPolicy::Skip,
+                    },
+                    fold: match schedule.dst_policy.fold {
+                        mitsuro_client::HiveDstFoldPolicy::First => ProductDstFoldPolicy::First,
+                        mitsuro_client::HiveDstFoldPolicy::Second => ProductDstFoldPolicy::Second,
+                    },
+                },
+                priority: schedule.priority,
                 project_dir: schedule.project_dir,
                 model: schedule.model,
+                model_key: schedule.model_key.map(|key| ProductModelKey {
+                    provider: key.provider,
+                    model_id: key.model_id,
+                    auth_scope: key.auth_scope,
+                    api_format: key.api_format,
+                }),
+                model_catalog_revision: schedule.model_catalog_revision,
+                crew_slug: schedule.crew_slug,
+                misfire: ProductMisfireConfig {
+                    policy: match schedule.misfire.policy {
+                        mitsuro_client::HiveMisfirePolicy::Skip => ProductMisfirePolicy::Skip,
+                        mitsuro_client::HiveMisfirePolicy::FireOnce => {
+                            ProductMisfirePolicy::FireOnce
+                        }
+                        mitsuro_client::HiveMisfirePolicy::CatchUp => ProductMisfirePolicy::CatchUp,
+                    },
+                    grace_secs: schedule.misfire.grace_secs,
+                    catch_up_limit: schedule.misfire.catch_up_limit,
+                },
+                overlap_policy: match schedule.overlap_policy {
+                    mitsuro_client::HiveOverlapPolicy::Skip => ProductOverlapPolicy::Skip,
+                    mitsuro_client::HiveOverlapPolicy::QueueOne => ProductOverlapPolicy::QueueOne,
+                    mitsuro_client::HiveOverlapPolicy::Allow => ProductOverlapPolicy::Allow,
+                },
+                retry: ProductRetryPolicy {
+                    max_attempts: schedule.retry.max_attempts,
+                    base_delay_secs: schedule.retry.base_delay_secs,
+                    max_delay_secs: schedule.retry.max_delay_secs,
+                    jitter: match schedule.retry.jitter {
+                        mitsuro_client::HiveRetryJitter::None => ProductRetryJitter::None,
+                        mitsuro_client::HiveRetryJitter::Full => ProductRetryJitter::Full,
+                    },
+                },
                 revision: schedule.revision,
             })
             .collect())
+    }
+
+    async fn create_schedule(
+        &self,
+        request: ProductScheduleCreateRequest,
+    ) -> Result<ProductScheduleMutation> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive schedule creation".to_owned(),
+            ));
+        };
+        let definition = product_schedule_definition_to_mitsuro(request.definition);
+        let response = backend
+            .client()
+            .create_hive_schedule(
+                &request.session_id,
+                &definition,
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(ProductScheduleMutation {
+            schedule_id: response.schedule_id,
+            revision: response.revision,
+            status: response.status,
+        })
+    }
+
+    async fn replace_schedule(
+        &self,
+        request: ProductScheduleReplaceRequest,
+    ) -> Result<ProductScheduleMutation> {
+        let DesktopBackend::Mitsuro(backend) = self else {
+            return Err(AgentError::NotImplemented(
+                "Codex does not expose Mitsuro Hive schedule replacement".to_owned(),
+            ));
+        };
+        let definition = product_schedule_definition_to_mitsuro(request.definition);
+        let response = backend
+            .client()
+            .replace_hive_schedule(
+                &request.session_id,
+                &request.schedule_id,
+                request.revision,
+                &definition,
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        Ok(ProductScheduleMutation {
+            schedule_id: response.schedule_id,
+            revision: response.revision,
+            status: response.status,
+        })
     }
 
     async fn mutate_schedule(
@@ -2065,6 +2518,137 @@ mod tests {
             .expect_err("Codex must not claim Mitsuro schedule mutation support");
         assert!(matches!(error, AgentError::NotImplemented(_)));
         assert!(error.to_string().contains("Hive schedule mutations"));
+    }
+
+    fn schedule_definition() -> ProductScheduleDefinition {
+        ProductScheduleDefinition {
+            title: "Weekly audit".into(),
+            summary: "Inspect the workspace".into(),
+            objective: "Run the full audit".into(),
+            recurrence: ProductScheduleRecurrence::Weekly {
+                start_date: "2026-08-10".into(),
+                time: "09:30:00".into(),
+                weekdays: vec![ProductScheduleWeekday::Monday],
+            },
+            timezone: "America/Los_Angeles".into(),
+            dst_policy: ProductDstPolicy::default(),
+            priority: 2,
+            project_dir: Some("/workspace".into()),
+            model: Some("gpt-5.5".into()),
+            model_key: Some(ProductModelKey {
+                provider: "openai".into(),
+                model_id: "gpt-5.5".into(),
+                auth_scope: Some("chatgpt".into()),
+                api_format: "responses".into(),
+            }),
+            crew_slug: Some("audit".into()),
+            misfire: ProductMisfireConfig::default(),
+            overlap_policy: ProductOverlapPolicy::QueueOne,
+            retry: ProductRetryPolicy::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_product_schedule_writes_are_rejected_before_io() {
+        let backend = DesktopBackend::codex_stdio();
+        let create_error = backend
+            .create_schedule(ProductScheduleCreateRequest {
+                session_id: "session-7".into(),
+                definition: schedule_definition(),
+                idempotency_key: "create-7".into(),
+            })
+            .await
+            .expect_err("Codex must reject Mitsuro schedule creation");
+        assert!(matches!(create_error, AgentError::NotImplemented(_)));
+        let replace_error = backend
+            .replace_schedule(ProductScheduleReplaceRequest {
+                session_id: "session-7".into(),
+                schedule_id: "schedule-7".into(),
+                revision: 3,
+                definition: schedule_definition(),
+                idempotency_key: "replace-7".into(),
+            })
+            .await
+            .expect_err("Codex must reject Mitsuro schedule replacement");
+        assert!(matches!(replace_error, AgentError::NotImplemented(_)));
+    }
+
+    #[tokio::test]
+    async fn mitsuro_product_schedule_writes_preserve_contract_and_authoritative_response() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            for (method, path, response_revision) in [
+                ("POST", "/api/hive/sessions/session-7/schedules", 0_u64),
+                (
+                    "PUT",
+                    "/api/hive/sessions/session-7/schedules/schedule-7",
+                    1_u64,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let size = socket.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(request.starts_with(&format!("{method} {path} ")));
+                let headers = request.to_ascii_lowercase();
+                assert!(headers.contains(if method == "POST" {
+                    "idempotency-key: create-7"
+                } else {
+                    "idempotency-key: replace-7"
+                }));
+                if method == "PUT" {
+                    assert!(headers.contains("if-match: \"0\""));
+                }
+                let body = request.split("\r\n\r\n").nth(1).expect("request body");
+                let body: serde_json::Value = serde_json::from_str(body).expect("schedule JSON");
+                assert_eq!(body["recurrence"]["kind"], "weekly");
+                assert_eq!(body["priority"], 2);
+                assert_eq!(body["project_dir"], "/workspace");
+                assert_eq!(body["crew_slug"], "audit");
+                assert_eq!(body["model_key"]["provider"], "openai");
+                assert_eq!(body["model_key"]["auth_scope"], "chatgpt");
+                let response_body = format!(
+                    r#"{{"schedule_id":"schedule-7","revision":{response_revision},"status":"enabled"}}"#
+                );
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                            response_body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        let mitsuro = crate::MitsuroServerBackend::from_url(format!("http://{address}"), None)
+            .expect("Mitsuro backend");
+        let backend = DesktopBackend::Mitsuro(Arc::new(mitsuro));
+        let created = backend
+            .create_schedule(ProductScheduleCreateRequest {
+                session_id: "session-7".into(),
+                definition: schedule_definition(),
+                idempotency_key: "create-7".into(),
+            })
+            .await
+            .expect("create schedule");
+        assert_eq!(created.revision, 0);
+        let replaced = backend
+            .replace_schedule(ProductScheduleReplaceRequest {
+                session_id: "session-7".into(),
+                schedule_id: "schedule-7".into(),
+                revision: created.revision,
+                definition: schedule_definition(),
+                idempotency_key: "replace-7".into(),
+            })
+            .await
+            .expect("replace schedule");
+        assert_eq!(replaced.revision, 1);
+        server.join().expect("test server join");
     }
 
     #[tokio::test]

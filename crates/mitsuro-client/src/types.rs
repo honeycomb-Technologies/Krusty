@@ -130,17 +130,180 @@ pub struct HiveCurrentResponse {
     pub approvals: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveScheduleWeekday {
+    Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveMonthlyDayPolicy {
+    Skip,
+    LastDay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HiveScheduleRecurrence {
+    Once {
+        at: String,
+    },
+    Daily {
+        start_date: String,
+        time: String,
+    },
+    Weekdays {
+        start_date: String,
+        time: String,
+    },
+    Weekly {
+        start_date: String,
+        time: String,
+        weekdays: Vec<HiveScheduleWeekday>,
+    },
+    Monthly {
+        start_date: String,
+        time: String,
+        day: u8,
+        invalid_day_policy: HiveMonthlyDayPolicy,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveDstGapPolicy {
+    ShiftForward,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveDstFoldPolicy {
+    First,
+    Second,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveDstPolicy {
+    pub gap: HiveDstGapPolicy,
+    pub fold: HiveDstFoldPolicy,
+}
+
+impl Default for HiveDstPolicy {
+    fn default() -> Self {
+        Self {
+            gap: HiveDstGapPolicy::ShiftForward,
+            fold: HiveDstFoldPolicy::First,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveMisfirePolicy {
+    Skip,
+    FireOnce,
+    CatchUp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveMisfireConfig {
+    pub policy: HiveMisfirePolicy,
+    pub grace_secs: u64,
+    pub catch_up_limit: usize,
+}
+
+impl Default for HiveMisfireConfig {
+    fn default() -> Self {
+        Self {
+            policy: HiveMisfirePolicy::FireOnce,
+            grace_secs: 300,
+            catch_up_limit: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveOverlapPolicy {
+    Skip,
+    #[default]
+    QueueOne,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveRetryJitter {
+    None,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveRetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay_secs: u64,
+    pub max_delay_secs: u64,
+    pub jitter: HiveRetryJitter,
+}
+
+impl Default for HiveRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 15,
+            max_delay_secs: 900,
+            jitter: HiveRetryJitter::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleWriteRequest {
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub recurrence: HiveScheduleRecurrence,
+    pub timezone: String,
+    pub dst_policy: HiveDstPolicy,
+    pub priority: i32,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub model_key: Option<ModelKey>,
+    pub crew_slug: Option<String>,
+    pub misfire: HiveMisfireConfig,
+    pub overlap_policy: HiveOverlapPolicy,
+    pub retry: HiveRetryPolicy,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HiveScheduleSummary {
     pub id: String,
     pub title: String,
     pub summary: String,
     pub objective: String,
+    pub recurrence: HiveScheduleRecurrence,
     pub next_fire_at: Option<String>,
+    pub last_scheduled_for: Option<String>,
     pub status: String,
     pub timezone: String,
+    pub dst_policy: HiveDstPolicy,
+    pub priority: i32,
     pub project_dir: Option<String>,
     pub model: Option<String>,
+    pub model_key: Option<ModelKey>,
+    pub model_catalog_revision: Option<String>,
+    pub crew_slug: Option<String>,
+    pub misfire: HiveMisfireConfig,
+    pub overlap_policy: HiveOverlapPolicy,
+    pub retry: HiveRetryPolicy,
     pub revision: u64,
     pub controller_session_id: String,
 }
@@ -1569,8 +1732,9 @@ mod tests {
     use super::{
         ChatStreamEvent, ContentBlock, DelegatedProgressStatus, DelegatedRunRole,
         DelegationEventKind, DelegationExecutionMode, DelegationParentContinuationState, FastMode,
-        HiveCurrentResponse, HiveScheduleSummary, ModelInfo, ReasoningControl, ReasoningEffort,
-        SessionStateResponse, SessionType, SteerRequest, ThinkingLevel,
+        HiveCurrentResponse, HiveScheduleRecurrence, HiveScheduleSummary, ModelInfo,
+        ReasoningControl, ReasoningEffort, SessionStateResponse, SessionType, SteerRequest,
+        ThinkingLevel,
     };
     use serde_json::json;
 
@@ -1614,17 +1778,25 @@ mod tests {
 
         let schedules: Vec<HiveScheduleSummary> = serde_json::from_value(json!([{
             "id": "schedule-1", "controller_id": "controller-1", "title": "Sweep",
-            "summary": "Nightly", "objective": "Inspect", "recurrence": {},
-            "timezone": "UTC", "dst_policy": "skip", "next_fire_at": null,
-            "last_scheduled_for": null, "status": "active", "priority": 0,
+            "summary": "Nightly", "objective": "Inspect",
+            "recurrence": {"kind": "daily", "start_date": "2026-08-10", "time": "02:00:00"},
+            "timezone": "UTC", "dst_policy": {"gap": "shift_forward", "fold": "first"},
+            "next_fire_at": null, "last_scheduled_for": null, "status": "enabled", "priority": 0,
             "project_dir": null, "model": null, "model_key": null,
-            "model_catalog_revision": null, "crew_slug": null, "misfire": {},
-            "overlap_policy": "skip", "retry": {}, "revision": 1,
+            "model_catalog_revision": null, "crew_slug": null,
+            "misfire": {"policy": "fire_once", "grace_secs": 300, "catch_up_limit": 3},
+            "overlap_policy": "skip",
+            "retry": {"max_attempts": 5, "base_delay_secs": 15, "max_delay_secs": 900, "jitter": "full"},
+            "revision": 1,
             "created_by": "user", "created_at": "now", "updated_at": "now",
             "controller_session_id": "hive-1"
         }]))
         .expect("Hive schedule list");
         assert_eq!(schedules[0].controller_session_id, "hive-1");
+        assert!(matches!(
+            schedules[0].recurrence,
+            HiveScheduleRecurrence::Daily { .. }
+        ));
     }
 
     #[test]

@@ -87,8 +87,9 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
 - Scheduled reads `/api/hive/schedules` and exposes real Mitsuro pause, resume, and
   cancellation controls. Every mutation sends the schedule revision through `If-Match`
   plus a unique idempotency key, refreshes the authoritative catalog after success, and
-  requires a second click before cancellation. New schedule creation/replacement remains
-  unavailable until the native form can collect the complete recurrence contract.
+  requires a second click before cancellation. The native editor creates and replaces
+  schedules with the full server contract: all recurrence variants, timezone/DST,
+  workspace/model/crew identity, priority, misfire, overlap, and retry policy.
 - Terminal shows Mitsuro's `/api/processes` catalog read-only. Codex stdio launches
   standalone commands through the current sandboxed `command/exec*` family, including
   streamed stdout/stderr, stdin, resize, termination, and the process-exit response.

@@ -11,9 +11,9 @@ use crate::sse::{chat_stream_from_response, ChatEventStream};
 use crate::{
     BackgroundProcess, ChatRequest, CreateSessionRequest, ExtensionOverview, FileResponse,
     FileTreeResponse, HealthResponse, HiveCurrentResponse, HiveScheduleMutationResponse,
-    HiveScheduleSummary, McpServer, ModelsResponse, OAuthExchangeRequest, OAuthExchangeResponse,
-    OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse, ProviderStatus,
-    ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateOptions,
+    HiveScheduleSummary, HiveScheduleWriteRequest, McpServer, ModelsResponse, OAuthExchangeRequest,
+    OAuthExchangeResponse, OAuthStartRequest, OAuthStartResponse, OAuthStatusResponse,
+    ProviderStatus, ServerAccessResponse, ServerStatusResponse, SessionInfo, SessionStateOptions,
     SessionStateResponse, SessionWithMessages, SetCredentialRequest, SimpleOkResponse, SkillInfo,
     SteerRequest, SteerResponse, ToolApprovalRequest, UpdateServerAccessRequest,
     UpdateSessionRequest,
@@ -247,6 +247,42 @@ impl MitsuroClient {
         self.get_json("/hive/schedules").await
     }
 
+    pub async fn create_hive_schedule(
+        &self,
+        session_id: &str,
+        definition: &HiveScheduleWriteRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        self.write_hive_schedule(
+            reqwest::Method::POST,
+            session_id,
+            None,
+            None,
+            definition,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn replace_hive_schedule(
+        &self,
+        session_id: &str,
+        schedule_id: &str,
+        revision: u64,
+        definition: &HiveScheduleWriteRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        self.write_hive_schedule(
+            reqwest::Method::PUT,
+            session_id,
+            Some(schedule_id),
+            Some(revision),
+            definition,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub async fn pause_hive_schedule(
         &self,
         session_id: &str,
@@ -337,6 +373,45 @@ impl MitsuroClient {
             .send()
             .await
             .with_context(|| format!("mutating Hive schedule at {url}"))?;
+        decode_json_response(response, &url).await
+    }
+
+    async fn write_hive_schedule(
+        &self,
+        method: reqwest::Method,
+        session_id: &str,
+        schedule_id: Option<&str>,
+        revision: Option<u64>,
+        definition: &HiveScheduleWriteRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<HiveScheduleMutationResponse> {
+        let mut url = reqwest::Url::parse(&self.api_url("/hive/sessions"))
+            .context("building Mitsuro Hive schedule write URL")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("Mitsuro Hive endpoint cannot be a base URL"))?;
+            segments.push(session_id).push("schedules");
+            if let Some(schedule_id) = schedule_id {
+                segments.push(schedule_id);
+            }
+        }
+        let url = url.to_string();
+        let mut request = self
+            .http
+            .request(method, &url)
+            .header(ACCEPT, "application/json")
+            .json(definition);
+        if let Some(revision) = revision {
+            request = request.header(IF_MATCH, format!("\"{revision}\""));
+        }
+        if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+            request = request.header("Idempotency-Key", key);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("writing Hive schedule at {url}"))?;
         decode_json_response(response, &url).await
     }
 
@@ -662,7 +737,7 @@ mod tests {
                 socket
                     .write_all(
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
                         )
                         .as_bytes(),
@@ -692,6 +767,102 @@ mod tests {
             .expect("cancel response");
         assert_eq!(cancelled.status, "cancelled");
         assert_eq!(cancelled.revision, 10);
+        server.join().expect("test server join");
+    }
+
+    #[tokio::test]
+    async fn hive_schedule_writes_preserve_full_definition_and_concurrency_headers() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            for (method, path, revision, response_revision) in [
+                (
+                    "POST",
+                    "/api/hive/sessions/session%20one/schedules",
+                    None,
+                    0_u64,
+                ),
+                (
+                    "PUT",
+                    "/api/hive/sessions/session%20one/schedules/schedule%2Fone",
+                    Some(0_u64),
+                    1_u64,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let size = socket.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(request.starts_with(&format!("{method} {path} ")));
+                let headers = request.to_ascii_lowercase();
+                assert!(headers.contains("idempotency-key: write-key"));
+                if let Some(revision) = revision {
+                    assert!(headers.contains(&format!("if-match: \"{revision}\"")));
+                } else {
+                    assert!(!headers.contains("if-match:"));
+                }
+                let body = request.split("\r\n\r\n").nth(1).expect("request body");
+                let body: serde_json::Value = serde_json::from_str(body).expect("schedule JSON");
+                assert_eq!(body["recurrence"]["kind"], "weekly");
+                assert_eq!(body["recurrence"]["weekdays"][0], "monday");
+                assert_eq!(body["dst_policy"]["gap"], "shift_forward");
+                assert_eq!(body["misfire"]["policy"], "fire_once");
+                assert_eq!(body["overlap_policy"], "queue_one");
+                assert_eq!(body["retry"]["jitter"], "full");
+                let response_body = format!(
+                    r#"{{"schedule_id":"schedule/one","revision":{response_revision},"status":"enabled"}}"#
+                );
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{response_body}",
+                            response_body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        let definition = HiveScheduleWriteRequest {
+            title: "Weekly audit".into(),
+            summary: "Inspect the workspace".into(),
+            objective: "Run the full audit".into(),
+            recurrence: crate::HiveScheduleRecurrence::Weekly {
+                start_date: "2026-08-10".into(),
+                time: "09:30:00".into(),
+                weekdays: vec![crate::HiveScheduleWeekday::Monday],
+            },
+            timezone: "America/Los_Angeles".into(),
+            dst_policy: crate::HiveDstPolicy::default(),
+            priority: 2,
+            project_dir: Some("/workspace".into()),
+            model: Some("gpt-5.5".into()),
+            model_key: None,
+            crew_slug: Some("audit".into()),
+            misfire: crate::HiveMisfireConfig::default(),
+            overlap_policy: crate::HiveOverlapPolicy::QueueOne,
+            retry: crate::HiveRetryPolicy::default(),
+        };
+        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+        let created = client
+            .create_hive_schedule("session one", &definition, Some("write-key"))
+            .await
+            .expect("create response");
+        assert_eq!(created.revision, 0);
+        let replaced = client
+            .replace_hive_schedule(
+                "session one",
+                "schedule/one",
+                created.revision,
+                &definition,
+                Some("write-key"),
+            )
+            .await
+            .expect("replace response");
+        assert_eq!(replaced.revision, 1);
         server.join().expect("test server join");
     }
 
