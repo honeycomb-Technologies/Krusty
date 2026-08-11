@@ -111,6 +111,9 @@ pub struct BackendCapabilities {
     pub external_agent_import: bool,
     pub experimental_features: bool,
     pub memory_settings: bool,
+    pub thread_settings: bool,
+    pub thread_metadata: bool,
+    pub item_pagination: bool,
     pub account_workspace_messages: bool,
     pub account_reset_credits: bool,
     pub account_credit_nudge: bool,
@@ -165,6 +168,9 @@ impl BackendCapabilities {
             external_agent_import: true,
             experimental_features: true,
             memory_settings: true,
+            thread_settings: true,
+            thread_metadata: true,
+            item_pagination: true,
             account_workspace_messages: true,
             account_reset_credits: true,
             account_credit_nudge: true,
@@ -222,6 +228,9 @@ impl BackendCapabilities {
             external_agent_import: false,
             experimental_features: false,
             memory_settings: false,
+            thread_settings: false,
+            thread_metadata: false,
+            item_pagination: false,
             account_workspace_messages: false,
             account_reset_credits: false,
             account_credit_nudge: false,
@@ -740,6 +749,51 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.memory_reset().await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose the Codex local-memory store".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn update_thread_settings(
+        &self,
+        session: &BackendSessionId,
+        mut params: crate::ThreadSettingsUpdateParams,
+    ) -> Result<crate::ThreadSettingsUpdateResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_settings_update(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex per-thread settings".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn update_thread_metadata(
+        &self,
+        session: &BackendSessionId,
+        mut params: crate::ThreadMetadataUpdateParams,
+    ) -> Result<crate::ThreadMetadataUpdateResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_metadata_update(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex per-thread metadata".to_owned(),
+            )),
+        }
+    }
+
+    pub async fn list_thread_items(
+        &self,
+        session: &BackendSessionId,
+        mut params: crate::ThreadItemsListParams,
+    ) -> Result<crate::ThreadItemsListResponse> {
+        self.ensure_session_origin(session)?;
+        params.thread_id.clone_from(&session.raw);
+        match self {
+            Self::Codex(backend) => backend.thread_items_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex item pagination".to_owned(),
             )),
         }
     }
@@ -1281,6 +1335,12 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().experimental_features);
         assert!(BackendCapabilities::codex().memory_settings);
         assert!(!BackendCapabilities::mitsuro().memory_settings);
+        assert!(BackendCapabilities::codex().thread_settings);
+        assert!(!BackendCapabilities::mitsuro().thread_settings);
+        assert!(BackendCapabilities::codex().thread_metadata);
+        assert!(!BackendCapabilities::mitsuro().thread_metadata);
+        assert!(BackendCapabilities::codex().item_pagination);
+        assert!(!BackendCapabilities::mitsuro().item_pagination);
         assert!(BackendCapabilities::codex().account_workspace_messages);
         assert!(!BackendCapabilities::mitsuro().account_workspace_messages);
         assert!(BackendCapabilities::codex().account_reset_credits);

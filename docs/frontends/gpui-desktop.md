@@ -97,8 +97,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 103 typed adapters
-and 30 raw-transport-only methods. The reviewed reference client uses 16 of those raw
+The executable client-method coverage matrix currently identifies 106 typed adapters
+and 27 raw-transport-only methods. The reviewed reference client uses 13 of those raw
 methods on Linux product paths; two are Windows-sandbox-only, and 12 appear only in the
 generated inventory or unused reference modules. Raw reachability is treated as
 remaining product work, not as feature completion; the matrix test must change with
@@ -289,6 +289,14 @@ each typed adapter or approved platform/product exclusion.
   read-only contract from its persisted transcript. Codex `thread/rollback` is typed for
   the reference edit/retry workflow, while Mitsuro explicitly rejects destructive
   rollback because its HTTP API has no equivalent mutation.
+- The exact `thread/settings/update` and `thread/metadata/update` nullable-patch
+  contracts are typed and origin-checked, including the difference between an omitted
+  field and an explicit `null` clear. `thread/items/list` is also typed with turn
+  identity, direction, and cursor preservation; a runtime returning JSON-RPC `-32601`
+  is projected from the same real `thread/read(includeTurns)` payload. Wiring the
+  per-thread settings notification into every composer selector and adopting item pages
+  as the primary transcript loader remain product/UI work; typed reachability alone is
+  not reported as interaction parity.
 - Backend session IDs are namespaced (`BackendSessionId`) and are stored on every
   live GPUI thread. Session/model/turn flows use the transport-neutral
   `ProductBackend` contract, and mutations reject a session whose origin differs

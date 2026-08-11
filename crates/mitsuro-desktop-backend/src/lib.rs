@@ -30,6 +30,7 @@ pub mod realtime;
 pub mod remote_control;
 pub mod server_requests;
 pub mod skill_config;
+pub mod thread_configuration;
 pub mod thread_history;
 pub mod types;
 
@@ -253,8 +254,16 @@ pub use server_requests::{
     MCP_SERVER_ELICITATION_REQUEST, SERVER_REQUEST_METHODS, TOOL_REQUEST_USER_INPUT,
 };
 pub use skill_config::{SkillsConfigWriteParams, SkillsConfigWriteResponse};
+pub use thread_configuration::{
+    ActivePermissionProfile, ApprovalPolicyMode, AskForApproval, GranularApprovalPolicy,
+    ThreadMetadataGitInfoUpdateParams, ThreadMetadataUpdateParams, ThreadMetadataUpdateResponse,
+    ThreadMultiAgentMode, ThreadMultiAgentModeName, ThreadPersonality, ThreadReasoningSummary,
+    ThreadSettings, ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse,
+    ThreadSettingsUpdatedNotification,
+};
 pub use thread_history::{
-    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
+    list_items_in_thread, list_turns_in_thread, search_occurrences_in_thread, ThreadItemEntry,
+    ThreadItemsListParams, ThreadItemsListResponse, ThreadItemsSortDirection, ThreadRollbackParams,
     ThreadRollbackResponse, ThreadSearchOccurrence, ThreadSearchOccurrencesParams,
     ThreadSearchOccurrencesResponse, ThreadSearchTextRange, ThreadTurnItemsView,
     ThreadTurnsListParams, ThreadTurnsListResponse, ThreadTurnsSortDirection,

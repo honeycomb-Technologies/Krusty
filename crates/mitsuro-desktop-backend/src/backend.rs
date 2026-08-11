@@ -93,9 +93,14 @@ use crate::remote_control::{
     RemoteControlPairingStartResponse, RemoteControlPairingStatusParams,
     RemoteControlPairingStatusResponse, RemoteControlStatusReadResponse,
 };
+use crate::thread_configuration::{
+    ThreadMetadataUpdateParams, ThreadMetadataUpdateResponse, ThreadSettingsUpdateParams,
+    ThreadSettingsUpdateResponse,
+};
 use crate::thread_history::{
-    ThreadRollbackParams, ThreadRollbackResponse, ThreadSearchOccurrencesParams,
-    ThreadSearchOccurrencesResponse, ThreadTurnsListParams, ThreadTurnsListResponse,
+    ThreadItemsListParams, ThreadItemsListResponse, ThreadRollbackParams, ThreadRollbackResponse,
+    ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse, ThreadTurnsListParams,
+    ThreadTurnsListResponse,
 };
 use crate::types::{ConnectionStatus, Result};
 use crate::{
@@ -187,6 +192,26 @@ pub trait AgentBackend: Send + Sync {
     async fn memory_reset(&self) -> Result<MemoryResetResponse> {
         Err(crate::AgentError::NotImplemented(
             "memory reset is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Persist settings used by subsequent turns on an existing Codex thread.
+    async fn thread_settings_update(
+        &self,
+        _params: ThreadSettingsUpdateParams,
+    ) -> Result<ThreadSettingsUpdateResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "per-thread settings are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Patch durable Git metadata associated with a Codex thread.
+    async fn thread_metadata_update(
+        &self,
+        _params: ThreadMetadataUpdateParams,
+    ) -> Result<ThreadMetadataUpdateResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "per-thread metadata is not implemented by this backend".to_owned(),
         ))
     }
 
@@ -291,6 +316,16 @@ pub trait AgentBackend: Send + Sync {
         &self,
         params: ThreadTurnsListParams,
     ) -> Result<ThreadTurnsListResponse>;
+
+    /// Read one bounded page of items, optionally scoped to a single turn.
+    async fn thread_items_list(
+        &self,
+        _params: ThreadItemsListParams,
+    ) -> Result<ThreadItemsListResponse> {
+        Err(crate::AgentError::NotImplemented(
+            "thread item pagination is not implemented by this backend".to_owned(),
+        ))
+    }
 
     /// Remove completed turns from the tail of a Codex thread. The Codex method
     /// is deprecated but still underpins reference-desktop message editing.

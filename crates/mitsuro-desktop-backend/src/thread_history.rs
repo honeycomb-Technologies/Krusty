@@ -132,6 +132,44 @@ pub struct ThreadTurnsListResponse {
     pub backwards_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadItemsSortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadItemsListParams {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_direction: Option<ThreadItemsSortDirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadItemEntry {
+    pub turn_id: String,
+    pub item: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadItemsListResponse {
+    pub data: Vec<ThreadItemEntry>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub backwards_cursor: Option<String>,
+}
+
 /// Map a real thread/read payload into the occurrence contract. This is used by
 /// the Mitsuro adapter and by offline contract tests; Codex calls its native method.
 pub fn search_occurrences_in_thread(
@@ -241,6 +279,59 @@ pub fn list_turns_in_thread(
         data,
         next_cursor: (end < turns.len()).then(|| format!("mitsuro-offset:{end}")),
         backwards_cursor: (!turns.is_empty()).then(|| format!("mitsuro-offset:{offset}")),
+    }
+}
+
+/// Map a real `thread/read(includeTurns)` payload into the item pagination
+/// contract. Codex uses this only when a runtime advertises the method but
+/// responds with JSON-RPC `-32601`.
+pub fn list_items_in_thread(
+    thread: &Value,
+    params: &ThreadItemsListParams,
+) -> ThreadItemsListResponse {
+    let mut entries = Vec::new();
+    for turn in thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if params
+            .turn_id
+            .as_deref()
+            .is_some_and(|filter| filter != turn_id)
+        {
+            continue;
+        }
+        for item in turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            entries.push(ThreadItemEntry {
+                turn_id: turn_id.to_owned(),
+                item: item.clone(),
+            });
+        }
+    }
+    if params
+        .sort_direction
+        .unwrap_or(ThreadItemsSortDirection::Asc)
+        == ThreadItemsSortDirection::Desc
+    {
+        entries.reverse();
+    }
+    let offset = parse_local_cursor(params.cursor.as_deref()).unwrap_or(0);
+    let limit = params.limit.unwrap_or(100).clamp(1, 500) as usize;
+    let end = offset.saturating_add(limit).min(entries.len());
+    ThreadItemsListResponse {
+        data: entries.get(offset..end).unwrap_or_default().to_vec(),
+        next_cursor: (end < entries.len()).then(|| format!("mitsuro-offset:{end}")),
+        backwards_cursor: (!entries.is_empty()).then(|| format!("mitsuro-offset:{offset}")),
     }
 }
 
@@ -383,6 +474,32 @@ mod tests {
             serde_json::to_value(ThreadRollbackParams::one("thread-1")).unwrap(),
             serde_json::json!({"threadId": "thread-1", "numTurns": 1})
         );
+    }
+
+    #[test]
+    fn item_pages_preserve_turn_identity_direction_and_real_payloads() {
+        let thread = serde_json::json!({
+            "turns": [
+                {"id": "turn-1", "items": [{"id": "item-1", "type": "userMessage"}]},
+                {"id": "turn-2", "items": [
+                    {"id": "item-2", "type": "agentMessage"},
+                    {"id": "item-3", "type": "commandExecution"}
+                ]}
+            ]
+        });
+        let page = list_items_in_thread(
+            &thread,
+            &ThreadItemsListParams {
+                thread_id: "thread-1".to_owned(),
+                turn_id: Some("turn-2".to_owned()),
+                cursor: None,
+                limit: Some(1),
+                sort_direction: Some(ThreadItemsSortDirection::Desc),
+            },
+        );
+        assert_eq!(page.data[0].turn_id, "turn-2");
+        assert_eq!(page.data[0].item["id"], "item-3");
+        assert_eq!(page.next_cursor.as_deref(), Some("mitsuro-offset:1"));
     }
 
     #[test]

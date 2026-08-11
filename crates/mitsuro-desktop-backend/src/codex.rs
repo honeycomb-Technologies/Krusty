@@ -96,9 +96,10 @@ use crate::remote_control::{
 };
 use crate::server_requests::{automatic_server_response, AutomaticServerResponse};
 use crate::thread_history::{
-    list_turns_in_thread, search_occurrences_in_thread, ThreadRollbackParams,
-    ThreadRollbackResponse, ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse,
-    ThreadTurnsListParams, ThreadTurnsListResponse,
+    list_items_in_thread, list_turns_in_thread, search_occurrences_in_thread,
+    ThreadItemsListParams, ThreadItemsListResponse, ThreadRollbackParams, ThreadRollbackResponse,
+    ThreadSearchOccurrencesParams, ThreadSearchOccurrencesResponse, ThreadTurnsListParams,
+    ThreadTurnsListResponse,
 };
 use crate::types::{AgentError, ConnectionStatus, Result, TurnStreamEvent};
 
@@ -558,6 +559,25 @@ impl CodexAppServerBackend {
                 );
                 let thread = self.read_history_fallback(&params.thread_id).await?;
                 Ok(list_turns_in_thread(&thread.thread, &params))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read one bounded page of durable thread items.
+    pub async fn list_thread_items(
+        &self,
+        params: ThreadItemsListParams,
+    ) -> Result<ThreadItemsListResponse> {
+        let value = serde_json::to_value(&params)?;
+        match self.request_typed("thread/items/list", Some(value)).await {
+            Ok(response) => Ok(response),
+            Err(AgentError::Rpc { code: -32601, .. }) => {
+                warn!(
+                    "Codex app-server rejected thread/items/list; projecting real thread/read history"
+                );
+                let thread = self.read_history_fallback(&params.thread_id).await?;
+                Ok(list_items_in_thread(&thread.thread, &params))
             }
             Err(error) => Err(error),
         }
@@ -1180,6 +1200,24 @@ impl AgentBackend for CodexAppServerBackend {
         self.request_typed("memory/reset", None).await
     }
 
+    async fn thread_settings_update(
+        &self,
+        params: crate::ThreadSettingsUpdateParams,
+    ) -> Result<crate::ThreadSettingsUpdateResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/settings/update", Some(value))
+            .await
+    }
+
+    async fn thread_metadata_update(
+        &self,
+        params: crate::ThreadMetadataUpdateParams,
+    ) -> Result<crate::ThreadMetadataUpdateResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/metadata/update", Some(value))
+            .await
+    }
+
     async fn permission_profile_list(
         &self,
         params: PermissionProfileListParams,
@@ -1266,6 +1304,13 @@ impl AgentBackend for CodexAppServerBackend {
         params: ThreadTurnsListParams,
     ) -> Result<ThreadTurnsListResponse> {
         self.list_thread_turns(params).await
+    }
+
+    async fn thread_items_list(
+        &self,
+        params: ThreadItemsListParams,
+    ) -> Result<ThreadItemsListResponse> {
+        self.list_thread_items(params).await
     }
 
     async fn thread_rollback(
@@ -2619,6 +2664,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_configuration_and_item_pages_match_generated_contracts() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server_reader);
+            for expected in [
+                "thread/settings/update",
+                "thread/metadata/update",
+                "thread/items/list",
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(request["method"], expected);
+                let result = match expected {
+                    "thread/settings/update" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-7",
+                                "model": "gpt-5.6-sol",
+                                "serviceTier": null
+                            })
+                        );
+                        serde_json::json!({})
+                    }
+                    "thread/metadata/update" => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-7",
+                                "gitInfo": {"branch": "main"}
+                            })
+                        );
+                        serde_json::json!({"thread": {"id": "thread-7"}})
+                    }
+                    _ => {
+                        assert_eq!(
+                            request["params"],
+                            serde_json::json!({
+                                "threadId": "thread-7",
+                                "turnId": "turn-3",
+                                "limit": 100,
+                                "sortDirection": "desc"
+                            })
+                        );
+                        serde_json::json!({
+                            "data": [],
+                            "nextCursor": null,
+                            "backwardsCursor": null
+                        })
+                    }
+                };
+                responder
+                    .inject_stdout_line(
+                        &serde_json::json!({"id": request["id"], "result": result}).to_string(),
+                    )
+                    .await;
+            }
+        });
+
+        let mut settings = crate::ThreadSettingsUpdateParams::new("thread-7");
+        settings.model = Some(Some("gpt-5.6-sol".to_owned()));
+        settings.service_tier = Some(None);
+        backend.thread_settings_update(settings).await.unwrap();
+        backend
+            .thread_metadata_update(crate::ThreadMetadataUpdateParams {
+                thread_id: "thread-7".to_owned(),
+                git_info: Some(Some(crate::ThreadMetadataGitInfoUpdateParams {
+                    branch: Some(Some("main".to_owned())),
+                    ..Default::default()
+                })),
+            })
+            .await
+            .unwrap();
+        backend
+            .thread_items_list(crate::ThreadItemsListParams {
+                thread_id: "thread-7".to_owned(),
+                turn_id: Some("turn-3".to_owned()),
+                cursor: None,
+                limit: Some(100),
+                sort_direction: Some(crate::ThreadItemsSortDirection::Desc),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn account_message_reset_and_nudge_methods_match_generated_contracts() {
         let (client_writer, mut server_reader) = duplex(64 * 1024);
         let backend = Arc::new(CodexAppServerBackend::with_defaults());
@@ -3794,6 +3937,17 @@ mod integration_tests {
         // desktop task can legitimately own a writer for any listed thread.
         for thread in list.threads() {
             let thread_id = thread.id.clone();
+            let items = backend
+                .list_thread_items(ThreadItemsListParams {
+                    thread_id: thread_id.clone(),
+                    turn_id: None,
+                    cursor: None,
+                    limit: Some(1),
+                    sort_direction: Some(crate::ThreadItemsSortDirection::Desc),
+                })
+                .await
+                .expect("thread/items/list or real thread/read fallback");
+            assert!(items.data.len() <= 1);
             match backend
                 .resume_thread(ThreadResumeParams::new(thread_id.clone()))
                 .await
