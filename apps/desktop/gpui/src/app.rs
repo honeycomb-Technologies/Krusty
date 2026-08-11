@@ -135,6 +135,96 @@ fn parse_side_command(text: &str) -> Option<Option<String>> {
     Some((!prompt.is_empty()).then(|| prompt.to_owned()))
 }
 
+fn side_developer_instructions(existing: Option<&str>) -> String {
+    match existing.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(existing) => format!("{existing}\n\n{SIDE_DEVELOPER_INSTRUCTIONS}"),
+        None => SIDE_DEVELOPER_INSTRUCTIONS.to_owned(),
+    }
+}
+
+fn side_fork_params(
+    thread_id: String,
+    model: Option<String>,
+    cwd: Option<String>,
+    reasoning_effort: Option<String>,
+    speed_mode: Option<&ProductSpeedMode>,
+    access_mode: Option<ProductAccessMode>,
+    default_permissions: Option<String>,
+    config: &serde_json::Value,
+) -> ThreadForkParams {
+    let mut params = ThreadForkParams::new(thread_id);
+    params.model = model;
+    params.model_provider = config
+        .get("model_provider")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    params.cwd = cwd.clone();
+    params.service_tier = Some(match speed_mode {
+        Some(ProductSpeedMode::CodexServiceTier(tier)) => Some(tier.clone()),
+        _ => None,
+    });
+    if let Some(effort) = reasoning_effort {
+        params.config = Some(BTreeMap::from([(
+            "model_reasoning_effort".to_owned(),
+            serde_json::json!(effort),
+        )]));
+    }
+    params.runtime_workspace_roots = config
+        .get("runtime_workspace_roots")
+        .or_else(|| config.get("workspace_roots"))
+        .and_then(serde_json::Value::as_array)
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|roots| !roots.is_empty())
+        .or_else(|| {
+            cwd.as_deref()
+                .filter(|path| Path::new(path).is_absolute())
+                .map(|path| vec![path.to_owned()])
+        });
+    params.approval_policy = config
+        .get("approval_policy")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    params.approvals_reviewer = config
+        .get("approvals_reviewer")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    params.permissions = match access_mode {
+        Some(ProductAccessMode::CodexReadOnly) => Some(READ_ONLY_PROFILE_ID.to_owned()),
+        Some(ProductAccessMode::CodexAuto) => Some(WORKSPACE_PROFILE_ID.to_owned()),
+        Some(ProductAccessMode::CodexFullAccess) => Some(FULL_ACCESS_PROFILE_ID.to_owned()),
+        _ => config
+            .get("default_permissions")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or(default_permissions),
+    };
+    if params.permissions.is_none() {
+        params.sandbox = config
+            .get("sandbox_mode")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+    }
+    params.base_instructions = config
+        .get("base_instructions")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    params.developer_instructions = Some(side_developer_instructions(
+        config
+            .get("developer_instructions")
+            .and_then(serde_json::Value::as_str),
+    ));
+    params.ephemeral = Some(true);
+    params.thread_source = Some("user".to_owned());
+    params.exclude_turns = Some(true);
+    params
+}
+
 /// Top-level product shell mode (ChatGPT + Codex desktop unified chrome).
 ///
 /// Bar home sidebar drives Chat/Codex + stub routes (PRs / Sites / Scheduled /
@@ -1250,6 +1340,49 @@ struct TranscriptPaginationState {
     generation: u64,
 }
 
+/// A side chat can run while its main thread remains active. The existing
+/// primary turn fields continue to own the main thread; this state owns the
+/// one ephemeral side thread allowed by the reference interaction.
+struct ConcurrentSideTurnState {
+    thread_id: String,
+    generation: u64,
+    in_progress: bool,
+    turn_id: Option<String>,
+    live_approval_bridge: Option<Arc<LiveApprovalBridge>>,
+    pending_approval: Option<PendingApproval>,
+    pending_user_input: Option<PendingUserInput>,
+    user_input_question_index: usize,
+    user_input_answers: BTreeMap<String, Vec<String>>,
+    pending_mcp_elicitation: Option<PendingMcpElicitation>,
+    mcp_form_field_index: usize,
+    mcp_form_values: BTreeMap<String, serde_json::Value>,
+}
+
+impl ConcurrentSideTurnState {
+    fn new(thread_id: String, generation: u64) -> Self {
+        Self {
+            thread_id,
+            generation,
+            in_progress: true,
+            turn_id: None,
+            live_approval_bridge: None,
+            pending_approval: None,
+            pending_user_input: None,
+            user_input_question_index: 0,
+            user_input_answers: BTreeMap::new(),
+            pending_mcp_elicitation: None,
+            mcp_form_field_index: 0,
+            mcp_form_values: BTreeMap::new(),
+        }
+    }
+
+    fn has_pending_interaction(&self) -> bool {
+        self.pending_approval.is_some()
+            || self.pending_user_input.is_some()
+            || self.pending_mcp_elicitation.is_some()
+    }
+}
+
 impl From<mitsuro_desktop_backend::SessionHistoryState> for TranscriptPaginationState {
     fn from(history: mitsuro_desktop_backend::SessionHistoryState) -> Self {
         Self {
@@ -1499,6 +1632,9 @@ pub struct MitsuroApp {
     active_turn_thread_id: Option<String>,
     /// Active turn id for `turn/interrupt` (from TurnStarted).
     active_turn_id: Option<String>,
+    /// Independent live turn state for the single ephemeral side chat.
+    concurrent_side_turn: Option<ConcurrentSideTurnState>,
+    side_turn_generation: u64,
     /// Cancel flag for fixture stream replay (Stop → set true).
     turn_cancel: Option<Arc<AtomicBool>>,
     /// When true, sidebar includes archived threads; default hides them.
@@ -1524,6 +1660,10 @@ pub struct MitsuroApp {
     user_input_answers: BTreeMap<String, Vec<String>>,
     server_request_input: Entity<InputState>,
     server_request_secret_input: Entity<InputState>,
+    /// Separate editor entities prevent unsubmitted request drafts from crossing
+    /// the main/side conversation boundary.
+    side_server_request_input: Entity<InputState>,
+    side_server_request_secret_input: Entity<InputState>,
     /// Active MCP elicitation. Standard form fields are answered sequentially.
     pending_mcp_elicitation: Option<PendingMcpElicitation>,
     mcp_form_field_index: usize,
@@ -1897,6 +2037,13 @@ impl MitsuroApp {
                 .placeholder("Type a private answer…")
                 .masked(true)
         });
+        let side_server_request_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
+        let side_server_request_secret_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type a private answer…")
+                .masked(true)
+        });
         cx.subscribe_in(
             &files_path_input,
             window,
@@ -1982,6 +2129,8 @@ impl MitsuroApp {
             user_input_answers: BTreeMap::new(),
             server_request_input,
             server_request_secret_input,
+            side_server_request_input,
+            side_server_request_secret_input,
             pending_mcp_elicitation: None,
             mcp_form_field_index: 0,
             mcp_form_values: BTreeMap::new(),
@@ -2110,6 +2259,8 @@ impl MitsuroApp {
             turn_generation: 0,
             active_turn_thread_id: None,
             active_turn_id: None,
+            concurrent_side_turn: None,
+            side_turn_generation: 0,
             turn_cancel: None,
             show_archived,
             pending_approval: None,
@@ -9289,7 +9440,7 @@ impl MitsuroApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.turn_in_progress {
+        if self.turn_in_progress() {
             self.status_line = "Edit unavailable while a turn is running.".into();
             cx.notify();
             return;
@@ -10400,23 +10551,67 @@ impl MitsuroApp {
     }
 
     pub fn pending_approval(&self) -> Option<&PendingApproval> {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side.pending_approval.as_ref();
+        }
+        if self.selected_side_conversation_parent().is_some()
+            && !selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
+        {
+            return None;
+        }
         self.pending_approval.as_ref()
     }
 
     pub fn pending_user_input(&self) -> Option<(&PendingUserInput, usize)> {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side
+                .pending_user_input
+                .as_ref()
+                .map(|pending| (pending, side.user_input_question_index));
+        }
+        if self.selected_side_conversation_parent().is_some()
+            && !selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
+        {
+            return None;
+        }
         self.pending_user_input
             .as_ref()
             .map(|pending| (pending, self.user_input_question_index))
     }
 
     pub fn pending_mcp_elicitation(&self) -> Option<(&PendingMcpElicitation, usize)> {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side
+                .pending_mcp_elicitation
+                .as_ref()
+                .map(|pending| (pending, side.mcp_form_field_index));
+        }
+        if self.selected_side_conversation_parent().is_some()
+            && !selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
+        {
+            return None;
+        }
         self.pending_mcp_elicitation
             .as_ref()
             .map(|pending| (pending, self.mcp_form_field_index))
     }
 
     pub fn server_request_input(&self, secret: bool) -> &Entity<InputState> {
-        if secret {
+        let side_selected = self.selected_side_conversation_parent().is_some();
+        if side_selected && secret {
+            &self.side_server_request_secret_input
+        } else if side_selected {
+            &self.side_server_request_input
+        } else if secret {
             &self.server_request_secret_input
         } else {
             &self.server_request_input
@@ -10424,10 +10619,21 @@ impl MitsuroApp {
     }
 
     fn clear_server_request_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_request_input.update(cx, |state, cx| {
+        let (plain, secret) = if self.selected_side_conversation_parent().is_some() {
+            (
+                self.side_server_request_input.clone(),
+                self.side_server_request_secret_input.clone(),
+            )
+        } else {
+            (
+                self.server_request_input.clone(),
+                self.server_request_secret_input.clone(),
+            )
+        };
+        plain.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
-        self.server_request_secret_input.update(cx, |state, cx| {
+        secret.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
     }
@@ -10496,6 +10702,47 @@ impl MitsuroApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            let Some((question_id, question_count)) =
+                side.pending_user_input.as_ref().and_then(|pending| {
+                    pending
+                        .questions
+                        .get(side.user_input_question_index)
+                        .map(|question| (question.id.clone(), pending.questions.len()))
+                })
+            else {
+                return;
+            };
+            let mut completed = None;
+            let mut next_index = None;
+            if let Some(side) = self.selected_concurrent_side_turn_mut() {
+                side.user_input_answers.insert(question_id, answers);
+                if side.user_input_question_index + 1 < question_count {
+                    side.user_input_question_index += 1;
+                    next_index = Some(side.user_input_question_index);
+                } else if let Some(pending) = side.pending_user_input.take() {
+                    side.user_input_question_index = 0;
+                    completed = Some((pending, std::mem::take(&mut side.user_input_answers)));
+                }
+            }
+            self.clear_server_request_inputs(window, cx);
+            if let Some(index) = next_index {
+                self.status_line = format!(
+                    "Side-chat input · question {} of {question_count}",
+                    index + 1
+                )
+                .into();
+                cx.notify();
+            } else if let Some((pending, answers)) = completed {
+                self.send_codex_server_response(
+                    pending.request_id,
+                    PendingUserInput::response(answers),
+                    "Side-chat user input".to_owned(),
+                    cx,
+                );
+            }
+            return;
+        }
         let Some((question_id, question_count)) =
             self.pending_user_input.as_ref().and_then(|pending| {
                 pending
@@ -10531,6 +10778,31 @@ impl MitsuroApp {
     }
 
     pub fn decline_user_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_concurrent_side_turn().is_some() {
+            let pending = self
+                .selected_concurrent_side_turn_mut()
+                .and_then(|side| side.pending_user_input.take());
+            let Some(pending) = pending else {
+                return;
+            };
+            self.clear_server_request_inputs(window, cx);
+            if let Some(side) = self.selected_concurrent_side_turn_mut() {
+                side.user_input_question_index = 0;
+                side.user_input_answers.clear();
+            }
+            let answers = pending
+                .questions
+                .iter()
+                .map(|question| (question.id.clone(), Vec::new()))
+                .collect();
+            self.send_codex_server_response(
+                pending.request_id,
+                PendingUserInput::response(answers),
+                "Side-chat user input declined".to_owned(),
+                cx,
+            );
+            return;
+        }
         let Some(pending) = self.pending_user_input.take() else {
             return;
         };
@@ -10569,10 +10841,27 @@ impl MitsuroApp {
     }
 
     pub fn current_mcp_form_field(&self) -> Option<(String, serde_json::Value, usize)> {
-        let pending = self.pending_mcp_elicitation.as_ref()?;
+        let (pending, index) = if let Some(side) = self.selected_concurrent_side_turn() {
+            (
+                side.pending_mcp_elicitation.as_ref()?,
+                side.mcp_form_field_index,
+            )
+        } else if self.selected_side_conversation_parent().is_some()
+            && !selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
+        {
+            return None;
+        } else {
+            (
+                self.pending_mcp_elicitation.as_ref()?,
+                self.mcp_form_field_index,
+            )
+        };
         let fields = Self::mcp_form_fields(pending);
         fields
-            .get(self.mcp_form_field_index)
+            .get(index)
             .cloned()
             .map(|(name, schema)| (name, schema, fields.len()))
     }
@@ -10636,6 +10925,32 @@ impl MitsuroApp {
         let Some((name, _, count)) = self.current_mcp_form_field() else {
             return;
         };
+        if self.selected_concurrent_side_turn().is_some() {
+            let mut completed = None;
+            if let Some(side) = self.selected_concurrent_side_turn_mut() {
+                side.mcp_form_values.insert(name, value);
+                if side.mcp_form_field_index + 1 < count {
+                    side.mcp_form_field_index += 1;
+                } else if let Some(pending) = side.pending_mcp_elicitation.take() {
+                    side.mcp_form_field_index = 0;
+                    completed = Some((pending, std::mem::take(&mut side.mcp_form_values)));
+                }
+            }
+            self.clear_server_request_inputs(window, cx);
+            if let Some((pending, values)) = completed {
+                self.send_codex_server_response(
+                    pending.request_id,
+                    PendingMcpElicitation::accept(serde_json::Value::Object(
+                        values.into_iter().collect(),
+                    )),
+                    format!("Side-chat MCP response · {}", pending.server_name),
+                    cx,
+                );
+            } else {
+                cx.notify();
+            }
+            return;
+        }
         self.mcp_form_values.insert(name, value);
         self.clear_server_request_inputs(window, cx);
         if self.mcp_form_field_index + 1 < count {
@@ -10660,6 +10975,26 @@ impl MitsuroApp {
     }
 
     pub fn decline_mcp_elicitation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_concurrent_side_turn().is_some() {
+            let pending = self
+                .selected_concurrent_side_turn_mut()
+                .and_then(|side| side.pending_mcp_elicitation.take());
+            let Some(pending) = pending else {
+                return;
+            };
+            self.clear_server_request_inputs(window, cx);
+            if let Some(side) = self.selected_concurrent_side_turn_mut() {
+                side.mcp_form_field_index = 0;
+                side.mcp_form_values.clear();
+            }
+            self.send_codex_server_response(
+                pending.request_id,
+                PendingMcpElicitation::decline(),
+                format!("Side-chat MCP request declined · {}", pending.server_name),
+                cx,
+            );
+            return;
+        }
         let Some(pending) = self.pending_mcp_elicitation.take() else {
             return;
         };
@@ -10675,6 +11010,22 @@ impl MitsuroApp {
     }
 
     pub fn accept_empty_mcp_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_concurrent_side_turn().is_some() {
+            let pending = self
+                .selected_concurrent_side_turn_mut()
+                .and_then(|side| side.pending_mcp_elicitation.take());
+            let Some(pending) = pending else {
+                return;
+            };
+            self.clear_server_request_inputs(window, cx);
+            self.send_codex_server_response(
+                pending.request_id,
+                PendingMcpElicitation::accept(serde_json::json!({})),
+                format!("Side-chat MCP response · {}", pending.server_name),
+                cx,
+            );
+            return;
+        }
         let Some(pending) = self.pending_mcp_elicitation.take() else {
             return;
         };
@@ -10688,13 +11039,13 @@ impl MitsuroApp {
     }
 
     pub fn open_mcp_elicitation_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(url) =
-            self.pending_mcp_elicitation
-                .as_ref()
-                .and_then(|pending| match &pending.mode {
-                    McpElicitationMode::Url { url, .. } => Some(url.clone()),
-                    _ => None,
-                })
+        let Some(url) = self
+            .pending_mcp_elicitation()
+            .map(|(pending, _)| pending)
+            .and_then(|pending| match &pending.mode {
+                McpElicitationMode::Url { url, .. } => Some(url.clone()),
+                _ => None,
+            })
         else {
             return;
         };
@@ -10706,6 +11057,25 @@ impl MitsuroApp {
     }
 
     pub fn accept_mcp_url_elicitation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_concurrent_side_turn().is_some() {
+            let pending = self
+                .selected_concurrent_side_turn_mut()
+                .and_then(|side| side.pending_mcp_elicitation.take());
+            let Some(pending) = pending else {
+                return;
+            };
+            self.clear_server_request_inputs(window, cx);
+            self.send_codex_server_response(
+                pending.request_id,
+                PendingMcpElicitation::accept(serde_json::json!({})),
+                format!(
+                    "Side-chat MCP authorization accepted · {}",
+                    pending.server_name
+                ),
+                cx,
+            );
+            return;
+        }
         let Some(pending) = self.pending_mcp_elicitation.take() else {
             return;
         };
@@ -10720,6 +11090,51 @@ impl MitsuroApp {
 
     /// Approve or reject the current pending approval (fixture resume + live respond).
     pub fn resolve_pending_approval(&mut self, choice: ApprovalChoice, cx: &mut Context<Self>) {
+        if self.selected_concurrent_side_turn().is_some() {
+            let (pending, bridge) = {
+                let side = self
+                    .selected_concurrent_side_turn_mut()
+                    .expect("selected side turn checked");
+                (
+                    side.pending_approval.take(),
+                    side.live_approval_bridge.clone(),
+                )
+            };
+            let Some(pending) = pending else {
+                self.status_line = "No pending side-chat approval.".into();
+                cx.notify();
+                return;
+            };
+            let label = match choice {
+                ApprovalChoice::Approve => "approved",
+                ApprovalChoice::Reject => "rejected",
+                ApprovalChoice::Abort => "aborted",
+            };
+            if bridge.as_ref().is_some_and(|bridge| bridge.submit(choice)) {
+                self.status_line = format!("Side-chat approval {label} · turn continuing…").into();
+                cx.notify();
+                return;
+            }
+            if let Some(backend) = self.backend.clone() {
+                cx.spawn(async move |_this, cx| {
+                    let _ = cx
+                        .background_spawn(async move {
+                            let runner = Arc::clone(&backend);
+                            backend.block_on(async move {
+                                runner
+                                    .respond_approval(&pending, choice)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            })
+                        })
+                        .await;
+                })
+                .detach();
+            }
+            self.status_line = format!("Side-chat approval {label}.").into();
+            cx.notify();
+            return;
+        }
         let Some(pending) = self.pending_approval.take() else {
             self.status_line = "No pending approval.".into();
             cx.notify();
@@ -10925,6 +11340,21 @@ impl MitsuroApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(parent_id) = self.selected_side_conversation_parent().map(str::to_owned) {
+            if self.selected_thread.as_deref() != Some(id.as_str()) {
+                if self.turn_in_progress() {
+                    self.status_line =
+                        "Stop or finish the side-chat turn before changing conversations.".into();
+                    cx.notify();
+                    return;
+                }
+                self.return_to_side_conversation_parent(window, cx);
+                if id == parent_id {
+                    self.update_composer_placeholder(window, cx);
+                    return;
+                }
+            }
+        }
         self.select_thread(id, cx);
         self.update_composer_placeholder(window, cx);
     }
@@ -11001,6 +11431,11 @@ impl MitsuroApp {
     /// Priority is derived only from a real in-flight turn or interaction owned
     /// by this app instance. Idle catalog rows are never promoted decoratively.
     pub fn thread_has_priority_activity(&self, thread_id: &str) -> bool {
+        if self.concurrent_side_turn.as_ref().is_some_and(|side| {
+            side.thread_id == thread_id && (side.in_progress || side.has_pending_interaction())
+        }) {
+            return true;
+        }
         self.active_turn_thread_id.as_deref() == Some(thread_id)
             && (self.turn_in_progress
                 || self.pending_approval.is_some()
@@ -11012,6 +11447,10 @@ impl MitsuroApp {
         self.active_turn_thread_id
             .as_deref()
             .is_some_and(|id| self.thread_has_priority_activity(id))
+            || self
+                .concurrent_side_turn
+                .as_ref()
+                .is_some_and(|side| self.thread_has_priority_activity(&side.thread_id))
     }
 
     pub fn thread_menu_open(&self) -> bool {
@@ -11249,8 +11688,36 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Whether a turn is currently streaming (Send blocked / Stop visible).
+    fn selected_concurrent_side_turn(&self) -> Option<&ConcurrentSideTurnState> {
+        let selected = self.selected_thread.as_deref()?;
+        self.concurrent_side_turn
+            .as_ref()
+            .filter(|side| side.thread_id == selected)
+    }
+
+    fn selected_concurrent_side_turn_mut(&mut self) -> Option<&mut ConcurrentSideTurnState> {
+        let selected = self.selected_thread.as_deref()?;
+        self.concurrent_side_turn
+            .as_mut()
+            .filter(|side| side.thread_id == selected)
+    }
+
+    fn thread_is_concurrent_side_turn(&self, thread_id: &str) -> bool {
+        self.concurrent_side_turn
+            .as_ref()
+            .is_some_and(|side| side.thread_id == thread_id)
+    }
+
+    /// Whether the selected thread is currently streaming. A main thread and
+    /// its ephemeral side chat can each own an independent live turn.
     pub fn turn_in_progress(&self) -> bool {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side.in_progress;
+        }
+        if self.selected_side_conversation_parent().is_some() {
+            return self.turn_in_progress
+                && self.active_turn_thread_id.as_deref() == self.selected_thread.as_deref();
+        }
         self.turn_in_progress
     }
 
@@ -12338,12 +12805,21 @@ impl MitsuroApp {
     }
 
     pub fn can_steer_active_turn(&self) -> bool {
+        if !self
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.capabilities().steering)
+        {
+            return false;
+        }
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side.in_progress && side.turn_id.is_some();
+        }
         self.turn_in_progress
-            && self
-                .backend
-                .as_ref()
-                .is_some_and(|backend| backend.capabilities().steering)
-            && self.active_turn_thread_id.is_some()
+            && selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
             && self.active_turn_id.is_some()
     }
 
@@ -12749,6 +13225,22 @@ impl MitsuroApp {
             .map(String::as_str)
     }
 
+    pub fn selected_side_parent_status_label(&self) -> Option<&'static str> {
+        let parent = self.selected_side_conversation_parent()?;
+        if self.active_turn_thread_id.as_deref() != Some(parent) {
+            return Some("Main finished");
+        }
+        if self.pending_user_input.is_some() {
+            Some("Main needs input")
+        } else if self.pending_approval.is_some() || self.pending_mcp_elicitation.is_some() {
+            Some("Main needs approval")
+        } else if self.turn_in_progress {
+            Some("Main working")
+        } else {
+            Some("Main finished")
+        }
+    }
+
     pub fn side_conversations_available(&self) -> bool {
         self.live_backend()
             .is_some_and(|backend| backend.capabilities().side_conversations)
@@ -12756,13 +13248,14 @@ impl MitsuroApp {
 
     /// Start the reference desktop's ephemeral side fork. The hidden boundary
     /// is injected into model history and never rendered as a transcript item.
-    pub fn open_side_conversation(&mut self, cx: &mut Context<Self>) {
-        self.open_side_conversation_with_prompt(None, cx);
+    pub fn open_side_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_side_conversation_with_prompt(None, window, cx);
     }
 
     fn open_side_conversation_with_prompt(
         &mut self,
         prompt: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.thread_menu_open = false;
@@ -12783,20 +13276,14 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
-        if self.turn_in_progress {
+        if self.turn_in_progress
+            && self.active_turn_thread_id.as_deref() != self.selected_thread.as_deref()
+        {
             self.status_line =
-                "Side chat will be available after the active turn finishes in this build.".into();
+                "Side chat is unavailable while another conversation owns the active turn.".into();
             cx.notify();
             return;
         }
-        if self.selected_thread_is_read_only() {
-            self.status_line =
-                "Side chat is unavailable while this thread is owned by another Codex client."
-                    .into();
-            cx.notify();
-            return;
-        }
-
         let Some(parent_ui_id) = self.selected_thread.clone() else {
             self.status_line = "Start the main conversation before opening a side chat.".into();
             cx.notify();
@@ -12835,24 +13322,23 @@ impl MitsuroApp {
         let speed_mode = self.selected_speed_mode();
         let work_mode = self.selected_work_mode();
         let access_mode = self.composer_access_mode();
+        let parent_thread_id = parent_session.raw;
+        let fork_model = model.clone();
+        let fork_cwd = cwd.clone();
+        let fork_reasoning_effort = reasoning_effort.clone();
+        let fork_speed_mode = speed_mode.clone();
+        let default_permissions = self.config_default_permissions.clone();
 
-        let mut params = ThreadForkParams::new(parent_session.raw);
-        params.model = model.clone();
-        params.cwd = cwd.clone();
-        params.service_tier = Some(match speed_mode.as_ref() {
-            Some(ProductSpeedMode::CodexServiceTier(tier)) => Some(tier.clone()),
-            _ => None,
+        // Request drafts are conversation-owned. Recreate the side editors at
+        // each ephemeral boundary so an abandoned draft can never cross into a
+        // later side chat.
+        self.side_server_request_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type an answer…"));
+        self.side_server_request_secret_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type a private answer…")
+                .masked(true)
         });
-        if let Some(effort) = reasoning_effort.as_ref() {
-            params.config = Some(BTreeMap::from([(
-                "model_reasoning_effort".to_owned(),
-                serde_json::json!(effort),
-            )]));
-        }
-        params.developer_instructions = Some(SIDE_DEVELOPER_INSTRUCTIONS.to_owned());
-        params.ephemeral = Some(true);
-        params.thread_source = Some("user".to_owned());
-        params.exclude_turns = Some(true);
 
         let generation = self.backend_generation;
         self.status_line = "Opening side chat…".into();
@@ -12862,6 +13348,26 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     let runner = Arc::clone(&worker);
                     worker.block_on(async move {
+                        // Match the reference client by refreshing layered config at
+                        // fork time. Bootstrap state may be stale after another client
+                        // or a project config changes on disk.
+                        let config = runner
+                            .config_read(ConfigReadParams {
+                                cwd: fork_cwd.clone(),
+                                include_layers: Some(false),
+                            })
+                            .await
+                            .map_err(|error| format!("config/read: {error}"))?;
+                        let params = side_fork_params(
+                            parent_thread_id,
+                            fork_model,
+                            fork_cwd,
+                            fork_reasoning_effort,
+                            fork_speed_mode.as_ref(),
+                            access_mode,
+                            default_permissions,
+                            &config.config,
+                        );
                         let response = runner
                             .thread_fork(params)
                             .await
@@ -12932,9 +13438,13 @@ impl MitsuroApp {
                             {
                                 thread.messages.push(DemoMessage::user(prompt.clone()));
                             }
-                            app.turn_in_progress = true;
-                            app.turn_generation = app.turn_generation.wrapping_add(1);
-                            app.active_turn_thread_id = Some(child_id.clone());
+                            let concurrent_side = app.turn_in_progress
+                                && app.active_turn_thread_id.as_deref() != Some(child_id.as_str());
+                            if !concurrent_side {
+                                app.turn_in_progress = true;
+                                app.turn_generation = app.turn_generation.wrapping_add(1);
+                                app.active_turn_thread_id = Some(child_id.clone());
+                            }
                             app.status_line = "Side chat · live turn/start…".into();
                             app.start_live_turn(
                                 child_id,
@@ -12963,15 +13473,18 @@ impl MitsuroApp {
     }
 
     /// Return to the main thread and discard the ephemeral backend fork.
-    pub fn return_to_side_conversation_parent(&mut self, cx: &mut Context<Self>) {
+    pub fn return_to_side_conversation_parent(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(child_id) = self.selected_thread.clone() else {
             return;
         };
         let Some(parent_id) = self.side_conversation_parents.get(&child_id).cloned() else {
             return;
         };
-        if self.turn_in_progress && self.active_turn_thread_id.as_deref() == Some(child_id.as_str())
-        {
+        if self.turn_in_progress() {
             self.status_line = "Stop or finish the side-chat turn before returning.".into();
             cx.notify();
             return;
@@ -12982,6 +13495,9 @@ impl MitsuroApp {
             .iter()
             .find(|thread| thread.summary.id == child_id)
             .and_then(|thread| thread.backend_session_id.clone());
+        self.concurrent_side_turn = None;
+        self.clear_server_request_inputs(window, cx);
+        self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
         self.side_conversation_parents.remove(&child_id);
         self.codex_thread_subscriptions.remove(&child_id);
         self.codex_read_only_threads.remove(&child_id);
@@ -13153,8 +13669,50 @@ impl MitsuroApp {
 
     /// Stop / interrupt the in-progress turn (fixture cancel or live `turn/interrupt`).
     pub fn interrupt_turn(&mut self, cx: &mut Context<Self>) {
-        if !self.turn_in_progress {
+        if !self.turn_in_progress() {
             self.status_line = "No turn in progress.".into();
+            cx.notify();
+            return;
+        }
+
+        if self.selected_concurrent_side_turn().is_some() {
+            let side = self
+                .concurrent_side_turn
+                .take()
+                .expect("selected side turn checked");
+            if let Some(bridge) = side.live_approval_bridge {
+                let _ = bridge.submit(ApprovalChoice::Abort);
+            }
+            let session_id = self.live_session_id(&side.thread_id);
+            if let (Some(backend), Some(session_id), Some(turn_id)) =
+                (self.backend.clone(), session_id, side.turn_id)
+            {
+                cx.spawn(async move |_this, cx| {
+                    let _ = cx
+                        .background_spawn(async move {
+                            let runner = Arc::clone(&backend);
+                            backend.block_on(async move {
+                                runner
+                                    .interrupt_session(&session_id, turn_id)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            })
+                        })
+                        .await;
+                })
+                .detach();
+            }
+            if let Some(thread) = self
+                .threads
+                .iter_mut()
+                .find(|thread| thread.summary.id == side.thread_id)
+            {
+                for message in &mut thread.messages {
+                    message.streaming = false;
+                }
+            }
+            self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
+            self.status_line = "Side-chat turn interrupted.".into();
             cx.notify();
             return;
         }
@@ -13295,7 +13853,7 @@ impl MitsuroApp {
             input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
-            self.open_side_conversation_with_prompt(prompt, cx);
+            self.open_side_conversation_with_prompt(prompt, window, cx);
             return;
         }
         if trimmed.is_empty() && self.composer_attachments.is_empty() {
@@ -13304,7 +13862,7 @@ impl MitsuroApp {
             return;
         }
 
-        if self.turn_in_progress {
+        if self.turn_in_progress() {
             if !self.can_steer_active_turn() {
                 self.status_line =
                     "Follow-up unavailable · the active turn is not currently steerable.".into();
@@ -13478,9 +14036,14 @@ impl MitsuroApp {
             self.status_line =
                 "Live Send · rate limit 100% / no credits — server may refuse.".into();
         }
-        self.turn_in_progress = true;
-        self.turn_generation = self.turn_generation.wrapping_add(1);
-        self.active_turn_thread_id = Some(thread_id.clone());
+        let concurrent_side = self.side_conversation_parents.contains_key(&thread_id)
+            && self.turn_in_progress
+            && self.active_turn_thread_id.as_deref() != Some(thread_id.as_str());
+        if !concurrent_side {
+            self.turn_in_progress = true;
+            self.turn_generation = self.turn_generation.wrapping_add(1);
+            self.active_turn_thread_id = Some(thread_id.clone());
+        }
         match mode {
             SendMode::Live => {
                 let model_note = model_slug
@@ -13540,15 +14103,35 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
-        let Some(thread_id) = self.active_turn_thread_id.clone() else {
-            self.status_line = "Steer unavailable · active thread is unknown.".into();
-            cx.notify();
-            return;
-        };
-        let Some(expected_turn_id) = self.active_turn_id.clone() else {
-            self.status_line = "Steer unavailable · active turn is not initialized yet.".into();
-            cx.notify();
-            return;
+        let active = self.selected_concurrent_side_turn().map(|side| {
+            (
+                side.thread_id.clone(),
+                side.turn_id.clone(),
+                side.generation,
+            )
+        });
+        let (thread_id, expected_turn_id, turn_generation) = match active {
+            Some((thread_id, Some(turn_id), generation)) => (thread_id, turn_id, generation),
+            Some(_) => {
+                self.status_line =
+                    "Steer unavailable · side-chat turn is not initialized yet.".into();
+                cx.notify();
+                return;
+            }
+            None => {
+                let Some(thread_id) = self.active_turn_thread_id.clone() else {
+                    self.status_line = "Steer unavailable · active thread is unknown.".into();
+                    cx.notify();
+                    return;
+                };
+                let Some(turn_id) = self.active_turn_id.clone() else {
+                    self.status_line =
+                        "Steer unavailable · active turn is not initialized yet.".into();
+                    cx.notify();
+                    return;
+                };
+                (thread_id, turn_id, self.turn_generation)
+            }
         };
         let Some(session_id) = self.live_session_id(&thread_id) else {
             self.status_line = "Steer unavailable · active session identity is missing.".into();
@@ -13567,7 +14150,6 @@ impl MitsuroApp {
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.status_line = "Steering active turn…".into();
         let backend_generation = self.backend_generation;
-        let turn_generation = self.turn_generation;
         let request = ProductSteer {
             session_id,
             expected_turn_id,
@@ -13584,7 +14166,7 @@ impl MitsuroApp {
                 .await;
             let _ = this.update(cx, |app, cx| {
                 if app.backend_generation != backend_generation
-                    || app.turn_generation != turn_generation
+                    || !app.is_current_turn(turn_generation, &thread_id)
                 {
                     return;
                 }
@@ -13989,18 +14571,41 @@ impl MitsuroApp {
         attachments: Vec<ProductAttachment>,
         cx: &mut Context<Self>,
     ) {
-        let turn_generation = self.turn_generation;
-        self.active_turn_thread_id = Some(thread_id.clone());
+        let concurrent_side = self.side_conversation_parents.contains_key(&thread_id)
+            && self.turn_in_progress
+            && self.active_turn_thread_id.as_deref() != Some(thread_id.as_str());
+        let turn_generation = if concurrent_side {
+            self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
+            let generation = self.side_turn_generation;
+            self.concurrent_side_turn =
+                Some(ConcurrentSideTurnState::new(thread_id.clone(), generation));
+            generation
+        } else {
+            if self.thread_is_concurrent_side_turn(&thread_id) {
+                self.concurrent_side_turn = None;
+                self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
+            }
+            self.active_turn_thread_id = Some(thread_id.clone());
+            self.turn_generation
+        };
         let Some(backend) = self.backend.clone() else {
-            self.turn_in_progress = false;
-            self.active_turn_thread_id = None;
+            if concurrent_side {
+                self.concurrent_side_turn = None;
+            } else {
+                self.turn_in_progress = false;
+                self.active_turn_thread_id = None;
+            }
             self.status_line = "Live turn failed · backend disconnected.".into();
             cx.notify();
             return;
         };
         let Some(session_id) = self.live_session_id(&thread_id) else {
-            self.turn_in_progress = false;
-            self.active_turn_thread_id = None;
+            if concurrent_side {
+                self.concurrent_side_turn = None;
+            } else {
+                self.turn_in_progress = false;
+                self.active_turn_thread_id = None;
+            }
             self.status_line =
                 "Live turn refused: the selected thread has no backend-qualified session id."
                     .into();
@@ -14011,7 +14616,13 @@ impl MitsuroApp {
         // Progressive path: apply events as they arrive; mid-stream approvals
         // surface ApprovalBar and block the turn loop until the user answers.
         let bridge = Arc::new(LiveApprovalBridge::new());
-        self.live_approval_bridge = Some(Arc::clone(&bridge));
+        if concurrent_side {
+            if let Some(side) = self.concurrent_side_turn.as_mut() {
+                side.live_approval_bridge = Some(Arc::clone(&bridge));
+            }
+        } else {
+            self.live_approval_bridge = Some(Arc::clone(&bridge));
+        }
 
         cx.spawn(async move |this, cx| {
             /// Messages from the progressive live-turn producer thread.
@@ -14096,8 +14707,18 @@ impl MitsuroApp {
                             }
                             app.apply_stream_event(&thread_id, ev);
                             if is_approval {
-                                app.turn_in_progress = true;
-                                app.status_line = "Waiting for approval (live)…".into();
+                                if let Some(side) = app
+                                    .concurrent_side_turn
+                                    .as_mut()
+                                    .filter(|side| side.thread_id == thread_id)
+                                {
+                                    side.in_progress = true;
+                                } else {
+                                    app.turn_in_progress = true;
+                                }
+                                if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                    app.status_line = "Waiting for approval (live)…".into();
+                                }
                             }
                             cx.notify();
                         });
@@ -14118,24 +14739,91 @@ impl MitsuroApp {
                 if !app.is_current_turn(turn_generation, &thread_id) {
                     return;
                 }
+                if app.thread_is_concurrent_side_turn(&thread_id) {
+                    let pending_interaction = app
+                        .concurrent_side_turn
+                        .as_ref()
+                        .is_some_and(ConcurrentSideTurnState::has_pending_interaction);
+                    if let Some(side) = app.concurrent_side_turn.as_mut() {
+                        side.live_approval_bridge = None;
+                    }
+                    match &outcome {
+                        Ok(o) if o.completed || saw_completed => {
+                            if !pending_interaction {
+                                if let Some(side) = app.concurrent_side_turn.as_mut() {
+                                    side.in_progress = false;
+                                    side.turn_id = None;
+                                }
+                                if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                    app.status_line = "Side-chat turn complete.".into();
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            if !pending_interaction {
+                                if let Some(side) = app.concurrent_side_turn.as_mut() {
+                                    side.in_progress = false;
+                                    side.turn_id = None;
+                                }
+                                if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                    app.status_line =
+                                        "Side-chat turn ended (timeout or closed).".into();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(thread) = app
+                                .threads
+                                .iter_mut()
+                                .find(|candidate| candidate.summary.id == thread_id)
+                            {
+                                thread
+                                    .messages
+                                    .push(DemoMessage::error(format!("Live turn failed: {error}")));
+                            }
+                            if let Some(side) = app.concurrent_side_turn.as_mut() {
+                                side.in_progress = false;
+                                side.turn_id = None;
+                                side.pending_approval = None;
+                                side.pending_user_input = None;
+                                side.user_input_answers.clear();
+                                side.pending_mcp_elicitation = None;
+                                side.mcp_form_values.clear();
+                            }
+                            if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                app.status_line = format!("Side-chat turn failed: {error}").into();
+                            }
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
                 app.live_approval_bridge = None;
+                let pending_interaction = app.pending_approval.is_some()
+                    || app.pending_user_input.is_some()
+                    || app.pending_mcp_elicitation.is_some();
+                let foreground = app.selected_thread.as_deref() == Some(thread_id.as_str());
                 match &outcome {
                     Ok(o) if o.completed || saw_completed => {
-                        if app.pending_approval.is_none() {
+                        if !pending_interaction {
                             app.turn_in_progress = false;
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
-                            app.status_line = "Live turn complete.".into();
+                            if foreground {
+                                app.status_line = "Live turn complete.".into();
+                            }
                         }
                     }
                     Ok(_) => {
-                        if app.pending_approval.is_none() {
+                        if !pending_interaction {
                             app.turn_in_progress = false;
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
-                            app.status_line = "Live turn ended (timeout or closed).".into();
+                            if foreground {
+                                app.status_line = "Live turn ended (timeout or closed).".into();
+                            }
                         }
                     }
                     Err(e) => {
@@ -14152,11 +14840,17 @@ impl MitsuroApp {
                         app.active_turn_thread_id = None;
                         app.active_turn_id = None;
                         app.turn_cancel = None;
-                        app.status_line = format!("Live turn failed: {e}").into();
+                        if foreground {
+                            app.status_line = format!("Live turn failed: {e}").into();
+                        }
                     }
                 }
                 if !app.turn_in_progress
                     && app.selected_thread.as_deref() != Some(thread_id.as_str())
+                    && !app
+                        .side_conversation_parents
+                        .values()
+                        .any(|parent| parent == &thread_id)
                 {
                     app.release_thread_subscription_best_effort(&thread_id, cx);
                 }
@@ -14328,9 +15022,12 @@ impl MitsuroApp {
     }
 
     fn is_current_turn(&self, generation: u64, thread_id: &str) -> bool {
-        turn_update_is_current(
+        turn_update_is_current_for_owners(
             self.turn_generation,
             self.active_turn_thread_id.as_deref(),
+            self.concurrent_side_turn
+                .as_ref()
+                .map(|side| (side.generation, side.thread_id.as_str())),
             generation,
             thread_id,
         )
@@ -14360,7 +15057,15 @@ impl MitsuroApp {
 
         // Capture turn id before borrowing the thread mutably.
         if let TurnStreamEvent::TurnStarted { turn_id, .. } = &event {
-            self.active_turn_id = Some(turn_id.clone());
+            if let Some(side) = self
+                .concurrent_side_turn
+                .as_mut()
+                .filter(|side| side.thread_id == thread_id)
+            {
+                side.turn_id = Some(turn_id.clone());
+            } else {
+                self.active_turn_id = Some(turn_id.clone());
+            }
             status_update = Some(format!("Turn {turn_id} started…"));
         }
 
@@ -14745,20 +15450,42 @@ impl MitsuroApp {
                     status_update = Some(format!("Turn {label}."));
                 }
                 TurnStreamEvent::ApprovalRequested(pending) => {
-                    self.pending_user_input = None;
-                    self.pending_mcp_elicitation = None;
-                    self.pending_approval = Some(pending.clone());
+                    if let Some(side) = self
+                        .concurrent_side_turn
+                        .as_mut()
+                        .filter(|side| side.thread_id == thread_id)
+                    {
+                        side.pending_user_input = None;
+                        side.pending_mcp_elicitation = None;
+                        side.pending_approval = Some(pending.clone());
+                    } else {
+                        self.pending_user_input = None;
+                        self.pending_mcp_elicitation = None;
+                        self.pending_approval = Some(pending.clone());
+                    }
                     status_update = Some(format!(
                         "Approval required: {}",
                         pending.summary.chars().take(56).collect::<String>()
                     ));
                 }
                 TurnStreamEvent::UserInputRequested(pending) => {
-                    self.pending_approval = None;
-                    self.pending_mcp_elicitation = None;
-                    self.pending_user_input = Some(pending.clone());
-                    self.user_input_question_index = 0;
-                    self.user_input_answers.clear();
+                    if let Some(side) = self
+                        .concurrent_side_turn
+                        .as_mut()
+                        .filter(|side| side.thread_id == thread_id)
+                    {
+                        side.pending_approval = None;
+                        side.pending_mcp_elicitation = None;
+                        side.pending_user_input = Some(pending.clone());
+                        side.user_input_question_index = 0;
+                        side.user_input_answers.clear();
+                    } else {
+                        self.pending_approval = None;
+                        self.pending_mcp_elicitation = None;
+                        self.pending_user_input = Some(pending.clone());
+                        self.user_input_question_index = 0;
+                        self.user_input_answers.clear();
+                    }
                     status_update = Some(format!(
                         "Input requested · {} question{}",
                         pending.questions.len(),
@@ -14770,11 +15497,23 @@ impl MitsuroApp {
                     ));
                 }
                 TurnStreamEvent::McpElicitationRequested(pending) => {
-                    self.pending_approval = None;
-                    self.pending_user_input = None;
-                    self.pending_mcp_elicitation = Some(pending.clone());
-                    self.mcp_form_field_index = 0;
-                    self.mcp_form_values.clear();
+                    if let Some(side) = self
+                        .concurrent_side_turn
+                        .as_mut()
+                        .filter(|side| side.thread_id == thread_id)
+                    {
+                        side.pending_approval = None;
+                        side.pending_user_input = None;
+                        side.pending_mcp_elicitation = Some(pending.clone());
+                        side.mcp_form_field_index = 0;
+                        side.mcp_form_values.clear();
+                    } else {
+                        self.pending_approval = None;
+                        self.pending_user_input = None;
+                        self.pending_mcp_elicitation = Some(pending.clone());
+                        self.mcp_form_field_index = 0;
+                        self.mcp_form_values.clear();
+                    }
                     status_update = Some(format!(
                         "MCP request · {} · {}",
                         pending.server_name, pending.message
@@ -14888,8 +15627,10 @@ impl MitsuroApp {
             }
         }
 
-        if let Some(line) = status_update {
-            self.status_line = line.into();
+        if self.selected_thread.as_deref() == Some(thread_id) {
+            if let Some(line) = status_update {
+                self.status_line = line.into();
+            }
         }
         if self.selected_thread.as_deref() == Some(thread_id) {
             self.transcript_scroll_handle.scroll_to_bottom();
@@ -15041,11 +15782,28 @@ impl MitsuroApp {
             return;
         }
         if event.method == "serverRequest/resolved" {
-            self.pending_approval = None;
-            self.pending_user_input = None;
-            self.user_input_answers.clear();
-            self.pending_mcp_elicitation = None;
-            self.mcp_form_values.clear();
+            let resolved_thread = event
+                .params
+                .as_ref()
+                .and_then(|params| params.get("threadId"))
+                .and_then(serde_json::Value::as_str);
+            if let Some(side) = self
+                .concurrent_side_turn
+                .as_mut()
+                .filter(|side| resolved_thread.is_some_and(|thread_id| thread_id == side.thread_id))
+            {
+                side.pending_approval = None;
+                side.pending_user_input = None;
+                side.user_input_answers.clear();
+                side.pending_mcp_elicitation = None;
+                side.mcp_form_values.clear();
+            } else {
+                self.pending_approval = None;
+                self.pending_user_input = None;
+                self.user_input_answers.clear();
+                self.pending_mcp_elicitation = None;
+                self.mcp_form_values.clear();
+            }
         }
         if event.method == "mcpServer/oauthLogin/completed" {
             if let Some(completion) = event
@@ -15615,7 +16373,13 @@ impl MitsuroApp {
         if let Some(bridge) = self.live_approval_bridge.take() {
             let _ = bridge.submit(ApprovalChoice::Abort);
         }
+        if let Some(mut side) = self.concurrent_side_turn.take() {
+            if let Some(bridge) = side.live_approval_bridge.take() {
+                let _ = bridge.submit(ApprovalChoice::Abort);
+            }
+        }
         self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
         self.latest_message_edit = None;
         self.latest_message_edit_in_progress = false;
         self.latest_message_edit_error = None;
@@ -16960,6 +17724,35 @@ fn turn_update_is_current(
     active_generation == candidate_generation && active_thread_id == Some(candidate_thread_id)
 }
 
+fn selected_thread_owns_primary_turn(
+    selected_thread_id: Option<&str>,
+    active_thread_id: Option<&str>,
+) -> bool {
+    selected_thread_id.is_some() && selected_thread_id == active_thread_id
+}
+
+fn turn_update_is_current_for_owners(
+    primary_generation: u64,
+    primary_thread_id: Option<&str>,
+    side: Option<(u64, &str)>,
+    candidate_generation: u64,
+    candidate_thread_id: &str,
+) -> bool {
+    turn_update_is_current(
+        primary_generation,
+        primary_thread_id,
+        candidate_generation,
+        candidate_thread_id,
+    ) || side.is_some_and(|(generation, thread_id)| {
+        turn_update_is_current(
+            generation,
+            Some(thread_id),
+            candidate_generation,
+            candidate_thread_id,
+        )
+    })
+}
+
 fn command_available(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|directory| directory.join(name).is_file())
@@ -17999,6 +18792,76 @@ mod tests {
         assert!(SIDE_BOUNDARY_PROMPT.contains("reference context only"));
         assert!(SIDE_BOUNDARY_PROMPT.contains("Sub-agents are off-limits"));
         assert!(SIDE_DEVELOPER_INSTRUCTIONS.contains("not the main thread"));
+        assert_eq!(
+            side_developer_instructions(None),
+            SIDE_DEVELOPER_INSTRUCTIONS
+        );
+        let merged = side_developer_instructions(Some("Keep the project convention."));
+        assert!(merged.starts_with("Keep the project convention.\n\n"));
+        assert!(merged.ends_with(SIDE_DEVELOPER_INSTRUCTIONS));
+    }
+
+    #[test]
+    fn side_fork_preserves_live_context_with_an_ephemeral_boundary() {
+        let config = serde_json::json!({
+            "model_provider": "openai",
+            "runtime_workspace_roots": ["/workspace", "/shared"],
+            "approval_policy": "on-request",
+            "approvals_reviewer": "auto_review",
+            "sandbox_mode": "workspace-write",
+            "default_permissions": FULL_ACCESS_PROFILE_ID,
+            "base_instructions": "Base instructions",
+            "developer_instructions": "Existing developer instructions"
+        });
+        let params = side_fork_params(
+            "thread-main".to_owned(),
+            Some("gpt-5.6-sol".to_owned()),
+            Some("/workspace".to_owned()),
+            Some("high".to_owned()),
+            Some(&ProductSpeedMode::CodexServiceTier("priority".to_owned())),
+            Some(ProductAccessMode::CodexAuto),
+            Some(READ_ONLY_PROFILE_ID.to_owned()),
+            &config,
+        );
+
+        assert_eq!(params.thread_id, "thread-main");
+        assert_eq!(params.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(params.model_provider.as_deref(), Some("openai"));
+        assert_eq!(params.cwd.as_deref(), Some("/workspace"));
+        assert_eq!(
+            params.runtime_workspace_roots.as_deref(),
+            Some(["/workspace".to_owned(), "/shared".to_owned()].as_slice())
+        );
+        assert_eq!(params.service_tier, Some(Some("priority".to_owned())));
+        assert_eq!(params.permissions.as_deref(), Some(WORKSPACE_PROFILE_ID));
+        assert!(params.sandbox.is_none());
+        assert_eq!(
+            params.base_instructions.as_deref(),
+            Some("Base instructions")
+        );
+        assert!(params
+            .developer_instructions
+            .as_deref()
+            .is_some_and(|value| value.starts_with("Existing developer instructions\n\n")));
+        assert_eq!(params.ephemeral, Some(true));
+        assert_eq!(params.exclude_turns, Some(true));
+        // app-server rejects deferGoalContinuation together with ephemeral.
+        assert_eq!(params.defer_goal_continuation, None);
+
+        let fresh_default = side_fork_params(
+            "thread-main".to_owned(),
+            None,
+            Some("/workspace".to_owned()),
+            None,
+            None,
+            None,
+            Some(READ_ONLY_PROFILE_ID.to_owned()),
+            &config,
+        );
+        assert_eq!(
+            fresh_default.permissions.as_deref(),
+            Some(FULL_ACCESS_PROFILE_ID)
+        );
     }
 
     #[test]
@@ -18484,10 +19347,50 @@ mod tests {
 
     #[test]
     fn turn_updates_are_scoped_to_the_originating_thread_and_generation() {
+        assert!(selected_thread_owns_primary_turn(
+            Some("thread-main"),
+            Some("thread-main")
+        ));
+        assert!(!selected_thread_owns_primary_turn(
+            Some("thread-side"),
+            Some("thread-main")
+        ));
+        assert!(!selected_thread_owns_primary_turn(None, None));
+
         assert!(turn_update_is_current(7, Some("thread-a"), 7, "thread-a"));
         assert!(!turn_update_is_current(7, Some("thread-a"), 7, "thread-b"));
         assert!(!turn_update_is_current(8, Some("thread-a"), 7, "thread-a"));
         assert!(!turn_update_is_current(7, None, 7, "thread-a"));
+
+        let side = Some((11, "thread-side"));
+        assert!(turn_update_is_current_for_owners(
+            7,
+            Some("thread-main"),
+            side,
+            7,
+            "thread-main"
+        ));
+        assert!(turn_update_is_current_for_owners(
+            7,
+            Some("thread-main"),
+            side,
+            11,
+            "thread-side"
+        ));
+        assert!(!turn_update_is_current_for_owners(
+            7,
+            Some("thread-main"),
+            side,
+            7,
+            "thread-side"
+        ));
+        assert!(!turn_update_is_current_for_owners(
+            7,
+            Some("thread-main"),
+            side,
+            11,
+            "thread-main"
+        ));
     }
 
     #[test]

@@ -290,6 +290,15 @@ advertises review support. It subscribes before `review/start`, streams the resu
 review turn through the native transcript and approval UI, and never substitutes
 fixture review content for Mitsuro.
 
+Codex side chats use a real ephemeral fork plus hidden model-history boundary. Start
+one with `/side [prompt]` or **Open side chat**; **Back to main chat** deletes the
+ephemeral child. Main and side turns keep separate IDs and interactive-request state,
+including separate typed-answer editors, so either can continue while the other is
+working or waiting for approval. Forks refresh effective project configuration at the
+moment they are created and preserve model, effort, service tier, workspace, permission,
+approval, and instruction context. Mitsuro does not expose this control because its HTTP
+API has no history-injection primitive.
+
 ```bash
 scripts/gpui-codex-protocol-check.sh
 ```

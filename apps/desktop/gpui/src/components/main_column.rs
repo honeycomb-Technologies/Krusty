@@ -10,7 +10,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     deferred, div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _,
+    StyledImage as _, Window,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
@@ -207,7 +207,10 @@ fn thread_main(
             this.child(thread_title_bar(&title, project_path.as_deref(), app, cx))
         })
         .when(app.selected_side_conversation_parent().is_some(), |this| {
-            this.child(side_conversation_bar(cx))
+            this.child(side_conversation_bar(
+                app.selected_side_parent_status_label(),
+                cx,
+            ))
         })
         .when(show_title && app.thread_find_open(), |this| {
             this.child(thread_find_bar(app, cx))
@@ -402,6 +405,7 @@ fn thread_title_bar(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let menu_open = app.thread_menu_open();
+    let is_side_chat = app.selected_side_conversation_parent().is_some();
     let can_compact = app.can_compact_selected_thread();
     let can_review = app.can_review_selected_thread();
     let can_pin = app.can_pin_selected_thread();
@@ -498,9 +502,11 @@ fn thread_title_bar(
                     )
                 })
                 .child(thread_find_button(app.thread_find_open(), cx))
-                .child(thread_overflow_menu(menu_open, is_archived, cx)),
+                .when(!is_side_chat, |this| {
+                    this.child(thread_overflow_menu(menu_open, is_archived, cx))
+                }),
         )
-        .when(menu_open, |this| {
+        .when(menu_open && !is_side_chat, |this| {
             this.child(
                 deferred(thread_overflow_dropdown(
                     is_archived,
@@ -825,7 +831,7 @@ fn thread_overflow_dropdown(
                 "icons/arrow-left.svg",
                 false,
                 cx,
-                |app, cx| app.toggle_thread_project_menu(cx),
+                |app, _window, cx| app.toggle_thread_project_menu(cx),
             ))
             .child(
                 div()
@@ -852,7 +858,7 @@ fn thread_overflow_dropdown(
                 "icons/pin.svg",
                 false,
                 cx,
-                |app, cx| app.toggle_selected_thread_pin(cx),
+                |app, _window, cx| app.toggle_selected_thread_pin(cx),
             ))
         })
         .when(
@@ -864,7 +870,7 @@ fn thread_overflow_dropdown(
                     "icons/folder.svg",
                     false,
                     cx,
-                    |app, cx| app.toggle_thread_project_menu(cx),
+                    |app, _window, cx| app.toggle_thread_project_menu(cx),
                 ))
             },
         )
@@ -875,7 +881,7 @@ fn thread_overflow_dropdown(
                 "icons/inbox.svg",
                 false,
                 cx,
-                |app, cx| app.archive_selected_thread(cx),
+                |app, _window, cx| app.archive_selected_thread(cx),
             ))
         })
         .when(!project_menu_open, |this| {
@@ -885,7 +891,7 @@ fn thread_overflow_dropdown(
                 "icons/git-branch.svg",
                 false,
                 cx,
-                |app, cx| app.fork_selected_thread(cx),
+                |app, _window, cx| app.fork_selected_thread(cx),
             ))
         })
         .when(!project_menu_open && can_open_side, |this| {
@@ -895,7 +901,7 @@ fn thread_overflow_dropdown(
                 "icons/git-branch.svg",
                 false,
                 cx,
-                |app, cx| app.open_side_conversation(cx),
+                |app, window, cx| app.open_side_conversation(window, cx),
             ))
         })
         .when(!project_menu_open && can_review, |this| {
@@ -905,7 +911,7 @@ fn thread_overflow_dropdown(
                 "icons/search.svg",
                 false,
                 cx,
-                |app, cx| app.review_selected_thread(cx),
+                |app, _window, cx| app.review_selected_thread(cx),
             ))
         })
         .when(!project_menu_open && can_compact, |this| {
@@ -915,7 +921,7 @@ fn thread_overflow_dropdown(
                 "icons/refresh-cw.svg",
                 false,
                 cx,
-                |app, cx| app.compact_selected_thread(cx),
+                |app, _window, cx| app.compact_selected_thread(cx),
             ))
         })
         .when(!project_menu_open, |this| {
@@ -934,12 +940,15 @@ fn thread_overflow_dropdown(
                 "icons/delete.svg",
                 true,
                 cx,
-                |app, cx| app.delete_selected_thread(cx),
+                |app, _window, cx| app.delete_selected_thread(cx),
             ))
         })
 }
 
-fn side_conversation_bar(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn side_conversation_bar(
+    parent_status: Option<&'static str>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("side-conversation-bar")
@@ -968,7 +977,10 @@ fn side_conversation_bar(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(colors.text_secondary)
-                        .child("Temporary side chat"),
+                        .child(match parent_status {
+                            Some(status) => format!("Temporary side chat · {status}"),
+                            None => "Temporary side chat".to_owned(),
+                        }),
                 ),
         )
         .child(
@@ -983,8 +995,8 @@ fn side_conversation_bar(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
                 .rounded(px(7.0))
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.return_to_side_conversation_parent(cx);
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.return_to_side_conversation_parent(window, cx);
                 }))
                 .child(
                     Icon::empty()
@@ -1062,7 +1074,7 @@ fn thread_menu_item(
     icon: &'static str,
     destructive: bool,
     cx: &mut Context<MitsuroApp>,
-    on_click: impl Fn(&mut MitsuroApp, &mut Context<MitsuroApp>) + 'static,
+    on_click: impl Fn(&mut MitsuroApp, &mut Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let fg = if destructive {
@@ -1086,7 +1098,7 @@ fn thread_menu_item(
         .rounded(px(7.0))
         .cursor_pointer()
         .hover(|s| s.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| on_click(app, cx)))
+        .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
         .child(
             Icon::empty()
                 .path(icon)

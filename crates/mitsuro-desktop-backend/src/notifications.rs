@@ -104,7 +104,6 @@ impl LifecycleNotification {
                 | "item/autoApprovalReview/started"
                 | "item/autoApprovalReview/completed"
                 | "mcpServer/oauthLogin/completed"
-                | "mcpServer/startupStatus/updated"
                 | "model/rerouted"
                 | "model/verification"
                 | "thread/compacted"
@@ -234,5 +233,19 @@ mod tests {
         assert_eq!(event.thread_id.as_deref(), Some("t1"));
         assert_eq!(event.detail, "Network unavailable");
         assert_eq!(event.severity, NotificationSeverity::Warning);
+    }
+
+    #[test]
+    fn ambient_mcp_startup_status_does_not_pollute_the_chat_transcript() {
+        let params = serde_json::json!({
+            "threadId": "t1",
+            "name": "example",
+            "status": "ready"
+        });
+        let event =
+            LifecycleNotification::from_known("mcpServer/startupStatus/updated", Some(&params))
+                .unwrap();
+        assert!(!event.is_transcript_activity());
+        assert_eq!(event.family, NotificationFamily::Mcp);
     }
 }

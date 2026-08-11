@@ -166,10 +166,15 @@ each typed adapter or approved platform/product exclusion.
   followed by a hidden typed `thread/inject_items` boundary. GPUI supports both
   `/side [prompt]` and **Open side chat**, keeps the fork out of Recents, and deletes
   it when **Back to main chat** is selected. Mitsuro reports the feature as unsupported
-  because its HTTP API has no model-history injection primitive. The GPUI currently
-  waits for an active main turn to finish before opening the side chat because active
-  turn/approval state is still window-global; concurrent main and side turns remain a
-  parity item rather than being simulated.
+  because its HTTP API has no model-history injection primitive. Main and side turns
+  retain independent generation, turn-id, interruption, approval, structured-input,
+  and MCP-elicitation ownership. The side banner reports whether the main thread is
+  working, needs input/approval, or finished, so a side chat can run without losing or
+  misrouting the parent's live events. Typed-answer editors are conversation-owned,
+  and fork creation refreshes effective layered configuration for the selected project
+  before preserving its model, policy, permission, workspace, and instruction context.
+  Ambient MCP startup-status updates refresh Extensions state without being inserted as
+  faux chat transcript rows.
 - Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
   visibility, and archived-recents visibility can mutate the privacy-safe local
   preference store; Full access and realtime voice retain their specialized live paths.
