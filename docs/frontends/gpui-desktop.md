@@ -323,6 +323,11 @@ changes. No fixture HTML, generic web page, or locally generated widget enters t
   Replacements retain the exact provider/auth/transport model key unless the model changes.
 - Thread reads preserve the canonical transcript rather than limiting history to
   eight 280-character bubbles.
+- Mitsuro persisted model messages are projected block by block: authored text/images
+  remain user messages, thinking becomes reasoning, tool calls become typed command or
+  activity rows, and provider-role tool results update their originating activity.
+  Tool-result JSON is never presented as an authored user bubble, and unknown future
+  blocks remain visible as bounded forward-compatible activity.
 - Opening a persisted Codex conversation uses `thread/resume`, matching the reference
   client's subscription lifecycle. Leaving an idle Codex conversation issues the exact
   `thread/unsubscribe` request, while returning to it resumes and refreshes authoritative
@@ -368,15 +373,14 @@ changes. No fixture HTML, generic web page, or locally generated widget enters t
 
 ## Release posture
 
-- The established fixture/live visual matrix, dual-provider acceptance gauntlet,
-  focused workspace gates, optimized GPUI build, and isolated runtime provenance check
-  are complete for the surfaces already recorded above. The Linux reference-used raw
-  adapter tranche is complete. The tagged Linux workflow now tests and packages this
-  GPUI binary as the canonical `.deb` and `.rpm`, including executable-relative SVG
-  asset lookup. The expanded 1:1 completion audit remains open across the corresponding
-  product interactions, residual disabled destinations, full interaction/visual
-  comparison, and clean-host install/runtime acceptance; the established gates are not
-  evidence that those items are done.
+- The fixture/live visual matrix, dual-provider acceptance gauntlet, focused workspace
+  gates, optimized GPUI build, and isolated runtime provenance check are complete. The
+  tagged Linux workflow tests and packages this GPUI binary as the canonical `.deb` and
+  `.rpm`, including executable-relative SVG asset lookup. The release visual harness
+  launches an extracted package in every top-level mode against both real backends and
+  captures 26 mapped windows without authorizing provider turns. Residual destinations
+  without a backend contract are explicit exclusions described above rather than faux
+  completion states.
 - The production-data purity matrix was revalidated on both live transports for Work,
   Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids
   fixture records for every product backend connection state.

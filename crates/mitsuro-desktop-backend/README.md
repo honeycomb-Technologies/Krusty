@@ -193,6 +193,12 @@ scripts/gpui-dual-backend-acceptance.sh
 
 # Require completed provider-backed streaming turns from Mitsuro and Codex (may use credits):
 MITSURO_RUN_LIVE_ACCEPTANCE=1 scripts/gpui-dual-backend-acceptance.sh
+
+# Optional: select another configured Mitsuro model when validating the HTTP/SSE
+# transport independently of a known outage in the server-selected provider:
+MITSURO_RUN_LIVE_ACCEPTANCE=1 \
+MITSURO_LIVE_ACCEPTANCE_MODEL="your-configured-model-id" \
+  scripts/gpui-dual-backend-acceptance.sh
 ```
 
 ## Contract sources

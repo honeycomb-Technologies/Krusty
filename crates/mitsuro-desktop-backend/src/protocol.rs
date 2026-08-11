@@ -702,7 +702,11 @@ pub fn activity_item_fields(item: &Value) -> ActivityFields {
             let namespace = value_string(item, "namespace");
             let tool = value_string(item, "tool");
             let label = join_nonempty(&[namespace.as_str(), tool.as_str()], " · ");
-            ("Tool call".to_owned(), label)
+            let summary = value_string(item, "summary");
+            (
+                "Tool call".to_owned(),
+                if summary.is_empty() { label } else { summary },
+            )
         }
         "webSearch" => ("Web search".to_owned(), value_string(item, "query")),
         "imageGeneration" => {
@@ -717,9 +721,14 @@ pub fn activity_item_fields(item: &Value) -> ActivityFields {
         "collabAgentToolCall" => {
             let tool = value_string(item, "tool");
             let prompt = value_string(item, "prompt");
+            let summary = value_string(item, "summary");
             (
                 "Collaboration".to_owned(),
-                join_nonempty(&[tool.as_str(), prompt.as_str()], " · "),
+                if summary.is_empty() {
+                    join_nonempty(&[tool.as_str(), prompt.as_str()], " · ")
+                } else {
+                    summary
+                },
             )
         }
         "subAgentActivity" => {

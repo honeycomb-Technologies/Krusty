@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt as _;
 use mitsuro_client::{
-    ChatRequest, ChatStreamEvent, ContentBlock, CreateSessionRequest, ImageSource, MitsuroClient,
-    PermissionMode, SessionType, SteerRequest, UpdateSessionRequest, WorkMode,
+    ChatRequest, ChatStreamEvent, ContentBlock, CreateSessionRequest, ImageSource, MessageResponse,
+    MitsuroClient, PermissionMode, SessionType, SteerRequest, UpdateSessionRequest, WorkMode,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -703,6 +704,232 @@ fn mitsuro_user_content(value: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// Project Mitsuro's persisted model-message blocks into the same typed thread-item
+/// vocabulary used by Codex. Stored tool results use the `user` model role because
+/// that is how providers consume them; they are not authored user chat messages and
+/// must never be rendered as raw JSON bubbles.
+fn mitsuro_history_items(messages: &[MessageResponse]) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut tool_items = HashMap::<String, usize>::new();
+
+    for (message_index, message) in messages.iter().enumerate() {
+        let parts = message
+            .content
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![message.content.clone()]);
+        let mut authored_user_parts = Vec::new();
+
+        for (part_index, part) in parts.into_iter().enumerate() {
+            let item_id = format!("mitsuro-message-{message_index}-{part_index}");
+            let block_type = part.get("type").and_then(Value::as_str);
+
+            if message.role == "user" {
+                if block_type == Some("tool_result") {
+                    apply_mitsuro_tool_result(&mut items, &tool_items, &part, item_id);
+                } else {
+                    authored_user_parts.push(part);
+                }
+                continue;
+            }
+
+            if message.role == "assistant" {
+                match block_type {
+                    Some("thinking") => {
+                        if let Some(thinking) = part.get("thinking").and_then(Value::as_str) {
+                            if !thinking.is_empty() {
+                                items.push(serde_json::json!({
+                                    "id": item_id,
+                                    "type": "reasoning",
+                                    "summary": [thinking],
+                                    "content": [],
+                                }));
+                            }
+                        }
+                    }
+                    Some("tool_use") => {
+                        let tool_id = part
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| item_id.clone());
+                        let item = mitsuro_tool_use_item(&part, &tool_id);
+                        tool_items.insert(tool_id, items.len());
+                        items.push(item);
+                    }
+                    Some("text") => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                items.push(serde_json::json!({
+                                    "id": item_id,
+                                    "type": "agentMessage",
+                                    "text": text,
+                                }));
+                            }
+                        }
+                    }
+                    _ => {
+                        let text = message_text(&part);
+                        if !text.is_empty() && !part.is_object() {
+                            items.push(serde_json::json!({
+                                "id": item_id,
+                                "type": "agentMessage",
+                                "text": text,
+                            }));
+                        } else if !part.is_null() {
+                            items.push(serde_json::json!({
+                                "id": item_id,
+                                "type": "mitsuroActivity",
+                                "status": "completed",
+                                "sourceType": block_type.unwrap_or("unknown"),
+                                "detail": part,
+                            }));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if !part.is_null() {
+                items.push(serde_json::json!({
+                    "id": item_id,
+                    "type": "mitsuroActivity",
+                    "status": "completed",
+                    "sourceRole": message.role,
+                    "detail": part,
+                }));
+            }
+        }
+
+        if !authored_user_parts.is_empty() {
+            let content = mitsuro_user_content(&Value::Array(authored_user_parts));
+            if !content.is_empty() {
+                items.push(serde_json::json!({
+                    "id": format!("mitsuro-message-{message_index}"),
+                    "type": "userMessage",
+                    "content": content,
+                }));
+            }
+        }
+    }
+
+    items
+}
+
+fn mitsuro_tool_use_item(part: &Value, tool_id: &str) -> Value {
+    let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+    let input = part.get("input").cloned().unwrap_or(Value::Null);
+    match name {
+        "bash" => serde_json::json!({
+            "id": tool_id,
+            "type": "commandExecution",
+            "command": input.get("command").and_then(Value::as_str).unwrap_or("bash"),
+            "cwd": input.get("cwd").and_then(Value::as_str).unwrap_or(""),
+            "status": "inProgress",
+            "aggregatedOutput": "",
+        }),
+        "agent" => serde_json::json!({
+            "id": tool_id,
+            "type": "collabAgentToolCall",
+            "tool": name,
+            "prompt": input.get("prompt")
+                .or_else(|| input.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            "status": "inProgress",
+        }),
+        "webfetch" => serde_json::json!({
+            "id": tool_id,
+            "type": "webSearch",
+            "query": input.get("url").and_then(Value::as_str).unwrap_or(""),
+            "status": "inProgress",
+        }),
+        _ => serde_json::json!({
+            "id": tool_id,
+            "type": "dynamicToolCall",
+            "namespace": "mitsuro",
+            "tool": name,
+            "status": "inProgress",
+            "arguments": input,
+        }),
+    }
+}
+
+fn apply_mitsuro_tool_result(
+    items: &mut Vec<Value>,
+    tool_items: &HashMap<String, usize>,
+    part: &Value,
+    fallback_id: String,
+) {
+    let tool_id = part
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let output = part.get("output").unwrap_or(&Value::Null);
+    let is_error = part
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || output
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let summary = mitsuro_tool_result_summary(output);
+    let status = if is_error { "failed" } else { "completed" };
+
+    if let Some(item) = tool_items
+        .get(tool_id)
+        .and_then(|index| items.get_mut(*index))
+        .and_then(Value::as_object_mut)
+    {
+        item.insert("status".to_owned(), Value::String(status.to_owned()));
+        item.insert("summary".to_owned(), Value::String(summary.clone()));
+        if item.get("type").and_then(Value::as_str) == Some("commandExecution") {
+            item.insert("aggregatedOutput".to_owned(), Value::String(summary));
+            if let Some(exit_code) = output
+                .get("result")
+                .and_then(|result| result.get("exit_code"))
+                .and_then(Value::as_i64)
+            {
+                item.insert("exitCode".to_owned(), Value::from(exit_code));
+            }
+        }
+        return;
+    }
+
+    let tool = output.get("tool").and_then(Value::as_str).unwrap_or("tool");
+    items.push(serde_json::json!({
+        "id": if tool_id.is_empty() { fallback_id } else { tool_id.to_owned() },
+        "type": "dynamicToolCall",
+        "namespace": "mitsuro",
+        "tool": tool,
+        "status": status,
+        "summary": summary,
+    }));
+}
+
+fn mitsuro_tool_result_summary(output: &Value) -> String {
+    output
+        .get("summary")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            output
+                .get("result")
+                .and_then(|result| result.get("output_preview"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| output.as_str())
+        .unwrap_or_else(|| {
+            if output.is_null() {
+                "Tool completed"
+            } else {
+                "Tool result available"
+            }
+        })
+        .to_owned()
+}
+
 fn mitsuro_reasoning_effort_name(effort: mitsuro_client::ReasoningEffort) -> Option<&'static str> {
     use mitsuro_client::ReasoningEffort;
     match effort {
@@ -872,27 +1099,7 @@ impl AgentBackend for MitsuroServerBackend {
             .get_session(&params.thread_id)
             .await
             .map_err(|error| AgentError::Other(error.to_string()))?;
-        let items = transcript
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(index, message)| {
-                let text = message_text(&message.content);
-                if message.role == "user" {
-                    serde_json::json!({
-                        "id": format!("mitsuro-message-{index}"),
-                        "type": "userMessage",
-                        "content": mitsuro_user_content(&message.content),
-                    })
-                } else {
-                    serde_json::json!({
-                        "id": format!("mitsuro-message-{index}"),
-                        "type": "agentMessage",
-                        "text": text,
-                    })
-                }
-            })
-            .collect::<Vec<_>>();
+        let items = mitsuro_history_items(&transcript.messages);
         let mut thread = session_json(&transcript.session);
         if let Some(object) = thread.as_object_mut() {
             object.insert(
@@ -1532,6 +1739,128 @@ mod tests {
     }
 
     #[test]
+    fn persisted_tool_blocks_project_to_typed_activity_not_user_json() {
+        let messages: Vec<MessageResponse> = serde_json::from_value(serde_json::json!([
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Inspect the workspace"}]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Checking files", "signature": ""},
+                    {
+                        "type": "tool_use",
+                        "id": "call-bash",
+                        "name": "bash",
+                        "input": {"command": "pwd", "cwd": "/workspace"}
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call-read",
+                        "name": "read",
+                        "input": {"file_path": "/workspace/README.md"}
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-bash",
+                        "output": {
+                            "is_error": false,
+                            "summary": "bash completed successfully",
+                            "result": {"exit_code": 0, "output_preview": "/workspace"},
+                            "tool": "bash"
+                        }
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-read",
+                        "output": {
+                            "is_error": false,
+                            "summary": "read returned 3 lines",
+                            "tool": "read"
+                        }
+                    }
+                ]
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "The workspace is ready."}]
+            }
+        ]))
+        .expect("typed Mitsuro messages");
+
+        let items = mitsuro_history_items(&messages);
+        let kinds = items
+            .iter()
+            .filter_map(|item| item.get("type").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "userMessage",
+                "reasoning",
+                "commandExecution",
+                "dynamicToolCall",
+                "agentMessage"
+            ]
+        );
+        assert_eq!(items[2]["status"], "completed");
+        assert_eq!(items[2]["aggregatedOutput"], "bash completed successfully");
+        assert_eq!(items[2]["exitCode"], 0);
+        assert_eq!(items[3]["summary"], "read returned 3 lines");
+
+        let thread = ThreadReadResponse {
+            thread: serde_json::json!({"turns": [{"items": items}]}),
+        };
+        let transcript = thread.transcript_messages();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|message| message.role == crate::protocol::TranscriptRole::User)
+                .count(),
+            1
+        );
+        assert!(transcript.iter().any(|message| {
+            message.role == crate::protocol::TranscriptRole::CommandExecution
+                && message.body.contains("bash completed successfully")
+        }));
+        assert!(transcript
+            .iter()
+            .all(|message| !message.body.contains("tool_use_id")));
+    }
+
+    #[test]
+    fn unmatched_persisted_tool_result_is_bounded_activity_not_authored_chat() {
+        let messages: Vec<MessageResponse> = serde_json::from_value(serde_json::json!([{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "missing-call",
+                "output": {
+                    "is_error": true,
+                    "summary": "Tool failed before its call was persisted",
+                    "tool": "grep"
+                }
+            }]
+        }]))
+        .expect("typed Mitsuro messages");
+
+        let items = mitsuro_history_items(&messages);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "dynamicToolCall");
+        assert_eq!(items[0]["status"], "failed");
+        assert_eq!(
+            items[0]["summary"],
+            "Tool failed before its call was persisted"
+        );
+    }
+
+    #[test]
     fn product_permission_modes_map_to_exact_mitsuro_contract() {
         assert_eq!(
             mitsuro_permission_mode(Some("supervised")).unwrap(),
@@ -1857,12 +2186,16 @@ mod tests {
             }
         });
 
+        let mut turn = TurnStartParams::text(
+            thread_id.clone(),
+            "Reply with exactly MITSURO_DESKTOP_ACCEPTANCE_OK. Do not use tools.",
+        );
+        turn.model = std::env::var("MITSURO_LIVE_ACCEPTANCE_MODEL")
+            .ok()
+            .filter(|model| !model.trim().is_empty());
         let outcome = backend
             .run_turn_streaming(
-                TurnStartParams::text(
-                    thread_id.clone(),
-                    "Reply with exactly MITSURO_DESKTOP_ACCEPTANCE_OK. Do not use tools.",
-                ),
+                turn,
                 event_tx,
                 bridge,
                 Duration::from_secs(120),

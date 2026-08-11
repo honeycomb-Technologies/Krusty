@@ -251,14 +251,16 @@ create/review controls. Atlas/browser now renders a real backend-independent Web
 the composer, live-turn failure handling, and secondary Settings actions retain explicit
 capability treatment. Desktop-only
 Settings values are durable and explicitly distinguished from live server configuration.
-The established surface matrix has passed strict dual-provider live acceptance. The
+The complete surface matrix has passed strict dual-provider live acceptance. The
 production-data purity slice adds a source-level fixture gate and fresh live captures
 for Work, Scheduled, Computer, Extensions, Settings, and Files on both transports.
 The tagged Linux release workflow now builds this GPUI client rather than the legacy
-Tauri shell and emits installable Debian and RPM packages. The expanded interaction,
-visual, clean-host installation, and runtime acceptance audit remains in progress;
-earlier gates do not by themselves prove the full 1:1 objective. Installation and
-deployment remain separate operator actions.
+Tauri shell and emits installable Debian and RPM packages. The release acceptance gate
+launches the extracted package in all 13 top-level modes on both real transports,
+captures 26 mapped GPUI windows, reopens real persisted threads, and verifies packaged
+asset discovery plus backend startup. Pull requests and Sites remain explicit typed-API
+exclusions, not incomplete or synthetic implementations. Installation and deployment
+remain separate operator actions.
 
 ## Build
 
@@ -271,6 +273,8 @@ cargo test -p mitsuro-gpui-desktop --no-default-features
 cargo build --release --locked -p mitsuro-gpui-desktop
 scripts/package-gpui-desktop.sh \
   target/release/mitsuro-gpui-desktop artifacts/gpui-desktop
+scripts/gpui-release-visual-matrix.sh \
+  target/release/mitsuro-gpui-desktop target/gpui-release-visuals
 ```
 
 Run against the local Mitsuro server without authorizing provider turns:
@@ -284,6 +288,11 @@ Use `MITSURO_BACKEND=codex-stdio` for a managed Codex app-server child. A Ready,
 authenticated backend sends a provider-backed turn when the user presses Send. Keep
 `MITSURO_NO_LIVE_TURN=1` for read-only visual validation; use
 `MITSURO_FORCE_FIXTURE=1` only for explicit fixture tests.
+
+Strict live acceptance normally uses the server-selected Mitsuro model. To validate the
+HTTP/SSE client contract independently of a known provider outage, set
+`MITSURO_LIVE_ACCEPTANCE_MODEL` to another configured live model id; the override is
+explicit and applies only to the ephemeral acceptance turn.
 
 Visual regression runs may set `MITSURO_START_MODE` to a product surface and
 `MITSURO_START_APP_MENU=file|edit|view|help` to open deterministic native chrome on

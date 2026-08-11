@@ -283,8 +283,8 @@ fn side_fork_params(
 
 /// Top-level product shell mode (ChatGPT + Codex desktop unified chrome).
 ///
-/// Bar home sidebar drives Chat/Codex + stub routes (PRs / Sites / Scheduled /
-/// Plugins). Activity rail remains for advanced surfaces (Work / Atlas / …).
+/// Bar home sidebar drives Chat/Codex plus capability-gated product destinations.
+/// Activity rail remains for advanced surfaces (Work / Atlas / …).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ProductMode {
     /// Simplified conversational chat surface (`mode=chat` threads).
@@ -816,7 +816,7 @@ impl TerminalSession {
 
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 160 * 1024;
 
-/// Atlas / agent browser-use session state (fixture until wry host lands).
+/// Atlas / agent browser-use session state for the shared WebKit runtime.
 ///
 /// Variants beyond `NoNativeHost` / `Idle` are reserved for the native host
 /// and agent-driving paths; matched in `browser_panel` status chrome.
