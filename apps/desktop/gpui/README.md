@@ -292,7 +292,14 @@ active turns, refreshing account, extension, thread-list, and file state without
 duplicating turn transcript events.
 Active-turn steering is a transport-neutral product action: Codex uses `turn/steer`
 with the exact active-turn precondition, while Mitsuro uses its durable `/chat/steer`
-endpoint. A non-empty draft therefore shows Send beside Stop during a live turn.
+endpoint. The persisted Follow-up behavior can instead select Queue: GPUI retains up to
+32 authored follow-ups per real thread and starts each as a new provider-backed turn
+only after the prior turn completes. Queued text and supported attachments preserve the
+model, workspace, access, speed, and work-mode selection captured at submission. A
+visible count and Clear action expose pending intent; interruption, timeout, failure, or
+backend replacement discards it with an explicit transcript marker rather than showing
+unsent prompts as successful. A non-empty draft therefore shows Send beside Stop during
+a live turn whenever the selected behavior is available.
 Codex threads also expose schema-exact manual compaction from the thread overflow;
 the action stays absent for Mitsuro until its HTTP API offers the same contract.
 The same menu exposes a live **Review changes** action only when the Codex backend

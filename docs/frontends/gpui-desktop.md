@@ -56,7 +56,7 @@ live catalog.
 | Sessions list/create/read/rename/delete | Live | Live | Typed fixture |
 | Pinned recents | Desktop-local ordered pins scoped to Mitsuro session identity | Desktop-local ordered pins scoped to Codex thread identity, matching native-host ownership | Unavailable; fixture rows have no durable product identity |
 | Activity sidebar | Priority from real in-flight interaction state; live RFC 3339 session updates grouped by local day | Priority from real in-flight interaction state; live app-server epoch updates grouped by local day | No product rows; fixture timestamps are never presented as live activity |
-| Streaming chat | Live SSE + durable steering | Live JSON-RPC notifications + `turn/steer` | Sample replay |
+| Streaming chat | Live SSE + durable steering; bounded client queue dispatches subsequent real turns | Live JSON-RPC notifications + `turn/steer`; bounded client queue dispatches subsequent real turns | Sample replay; product queue unavailable |
 | Conversation find/history | Live search over the real persisted transcript plus bounded turn pages | Live `thread/searchOccurrences` plus bidirectional `thread/turns/list`; runtimes returning `-32601` fall back to a real `thread/read(includeTurns)` projection | Typed fixture transcript; no invented matches |
 | Edit latest user message | Unsupported; hidden because there is no destructive tail mutation | Live `thread/rollback { numTurns: 1 }`, authoritative returned-thread replacement, then real turn resubmit with retained text/media/reference inputs | Unsupported in product UI; typed rollback fixture is contract-test only |
 | Image attachments | Live base64 image content | Live schema-exact `localImage` input | Unsupported, hidden |

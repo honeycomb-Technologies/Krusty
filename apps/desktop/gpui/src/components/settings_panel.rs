@@ -512,7 +512,7 @@ fn general_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElem
                 .child(card_divider())
                 .child(segment_row(
                     "Follow-up behavior",
-                    "Active-turn messages use backend-native steering; queued follow-ups are not implemented",
+                    "Queue starts a real turn after completion; Steer updates the active turn immediately",
                     "follow_up",
                     &["Queue", "Steer"],
                     "Steer",

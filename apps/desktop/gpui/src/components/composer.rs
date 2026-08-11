@@ -50,7 +50,7 @@ fn codex_composer(
         .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
-    let steerable = app.can_steer_active_turn();
+    let follow_up_available = app.can_submit_active_follow_up();
     let calm = app.is_calm_stage();
     let show_usage = app.usage_card_visible();
     let draft_empty =
@@ -67,7 +67,7 @@ fn codex_composer(
         .flex_col()
         .gap(px(10.0))
         .when_some(composer_command_notice(app), |this, notice| {
-            this.child(command_notice(notice))
+            this.child(command_notice(notice, app.queued_follow_up_count() > 0, cx))
         })
         .when(show_usage, |this| this.child(usage_card(cx)))
         // Composer shell — full chrome on open thread
@@ -175,10 +175,10 @@ fn codex_composer(
                         .child(if streaming {
                             streaming_actions(
                                 "composer-stop",
-                                "composer-steer",
+                                "composer-follow-up",
                                 input,
                                 draft_empty,
-                                steerable,
+                                follow_up_available,
                                 cx,
                             )
                             .into_any_element()
@@ -213,7 +213,7 @@ fn chat_slim_composer(
         .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
-    let steerable = app.can_steer_active_turn();
+    let follow_up_available = app.can_submit_active_follow_up();
     let draft_empty =
         input.read(cx).value().trim().is_empty() && app.composer_attachments().is_empty();
 
@@ -228,7 +228,7 @@ fn chat_slim_composer(
         .flex_col()
         .items_center()
         .when_some(composer_command_notice(app), |this, notice| {
-            this.child(command_notice(notice))
+            this.child(command_notice(notice, app.queued_follow_up_count() > 0, cx))
         })
         .when(!app.composer_attachments().is_empty(), |this| {
             this.child(attachment_chips(app, cx))
@@ -299,8 +299,15 @@ fn chat_slim_composer(
                     ))
                 })
                 .child(if streaming {
-                    streaming_actions("chat-stop", "chat-steer", input, draft_empty, steerable, cx)
-                        .into_any_element()
+                    streaming_actions(
+                        "chat-stop",
+                        "chat-follow-up",
+                        input,
+                        draft_empty,
+                        follow_up_available,
+                        cx,
+                    )
+                    .into_any_element()
                 } else if !draft_empty && !app.selected_thread_is_read_only() {
                     round_action(
                         "chat-send",
@@ -331,7 +338,7 @@ fn chat_thread_composer(
         .flatten();
     let input_entity = input.clone();
     let streaming = app.turn_in_progress();
-    let steerable = app.can_steer_active_turn();
+    let follow_up_available = app.can_submit_active_follow_up();
     let draft_empty =
         input.read(cx).value().trim().is_empty() && app.composer_attachments().is_empty();
 
@@ -346,7 +353,7 @@ fn chat_thread_composer(
         .flex_col()
         .gap(px(8.0))
         .when_some(composer_command_notice(app), |this, notice| {
-            this.child(command_notice(notice))
+            this.child(command_notice(notice, app.queued_follow_up_count() > 0, cx))
         })
         .child(
             div()
@@ -425,10 +432,10 @@ fn chat_thread_composer(
                         .child(if streaming {
                             streaming_actions(
                                 "chat-thread-stop",
-                                "chat-thread-steer",
+                                "chat-thread-follow-up",
                                 input,
                                 draft_empty,
-                                steerable,
+                                follow_up_available,
                                 cx,
                             )
                             .into_any_element()
@@ -451,6 +458,13 @@ fn chat_thread_composer(
 }
 
 fn composer_command_notice(app: &MitsuroApp) -> Option<String> {
+    let queued = app.queued_follow_up_count();
+    if queued > 0 {
+        return Some(format!(
+            "{queued} follow-up{} queued for this chat",
+            if queued == 1 { "" } else { "s" }
+        ));
+    }
     let status = app.status_line().as_ref();
     [
         "Feedback upload is not exposed",
@@ -466,7 +480,11 @@ fn composer_command_notice(app: &MitsuroApp) -> Option<String> {
     .then(|| status.to_owned())
 }
 
-fn command_notice(notice: String) -> impl IntoElement {
+fn command_notice(
+    notice: String,
+    can_clear_queue: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("composer-command-notice")
@@ -477,9 +495,34 @@ fn command_notice(notice: String) -> impl IntoElement {
         .border_1()
         .border_color(colors.border)
         .bg(theme::hex_alpha(0xffffff, 0.025))
-        .text_xs()
-        .text_color(colors.text_secondary)
-        .child(notice)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(colors.text_secondary)
+                .child(notice),
+        )
+        .when(can_clear_queue, |this| {
+            this.child(
+                div()
+                    .id("composer-clear-queued-follow-ups")
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(colors.text_tertiary)
+                    .hover(|style| style.bg(colors.bg_hover).text_color(colors.text))
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.clear_selected_queued_follow_ups(cx);
+                    }))
+                    .child("Clear"),
+            )
+        })
 }
 
 fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -713,26 +756,26 @@ fn composer_add_action(
 
 fn streaming_actions(
     stop_id: &'static str,
-    steer_id: &'static str,
+    follow_up_id: &'static str,
     input: &Entity<InputState>,
     draft_empty: bool,
-    steerable: bool,
+    follow_up_available: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
-    let steer_input = input.clone();
+    let follow_up_input = input.clone();
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .when(steerable && !draft_empty, |this| {
+        .when(follow_up_available && !draft_empty, |this| {
             this.child(round_action(
-                steer_id,
+                follow_up_id,
                 IconName::ArrowUp,
                 false,
                 cx,
                 move |app, _, window, cx| {
-                    app.submit_composer(&steer_input, window, cx);
+                    app.submit_composer(&follow_up_input, window, cx);
                 },
             ))
         })

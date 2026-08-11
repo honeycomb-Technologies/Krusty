@@ -1,6 +1,6 @@
 //! Root Mitsuro desktop window: Codex-like chrome + app-server / fixture turns.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -511,7 +511,7 @@ fn runtime_wired_settings_toggle(key: &str) -> bool {
 }
 
 fn runtime_wired_settings_choice(key: &str) -> bool {
-    key == "send_shortcut"
+    matches!(key, "send_shortcut" | "follow_up")
 }
 
 fn retain_runtime_wired_settings(preferences: &mut DesktopPreferences) {
@@ -541,6 +541,14 @@ fn push_bounded_navigation(history: &mut Vec<ProductMode>, mode: ProductMode) {
     }
 }
 
+fn push_bounded_queue<T>(queue: &mut VecDeque<T>, item: T, max: usize) -> Result<usize, T> {
+    if queue.len() >= max {
+        return Err(item);
+    }
+    queue.push_back(item);
+    Ok(queue.len())
+}
+
 fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
     let mut m = std::collections::HashMap::new();
     // Controls with an observable desktop runtime effect. Reference controls
@@ -554,6 +562,7 @@ fn default_settings_toggles() -> std::collections::HashMap<String, bool> {
 fn default_settings_choices() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert("send_shortcut".into(), "Enter".into());
+    m.insert("follow_up".into(), "Steer".into());
     // Reverse voice names (settings.general.realtimeVoice.voice.*) — Sol default.
     m.insert("voice_output".into(), "Sol".into());
     m
@@ -1202,6 +1211,50 @@ enum SendMode {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum FollowUpBehavior {
+    Queue,
+    #[default]
+    Steer,
+}
+
+impl FollowUpBehavior {
+    fn from_setting(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("queue") {
+            Self::Queue
+        } else {
+            Self::Steer
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueuedFollowUp {
+    thread_id: String,
+    text: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    speed_mode: Option<ProductSpeedMode>,
+    work_mode: Option<ProductWorkMode>,
+    working_dir: Option<String>,
+    access_mode: Option<ProductAccessMode>,
+    attachments: Vec<ProductAttachment>,
+    demo_images: Vec<DemoImageAttachment>,
+    demo_audio: Vec<DemoAudioAttachment>,
+    demo_references: Vec<DemoReferenceAttachment>,
+    visible_user_text: String,
+}
+
+struct PreparedComposerInput {
+    product_attachments: Vec<ProductAttachment>,
+    demo_images: Vec<DemoImageAttachment>,
+    demo_audio: Vec<DemoAudioAttachment>,
+    demo_references: Vec<DemoReferenceAttachment>,
+    visible_user_text: String,
+}
+
+const MAX_QUEUED_FOLLOW_UPS_PER_THREAD: usize = 32;
+
 fn decide_send_mode(
     connection: &UiConnection,
     backend_kind: Option<BackendKind>,
@@ -1836,6 +1889,9 @@ pub struct MitsuroApp {
     active_turn_thread_id: Option<String>,
     /// Active turn id for `turn/interrupt` (from TurnStarted).
     active_turn_id: Option<String>,
+    /// User-authored follow-ups waiting for the active turn on each real thread.
+    /// Entries are local dispatch intent, never synthetic backend success.
+    queued_follow_ups: std::collections::HashMap<String, VecDeque<QueuedFollowUp>>,
     /// Independent live turn state for the single ephemeral side chat.
     concurrent_side_turn: Option<ConcurrentSideTurnState>,
     side_turn_generation: u64,
@@ -2516,6 +2572,7 @@ impl MitsuroApp {
             turn_generation: 0,
             active_turn_thread_id: None,
             active_turn_id: None,
+            queued_follow_ups: std::collections::HashMap::new(),
             concurrent_side_turn: None,
             side_turn_generation: 0,
             turn_cancel: None,
@@ -15175,6 +15232,58 @@ impl MitsuroApp {
             && self.active_turn_id.is_some()
     }
 
+    fn follow_up_behavior(&self) -> FollowUpBehavior {
+        FollowUpBehavior::from_setting(&self.settings_choice("follow_up", "Steer"))
+    }
+
+    fn selected_thread_owns_active_turn(&self) -> bool {
+        if let Some(side) = self.selected_concurrent_side_turn() {
+            return side.in_progress;
+        }
+        self.turn_in_progress
+            && selected_thread_owns_primary_turn(
+                self.selected_thread.as_deref(),
+                self.active_turn_thread_id.as_deref(),
+            )
+    }
+
+    /// Whether the active composer can accept the configured Queue/Steer action.
+    pub fn can_submit_active_follow_up(&self) -> bool {
+        if !self.selected_thread_owns_active_turn() {
+            return false;
+        }
+        match self.follow_up_behavior() {
+            FollowUpBehavior::Queue => matches!(self.resolve_send_mode(), SendMode::Live),
+            FollowUpBehavior::Steer => self.can_steer_active_turn(),
+        }
+    }
+
+    pub fn queued_follow_up_count(&self) -> usize {
+        self.selected_thread.as_ref().map_or(0, |thread_id| {
+            self.queued_follow_up_count_for_thread(thread_id)
+        })
+    }
+
+    fn queued_follow_up_count_for_thread(&self, thread_id: &str) -> usize {
+        self.queued_follow_ups
+            .get(thread_id)
+            .map_or(0, VecDeque::len)
+    }
+
+    pub fn clear_selected_queued_follow_ups(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let discarded = self.discard_queued_follow_ups_with_notice(
+            &thread_id,
+            "They were cleared before the active turn completed.",
+        );
+        if discarded > 0 {
+            self.status_line = format!("Cleared {discarded} queued follow-up(s).").into();
+            cx.notify();
+        }
+    }
+
     /// Visible threads for the sidebar (surface + search + archived filter).
     pub fn visible_threads(&self) -> Vec<DemoThread> {
         let surface = self.active_thread_surface();
@@ -16063,8 +16172,17 @@ impl MitsuroApp {
                     message.streaming = false;
                 }
             }
+            let discarded = self.discard_queued_follow_ups_with_notice(
+                &side.thread_id,
+                "The side-chat turn was interrupted.",
+            );
             self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
-            self.status_line = "Side-chat turn interrupted.".into();
+            self.status_line = if discarded == 0 {
+                "Side-chat turn interrupted.".into()
+            } else {
+                format!("Side-chat turn interrupted · {discarded} queued follow-up(s) discarded.")
+                    .into()
+            };
             cx.notify();
             return;
         }
@@ -16125,13 +16243,19 @@ impl MitsuroApp {
         }
 
         // Immediately clear streaming UI state.
-        if let Some(id) = thread_id {
+        if let Some(id) = thread_id.as_deref() {
             if let Some(thread) = self.threads.iter_mut().find(|t| t.summary.id == id) {
                 for m in &mut thread.messages {
                     m.streaming = false;
                 }
             }
         }
+        let discarded = thread_id.as_deref().map_or(0, |thread_id| {
+            self.discard_queued_follow_ups_with_notice(
+                thread_id,
+                "The active turn was interrupted.",
+            )
+        });
         self.turn_in_progress = false;
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.active_turn_thread_id = None;
@@ -16142,7 +16266,11 @@ impl MitsuroApp {
         self.user_input_answers.clear();
         self.pending_mcp_elicitation = None;
         self.mcp_form_values.clear();
-        self.status_line = "Turn interrupted.".into();
+        self.status_line = if discarded == 0 {
+            "Turn interrupted.".into()
+        } else {
+            format!("Turn interrupted · {discarded} queued follow-up(s) discarded.").into()
+        };
         cx.notify();
     }
 
@@ -16186,6 +16314,85 @@ impl MitsuroApp {
         });
         self.status_line = "Prompt loaded into composer.".into();
         cx.notify();
+    }
+
+    fn prepare_composer_input(&self, thread_id: &str, text: &str) -> PreparedComposerInput {
+        let mut product_attachments = self
+            .composer_attachments
+            .iter()
+            .map(|attachment| match attachment.kind {
+                ComposerAttachmentKind::Image => ProductAttachment::LocalImage {
+                    path: attachment.path.clone(),
+                },
+                ComposerAttachmentKind::Audio => ProductAttachment::LocalAudio {
+                    path: attachment.path.clone(),
+                },
+                ComposerAttachmentKind::Skill => ProductAttachment::Skill {
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                },
+                ComposerAttachmentKind::Mention => ProductAttachment::Mention {
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        product_attachments.extend(self.mcp_app_model_context_for_thread(thread_id));
+        let attachment_names = self
+            .composer_attachments
+            .iter()
+            .map(|attachment| attachment.name.clone())
+            .collect::<Vec<_>>();
+        let demo_images = self
+            .composer_attachments
+            .iter()
+            .filter(|attachment| attachment.kind == ComposerAttachmentKind::Image)
+            .map(|attachment| DemoImageAttachment {
+                label: attachment.name.clone(),
+                source: DemoImageSource::LocalPath(attachment.path.clone()),
+                resubmit_url: None,
+            })
+            .collect::<Vec<_>>();
+        let demo_audio = self
+            .composer_attachments
+            .iter()
+            .filter(|attachment| attachment.kind == ComposerAttachmentKind::Audio)
+            .map(|attachment| DemoAudioAttachment {
+                label: attachment.name.clone(),
+                source: DemoAudioSource::LocalPath(attachment.path.clone()),
+                resubmit_url: None,
+            })
+            .collect::<Vec<_>>();
+        let demo_references = self
+            .composer_attachments
+            .iter()
+            .filter_map(|attachment| {
+                let kind = match attachment.kind {
+                    ComposerAttachmentKind::Skill => DemoReferenceKind::Skill,
+                    ComposerAttachmentKind::Mention => DemoReferenceKind::Mention,
+                    ComposerAttachmentKind::Image | ComposerAttachmentKind::Audio => return None,
+                };
+                Some(DemoReferenceAttachment {
+                    kind,
+                    name: attachment.name.clone(),
+                    path: attachment.path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let visible_user_text = if attachment_names.is_empty() {
+            text.to_owned()
+        } else if text.is_empty() {
+            format!("Attachments · {}", attachment_names.join(", "))
+        } else {
+            format!("{text}\n\nAttachments · {}", attachment_names.join(", "))
+        };
+        PreparedComposerInput {
+            product_attachments,
+            demo_images,
+            demo_audio,
+            demo_references,
+            visible_user_text,
+        }
     }
 
     pub fn submit_composer(
@@ -16242,18 +16449,26 @@ impl MitsuroApp {
         }
 
         if self.turn_in_progress() {
-            if !self.can_steer_active_turn() {
-                self.status_line =
-                    "Follow-up unavailable · the active turn is not currently steerable.".into();
-                cx.notify();
-                return;
+            match self.follow_up_behavior() {
+                FollowUpBehavior::Queue => {
+                    self.enqueue_composer_follow_up(input, trimmed.to_owned(), window, cx);
+                }
+                FollowUpBehavior::Steer => {
+                    if !self.can_steer_active_turn() {
+                        self.status_line =
+                            "Follow-up unavailable · the selected chat does not own a steerable turn."
+                                .into();
+                        cx.notify();
+                        return;
+                    }
+                    if !self.composer_attachments.is_empty() {
+                        self.status_line = "Attachments cannot steer an active turn.".into();
+                        cx.notify();
+                        return;
+                    }
+                    self.submit_live_steer(input, trimmed.to_owned(), window, cx);
+                }
             }
-            if !self.composer_attachments.is_empty() {
-                self.status_line = "Attachments cannot steer an active turn.".into();
-                cx.notify();
-                return;
-            }
-            self.submit_live_steer(input, trimmed.to_owned(), window, cx);
             return;
         }
 
@@ -16298,75 +16513,13 @@ impl MitsuroApp {
             return;
         }
 
-        let mut attachments = self
-            .composer_attachments
-            .iter()
-            .map(|attachment| match attachment.kind {
-                ComposerAttachmentKind::Image => ProductAttachment::LocalImage {
-                    path: attachment.path.clone(),
-                },
-                ComposerAttachmentKind::Audio => ProductAttachment::LocalAudio {
-                    path: attachment.path.clone(),
-                },
-                ComposerAttachmentKind::Skill => ProductAttachment::Skill {
-                    name: attachment.name.clone(),
-                    path: attachment.path.clone(),
-                },
-                ComposerAttachmentKind::Mention => ProductAttachment::Mention {
-                    name: attachment.name.clone(),
-                    path: attachment.path.clone(),
-                },
-            })
-            .collect::<Vec<_>>();
-        attachments.extend(self.mcp_app_model_context_for_thread(&thread_id));
-        let attachment_names = self
-            .composer_attachments
-            .iter()
-            .map(|attachment| attachment.name.clone())
-            .collect::<Vec<_>>();
-        let demo_images = self
-            .composer_attachments
-            .iter()
-            .filter(|attachment| attachment.kind == ComposerAttachmentKind::Image)
-            .map(|attachment| DemoImageAttachment {
-                label: attachment.name.clone(),
-                source: DemoImageSource::LocalPath(attachment.path.clone()),
-                resubmit_url: None,
-            })
-            .collect::<Vec<_>>();
-        let demo_audio = self
-            .composer_attachments
-            .iter()
-            .filter(|attachment| attachment.kind == ComposerAttachmentKind::Audio)
-            .map(|attachment| DemoAudioAttachment {
-                label: attachment.name.clone(),
-                source: DemoAudioSource::LocalPath(attachment.path.clone()),
-                resubmit_url: None,
-            })
-            .collect::<Vec<_>>();
-        let demo_references = self
-            .composer_attachments
-            .iter()
-            .filter_map(|attachment| {
-                let kind = match attachment.kind {
-                    ComposerAttachmentKind::Skill => DemoReferenceKind::Skill,
-                    ComposerAttachmentKind::Mention => DemoReferenceKind::Mention,
-                    ComposerAttachmentKind::Image | ComposerAttachmentKind::Audio => return None,
-                };
-                Some(DemoReferenceAttachment {
-                    kind,
-                    name: attachment.name.clone(),
-                    path: attachment.path.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let visible_user_text = if attachment_names.is_empty() {
-            trimmed.to_owned()
-        } else if trimmed.is_empty() {
-            format!("Attachments · {}", attachment_names.join(", "))
-        } else {
-            format!("{trimmed}\n\nAttachments · {}", attachment_names.join(", "))
-        };
+        let PreparedComposerInput {
+            product_attachments: attachments,
+            demo_images,
+            demo_audio,
+            demo_references,
+            visible_user_text,
+        } = self.prepare_composer_input(&thread_id, trimmed);
 
         // Append user bubble immediately; auto-name from first message when still default.
         let mut auto_name: Option<String> = None;
@@ -16468,6 +16621,88 @@ impl MitsuroApp {
             }
             SendMode::Unavailable => unreachable!("unavailable sends return before mutation"),
         }
+        cx.notify();
+    }
+
+    fn enqueue_composer_follow_up(
+        &mut self,
+        input: &Entity<InputState>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selected_thread_owns_active_turn() {
+            self.status_line =
+                "Queue unavailable · the selected chat does not own the active turn.".into();
+            cx.notify();
+            return;
+        }
+        if !matches!(self.resolve_send_mode(), SendMode::Live) {
+            self.status_line =
+                "Queue unavailable · a live authenticated backend is required.".into();
+            cx.notify();
+            return;
+        }
+        if self.selected_thread_is_read_only() {
+            self.status_line =
+                "Queue unavailable · this chat is active in another Codex client.".into();
+            cx.notify();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            self.status_line = "Queue unavailable · no thread selected.".into();
+            cx.notify();
+            return;
+        };
+        let queue_len = self
+            .queued_follow_ups
+            .get(&thread_id)
+            .map_or(0, VecDeque::len);
+        if queue_len >= MAX_QUEUED_FOLLOW_UPS_PER_THREAD {
+            self.status_line = format!(
+                "Queue full · at most {MAX_QUEUED_FOLLOW_UPS_PER_THREAD} follow-ups can wait per chat."
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+
+        let PreparedComposerInput {
+            product_attachments: attachments,
+            demo_images,
+            demo_audio,
+            demo_references,
+            visible_user_text,
+        } = self.prepare_composer_input(&thread_id, &text);
+
+        let queued = QueuedFollowUp {
+            thread_id: thread_id.clone(),
+            text,
+            model: self.selected_model_slug(),
+            reasoning_effort: self.selected_reasoning_effort.clone(),
+            speed_mode: self.selected_speed_mode(),
+            work_mode: self.selected_work_mode(),
+            working_dir: self.composer_workspace_dir().map(ToOwned::to_owned),
+            access_mode: self.composer_access_mode(),
+            attachments,
+            demo_images,
+            demo_audio,
+            demo_references,
+            visible_user_text,
+        };
+        let queue = self.queued_follow_ups.entry(thread_id).or_default();
+        let queued_count = push_bounded_queue(queue, queued, MAX_QUEUED_FOLLOW_UPS_PER_THREAD)
+            .expect("queue capacity was checked before composer mutation");
+
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.composer_attachments.clear();
+        self.composer_add_menu_open = false;
+        self.composer_access_menu_open = false;
+        self.composer_model_menu_open = false;
+        self.composer_reasoning_menu_open = false;
+        self.status_line =
+            format!("Queued follow-up · {queued_count} waiting for this chat's active turn.")
+                .into();
         cx.notify();
     }
 
@@ -17127,6 +17362,7 @@ impl MitsuroApp {
                     if let Some(side) = app.concurrent_side_turn.as_mut() {
                         side.live_approval_bridge = None;
                     }
+                    let mut start_queued_follow_up = false;
                     match &outcome {
                         Ok(o) if o.completed || saw_completed => {
                             if !pending_interaction {
@@ -17134,7 +17370,10 @@ impl MitsuroApp {
                                     side.in_progress = false;
                                     side.turn_id = None;
                                 }
-                                if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                start_queued_follow_up = true;
+                                if app.queued_follow_up_count_for_thread(&thread_id) == 0
+                                    && app.selected_thread.as_deref() == Some(thread_id.as_str())
+                                {
                                     app.status_line = "Side-chat turn complete.".into();
                                 }
                             }
@@ -17145,13 +17384,27 @@ impl MitsuroApp {
                                     side.in_progress = false;
                                     side.turn_id = None;
                                 }
+                                let discarded = app.discard_queued_follow_ups_with_notice(
+                                    &thread_id,
+                                    "The side-chat turn ended before completion.",
+                                );
                                 if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
-                                    app.status_line =
-                                        "Side-chat turn ended (timeout or closed).".into();
+                                    app.status_line = if discarded == 0 {
+                                        "Side-chat turn ended (timeout or closed).".into()
+                                    } else {
+                                        format!(
+                                            "Side-chat turn ended · {discarded} queued follow-up(s) were not sent."
+                                        )
+                                        .into()
+                                    };
                                 }
                             }
                         }
                         Err(error) => {
+                            app.discard_queued_follow_ups_with_notice(
+                                &thread_id,
+                                "The side-chat turn failed.",
+                            );
                             if let Some(thread) = app
                                 .threads
                                 .iter_mut()
@@ -17175,6 +17428,9 @@ impl MitsuroApp {
                             }
                         }
                     }
+                    if start_queued_follow_up {
+                        app.start_next_queued_follow_up(&thread_id, cx);
+                    }
                     cx.notify();
                     return;
                 }
@@ -17183,6 +17439,7 @@ impl MitsuroApp {
                     || app.pending_user_input.is_some()
                     || app.pending_mcp_elicitation.is_some();
                 let foreground = app.selected_thread.as_deref() == Some(thread_id.as_str());
+                let mut start_queued_follow_up = false;
                 match &outcome {
                     Ok(o) if o.completed || saw_completed => {
                         if !pending_interaction {
@@ -17190,7 +17447,8 @@ impl MitsuroApp {
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
-                            if foreground {
+                            start_queued_follow_up = true;
+                            if app.queued_follow_up_count_for_thread(&thread_id) == 0 && foreground {
                                 app.status_line = "Live turn complete.".into();
                             }
                         }
@@ -17201,12 +17459,27 @@ impl MitsuroApp {
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
+                            let discarded = app.discard_queued_follow_ups_with_notice(
+                                &thread_id,
+                                "The active turn ended before completion.",
+                            );
                             if foreground {
-                                app.status_line = "Live turn ended (timeout or closed).".into();
+                                app.status_line = if discarded == 0 {
+                                    "Live turn ended (timeout or closed).".into()
+                                } else {
+                                    format!(
+                                        "Live turn ended · {discarded} queued follow-up(s) were not sent."
+                                    )
+                                    .into()
+                                };
                             }
                         }
                     }
                     Err(e) => {
+                        app.discard_queued_follow_ups_with_notice(
+                            &thread_id,
+                            "The active turn failed.",
+                        );
                         if let Some(thread) = app
                             .threads
                             .iter_mut()
@@ -17225,6 +17498,9 @@ impl MitsuroApp {
                         }
                     }
                 }
+                if start_queued_follow_up {
+                    app.start_next_queued_follow_up(&thread_id, cx);
+                }
                 if !app.turn_in_progress
                     && app.selected_thread.as_deref() != Some(thread_id.as_str())
                     && !app
@@ -17238,6 +17514,125 @@ impl MitsuroApp {
             });
         })
         .detach();
+    }
+
+    fn start_next_queued_follow_up(
+        &mut self,
+        completed_thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(next) = self
+            .queued_follow_ups
+            .get_mut(completed_thread_id)
+            .and_then(VecDeque::pop_front)
+        else {
+            return false;
+        };
+        let remaining = self
+            .queued_follow_ups
+            .get(completed_thread_id)
+            .map_or(0, VecDeque::len);
+        if remaining == 0 {
+            self.queued_follow_ups.remove(completed_thread_id);
+        }
+        if next.thread_id != completed_thread_id {
+            self.status_line = "Queued follow-up rejected · thread identity changed.".into();
+            return false;
+        }
+        if self.live_session_id(completed_thread_id).is_none() {
+            let discarded = self.discard_queued_follow_ups(completed_thread_id);
+            if let Some(thread) = self
+                .threads
+                .iter_mut()
+                .find(|thread| thread.summary.id == completed_thread_id)
+            {
+                thread.messages.push(DemoMessage::error(format!(
+                    "Queued follow-up was not sent because the live session identity is missing. {discarded} additional queued follow-up(s) were discarded."
+                )));
+            }
+            self.status_line = "Queued follow-up failed · live session identity is missing.".into();
+            return false;
+        }
+
+        let QueuedFollowUp {
+            thread_id,
+            text,
+            model,
+            reasoning_effort,
+            speed_mode,
+            work_mode,
+            working_dir,
+            access_mode,
+            attachments,
+            demo_images,
+            demo_audio,
+            demo_references,
+            visible_user_text,
+        } = next;
+        if let Some(thread) = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.summary.id == completed_thread_id)
+        {
+            thread.messages.push(DemoMessage::user_with_attachments(
+                &text,
+                demo_images,
+                demo_audio,
+                demo_references,
+            ));
+            thread.summary.preview = Some(visible_user_text.chars().take(64).collect());
+        }
+
+        let concurrent_side = self
+            .side_conversation_parents
+            .contains_key(completed_thread_id)
+            && self.turn_in_progress
+            && self.active_turn_thread_id.as_deref() != Some(completed_thread_id);
+        if !concurrent_side {
+            self.turn_in_progress = true;
+            self.turn_generation = self.turn_generation.wrapping_add(1);
+            self.active_turn_thread_id = Some(completed_thread_id.to_owned());
+        }
+        self.status_line = if remaining == 0 {
+            "Starting queued follow-up…".into()
+        } else {
+            format!("Starting queued follow-up · {remaining} still waiting.").into()
+        };
+        self.start_live_turn(
+            thread_id,
+            text,
+            model,
+            reasoning_effort,
+            speed_mode,
+            work_mode,
+            working_dir,
+            access_mode,
+            attachments,
+            cx,
+        );
+        true
+    }
+
+    fn discard_queued_follow_ups(&mut self, thread_id: &str) -> usize {
+        self.queued_follow_ups
+            .remove(thread_id)
+            .map_or(0, |queue| queue.len())
+    }
+
+    fn discard_queued_follow_ups_with_notice(&mut self, thread_id: &str, reason: &str) -> usize {
+        let discarded = self.discard_queued_follow_ups(thread_id);
+        if discarded > 0 {
+            if let Some(thread) = self
+                .threads
+                .iter_mut()
+                .find(|thread| thread.summary.id == thread_id)
+            {
+                thread.messages.push(DemoMessage::error(format!(
+                    "{discarded} queued follow-up(s) were not sent. {reason}"
+                )));
+            }
+        }
+        discarded
     }
 
     fn start_live_review(
@@ -17354,6 +17749,7 @@ impl MitsuroApp {
                     return;
                 }
                 app.live_approval_bridge = None;
+                let mut start_queued_follow_up = false;
                 match &outcome {
                     Ok(review) if review.stream.completed || saw_completed => {
                         if app.pending_approval.is_none() {
@@ -17361,7 +17757,10 @@ impl MitsuroApp {
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
-                            app.status_line = "Review complete.".into();
+                            start_queued_follow_up = true;
+                            if app.queued_follow_up_count_for_thread(&thread_id) == 0 {
+                                app.status_line = "Review complete.".into();
+                            }
                         }
                     }
                     Ok(_) => {
@@ -17370,10 +17769,22 @@ impl MitsuroApp {
                             app.active_turn_thread_id = None;
                             app.active_turn_id = None;
                             app.turn_cancel = None;
-                            app.status_line = "Review ended (timeout or closed).".into();
+                            let discarded = app.discard_queued_follow_ups_with_notice(
+                                &thread_id,
+                                "The review ended before completion.",
+                            );
+                            app.status_line = if discarded == 0 {
+                                "Review ended (timeout or closed).".into()
+                            } else {
+                                format!(
+                                    "Review ended · {discarded} queued follow-up(s) were not sent."
+                                )
+                                .into()
+                            };
                         }
                     }
                     Err(error) => {
+                        app.discard_queued_follow_ups_with_notice(&thread_id, "The review failed.");
                         if let Some(thread) = app
                             .threads
                             .iter_mut()
@@ -17389,6 +17800,9 @@ impl MitsuroApp {
                         app.turn_cancel = None;
                         app.status_line = format!("Review failed: {error}").into();
                     }
+                }
+                if start_queued_follow_up {
+                    app.start_next_queued_follow_up(&thread_id, cx);
                 }
                 if !app.turn_in_progress
                     && app.selected_thread.as_deref() != Some(thread_id.as_str())
@@ -18951,6 +19365,7 @@ impl MitsuroApp {
         self.active_turn_thread_id = None;
         self.active_turn_id = None;
         self.turn_in_progress = false;
+        self.queued_follow_ups.clear();
         self.composer_attachments.clear();
         self.composer_add_menu_open = false;
         self.composer_model_menu_open = false;
@@ -21480,7 +21895,7 @@ mod tests {
         assert!(!runtime_wired_settings_toggle("theme"));
         assert!(!runtime_wired_settings_toggle("worktrees_enabled"));
         assert!(runtime_wired_settings_choice("send_shortcut"));
-        assert!(!runtime_wired_settings_choice("follow_up"));
+        assert!(runtime_wired_settings_choice("follow_up"));
         assert!(!runtime_wired_settings_choice("accent_color"));
     }
 
@@ -21538,6 +21953,7 @@ mod tests {
         ]);
         preferences.settings_choices.extend([
             ("send_shortcut".into(), "Ctrl+Enter".into()),
+            ("follow_up".into(), "Queue".into()),
             ("theme".into(), "Light".into()),
             ("voice_output".into(), "Sol".into()),
         ]);
@@ -21545,7 +21961,7 @@ mod tests {
         retain_runtime_wired_settings(&mut preferences);
 
         assert_eq!(preferences.settings_toggles.len(), 2);
-        assert_eq!(preferences.settings_choices.len(), 2);
+        assert_eq!(preferences.settings_choices.len(), 3);
         assert!(!preferences.settings_toggles.contains_key("theme_animation"));
         assert!(!preferences.settings_choices.contains_key("theme"));
     }
@@ -21556,6 +21972,32 @@ mod tests {
         assert!(!composer_enter_should_send("Enter", true));
         assert!(!composer_enter_should_send("Ctrl+Enter", false));
         assert!(composer_enter_should_send("Ctrl+Enter", true));
+    }
+
+    #[test]
+    fn follow_up_behavior_is_explicit_and_defaults_to_steer() {
+        assert_eq!(
+            FollowUpBehavior::from_setting("Queue"),
+            FollowUpBehavior::Queue
+        );
+        assert_eq!(
+            FollowUpBehavior::from_setting("Steer"),
+            FollowUpBehavior::Steer
+        );
+        assert_eq!(
+            FollowUpBehavior::from_setting("unexpected"),
+            FollowUpBehavior::Steer
+        );
+        assert_eq!(MAX_QUEUED_FOLLOW_UPS_PER_THREAD, 32);
+    }
+
+    #[test]
+    fn follow_up_queue_is_fifo_and_refuses_overflow_without_dropping_existing_items() {
+        let mut queue = VecDeque::new();
+        assert_eq!(push_bounded_queue(&mut queue, "first", 2), Ok(1));
+        assert_eq!(push_bounded_queue(&mut queue, "second", 2), Ok(2));
+        assert_eq!(push_bounded_queue(&mut queue, "third", 2), Err("third"));
+        assert_eq!(queue.into_iter().collect::<Vec<_>>(), ["first", "second"]);
     }
 
     #[test]
