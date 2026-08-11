@@ -1,18 +1,19 @@
 //! Atlas browser surface.
 //!
-//! The default GPUI build does not embed a web renderer. Atlas therefore acts as an
-//! explicit system-browser bridge with local URL history; it never renders invented
-//! page content or implies that an agent can inspect a page opened elsewhere.
+//! The default Linux GPUI build renders a real WebKitGTK page offscreen and presents
+//! those pixels inside Atlas. The external browser remains an explicit fallback.
+
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _,
+    div, img, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _,
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::app::{BrowserSessionStatus, MitsuroApp};
+use crate::app::{BrowserSessionStatus, MitsuroApp, ATLAS_RUNTIME_KEY};
 use crate::theme;
 
 pub fn browser_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -41,7 +42,9 @@ pub fn browser_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                 .px(px(28.0))
                 .pb(px(28.0))
                 .child(if is_blank {
-                    empty_state().into_any_element()
+                    empty_state(app.browser_embedded_available()).into_any_element()
+                } else if let Some(frame) = app.browser_frame().cloned() {
+                    embedded_page(app, frame, cx).into_any_element()
                 } else {
                     current_url_state(session).into_any_element()
                 })
@@ -54,7 +57,9 @@ fn title_strip(status: BrowserSessionStatus) -> impl IntoElement {
     let label = match status {
         BrowserSessionStatus::Error => "Unavailable",
         BrowserSessionStatus::NoNativeHost => "System browser",
-        _ => "Browser bridge",
+        BrowserSessionStatus::Connecting => "Loading WebKit",
+        BrowserSessionStatus::Ready => "Embedded WebKit",
+        _ => "Browser",
     };
     div()
         .id("atlas-title")
@@ -112,6 +117,15 @@ fn browser_toolbar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
             cx,
             |app, window, cx| app.browser_go_back(window, cx),
         ))
+        .when(app.browser_embedded_available(), |this| {
+            this.child(nav_button(
+                "browser-reload",
+                IconName::Redo2,
+                true,
+                cx,
+                |app, _, cx| app.browser_reload(cx),
+            ))
+        })
         .child(nav_button(
             "browser-forward",
             IconName::ArrowRight,
@@ -160,22 +174,38 @@ fn browser_toolbar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.bg_button_primary_hover))
                 .on_click(cx.listener(|app, _, window, cx| {
-                    app.browser_navigate(window, cx);
-                    app.browser_open_external(cx);
+                    app.browser_submit_address(window, cx);
                 }))
                 .child(
-                    Icon::new(IconName::ExternalLink)
-                        .with_size(px(13.0))
-                        .text_color(colors.fg_button_primary),
+                    Icon::new(if app.browser_embedded_available() {
+                        IconName::Globe
+                    } else {
+                        IconName::ExternalLink
+                    })
+                    .with_size(px(13.0))
+                    .text_color(colors.fg_button_primary),
                 )
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(colors.fg_button_primary)
-                        .child("Open in browser"),
+                        .child(if app.browser_embedded_available() {
+                            "Go"
+                        } else {
+                            "Open in browser"
+                        }),
                 ),
         )
+        .when(app.browser_embedded_available(), |this| {
+            this.child(nav_button(
+                "browser-open-external",
+                IconName::ExternalLink,
+                true,
+                cx,
+                |app, _, cx| app.browser_open_external(cx),
+            ))
+        })
 }
 
 fn nav_button(
@@ -206,7 +236,7 @@ fn nav_button(
         )
 }
 
-fn empty_state() -> impl IntoElement {
+fn empty_state(embedded: bool) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("atlas-empty")
@@ -228,7 +258,11 @@ fn empty_state() -> impl IntoElement {
                 .text_lg()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(colors.text)
-                .child("Open a page in your browser"),
+                .child(if embedded {
+                    "Open a page in Atlas"
+                } else {
+                    "Open a page in your browser"
+                }),
         )
         .child(
             div()
@@ -237,9 +271,106 @@ fn empty_state() -> impl IntoElement {
                 .text_sm()
                 .text_center()
                 .text_color(colors.text_tertiary)
-                .child(
-                    "This build records URL history here and opens the real page in your system browser. Page content is not available inside Mitsuro.",
-                ),
+                .child(if embedded {
+                    "Enter an address above to load the real page inside Mitsuro's WebKit surface."
+                } else {
+                    "The embedded renderer is unavailable, so Atlas will open the real page in your system browser."
+                }),
+        )
+}
+
+fn embedded_page(
+    app: &MitsuroApp,
+    frame: crate::app::McpAppFrame,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let bounds = app.browser_bounds();
+    let click_bounds = Arc::clone(&bounds);
+    let runtime = app.browser_runtime_handle();
+    let focus = app.browser_focus();
+    let click_focus = focus.clone();
+    let key_focus = focus.clone();
+    let width = frame.width;
+    let height = frame.height;
+    div()
+        .on_children_prepainted(move |child_bounds, _window, _cx| {
+            if let Some(child) = child_bounds.first().copied() {
+                if let Ok(mut stored) = bounds.lock() {
+                    *stored = Some(child);
+                }
+                let target_width = f32::from(child.size.width).round().clamp(320.0, 1920.0) as u32;
+                let target_height =
+                    f32::from(child.size.height).round().clamp(240.0, 1440.0) as u32;
+                if (target_width.abs_diff(width) > 2 || target_height.abs_diff(height) > 2)
+                    && runtime.is_some()
+                {
+                    if let Some(runtime) = runtime.as_ref() {
+                        let _ = runtime.resize(
+                            ATLAS_RUNTIME_KEY.to_owned(),
+                            target_width,
+                            target_height,
+                        );
+                    }
+                }
+            }
+        })
+        .id("atlas-embedded-page")
+        .key_context("AtlasWebKit")
+        .track_focus(&focus)
+        .flex()
+        .flex_1()
+        .min_h(px(320.0))
+        .w_full()
+        .overflow_hidden()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.bg_sidebar)
+        .cursor_pointer()
+        .on_click(
+            cx.listener(move |app, event: &gpui::ClickEvent, window, cx| {
+                let Some(position) = event.mouse_position() else {
+                    return;
+                };
+                let Ok(stored) = click_bounds.lock() else {
+                    return;
+                };
+                let Some(bounds) = *stored else {
+                    return;
+                };
+                let rendered_width = f32::from(bounds.size.width).max(1.0);
+                let rendered_height = f32::from(bounds.size.height).max(1.0);
+                let x = f32::from(position.x - bounds.origin.x) * width as f32 / rendered_width;
+                let y = f32::from(position.y - bounds.origin.y) * height as f32 / rendered_height;
+                window.focus(&click_focus);
+                app.browser_click(x, y, cx);
+            }),
+        )
+        .on_scroll_wheel(cx.listener(|app, event: &gpui::ScrollWheelEvent, _, cx| {
+            let delta = event.delta.pixel_delta(px(20.0));
+            app.browser_scroll(-f32::from(delta.x), -f32::from(delta.y), cx);
+            cx.stop_propagation();
+        }))
+        .on_key_down(
+            cx.listener(move |app, event: &gpui::KeyDownEvent, window, cx| {
+                if !key_focus.is_focused(window) {
+                    return;
+                }
+                let value = event
+                    .keystroke
+                    .key_char
+                    .clone()
+                    .unwrap_or_else(|| event.keystroke.key.clone());
+                app.browser_key(value, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .child(
+            img(frame.image)
+                .w_full()
+                .h_full()
+                .object_fit(gpui::ObjectFit::Fill),
         )
 }
 

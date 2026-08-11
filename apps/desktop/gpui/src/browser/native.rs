@@ -78,6 +78,7 @@ pub struct NativeNavOutcome {
     pub bridge: Option<ExternalOpenResult>,
     #[allow(dead_code)]
     pub embedded_loaded: bool,
+    #[allow(dead_code)]
     pub summary: String,
 }
 

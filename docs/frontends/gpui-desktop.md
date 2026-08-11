@@ -82,7 +82,7 @@ live catalog.
 | Hive schedules | Live global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
 | Sites | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
-| Browser | System-browser bridge; no page ownership | System-browser bridge; no page ownership | Same local bridge |
+| Browser | Real offscreen WebKitGTK page rendered and interacted with inside GPUI; explicit system-browser fallback | Same backend-independent embedded page runtime | Same real browser runtime; fixture mode does not synthesize page content |
 | Computer environments/permissions | Unsupported; no invented rows or grants | Live environment add/status/info and exact requested permission grants; no list method | Explicit fixture catalog, labeled fixture |
 | Remote Control | Unsupported; explicit capability boundary | Live status, enable/disable, pairing, authorized-device list/revoke, and status lifecycle | Explicit fixture state; no invented devices |
 | External-agent import | Unsupported; explicit capability boundary | Live Claude Code/Cursor detection, explicit review/confirmation, import lifecycle, and completed history | Explicit fixture state; no invented sources or history |

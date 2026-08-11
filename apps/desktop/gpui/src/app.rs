@@ -91,7 +91,7 @@ use crate::demo::{
     DemoImageSource, DemoMessage, DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind,
     DemoThread, ThreadSurface,
 };
-use crate::mcp_app_runtime::{McpAppRuntime, McpAppRuntimeEvent};
+use crate::mcp_app_runtime::{McpAppRuntime, McpAppRuntimeEvent, McpAppRuntimeHandle};
 use crate::preferences::{DesktopPreferences, DesktopProject};
 use crate::theme;
 
@@ -158,6 +158,9 @@ const MCP_APP_INLINE_WIDTH: u32 = 680;
 const MCP_APP_INLINE_HEIGHT: u32 = 420;
 const MCP_APP_FULLSCREEN_WIDTH: u32 = 1100;
 const MCP_APP_FULLSCREEN_HEIGHT: u32 = 720;
+pub(crate) const ATLAS_RUNTIME_KEY: &str = "__mitsuro_atlas__";
+const ATLAS_FRAME_WIDTH: u32 = 1100;
+const ATLAS_FRAME_HEIGHT: u32 = 720;
 
 const SIDE_DEVELOPER_INSTRUCTIONS: &str = r#"You are in a side conversation, not the main thread.
 
@@ -1982,6 +1985,13 @@ pub struct MitsuroApp {
     browser: BrowserSession,
     /// Editable Atlas URL bar.
     browser_url_input: Entity<InputState>,
+    /// Real offscreen WebKit page rendered into the GPUI Atlas surface.
+    browser_runtime_started: bool,
+    browser_runtime_ready: bool,
+    browser_runtime_error: Option<String>,
+    browser_frame: Option<McpAppFrame>,
+    browser_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    browser_focus: FocusHandle,
     /// Best-effort native / external bridge (wry child or xdg-open). UI-thread only.
     #[cfg(feature = "browser-native")]
     native_host: NativeWebViewHost,
@@ -2143,15 +2153,14 @@ impl MitsuroApp {
                 .placeholder("Enter URL")
                 .default_value(initial_url)
         });
-        // Enter follows the visible Atlas action: record the URL, then open the real
-        // page through the system-browser bridge.
+        // Enter follows the visible Atlas action: navigate the embedded WebKit
+        // surface, with an explicit system-browser fallback when unavailable.
         cx.subscribe_in(
             &browser_url_input,
             window,
             |app, _input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    app.browser_navigate(window, cx);
-                    app.browser_open_external(cx);
+                    app.browser_submit_address(window, cx);
                 }
             },
         )
@@ -2627,6 +2636,12 @@ impl MitsuroApp {
             browser_host,
             browser,
             browser_url_input,
+            browser_runtime_started: false,
+            browser_runtime_ready: false,
+            browser_runtime_error: None,
+            browser_frame: None,
+            browser_bounds: Arc::new(Mutex::new(None)),
+            browser_focus: cx.focus_handle(),
             #[cfg(feature = "browser-native")]
             native_host,
             terminal: TerminalSession::idle("loading"),
@@ -3138,6 +3153,9 @@ impl MitsuroApp {
             } else if self.environment_status_detail.is_none() {
                 self.refresh_selected_environment_detail(cx);
             }
+        }
+        if matches!(mode, ProductMode::Atlas) {
+            self.browser_request_attach(window, cx);
         }
         // Re-hit plugin/list + mcpServerStatus/list + skills/list when Ready so
         // the panel reflects the latest live (or honestly empty) catalog.
@@ -9867,6 +9885,26 @@ impl MitsuroApp {
         &self.browser_url_input
     }
 
+    pub(crate) fn browser_frame(&self) -> Option<&McpAppFrame> {
+        self.browser_frame.as_ref()
+    }
+
+    pub(crate) fn browser_bounds(&self) -> Arc<Mutex<Option<Bounds<Pixels>>>> {
+        Arc::clone(&self.browser_bounds)
+    }
+
+    pub(crate) fn browser_focus(&self) -> FocusHandle {
+        self.browser_focus.clone()
+    }
+
+    pub(crate) fn browser_runtime_handle(&self) -> Option<McpAppRuntimeHandle> {
+        self.mcp_app_runtime.as_ref().map(McpAppRuntime::handle)
+    }
+
+    pub fn browser_embedded_available(&self) -> bool {
+        self.browser_runtime_started && self.browser_runtime_error.is_none()
+    }
+
     fn browser_host_kind_label(&self) -> String {
         #[cfg(feature = "browser-native")]
         {
@@ -9879,6 +9917,24 @@ impl MitsuroApp {
     }
 
     fn bridge_fields(&self) -> (SharedString, SharedString, Option<SharedString>) {
+        if let Some(error) = self.browser_runtime_error.as_ref() {
+            return (
+                SharedString::from("Unavailable"),
+                SharedString::from(error.clone()),
+                Some(SharedString::from("WebKitGTK offscreen renderer")),
+            );
+        }
+        if self.browser_runtime_started {
+            return (
+                SharedString::from(if self.browser_runtime_ready {
+                    "Embedded WebKit"
+                } else {
+                    "Starting WebKit"
+                }),
+                SharedString::from("Live page pixels are rendered inside the GPUI Atlas surface."),
+                Some(SharedString::from("WebKitGTK offscreen renderer")),
+            );
+        }
         #[cfg(feature = "browser-native")]
         {
             let mode = SharedString::from(self.native_host.bridge_mode().label());
@@ -9900,12 +9956,67 @@ impl MitsuroApp {
 
     fn sync_browser_session(&mut self) {
         let (bridge_mode, bridge_detail, host_kind_override) = self.bridge_fields();
+        if self.browser_runtime_started || self.browser_runtime_error.is_some() {
+            self.browser.bridge_mode = bridge_mode;
+            self.browser.bridge_detail = bridge_detail;
+            if let Some(host_kind) = host_kind_override {
+                self.browser.host_kind = host_kind;
+            }
+            self.browser.status = if self.browser_runtime_error.is_some() {
+                BrowserSessionStatus::Error
+            } else if self.browser_runtime_ready {
+                BrowserSessionStatus::Ready
+            } else {
+                BrowserSessionStatus::Connecting
+            };
+            return;
+        }
         self.browser = BrowserSession::from_host(
             &self.browser_host,
             bridge_detail,
             bridge_mode,
             host_kind_override,
         );
+    }
+
+    fn browser_start_runtime(&mut self, cx: &mut Context<Self>) {
+        if self.browser_runtime_started || self.browser_runtime_error.is_some() {
+            return;
+        }
+        let url = self.browser_host.url().to_owned();
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| {
+                self.mcp_app_runtime_error
+                    .clone()
+                    .unwrap_or_else(|| "WebKit renderer is unavailable".to_owned())
+            })
+            .and_then(|runtime| {
+                runtime.load_url(
+                    ATLAS_RUNTIME_KEY.to_owned(),
+                    url,
+                    ATLAS_FRAME_WIDTH,
+                    ATLAS_FRAME_HEIGHT,
+                )
+            });
+        match result {
+            Ok(()) => {
+                self.browser_runtime_started = true;
+                self.browser.status = BrowserSessionStatus::Connecting;
+                self.browser.bridge_mode = "Starting WebKit".into();
+                self.browser.bridge_detail =
+                    "Creating the embedded offscreen WebKit page surface.".into();
+                self.schedule_mcp_app_runtime_poll(cx);
+            }
+            Err(error) => {
+                self.browser_runtime_error = Some(error.clone());
+                self.browser.status = BrowserSessionStatus::Error;
+                self.browser.bridge_mode = "Unavailable".into();
+                self.browser.bridge_detail = error.into();
+            }
+        }
+        cx.notify();
     }
 
     fn sync_url_bar_from_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -9917,6 +10028,8 @@ impl MitsuroApp {
 
     /// Probe GPUI raw window handle and optionally try wry child embed.
     pub fn browser_request_attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser_start_runtime(cx);
+        self.sync_browser_session();
         #[cfg(feature = "browser-native")]
         {
             self.native_host.attach_after_window_open(window);
@@ -9928,7 +10041,11 @@ impl MitsuroApp {
         #[cfg(not(feature = "browser-native"))]
         {
             let _ = window;
-            self.status_line = "Atlas · mock host (browser-native off)".into();
+            self.status_line = if self.browser_embedded_available() {
+                "Atlas · embedded WebKit surface starting".into()
+            } else {
+                "Atlas · embedded renderer unavailable; external browser fallback".into()
+            };
             cx.notify();
         }
     }
@@ -9941,33 +10058,52 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
-        // Ensure handle probe has run before first navigate on Atlas.
+        // Ensure the page renderer is running before first navigation.
+        self.browser_start_runtime(cx);
+        // Preserve a fallback URL history even if WebKit cannot start.
+        self.browser_host.navigate(&raw);
+        let url = self.browser_host.url().to_string();
+
+        let runtime_navigation = if self.browser_runtime_started {
+            self.mcp_app_runtime
+                .as_ref()
+                .ok_or_else(|| "WebKit renderer stopped".to_owned())
+                .and_then(|runtime| runtime.navigate(ATLAS_RUNTIME_KEY.to_owned(), url.clone()))
+        } else {
+            Err(self
+                .browser_runtime_error
+                .clone()
+                .unwrap_or_else(|| "embedded renderer unavailable".to_owned()))
+        };
+
+        // The optional child-host probe is retained for compatibility builds,
+        // but the default Wayland-safe renderer above owns Atlas page pixels.
         #[cfg(feature = "browser-native")]
         {
             if !self.native_host.is_attached() {
                 self.native_host.attach_after_window_open(window);
             }
         }
-        self.browser_host.navigate(&raw);
-        let url = self.browser_host.url().to_string();
-
-        #[cfg(feature = "browser-native")]
-        let nav_note = {
-            let out = self.native_host.navigate(&url);
-            out.summary
-        };
-        #[cfg(not(feature = "browser-native"))]
-        let nav_note = "mock history".to_string();
 
         self.sync_browser_session();
         self.sync_url_bar_from_host(window, cx);
-        self.status_line = format!("Navigated · {url} · {nav_note}").into();
+        self.status_line = match runtime_navigation {
+            Ok(()) => format!("Atlas navigating · {url}").into(),
+            Err(error) => format!("Atlas history updated · {error}").into(),
+        };
         cx.notify();
+    }
+
+    pub fn browser_submit_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser_navigate(window, cx);
+        if !self.browser_embedded_available() {
+            self.browser_open_external(cx);
+        }
     }
 
     /// Open current Atlas URL in the system browser (or Chromium --app sibling).
     pub fn browser_open_external(&mut self, cx: &mut Context<Self>) {
-        let url = self.browser_host.url().to_string();
+        let url = self.browser.url.to_string();
         #[cfg(feature = "browser-native")]
         let result = self.native_host.open_bridge(&url);
         #[cfg(not(feature = "browser-native"))]
@@ -9980,6 +10116,19 @@ impl MitsuroApp {
 
     /// Back navigation via host history.
     pub fn browser_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser_embedded_available() {
+            let result = self
+                .mcp_app_runtime
+                .as_ref()
+                .ok_or_else(|| "WebKit renderer stopped".to_owned())
+                .and_then(|runtime| runtime.back(ATLAS_RUNTIME_KEY.to_owned()));
+            self.status_line = match result {
+                Ok(()) => "Atlas back".into(),
+                Err(error) => format!("Browser back failed · {error}").into(),
+            };
+            cx.notify();
+            return;
+        }
         if !self.browser_host.go_back() {
             self.status_line = "Browser back · no history".into();
             cx.notify();
@@ -9998,6 +10147,19 @@ impl MitsuroApp {
 
     /// Forward navigation via host history.
     pub fn browser_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser_embedded_available() {
+            let result = self
+                .mcp_app_runtime
+                .as_ref()
+                .ok_or_else(|| "WebKit renderer stopped".to_owned())
+                .and_then(|runtime| runtime.forward(ATLAS_RUNTIME_KEY.to_owned()));
+            self.status_line = match result {
+                Ok(()) => "Atlas forward".into(),
+                Err(error) => format!("Browser forward failed · {error}").into(),
+            };
+            cx.notify();
+            return;
+        }
         if !self.browser_host.go_forward() {
             self.status_line = "Browser forward · no history".into();
             cx.notify();
@@ -10011,6 +10173,56 @@ impl MitsuroApp {
         self.sync_browser_session();
         self.sync_url_bar_from_host(window, cx);
         self.status_line = format!("Forward · {url}").into();
+        cx.notify();
+    }
+
+    pub fn browser_reload(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .filter(|_| self.browser_embedded_available())
+            .ok_or_else(|| "embedded WebKit surface is unavailable".to_owned())
+            .and_then(|runtime| runtime.reload(ATLAS_RUNTIME_KEY.to_owned()));
+        self.status_line = match result {
+            Ok(()) => "Atlas reloading".into(),
+            Err(error) => format!("Browser reload failed · {error}").into(),
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn browser_click(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| "embedded WebKit surface is unavailable".to_owned())
+            .and_then(|runtime| runtime.click(ATLAS_RUNTIME_KEY.to_owned(), x, y));
+        if let Err(error) = result {
+            self.status_line = format!("Browser interaction failed · {error}").into();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn browser_key(&mut self, value: String, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| "embedded WebKit surface is unavailable".to_owned())
+            .and_then(|runtime| runtime.key(ATLAS_RUNTIME_KEY.to_owned(), value));
+        if let Err(error) = result {
+            self.status_line = format!("Browser keyboard input failed · {error}").into();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn browser_scroll(&mut self, delta_x: f32, delta_y: f32, cx: &mut Context<Self>) {
+        let result = self
+            .mcp_app_runtime
+            .as_ref()
+            .ok_or_else(|| "embedded WebKit surface is unavailable".to_owned())
+            .and_then(|runtime| runtime.scroll(ATLAS_RUNTIME_KEY.to_owned(), delta_x, delta_y));
+        if let Err(error) = result {
+            self.status_line = format!("Browser scroll failed · {error}").into();
+        }
         cx.notify();
     }
 
@@ -10256,6 +10468,7 @@ impl MitsuroApp {
                     .mcp_app_views
                     .values()
                     .any(|state| matches!(state, McpAppViewState::Ready { .. }))
+                    || app.browser_runtime_started
                 {
                     app.schedule_mcp_app_runtime_poll(cx);
                 }
@@ -10283,6 +10496,17 @@ impl MitsuroApp {
         match event {
             McpAppRuntimeEvent::Started => {}
             McpAppRuntimeEvent::Ready { key } => {
+                if key == ATLAS_RUNTIME_KEY {
+                    self.browser_runtime_ready = true;
+                    self.browser.status = BrowserSessionStatus::Ready;
+                    self.browser.bridge_mode = "Embedded WebKit".into();
+                    self.browser.bridge_detail =
+                        "Live page pixels are rendered inside the GPUI Atlas surface.".into();
+                    self.browser.page_body = "Live WebKit page rendered inside Mitsuro.".into();
+                    self.status_line = "Atlas WebKit surface ready.".into();
+                    cx.notify();
+                    return;
+                }
                 if let Some(McpAppViewState::Ready { runtime_ready, .. }) =
                     self.mcp_app_views.get_mut(&key)
                 {
@@ -10297,6 +10521,15 @@ impl MitsuroApp {
                 width,
                 height,
             } => {
+                if key == ATLAS_RUNTIME_KEY {
+                    self.browser_frame = Some(McpAppFrame {
+                        image: Arc::new(gpui::Image::from_bytes(ImageFormat::Png, png)),
+                        width,
+                        height,
+                    });
+                    cx.notify();
+                    return;
+                }
                 if let Some(McpAppViewState::Ready { frame, .. }) = self.mcp_app_views.get_mut(&key)
                 {
                     *frame = Some(McpAppFrame {
@@ -10315,7 +10548,46 @@ impl MitsuroApp {
                     let _ = runtime.capture(key);
                 }
             }
+            McpAppRuntimeEvent::Navigation {
+                key,
+                url,
+                title,
+                can_go_back,
+                can_go_forward,
+                loading,
+            } => {
+                if key != ATLAS_RUNTIME_KEY {
+                    return;
+                }
+                self.browser.url = url.clone().into();
+                self.browser.title = title.into();
+                self.browser.can_go_back = can_go_back;
+                self.browser.can_go_forward = can_go_forward;
+                self.browser.status = if loading {
+                    BrowserSessionStatus::Connecting
+                } else {
+                    BrowserSessionStatus::Ready
+                };
+                self.browser.page_body = "Live WebKit page rendered inside Mitsuro.".into();
+                let input = self.browser_url_input.clone();
+                let window_handle = self.window_handle;
+                let display_url = if url == "about:blank" {
+                    String::new()
+                } else {
+                    url
+                };
+                let _ = window_handle.update(cx, move |_, window, cx| {
+                    input.update(cx, |state, cx| state.set_value(display_url, window, cx));
+                });
+                cx.notify();
+            }
             McpAppRuntimeEvent::OpenLink { key, url } => {
+                if key == ATLAS_RUNTIME_KEY {
+                    let result = open_system_browser(&url);
+                    self.status_line = format!("Atlas external link · {}", result.summary()).into();
+                    cx.notify();
+                    return;
+                }
                 if matches!(url::Url::parse(&url), Ok(parsed) if matches!(parsed.scheme(), "http" | "https"))
                 {
                     let result = open_system_browser(&url);
@@ -10327,6 +10599,17 @@ impl MitsuroApp {
                 cx.notify();
             }
             McpAppRuntimeEvent::Error { key, message } => {
+                if key.as_deref() == Some(ATLAS_RUNTIME_KEY) {
+                    self.browser_runtime_error = Some(message.clone());
+                    self.browser_runtime_started = false;
+                    self.browser_runtime_ready = false;
+                    self.browser.status = BrowserSessionStatus::Error;
+                    self.browser.bridge_mode = "Unavailable".into();
+                    self.browser.bridge_detail = message.clone().into();
+                    self.status_line = format!("Atlas renderer error · {message}").into();
+                    cx.notify();
+                    return;
+                }
                 if let Some(key) = key {
                     if let Some(runtime) = self.mcp_app_runtime.as_ref() {
                         let _ = runtime.close(key.clone());
@@ -10350,6 +10633,7 @@ impl MitsuroApp {
                 } else {
                     self.mcp_app_runtime_error = Some(message.clone());
                     self.mcp_app_runtime = None;
+                    self.browser_runtime_started = false;
                 }
                 self.status_line = format!("MCP app renderer error · {message}").into();
                 cx.notify();

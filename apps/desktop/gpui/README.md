@@ -131,9 +131,11 @@ each backend. Connection errors remain errors; they do not silently enable fixtu
   retains the submitted id and URL for the app session and probes typed status/info.
   The form is hidden for Mitsuro because its HTTP API has no equivalent mutation, and
   no live registration is performed by automated acceptance.
-- Atlas is an explicit system-browser bridge in the default build. It stores local URL
-  history and opens real pages externally; it does not fabricate page content, import
-  browser profiles, or claim access to browser-owned cookies and history.
+- Atlas owns a real WebKitGTK page in the default Linux build. WebKit runs offscreen on
+  the same dedicated GTK thread as MCP Apps; GPUI displays its captured pixels and
+  forwards navigation, reload, clicks, keyboard input, scrolling, and resize. The
+  system browser remains an explicit fallback/open-external action. Atlas does not
+  fabricate page content or import another browser's profiles, cookies, or history.
 - Secondary Settings actions without an implementation are non-interactive and labeled
   `Not wired` or `Unavailable`. Account, backend, and connection actions retain their
   separate live implementations.
@@ -245,8 +247,9 @@ reviewed in a live 940×1054 GPUI window against the reversed ChatGPT desktop re
 Pull requests and Sites retain their navigation destinations but render
 explicit capability states: neither backend exposes a typed API for those products, so
 the native client does not show sample repositories, sample deployments, or inactive
-create/review controls. Atlas/browser, the composer, live-turn failure handling, and
-secondary Settings actions follow the same honest capability treatment. Desktop-only
+create/review controls. Atlas/browser now renders a real backend-independent WebKit page;
+the composer, live-turn failure handling, and secondary Settings actions retain explicit
+capability treatment. Desktop-only
 Settings values are durable and explicitly distinguished from live server configuration.
 The established surface matrix has passed strict dual-provider live acceptance. The
 production-data purity slice adds a source-level fixture gate and fresh live captures
@@ -335,6 +338,7 @@ downloads, consented `ui/message` turns, untrusted model-context updates, and
 inline/fullscreen display. Mitsuro and fixture modes remain explicitly unsupported and
 never substitute synthetic app content.
 
-The optional `browser-native` feature remains the legacy Atlas child-embed experiment.
-The default build uses the external-browser bridge for Atlas and the separate
-Wayland-capable `mcp-app-runtime` WebKitGTK renderer for interactive MCP Apps.
+The optional `browser-native` feature remains only as the legacy X11 child-embed
+experiment. The default Wayland-capable `mcp-app-runtime` owns both Atlas pages and
+interactive MCP Apps on one dedicated GTK/WebKit thread, preventing competing GTK event
+loops while keeping the GPUI window in control of layout and input.

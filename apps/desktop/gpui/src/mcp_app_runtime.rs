@@ -17,6 +17,30 @@ pub enum McpAppRuntimeCommand {
         width: u32,
         height: u32,
     },
+    LoadUrl {
+        key: String,
+        url: String,
+        width: u32,
+        height: u32,
+    },
+    Navigate {
+        key: String,
+        url: String,
+    },
+    Back {
+        key: String,
+    },
+    Forward {
+        key: String,
+    },
+    Reload {
+        key: String,
+    },
+    Scroll {
+        key: String,
+        delta_x: f32,
+        delta_y: f32,
+    },
     HostMessage {
         key: String,
         message: Value,
@@ -63,6 +87,14 @@ pub enum McpAppRuntimeEvent {
     FrameDirty {
         key: String,
     },
+    Navigation {
+        key: String,
+        url: String,
+        title: String,
+        can_go_back: bool,
+        can_go_forward: bool,
+        loading: bool,
+    },
     OpenLink {
         key: String,
         url: String,
@@ -76,6 +108,19 @@ pub enum McpAppRuntimeEvent {
 pub struct McpAppRuntime {
     commands: mpsc::Sender<McpAppRuntimeCommand>,
     events: mpsc::Receiver<McpAppRuntimeEvent>,
+}
+
+#[derive(Clone)]
+pub struct McpAppRuntimeHandle {
+    commands: mpsc::Sender<McpAppRuntimeCommand>,
+}
+
+impl McpAppRuntimeHandle {
+    pub fn resize(&self, key: String, width: u32, height: u32) -> Result<(), String> {
+        self.commands
+            .send(McpAppRuntimeCommand::Resize { key, width, height })
+            .map_err(|_| "WebKit renderer stopped".to_owned())
+    }
 }
 
 impl McpAppRuntime {
@@ -95,6 +140,45 @@ impl McpAppRuntime {
             html,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+        })
+    }
+
+    pub fn load_url(
+        &self,
+        key: String,
+        url: String,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::LoadUrl {
+            key,
+            url,
+            width,
+            height,
+        })
+    }
+
+    pub fn navigate(&self, key: String, url: String) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Navigate { key, url })
+    }
+
+    pub fn back(&self, key: String) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Back { key })
+    }
+
+    pub fn forward(&self, key: String) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Forward { key })
+    }
+
+    pub fn reload(&self, key: String) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Reload { key })
+    }
+
+    pub fn scroll(&self, key: String, delta_x: f32, delta_y: f32) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Scroll {
+            key,
+            delta_x,
+            delta_y,
         })
     }
 
@@ -124,6 +208,12 @@ impl McpAppRuntime {
 
     pub fn try_recv(&self) -> Option<McpAppRuntimeEvent> {
         self.events.try_recv().ok()
+    }
+
+    pub fn handle(&self) -> McpAppRuntimeHandle {
+        McpAppRuntimeHandle {
+            commands: self.commands.clone(),
+        }
     }
 
     fn send(&self, command: McpAppRuntimeCommand) -> Result<(), String> {
@@ -216,6 +306,24 @@ mod platform {
 })();
 "#;
 
+    const BROWSER_BRIDGE: &str = r#"
+(() => {
+  const dirty = () => {
+    clearTimeout(window.__mitsuroFrameTimer);
+    window.__mitsuroFrameTimer = setTimeout(() => {
+      try { window.ipc.postMessage(JSON.stringify({ kind: 'frame-dirty' })); } catch (_) {}
+    }, 24);
+  };
+  new MutationObserver(dirty).observe(document.documentElement, {
+    subtree: true, childList: true, attributes: true, characterData: true
+  });
+  addEventListener('input', dirty, true);
+  addEventListener('scroll', dirty, true);
+  addEventListener('resize', dirty, true);
+  addEventListener('load', dirty, true);
+})();
+"#;
+
     struct RuntimeView {
         window: gtk::OffscreenWindow,
         webview: wry::WebView,
@@ -238,6 +346,12 @@ mod platform {
         commands: mpsc::Receiver<McpAppRuntimeCommand>,
         events: mpsc::Sender<McpAppRuntimeEvent>,
     ) {
+        // GTK offscreen windows have no compositor-backed GL surface. Disable
+        // WebKit accelerated compositing before GTK initializes so Atlas and
+        // MCP App views can coexist without GDK aborting on a second context.
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
         if let Err(error) = gtk::init() {
             let _ = events.send(McpAppRuntimeEvent::Error {
                 key: None,
@@ -288,6 +402,64 @@ mod platform {
                     });
                 }
             },
+            McpAppRuntimeCommand::LoadUrl {
+                key,
+                url,
+                width,
+                height,
+            } => match build_url_view(key.clone(), url, width, height, events.clone()) {
+                Ok(view) => {
+                    views.insert(key, view);
+                }
+                Err(message) => {
+                    let _ = events.send(McpAppRuntimeEvent::Error {
+                        key: Some(key),
+                        message,
+                    });
+                }
+            },
+            McpAppRuntimeCommand::Navigate { key, url } => {
+                if let Some(view) = views.get(&key) {
+                    if let Err(error) = view.webview.load_url(&url) {
+                        let _ = events.send(McpAppRuntimeEvent::Error {
+                            key: Some(key),
+                            message: format!("could not navigate WebKit view: {error}"),
+                        });
+                    }
+                }
+            }
+            McpAppRuntimeCommand::Back { key } => {
+                if let Some(view) = views.get(&key) {
+                    view.webview.webview().go_back();
+                }
+            }
+            McpAppRuntimeCommand::Forward { key } => {
+                if let Some(view) = views.get(&key) {
+                    view.webview.webview().go_forward();
+                }
+            }
+            McpAppRuntimeCommand::Reload { key } => {
+                if let Some(view) = views.get(&key) {
+                    view.webview.webview().reload();
+                }
+            }
+            McpAppRuntimeCommand::Scroll {
+                key,
+                delta_x,
+                delta_y,
+            } => {
+                if let Some(view) = views.get(&key) {
+                    let script = format!("window.scrollBy({delta_x}, {delta_y});");
+                    let _ = view.webview.evaluate_script(&script);
+                    schedule_frame(
+                        view.window.clone(),
+                        key,
+                        view.width,
+                        view.height,
+                        events.clone(),
+                    );
+                }
+            }
             McpAppRuntimeCommand::HostMessage { key, message } => {
                 if let Some(view) = views.get(&key) {
                     match serde_json::to_string(&message) {
@@ -482,6 +654,135 @@ mod platform {
         })
     }
 
+    fn build_url_view(
+        key: String,
+        url: String,
+        width: u32,
+        height: u32,
+        events: mpsc::Sender<McpAppRuntimeEvent>,
+    ) -> Result<RuntimeView, String> {
+        let window = gtk::OffscreenWindow::new();
+        window.set_default_size(width as i32, height as i32);
+        let ipc_key = key.clone();
+        let ipc_events = events.clone();
+        let nav_key = key.clone();
+        let nav_events = events.clone();
+        let popup_key = key.clone();
+        let popup_events = events.clone();
+        let webview = WebViewBuilder::new()
+            .with_url(&url)
+            .with_initialization_script(BROWSER_BRIDGE)
+            .with_clipboard(true)
+            .with_ipc_handler(move |request| {
+                if serde_json::from_str::<serde_json::Value>(request.body())
+                    .ok()
+                    .and_then(|value| value.get("kind").cloned())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("frame-dirty")
+                {
+                    let _ = ipc_events.send(McpAppRuntimeEvent::FrameDirty {
+                        key: ipc_key.clone(),
+                    });
+                }
+            })
+            .with_navigation_handler(move |target| {
+                let allowed = url::Url::parse(&target).ok().is_some_and(|parsed| {
+                    matches!(
+                        parsed.scheme(),
+                        "http" | "https" | "about" | "data" | "blob"
+                    )
+                });
+                if !allowed {
+                    let _ = nav_events.send(McpAppRuntimeEvent::OpenLink {
+                        key: nav_key.clone(),
+                        url: target,
+                    });
+                }
+                allowed
+            })
+            .with_new_window_req_handler(move |target, _features| {
+                let _ = popup_events.send(McpAppRuntimeEvent::OpenLink {
+                    key: popup_key.clone(),
+                    url: target,
+                });
+                NewWindowResponse::Deny
+            })
+            .build_gtk(&window)
+            .map_err(|error| format!("could not create Atlas WebKit view: {error}"))?;
+
+        let raw = webview.webview();
+        raw.connect_permission_request(|_, request| {
+            request.deny();
+            true
+        });
+        if let Some(settings) = WebViewExt::settings(&raw) {
+            settings.set_enable_developer_extras(false);
+            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+        }
+        let state_window = window.clone();
+        let state_key = key.clone();
+        let state_events = events.clone();
+        let title_key = key.clone();
+        let title_events = events.clone();
+        raw.connect_title_notify(move |view| {
+            emit_navigation(view, &title_key, view.is_loading(), &title_events);
+        });
+        raw.connect_load_changed(move |view, event| {
+            let loading = event != LoadEvent::Finished;
+            emit_navigation(view, &state_key, loading, &state_events);
+            if event == LoadEvent::Finished {
+                let _ = state_events.send(McpAppRuntimeEvent::Ready {
+                    key: state_key.clone(),
+                });
+                schedule_frame(
+                    state_window.clone(),
+                    state_key.clone(),
+                    width,
+                    height,
+                    state_events.clone(),
+                );
+            }
+        });
+        let crash_key = key;
+        let crash_events = events;
+        raw.connect_web_process_terminated(move |_, reason| {
+            let _ = crash_events.send(McpAppRuntimeEvent::Error {
+                key: Some(crash_key.clone()),
+                message: format!("Atlas WebKit process terminated: {reason:?}"),
+            });
+        });
+        window.show_all();
+        Ok(RuntimeView {
+            window,
+            webview,
+            width,
+            height,
+        })
+    }
+
+    fn emit_navigation(
+        view: &webkit2gtk::WebView,
+        key: &str,
+        loading: bool,
+        events: &mpsc::Sender<McpAppRuntimeEvent>,
+    ) {
+        let _ = events.send(McpAppRuntimeEvent::Navigation {
+            key: key.to_owned(),
+            url: view
+                .uri()
+                .unwrap_or_else(|| "about:blank".into())
+                .to_string(),
+            title: view
+                .title()
+                .unwrap_or_else(|| "New page".into())
+                .to_string(),
+            can_go_back: view.can_go_back(),
+            can_go_forward: view.can_go_forward(),
+            loading,
+        });
+    }
+
     fn handle_ipc(key: &str, body: &str, events: &mpsc::Sender<McpAppRuntimeEvent>) {
         let Ok(envelope) = serde_json::from_str::<serde_json::Value>(body) else {
             let _ = events.send(McpAppRuntimeEvent::Error {
@@ -558,6 +859,8 @@ mod platform {
 
 #[cfg(all(test, target_os = "linux", feature = "mcp-app-runtime"))]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
     use super::{McpAppRuntime, McpAppRuntimeEvent};
@@ -680,6 +983,101 @@ mod tests {
             got_resized_frame,
             "WebKit view did not resize and recapture"
         );
+
+        assert_live_url_probe(&runtime);
+    }
+
+    fn assert_live_url_probe(runtime: &McpAppRuntime) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Atlas probe server");
+        let address = listener.local_addr().expect("Atlas probe address");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = "<title>Atlas Probe</title><body style='margin:0;background:#112233;color:white;height:2200px'><button style='position:absolute;left:0;top:0;width:80px;height:40px' onclick=\"document.title='Clicked'\">Click</button><input style='position:absolute;left:0;top:50px;width:120px;height:30px' oninput=\"document.title='Input:'+this.value\"><script>addEventListener('scroll',()=>document.title='Scrolled')</script></body>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        runtime
+            .load_url(
+                "atlas-probe".to_owned(),
+                format!("http://{address}/"),
+                480,
+                320,
+            )
+            .expect("URL load command");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut got_ready = false;
+        let mut got_frame = false;
+        let mut got_navigation = false;
+        while Instant::now() < deadline && !(got_ready && got_frame && got_navigation) {
+            match runtime.try_recv() {
+                Some(McpAppRuntimeEvent::Ready { key }) if key == "atlas-probe" => {
+                    got_ready = true;
+                }
+                Some(McpAppRuntimeEvent::Frame {
+                    key,
+                    png,
+                    width,
+                    height,
+                }) if key == "atlas-probe" => {
+                    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                    assert_eq!((width, height), (480, 320));
+                    got_frame = true;
+                }
+                Some(McpAppRuntimeEvent::Navigation {
+                    key,
+                    title,
+                    loading,
+                    ..
+                }) if key == "atlas-probe" && !loading => {
+                    got_navigation = title == "Atlas Probe";
+                }
+                Some(McpAppRuntimeEvent::Error { message, .. }) => panic!("{message}"),
+                Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_ready, "Atlas WebKit view did not finish loading");
+        assert!(got_frame, "Atlas WebKit view did not produce a PNG frame");
+        assert!(got_navigation, "Atlas navigation state was not reported");
+
+        runtime
+            .click("atlas-probe".to_owned(), 20.0, 20.0)
+            .expect("Atlas click command");
+        wait_for_atlas_title(runtime, "Clicked");
+        runtime
+            .click("atlas-probe".to_owned(), 20.0, 60.0)
+            .expect("Atlas input focus command");
+        runtime
+            .key("atlas-probe".to_owned(), "x".to_owned())
+            .expect("Atlas key command");
+        wait_for_atlas_title(runtime, "Input:x");
+        runtime
+            .scroll("atlas-probe".to_owned(), 0.0, 240.0)
+            .expect("Atlas scroll command");
+        wait_for_atlas_title(runtime, "Scrolled");
+    }
+
+    fn wait_for_atlas_title(runtime: &McpAppRuntime, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match runtime.try_recv() {
+                Some(McpAppRuntimeEvent::Navigation { key, title, .. })
+                    if key == "atlas-probe" && title == expected =>
+                {
+                    return;
+                }
+                Some(McpAppRuntimeEvent::Error { message, .. }) => panic!("{message}"),
+                Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        panic!("Atlas did not report title {expected:?}");
     }
 }
 
