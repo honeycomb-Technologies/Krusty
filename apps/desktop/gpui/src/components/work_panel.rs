@@ -184,7 +184,9 @@ fn work_title_bar(
                     )
                     .rounded(px(8.0))
                     .when(state == SurfaceDataState::Fixture, |this| {
-                        this.on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx)))
+                        this.on_click(
+                            cx.listener(|app, _, window, cx| app.start_new_goal(window, cx)),
+                        )
                     })
                     .when(mutations_available, |this| {
                         this.on_click(cx.listener(|app, _, window, cx| {
@@ -286,7 +288,7 @@ fn work_empty_state(
                             cx,
                         )
                         .rounded(px(10.0))
-                        .on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx))),
+                        .on_click(cx.listener(|app, _, window, cx| app.start_new_goal(window, cx))),
                     )
                 }),
         )
@@ -343,7 +345,11 @@ fn goal_list(
                         .when(state == SurfaceDataState::Fixture, |this| {
                             this.cursor_pointer()
                                 .hover(|style| style.text_color(colors.text))
-                                .on_click(cx.listener(|app, _, _, cx| app.start_new_goal(cx)))
+                                .on_click(
+                                    cx.listener(|app, _, window, cx| {
+                                        app.start_new_goal(window, cx)
+                                    }),
+                                )
                         })
                         .child(if state == SurfaceDataState::Live {
                             "Refresh"

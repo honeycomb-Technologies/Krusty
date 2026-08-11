@@ -3506,19 +3506,27 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// CTA: create a fixture goal with plan steps; also `thread/goal/set` when linked.
-    pub fn start_new_goal(&mut self, cx: &mut Context<Self>) {
+    /// CTA: open the real Mitsuro dispatch editor, or create a fixture goal offline.
+    pub fn start_new_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_explicit_fixture() {
-            self.status_line = match self.work_state() {
-                SurfaceDataState::Live => {
-                    "Hive dispatch is not wired from the GPUI client yet; this view is read-only."
+            if self.work_state() == SurfaceDataState::Live
+                && self
+                    .live_backend()
+                    .is_some_and(|backend| backend.capabilities().hive_mutations)
+            {
+                self.open_hive_dispatch_editor(window, cx);
+            } else {
+                self.status_line = match self.work_state() {
+                    SurfaceDataState::Live => {
+                        "Hive dispatch is unavailable on the selected backend."
+                    }
+                    SurfaceDataState::Loading => "Work data is still loading.",
+                    SurfaceDataState::Error => "Work is unavailable while the backend is in error.",
+                    _ => "Work goals are not exposed by this backend.",
                 }
-                SurfaceDataState::Loading => "Work data is still loading.",
-                SurfaceDataState::Error => "Work is unavailable while the backend is in error.",
-                _ => "Work goals are not exposed by this backend.",
+                .into();
+                cx.notify();
             }
-            .into();
-            cx.notify();
             return;
         }
         let id = format!("goal-local-{}", self.goals.len() + 1);
