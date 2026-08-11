@@ -334,7 +334,8 @@ Interactive Codex MCP Apps are not represented by a placeholder. Completed
 host-owned CSP, and render in an ephemeral WebKitGTK view whose pixels and input are
 owned by GPUI. The host supports initialize, tool/resource proxies and catalogs,
 resource update subscriptions backed by real bounded reads, HTTP(S) links, native
-downloads, consented `ui/message` turns, untrusted model-context updates, and
+downloads for standard embedded resources and server-backed resource links (plus the
+legacy Blob shape), consented `ui/message` turns, untrusted model-context updates, and
 inline/fullscreen display. Mitsuro and fixture modes remain explicitly unsupported and
 never substitute synthetic app content.
 

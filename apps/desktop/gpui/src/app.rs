@@ -45,15 +45,15 @@ use mitsuro_desktop_backend::{
     HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
     LiveApprovalBridge, LoginAccountParams, MarketplaceAddParams, MarketplaceRemoveParams,
     MarketplaceUpgradeParams, McpAppHtmlResource, McpAppToolCall, McpAuthStatus,
-    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
-    MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
-    ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
-    PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
-    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginMarketplaceEntry,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
+    McpElicitationMode, McpResourceContent, McpResourceReadResponse, McpServerConfigAddParams,
+    McpServerInfo, McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
+    McpServerTransportConfig, MergeStrategy, MessageRole, ModeKind, ModelInfo, ModelListParams,
+    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse, ModelServiceTier,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PermissionProfileListParams,
+    PermissionProfileSummary, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginMarketplaceEntry, PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams,
+    ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
+    ProductBackend, ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
     ProductFileMatch, ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
     ProductHiveSessionDetail, ProductHiveSessionMutationRequest, ProductHiveSnapshot,
     ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
@@ -1622,6 +1622,18 @@ struct PendingMcpAppMessage {
     text: String,
     attachments: Vec<ProductAttachment>,
     demo_images: Vec<DemoImageAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum McpAppDownloadSource {
+    Inline { name: String, bytes: Vec<u8> },
+    ResourceLink { name: String, uri: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct McpAppDownloadFile {
+    name: String,
+    bytes: Vec<u8>,
 }
 
 impl ConcurrentSideTurnState {
@@ -10918,66 +10930,99 @@ impl MitsuroApp {
         message: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        let name = message
-            .pointer("/params/name")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|name| valid_mcp_app_download_name(name))
-            .map(str::to_owned);
-        let encoded = message
-            .pointer("/params/blob/base64")
-            .and_then(serde_json::Value::as_str);
-        let declared_size = message
-            .pointer("/params/blob/size")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|size| usize::try_from(size).ok());
-        let Some(name) = name else {
-            self.send_mcp_app_protocol_error(
-                key,
-                Some(id),
-                -32602,
-                "Download name must be a safe file name",
-            );
-            return;
+        let sources = match parse_mcp_app_download_sources(&message) {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.send_mcp_app_protocol_error(key, Some(id), -32602, &error);
+                return;
+            }
         };
-        let Some(encoded) = encoded else {
-            let detail = message
-                .get("__mitsuroBlobError")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Download blob is required");
-            self.send_mcp_app_protocol_error(key, Some(id), -32602, detail);
-            return;
-        };
-        let estimated_size = encoded.len().saturating_mul(3) / 4;
-        if estimated_size > MCP_APP_MAX_DOWNLOAD_BYTES
-            || declared_size.is_some_and(|size| size > MCP_APP_MAX_DOWNLOAD_BYTES)
-        {
-            self.send_mcp_app_protocol_error(
-                key,
-                Some(id),
-                -32602,
-                "Download exceeds the 100 MB safety limit",
-            );
+        let linked = sources
+            .iter()
+            .any(|source| matches!(source, McpAppDownloadSource::ResourceLink { .. }));
+        if !linked {
+            let files = sources
+                .into_iter()
+                .map(|source| match source {
+                    McpAppDownloadSource::Inline { name, bytes } => {
+                        McpAppDownloadFile { name, bytes }
+                    }
+                    McpAppDownloadSource::ResourceLink { .. } => unreachable!(),
+                })
+                .collect();
+            self.begin_mcp_app_download_save(key, id, files, cx);
             return;
         }
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-            self.send_mcp_app_protocol_error(
-                key,
-                Some(id),
-                -32602,
-                "Download blob is not valid base64",
-            );
+
+        let Some((session, server)) = self.mcp_app_views.get(&key).and_then(|state| match state {
+            McpAppViewState::Ready { session, call, .. } => {
+                Some((session.clone(), call.server.clone()))
+            }
+            _ => None,
+        }) else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "MCP app is not active");
             return;
         };
-        if bytes.len() > MCP_APP_MAX_DOWNLOAD_BYTES
-            || declared_size.is_some_and(|size| size != bytes.len())
-        {
-            self.send_mcp_app_protocol_error(
-                key,
-                Some(id),
-                -32602,
-                "Download blob size is invalid",
-            );
+        let Some(backend) = self.live_backend() else {
+            self.send_mcp_app_protocol_error(key, Some(id), -32000, "Backend is not ready");
+            return;
+        };
+        let backend_generation = self.backend_generation;
+        self.status_line = "MCP app download · reading linked resources".into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let mut files = Vec::with_capacity(sources.len());
+                    let mut total_bytes = 0usize;
+                    for source in sources {
+                        let file = match source {
+                            McpAppDownloadSource::Inline { name, bytes } => {
+                                McpAppDownloadFile { name, bytes }
+                            }
+                            McpAppDownloadSource::ResourceLink { name, uri } => {
+                                let response = backend
+                                    .read_mcp_resource(Some(&session), &server, &uri)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                let bytes = resolve_mcp_app_download_resource(response, &uri)?;
+                                McpAppDownloadFile { name, bytes }
+                            }
+                        };
+                        total_bytes = total_bytes.saturating_add(file.bytes.len());
+                        if total_bytes > MCP_APP_MAX_DOWNLOAD_BYTES {
+                            return Err("Downloads exceed the 100 MB safety limit".to_owned());
+                        }
+                        files.push(file);
+                    }
+                    Ok::<_, String>(files)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation {
+                    return;
+                }
+                match result {
+                    Ok(files) => app.begin_mcp_app_download_save(key, id, files, cx),
+                    Err(error) => {
+                        app.status_line = format!("MCP app download failed · {error}").into();
+                        app.send_mcp_app_protocol_error(key, Some(id), -32000, &error);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn begin_mcp_app_download_save(
+        &mut self,
+        key: String,
+        id: serde_json::Value,
+        mut files: Vec<McpAppDownloadFile>,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            self.send_mcp_app_protocol_error(key, Some(id), -32602, "Download contains no files");
             return;
         }
         let directory = self
@@ -10986,55 +11031,126 @@ impl MitsuroApp {
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        let receiver = cx.prompt_for_new_path(&directory, Some(&name));
-        self.status_line = format!("MCP app download · choose where to save {name}").into();
+        if files.len() == 1 {
+            let file = files.pop().expect("single download checked");
+            let receiver = cx.prompt_for_new_path(&directory, Some(&file.name));
+            self.status_line =
+                format!("MCP app download · choose where to save {}", file.name).into();
+            cx.spawn(async move |this, cx| {
+                let selection = receiver.await;
+                let outcome = match selection {
+                    Ok(Ok(Some(path))) => {
+                        cx.background_spawn(async move {
+                            std::fs::write(&path, file.bytes)
+                                .map(|_| format!("Saved {}", path.display()))
+                                .map_err(|error| format!("Could not save download: {error}"))
+                        })
+                        .await
+                    }
+                    Ok(Ok(None)) => Err("Download canceled".to_owned()),
+                    Ok(Err(error)) => Err(format!("Could not open save dialog: {error}")),
+                    Err(error) => Err(format!("Save dialog closed unexpectedly: {error}")),
+                };
+                let _ = this.update(cx, |app, cx| {
+                    app.finish_mcp_app_download(key, id, outcome, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(format!("Choose folder for {} downloads", files.len()).into()),
+        });
+        self.status_line = format!(
+            "MCP app download · choose a folder for {} files",
+            files.len()
+        )
+        .into();
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
             let outcome = match selection {
-                Ok(Ok(Some(path))) => {
-                    let write = cx
-                        .background_spawn(async move {
-                            std::fs::write(&path, bytes)
-                                .map(|_| path)
-                                .map_err(|error| error.to_string())
-                        })
-                        .await;
-                    match write {
-                        Ok(path) => Ok(format!("Saved {}", path.display())),
-                        Err(error) => Err(format!("Could not save download: {error}")),
+                Ok(Ok(Some(paths))) => {
+                    match paths.into_iter().next().filter(|path| path.is_dir()) {
+                        Some(directory) => {
+                            cx.background_spawn(async move {
+                                let file_count = files.len();
+                                let targets = files
+                                    .iter()
+                                    .map(|file| directory.join(&file.name))
+                                    .collect::<Vec<_>>();
+                                if let Some(existing) = targets.iter().find(|path| path.exists()) {
+                                    return Err(format!(
+                                        "Could not save downloads: {} already exists",
+                                        existing.display()
+                                    ));
+                                }
+                                for (file, path) in files.into_iter().zip(targets) {
+                                    let mut output = std::fs::OpenOptions::new()
+                                        .write(true)
+                                        .create_new(true)
+                                        .open(&path)
+                                        .map_err(|error| {
+                                            format!("Could not create {}: {error}", path.display())
+                                        })?;
+                                    output.write_all(&file.bytes).map_err(|error| {
+                                        format!("Could not write {}: {error}", path.display())
+                                    })?;
+                                }
+                                Ok(format!(
+                                    "Saved {file_count} files to {}",
+                                    directory.display()
+                                ))
+                            })
+                            .await
+                        }
+                        None => Err("Download folder is unavailable".to_owned()),
                     }
                 }
                 Ok(Ok(None)) => Err("Download canceled".to_owned()),
-                Ok(Err(error)) => Err(format!("Could not open save dialog: {error}")),
-                Err(error) => Err(format!("Save dialog closed unexpectedly: {error}")),
+                Ok(Err(error)) => Err(format!("Could not open folder dialog: {error}")),
+                Err(error) => Err(format!("Folder dialog closed unexpectedly: {error}")),
             };
             let _ = this.update(cx, |app, cx| {
-                if !matches!(
-                    app.mcp_app_views.get(&key),
-                    Some(McpAppViewState::Ready { .. })
-                ) {
-                    return;
-                }
-                match outcome {
-                    Ok(summary) => {
-                        app.status_line = summary.into();
-                        app.send_mcp_app_message(
-                            key,
-                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
-                        );
-                    }
-                    Err(message) => {
-                        app.status_line = message.into();
-                        app.send_mcp_app_message(
-                            key,
-                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true}}),
-                        );
-                    }
-                }
-                cx.notify();
+                app.finish_mcp_app_download(key, id, outcome, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_mcp_app_download(
+        &mut self,
+        key: String,
+        id: serde_json::Value,
+        outcome: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.mcp_app_views.get(&key),
+            Some(McpAppViewState::Ready { .. })
+        ) {
+            return;
+        }
+        match outcome {
+            Ok(summary) => {
+                self.status_line = summary.into();
+                self.send_mcp_app_message(
+                    key,
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
+                );
+            }
+            Err(message) => {
+                self.status_line = message.into();
+                self.send_mcp_app_message(
+                    key,
+                    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true}}),
+                );
+            }
+        }
+        cx.notify();
     }
 
     fn set_mcp_app_display_mode(
@@ -22110,6 +22226,175 @@ fn valid_mcp_app_download_name(name: &str) -> bool {
             .is_some_and(|file| file == name)
 }
 
+fn mcp_app_download_name_from_uri(uri: &str) -> Option<String> {
+    let candidate = url::Url::parse(uri)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            uri.rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .map(str::to_owned)
+        })?;
+    valid_mcp_app_download_name(&candidate).then_some(candidate)
+}
+
+fn decode_mcp_app_download_blob(encoded: &str) -> Result<Vec<u8>, String> {
+    let estimated_size = encoded.len().saturating_mul(3) / 4;
+    if estimated_size > MCP_APP_MAX_DOWNLOAD_BYTES {
+        return Err("Download exceeds the 100 MB safety limit".to_owned());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "Download blob is not valid base64".to_owned())?;
+    if bytes.len() > MCP_APP_MAX_DOWNLOAD_BYTES {
+        return Err("Download exceeds the 100 MB safety limit".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn parse_mcp_app_download_sources(
+    message: &serde_json::Value,
+) -> Result<Vec<McpAppDownloadSource>, String> {
+    if let Some(contents) = message
+        .pointer("/params/contents")
+        .and_then(serde_json::Value::as_array)
+    {
+        if contents.is_empty() || contents.len() > 16 {
+            return Err("Download contents must contain between 1 and 16 resources".to_owned());
+        }
+        let mut sources = Vec::with_capacity(contents.len());
+        let mut names = BTreeSet::new();
+        let mut inline_bytes = 0usize;
+        for content in contents {
+            let source = match content.get("type").and_then(serde_json::Value::as_str) {
+                Some("resource") => {
+                    let resource = content
+                        .get("resource")
+                        .and_then(serde_json::Value::as_object)
+                        .ok_or_else(|| "Embedded downloads require a resource object".to_owned())?;
+                    let uri = resource
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|uri| !uri.trim().is_empty())
+                        .ok_or_else(|| "Embedded downloads require a resource URI".to_owned())?;
+                    let name = mcp_app_download_name_from_uri(uri).ok_or_else(|| {
+                        "Embedded download URI must end with a safe file name".to_owned()
+                    })?;
+                    let text = resource.get("text").and_then(serde_json::Value::as_str);
+                    let blob = resource.get("blob").and_then(serde_json::Value::as_str);
+                    let bytes = match (text, blob) {
+                        (Some(text), None) => text.as_bytes().to_vec(),
+                        (None, Some(blob)) => decode_mcp_app_download_blob(blob)?,
+                        _ => {
+                            return Err("Embedded downloads require exactly one text or blob field"
+                                .to_owned())
+                        }
+                    };
+                    inline_bytes = inline_bytes.saturating_add(bytes.len());
+                    if inline_bytes > MCP_APP_MAX_DOWNLOAD_BYTES {
+                        return Err("Downloads exceed the 100 MB safety limit".to_owned());
+                    }
+                    McpAppDownloadSource::Inline { name, bytes }
+                }
+                Some("resource_link") => {
+                    let name = content
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| valid_mcp_app_download_name(name))
+                        .ok_or_else(|| "Linked downloads require a safe resource name".to_owned())?
+                        .to_owned();
+                    let uri = content
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|uri| !uri.is_empty())
+                        .ok_or_else(|| "Linked downloads require a resource URI".to_owned())?
+                        .to_owned();
+                    if content
+                        .get("size")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|size| size > MCP_APP_MAX_DOWNLOAD_BYTES as u64)
+                    {
+                        return Err("Download exceeds the 100 MB safety limit".to_owned());
+                    }
+                    McpAppDownloadSource::ResourceLink { name, uri }
+                }
+                _ => {
+                    return Err(
+                        "Download contents support embedded resources or resource links".to_owned(),
+                    )
+                }
+            };
+            let name = match &source {
+                McpAppDownloadSource::Inline { name, .. }
+                | McpAppDownloadSource::ResourceLink { name, .. } => name,
+            };
+            if !names.insert(name.clone()) {
+                return Err(format!("Download contains duplicate file name {name}"));
+            }
+            sources.push(source);
+        }
+        return Ok(sources);
+    }
+
+    // Legacy reversed-client shape: a real Blob is serialized by the sandbox
+    // bridge into params.blob.base64 before it crosses into Rust.
+    let name = message
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| valid_mcp_app_download_name(name))
+        .ok_or_else(|| "Download name must be a safe file name".to_owned())?
+        .to_owned();
+    let encoded = message
+        .pointer("/params/blob/base64")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            message
+                .get("__mitsuroBlobError")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Download contents are required")
+                .to_owned()
+        })?;
+    let bytes = decode_mcp_app_download_blob(encoded)?;
+    if message
+        .pointer("/params/blob/size")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|size| usize::try_from(size).ok())
+        .is_some_and(|size| size != bytes.len())
+    {
+        return Err("Download blob size is invalid".to_owned());
+    }
+    Ok(vec![McpAppDownloadSource::Inline { name, bytes }])
+}
+
+fn resolve_mcp_app_download_resource(
+    response: McpResourceReadResponse,
+    expected_uri: &str,
+) -> Result<Vec<u8>, String> {
+    for content in response.contents {
+        match content {
+            McpResourceContent::Text { uri, text, .. } if uri == expected_uri => {
+                if text.len() > MCP_APP_MAX_DOWNLOAD_BYTES {
+                    return Err("Download exceeds the 100 MB safety limit".to_owned());
+                }
+                return Ok(text.into_bytes());
+            }
+            McpResourceContent::Blob { uri, blob, .. } if uri == expected_uri => {
+                return decode_mcp_app_download_blob(&blob);
+            }
+            _ => {}
+        }
+    }
+    Err("Linked download resource returned no matching content".to_owned())
+}
+
 fn parse_mcp_app_message_content(
     content: Option<&Vec<serde_json::Value>>,
 ) -> Result<(String, Vec<ProductAttachment>, Vec<DemoImageAttachment>), String> {
@@ -23394,6 +23679,86 @@ mod tests {
         assert!(!valid_mcp_app_download_name("folder\\report.csv"));
         assert!(!valid_mcp_app_download_name("."));
         assert!(!valid_mcp_app_download_name(""));
+    }
+
+    #[test]
+    fn mcp_app_download_parser_accepts_standard_embedded_and_linked_resources() {
+        let sources = parse_mcp_app_download_sources(&serde_json::json!({
+            "params": {"contents": [
+                {"type":"resource","resource":{
+                    "uri":"file:///export.json",
+                    "mimeType":"application/json",
+                    "text":"{\"ok\":true}"
+                }},
+                {"type":"resource","resource":{
+                    "uri":"file:///pixel.bin",
+                    "mimeType":"application/octet-stream",
+                    "blob":"AAEC"
+                }},
+                {"type":"resource_link","uri":"report://latest","name":"report.pdf","size":42}
+            ]}
+        }))
+        .expect("standard download contents");
+        assert_eq!(
+            sources,
+            vec![
+                McpAppDownloadSource::Inline {
+                    name: "export.json".to_owned(),
+                    bytes: b"{\"ok\":true}".to_vec(),
+                },
+                McpAppDownloadSource::Inline {
+                    name: "pixel.bin".to_owned(),
+                    bytes: vec![0, 1, 2],
+                },
+                McpAppDownloadSource::ResourceLink {
+                    name: "report.pdf".to_owned(),
+                    uri: "report://latest".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_app_download_parser_rejects_unsafe_or_ambiguous_contents() {
+        let duplicate = serde_json::json!({"params":{"contents":[
+            {"type":"resource","resource":{"uri":"file:///same.txt","text":"one"}},
+            {"type":"resource_link","uri":"docs://same","name":"same.txt"}
+        ]}});
+        assert!(parse_mcp_app_download_sources(&duplicate)
+            .unwrap_err()
+            .contains("duplicate"));
+        let traversal = serde_json::json!({"params":{"contents":[
+            {"type":"resource_link","uri":"docs://secret","name":"../secret.txt"}
+        ]}});
+        assert!(parse_mcp_app_download_sources(&traversal).is_err());
+        let ambiguous = serde_json::json!({"params":{"contents":[
+            {"type":"resource","resource":{"uri":"file:///both.txt","text":"x","blob":"eA=="}}
+        ]}});
+        assert!(parse_mcp_app_download_sources(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn linked_mcp_app_download_uses_exact_server_resource_content() {
+        let response = McpResourceReadResponse {
+            contents: vec![
+                McpResourceContent::Text {
+                    uri: "docs://other".to_owned(),
+                    mime_type: Some("text/plain".to_owned()),
+                    text: "wrong".to_owned(),
+                    meta: None,
+                },
+                McpResourceContent::Blob {
+                    uri: "docs://report".to_owned(),
+                    mime_type: Some("application/octet-stream".to_owned()),
+                    blob: "cmVwb3J0".to_owned(),
+                    meta: None,
+                },
+            ],
+        };
+        assert_eq!(
+            resolve_mcp_app_download_resource(response, "docs://report").unwrap(),
+            b"report"
+        );
     }
 
     #[test]
