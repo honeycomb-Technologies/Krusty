@@ -42,17 +42,18 @@ use mitsuro_desktop_backend::{
     FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
     GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
     HookMetadata, HooksListEntry, HooksListParams, InstalledApp, LifecycleNotification,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, McpAuthStatus,
-    McpElicitationMode, McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
+    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, MarketplaceAddParams,
+    MarketplaceRemoveParams, MarketplaceUpgradeParams, McpAuthStatus, McpElicitationMode,
+    McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
     McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
     MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
     ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
     PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
-    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginSource, PluginSummary,
-    PluginUninstallParams, ProcessKillParams, ProcessSpawnParams, ProcessWriteStdinParams,
-    ProductAccessMode, ProductAttachment, ProductBackend, ProductDstFoldPolicy,
-    ProductDstGapPolicy, ProductDstPolicy, ProductExtension, ProductFileMatch,
-    ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
+    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginMarketplaceEntry,
+    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
+    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
+    ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
+    ProductFileMatch, ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
     ProductHiveSessionDetail, ProductHiveSessionMutationRequest, ProductHiveSnapshot,
     ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
     ProductMonthlyDayPolicy, ProductOverlapPolicy, ProductProcess, ProductRetryJitter,
@@ -927,6 +928,20 @@ fn schedule_cancel_confirmation_required(current: Option<&str>, schedule_id: &st
     current != Some(schedule_id)
 }
 
+fn marketplace_remove_confirmation_required(current: Option<&str>, marketplace: &str) -> bool {
+    current != Some(marketplace)
+}
+
+fn parse_marketplace_sparse_paths(value: &str) -> Option<Vec<String>> {
+    let paths = value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    (!paths.is_empty()).then_some(paths)
+}
+
 fn default_schedule_timezone() -> String {
     std::env::var("TZ")
         .ok()
@@ -1557,9 +1572,17 @@ pub struct MitsuroApp {
     mcp_add_in_progress: bool,
     /// Plugins from `plugin/list` (flattened marketplace entries).
     plugins: Vec<PluginSummary>,
+    /// Exact Codex marketplace buckets retained for management. Mitsuro leaves
+    /// this empty because its extension inventory has no compatible identity.
+    plugin_marketplaces: Vec<PluginMarketplaceEntry>,
     extensions_state: SurfaceDataState,
     /// Plugin id currently being installed or removed through Codex app-server.
     plugin_mutation_in_progress: Option<String>,
+    marketplace_source_input: Entity<InputState>,
+    marketplace_ref_input: Entity<InputState>,
+    marketplace_sparse_paths_input: Entity<InputState>,
+    marketplace_mutation_in_progress: Option<String>,
+    marketplace_remove_confirmation: Option<String>,
     /// Skill path currently being enabled or disabled through Codex app-server.
     skill_mutation_in_progress: Option<String>,
     /// Environments catalog (fixture demo; no protocol list method).
@@ -2009,6 +2032,13 @@ impl MitsuroApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
         let plugins_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search plugins and skills…"));
+        let marketplace_source_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Git URL or local path"));
+        let marketplace_ref_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Branch or tag (optional)"));
+        let marketplace_sparse_paths_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Sparse paths, comma-separated (optional)")
+        });
         cx.subscribe_in(
             &plugins_search_input,
             window,
@@ -2211,8 +2241,14 @@ impl MitsuroApp {
             mcp_add_args_input,
             mcp_add_in_progress: false,
             plugins: Vec::new(),
+            plugin_marketplaces: Vec::new(),
             extensions_state: SurfaceDataState::Loading,
             plugin_mutation_in_progress: None,
+            marketplace_source_input,
+            marketplace_ref_input,
+            marketplace_sparse_paths_input,
+            marketplace_mutation_in_progress: None,
+            marketplace_remove_confirmation: None,
             skill_mutation_in_progress: None,
             environments: Vec::new(),
             environments_state: SurfaceDataState::Loading,
@@ -2666,9 +2702,7 @@ impl MitsuroApp {
         // Re-hit plugin/list + mcpServerStatus/list + skills/list when Ready so
         // the panel reflects the latest live (or honestly empty) catalog.
         if matches!(mode, ProductMode::Extensions)
-            && (matches!(self.connection, UiConnection::Ready { .. })
-                || self.mcp_servers.is_empty()
-                || self.plugins.is_empty())
+            && (matches!(self.connection, UiConnection::Ready { .. }) || self.is_explicit_fixture())
         {
             self.refresh_extensions(window, cx);
         }
@@ -7659,6 +7693,10 @@ impl MitsuroApp {
         self.plugins = plugins;
     }
 
+    fn apply_plugin_marketplaces(&mut self, marketplaces: Vec<PluginMarketplaceEntry>) {
+        self.plugin_marketplaces = marketplaces;
+    }
+
     /// MCP servers for the Extensions panel.
     pub fn mcp_servers(&self) -> &[McpServerStatus] {
         &self.mcp_servers
@@ -7903,6 +7941,261 @@ impl MitsuroApp {
 
     pub fn plugin_mutation_id(&self) -> Option<&str> {
         self.plugin_mutation_in_progress.as_deref()
+    }
+
+    pub fn plugin_marketplaces(&self) -> &[PluginMarketplaceEntry] {
+        &self.plugin_marketplaces
+    }
+
+    pub fn marketplace_source_input(&self) -> &Entity<InputState> {
+        &self.marketplace_source_input
+    }
+
+    pub fn marketplace_ref_input(&self) -> &Entity<InputState> {
+        &self.marketplace_ref_input
+    }
+
+    pub fn marketplace_sparse_paths_input(&self) -> &Entity<InputState> {
+        &self.marketplace_sparse_paths_input
+    }
+
+    pub fn marketplace_management_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().marketplace_mutations)
+    }
+
+    pub fn marketplace_mutation_id(&self) -> Option<&str> {
+        self.marketplace_mutation_in_progress.as_deref()
+    }
+
+    pub fn marketplace_remove_confirmation(&self) -> Option<&str> {
+        self.marketplace_remove_confirmation.as_deref()
+    }
+
+    pub fn add_plugin_marketplace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.marketplace_mutation_in_progress.is_some() {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            self.status_line = "Plugins · marketplace changes require Codex app-server".into();
+            cx.notify();
+            return;
+        };
+        if !backend.capabilities().marketplace_mutations {
+            self.status_line =
+                "Plugins · this backend does not expose marketplace management".into();
+            cx.notify();
+            return;
+        }
+        let source = self
+            .marketplace_source_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if source.is_empty() || source.chars().any(char::is_control) {
+            self.status_line = "Plugins · enter a Git URL or local marketplace path".into();
+            cx.notify();
+            return;
+        }
+        let ref_name = self
+            .marketplace_ref_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let sparse_paths =
+            parse_marketplace_sparse_paths(&self.marketplace_sparse_paths_input.read(cx).value());
+        let params = MarketplaceAddParams {
+            source,
+            ref_name: (!ref_name.is_empty()).then_some(ref_name),
+            sparse_paths,
+        };
+        let generation = self.backend_generation;
+        self.marketplace_mutation_in_progress = Some("add".to_owned());
+        self.marketplace_remove_confirmation = None;
+        self.status_line = "Plugins · adding marketplace…".into();
+        cx.notify();
+
+        let source_input = self.marketplace_source_input.clone();
+        let ref_input = self.marketplace_ref_input.clone();
+        let sparse_input = self.marketplace_sparse_paths_input.clone();
+        let window_handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .add_marketplace(params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let should_clear = this
+                .update(cx, |app, cx| {
+                    if app.backend_generation != generation {
+                        return false;
+                    }
+                    app.marketplace_mutation_in_progress = None;
+                    let should_clear = match result {
+                        Ok(response) => {
+                            let note = if response.already_added {
+                                "already configured"
+                            } else {
+                                "added"
+                            };
+                            app.status_line =
+                                format!("Plugins · {} {note}", response.marketplace_name).into();
+                            app.kick_extensions_refresh(cx);
+                            true
+                        }
+                        Err(error) => {
+                            app.status_line =
+                                format!("Plugins · could not add marketplace · {error}").into();
+                            false
+                        }
+                    };
+                    cx.notify();
+                    should_clear
+                })
+                .ok()
+                .unwrap_or(false);
+            if should_clear {
+                let _ = window_handle.update(cx, move |_root, window, cx| {
+                    source_input.update(cx, |state, cx| state.set_value("", window, cx));
+                    ref_input.update(cx, |state, cx| state.set_value("", window, cx));
+                    sparse_input.update(cx, |state, cx| state.set_value("", window, cx));
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn upgrade_plugin_marketplaces(&mut self, cx: &mut Context<Self>) {
+        if self.marketplace_mutation_in_progress.is_some() {
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !backend.capabilities().marketplace_mutations {
+            return;
+        }
+        let generation = self.backend_generation;
+        self.marketplace_mutation_in_progress = Some("upgrade".to_owned());
+        self.marketplace_remove_confirmation = None;
+        self.status_line = "Plugins · upgrading marketplaces…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .upgrade_marketplaces(MarketplaceUpgradeParams::default())
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.marketplace_mutation_in_progress = None;
+                match result {
+                    Ok(response) if response.errors.is_empty() => {
+                        app.status_line = format!(
+                            "Plugins · upgraded {} of {} marketplace(s)",
+                            response.upgraded_roots.len(),
+                            response.selected_marketplaces.len()
+                        )
+                        .into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Ok(response) => {
+                        let detail = response
+                            .errors
+                            .iter()
+                            .map(|error| format!("{}: {}", error.marketplace_name, error.message))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        app.status_line =
+                            format!("Plugins · marketplace upgrade partial · {detail}").into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Plugins · could not upgrade marketplaces · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn remove_plugin_marketplace(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.marketplace_mutation_in_progress.is_some() {
+            return;
+        }
+        if marketplace_remove_confirmation_required(
+            self.marketplace_remove_confirmation.as_deref(),
+            &name,
+        ) {
+            self.marketplace_remove_confirmation = Some(name.clone());
+            self.status_line = format!("Plugins · confirm removal of {name}").into();
+            cx.notify();
+            return;
+        }
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !backend.capabilities().marketplace_mutations {
+            return;
+        }
+        let generation = self.backend_generation;
+        self.marketplace_remove_confirmation = None;
+        self.marketplace_mutation_in_progress = Some(format!("remove:{name}"));
+        self.status_line = format!("Plugins · removing {name}…").into();
+        cx.notify();
+        let name_for_request = name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .remove_marketplace(MarketplaceRemoveParams {
+                            marketplace_name: name_for_request,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.marketplace_mutation_in_progress = None;
+                match result {
+                    Ok(response) => {
+                        app.status_line =
+                            format!("Plugins · removed {}", response.marketplace_name).into();
+                        app.kick_extensions_refresh(cx);
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Plugins · could not remove {name} · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn cancel_marketplace_removal(&mut self, cx: &mut Context<Self>) {
+        self.marketplace_remove_confirmation = None;
+        self.status_line = "Plugins · marketplace removal cancelled".into();
+        cx.notify();
     }
 
     pub fn skill_mutations_available(&self) -> bool {
@@ -8526,6 +8819,7 @@ impl MitsuroApp {
     fn refresh_extensions_data(&mut self, announce: bool, cx: &mut Context<Self>) {
         let fixture = self.fixture.clone();
         let backend = self.live_backend();
+        let backend_generation = self.backend_generation;
         let use_live = backend.is_some();
         let use_fixture = self.is_explicit_fixture();
         let was_live = use_live;
@@ -8553,16 +8847,40 @@ impl MitsuroApp {
                                     Vec::new()
                                 }
                             };
-                            let plugins = match backend.list_product_extensions().await {
-                                Ok(extensions) => extensions
-                                    .into_iter()
-                                    .map(plugin_summary_from_product)
-                                    .collect(),
-                                Err(error) => {
-                                    errors.push(format!("plugins: {error}"));
-                                    Vec::new()
-                                }
-                            };
+                            let (plugins, plugin_marketplaces) =
+                                if backend.capabilities().marketplace_mutations {
+                                    match backend
+                                        .list_plugin_marketplaces(PluginListParams::default())
+                                        .await
+                                    {
+                                        Ok(response) => {
+                                            let marketplaces = response.marketplaces;
+                                            let plugins = marketplaces
+                                                .iter()
+                                                .flat_map(|marketplace| {
+                                                    marketplace.plugins.iter().cloned()
+                                                })
+                                                .collect();
+                                            (plugins, marketplaces)
+                                        }
+                                        Err(error) => {
+                                            errors.push(format!("plugins: {error}"));
+                                            (Vec::new(), Vec::new())
+                                        }
+                                    }
+                                } else {
+                                    let plugins = match backend.list_product_extensions().await {
+                                        Ok(extensions) => extensions
+                                            .into_iter()
+                                            .map(plugin_summary_from_product)
+                                            .collect(),
+                                        Err(error) => {
+                                            errors.push(format!("plugins: {error}"));
+                                            Vec::new()
+                                        }
+                                    };
+                                    (plugins, Vec::new())
+                                };
                             let skills = match backend.list_product_skills().await {
                                 Ok(skills) => skills
                                     .into_iter()
@@ -8622,6 +8940,7 @@ impl MitsuroApp {
                             return Ok::<_, String>((
                                 mcp,
                                 plugins,
+                                plugin_marketplaces,
                                 skills,
                                 hooks,
                                 hooks_state,
@@ -8647,13 +8966,14 @@ impl MitsuroApp {
                         .await
                         .map_err(|e| e.to_string())?
                         .data;
-                    let plugins = fixture
+                    let plugin_marketplaces = fixture
                         .plugin_list(PluginListParams::default())
                         .await
                         .map_err(|e| e.to_string())?
-                        .marketplaces
-                        .into_iter()
-                        .flat_map(|m| m.plugins)
+                        .marketplaces;
+                    let plugins = plugin_marketplaces
+                        .iter()
+                        .flat_map(|marketplace| marketplace.plugins.iter().cloned())
                         .collect::<Vec<_>>();
                     let skills = fixture
                         .skills_list(SkillsListParams::default())
@@ -8666,6 +8986,7 @@ impl MitsuroApp {
                     Ok((
                         mcp,
                         plugins,
+                        plugin_marketplaces,
                         skills,
                         Vec::new(),
                         SurfaceDataState::Fixture,
@@ -8679,10 +9000,14 @@ impl MitsuroApp {
                 .await;
 
             let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != backend_generation {
+                    return;
+                }
                 match result {
                     Ok((
                         mcp,
                         plugins,
+                        plugin_marketplaces,
                         skills,
                         hooks,
                         hooks_state,
@@ -8696,6 +9021,7 @@ impl MitsuroApp {
                         let plugins_empty = plugins.is_empty();
                         app.apply_mcp_servers(mcp);
                         app.apply_plugins(plugins);
+                        app.apply_plugin_marketplaces(plugin_marketplaces);
                         app.apply_skills(skills);
                         app.hooks = hooks;
                         app.hooks_state = hooks_state;
@@ -8729,6 +9055,7 @@ impl MitsuroApp {
                     Err(message) => {
                         app.apply_mcp_servers(Vec::new());
                         app.apply_plugins(Vec::new());
+                        app.apply_plugin_marketplaces(Vec::new());
                         app.apply_skills(Vec::new());
                         app.hooks.clear();
                         app.hooks_state = if was_live {
@@ -16462,8 +16789,11 @@ impl MitsuroApp {
         self.pending_mcp_oauth.clear();
         self.mcp_add_in_progress = false;
         self.plugins.clear();
+        self.plugin_marketplaces.clear();
         self.extensions_state = SurfaceDataState::Loading;
         self.plugin_mutation_in_progress = None;
+        self.marketplace_mutation_in_progress = None;
+        self.marketplace_remove_confirmation = None;
         self.skill_mutation_in_progress = None;
         self.expanded_plugin_sections.clear();
         self.goals.clear();
@@ -16662,6 +16992,7 @@ impl MitsuroApp {
                             remote_control,
                             mcp,
                             plugins,
+                            plugin_marketplaces,
                             processes,
                             hive,
                             schedules,
@@ -16856,6 +17187,7 @@ impl MitsuroApp {
                         }
                         app.apply_mcp_servers(mcp);
                         app.apply_plugins(plugins);
+                        app.apply_plugin_marketplaces(plugin_marketplaces);
                         app.extensions_state = SurfaceDataState::Live;
                         // Neither live transport exposes environment/list. Do not invent rows.
                         app.environments.clear();
@@ -18317,6 +18649,7 @@ struct BackendBootstrap {
     remote_control: Result<Option<RemoteControlSnapshot>, String>,
     mcp: Vec<McpServerStatus>,
     plugins: Vec<PluginSummary>,
+    plugin_marketplaces: Vec<PluginMarketplaceEntry>,
     processes: Option<Vec<ProductProcess>>,
     hive: Option<ProductHiveSnapshot>,
     schedules: Option<Vec<ProductSchedule>>,
@@ -18465,12 +18798,30 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             Ok(servers) => servers.into_iter().map(mcp_status_from_product).collect(),
             Err(_) => Vec::new(),
         };
-        let plugins = match b.list_product_extensions().await {
-            Ok(extensions) => extensions
-                .into_iter()
-                .map(plugin_summary_from_product)
-                .collect(),
-            Err(_) => Vec::new(),
+        let (plugins, plugin_marketplaces) = if b.capabilities().marketplace_mutations {
+            match b
+                .list_plugin_marketplaces(PluginListParams::default())
+                .await
+            {
+                Ok(response) => {
+                    let marketplaces = response.marketplaces;
+                    let plugins = marketplaces
+                        .iter()
+                        .flat_map(|marketplace| marketplace.plugins.iter().cloned())
+                        .collect();
+                    (plugins, marketplaces)
+                }
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        } else {
+            let plugins = match b.list_product_extensions().await {
+                Ok(extensions) => extensions
+                    .into_iter()
+                    .map(plugin_summary_from_product)
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            (plugins, Vec::new())
         };
         let processes = b.list_background_processes().await.ok();
         let hive = b.hive_snapshot().await.ok();
@@ -18493,6 +18844,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             remote_control,
             mcp,
             plugins,
+            plugin_marketplaces,
             processes,
             hive,
             schedules,
@@ -18985,6 +19337,28 @@ mod tests {
         ));
         assert_eq!(ScheduleRecurrenceKind::Once.label(), "Once");
         assert_eq!(ScheduleRecurrenceKind::Monthly.label(), "Monthly");
+    }
+
+    #[test]
+    fn marketplace_mutations_preserve_sparse_paths_and_require_remove_confirmation() {
+        assert_eq!(
+            parse_marketplace_sparse_paths("plugins/docs, plugins/pdf\nplugins/sheets"),
+            Some(vec![
+                "plugins/docs".to_owned(),
+                "plugins/pdf".to_owned(),
+                "plugins/sheets".to_owned(),
+            ])
+        );
+        assert_eq!(parse_marketplace_sparse_paths(" , \n "), None);
+        assert!(marketplace_remove_confirmation_required(None, "official"));
+        assert!(marketplace_remove_confirmation_required(
+            Some("personal"),
+            "official"
+        ));
+        assert!(!marketplace_remove_confirmation_required(
+            Some("official"),
+            "official"
+        ));
     }
 
     #[test]

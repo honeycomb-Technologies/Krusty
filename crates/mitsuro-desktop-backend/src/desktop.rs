@@ -631,6 +631,21 @@ impl DesktopBackend {
         }
     }
 
+    /// Read the exact marketplace buckets required by Codex marketplace
+    /// management. Mitsuro exposes a transport-neutral extension catalog but
+    /// has no compatible marketplace identity or mutation contract.
+    pub async fn list_plugin_marketplaces(
+        &self,
+        params: crate::PluginListParams,
+    ) -> Result<crate::PluginListResponse> {
+        match self {
+            Self::Codex(backend) => backend.plugin_list(params).await,
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex marketplace buckets".to_owned(),
+            )),
+        }
+    }
+
     pub async fn upload_feedback(
         &self,
         params: crate::FeedbackUploadParams,

@@ -17,7 +17,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::{input::Input, Icon, IconName, Sizable as _};
-use mitsuro_desktop_backend::{McpServerStatus, PluginSummary, SkillMetadata};
+use mitsuro_desktop_backend::{
+    McpServerStatus, PluginMarketplaceEntry, PluginSummary, SkillMetadata,
+};
 
 use crate::app::{MitsuroApp, PluginsFilter, PluginsSurfaceTab, SurfaceDataState};
 use crate::theme;
@@ -27,6 +29,7 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let colors = theme::colors();
     let mcp = app.mcp_servers().to_vec();
     let plugins = app.plugins().to_vec();
+    let marketplaces = app.plugin_marketplaces().to_vec();
     let skills = app.skills().to_vec();
     let filter = app.plugins_filter();
     let tab = app.plugins_surface_tab();
@@ -35,6 +38,13 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let source = data_state.label();
     let mutations_available = app.plugin_mutations_available();
     let mutating_plugin_id = app.plugin_mutation_id().map(ToOwned::to_owned);
+    let marketplace_management_available = app.marketplace_management_available();
+    let marketplace_mutation = app.marketplace_mutation_id().map(ToOwned::to_owned);
+    let marketplace_remove_confirmation =
+        app.marketplace_remove_confirmation().map(ToOwned::to_owned);
+    let marketplace_source_input = app.marketplace_source_input().clone();
+    let marketplace_ref_input = app.marketplace_ref_input().clone();
+    let marketplace_sparse_paths_input = app.marketplace_sparse_paths_input().clone();
     let skill_mutations_available = app.skill_mutations_available();
     let mutating_skill_id = app.skill_mutation_id().map(ToOwned::to_owned);
     let search_input = app.plugins_search_input().clone();
@@ -76,12 +86,19 @@ pub fn extensions_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
                 .child(match tab {
                     PluginsSurfaceTab::Plugins => plugins_body(
                         &plugins,
+                        &marketplaces,
                         &installed,
                         &mcp,
                         filter,
                         data_state,
                         mutations_available,
                         mutating_plugin_id.as_deref(),
+                        marketplace_management_available,
+                        marketplace_mutation.as_deref(),
+                        marketplace_remove_confirmation.as_deref(),
+                        &marketplace_source_input,
+                        &marketplace_ref_input,
+                        &marketplace_sparse_paths_input,
                         &query,
                         &expanded_sections,
                         cx,
@@ -299,12 +316,19 @@ fn search_field(
 
 fn plugins_body(
     plugins: &[PluginSummary],
+    marketplaces: &[PluginMarketplaceEntry],
     installed: &[PluginSummary],
     mcp: &[McpServerStatus],
     filter: PluginsFilter,
     data_state: SurfaceDataState,
     mutations_available: bool,
     mutating_plugin_id: Option<&str>,
+    marketplace_management_available: bool,
+    marketplace_mutation: Option<&str>,
+    marketplace_remove_confirmation: Option<&str>,
+    marketplace_source_input: &gpui::Entity<gpui_component::input::InputState>,
+    marketplace_ref_input: &gpui::Entity<gpui_component::input::InputState>,
+    marketplace_sparse_paths_input: &gpui::Entity<gpui_component::input::InputState>,
     query: &str,
     expanded_sections: &std::collections::HashSet<String>,
     cx: &mut Context<MitsuroApp>,
@@ -413,8 +437,15 @@ fn plugins_body(
             let personal: Vec<PluginSummary> = strip.to_vec();
             personal_catalog(
                 &personal,
+                marketplaces,
                 mutations_available,
                 mutating_plugin_id,
+                marketplace_management_available,
+                marketplace_mutation,
+                marketplace_remove_confirmation,
+                marketplace_source_input,
+                marketplace_ref_input,
+                marketplace_sparse_paths_input,
                 cx,
             )
             .into_any_element()
@@ -519,6 +550,7 @@ fn installed_strip(installed: &[PluginSummary]) -> impl IntoElement {
         .id("plugins-installed-strip")
         .flex()
         .flex_col()
+        .w_full()
         .gap(px(10.0))
         .child(
             div()
@@ -646,8 +678,15 @@ fn scope_chip(
 
 fn personal_catalog(
     installed: &[PluginSummary],
+    marketplaces: &[PluginMarketplaceEntry],
     mutations_available: bool,
     mutating_plugin_id: Option<&str>,
+    marketplace_management_available: bool,
+    marketplace_mutation: Option<&str>,
+    marketplace_remove_confirmation: Option<&str>,
+    marketplace_source_input: &gpui::Entity<gpui_component::input::InputState>,
+    marketplace_ref_input: &gpui::Entity<gpui_component::input::InputState>,
+    marketplace_sparse_paths_input: &gpui::Entity<gpui_component::input::InputState>,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -673,6 +712,291 @@ fn personal_catalog(
         } else {
             card_grid(&refs, 0, mutations_available, mutating_plugin_id, cx).into_any_element()
         })
+        .when(
+            marketplace_management_available || !marketplaces.is_empty(),
+            |this| {
+                this.child(marketplace_manager(
+                    marketplaces,
+                    marketplace_management_available,
+                    marketplace_mutation,
+                    marketplace_remove_confirmation,
+                    marketplace_source_input,
+                    marketplace_ref_input,
+                    marketplace_sparse_paths_input,
+                    cx,
+                ))
+            },
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn marketplace_manager(
+    marketplaces: &[PluginMarketplaceEntry],
+    available: bool,
+    mutation: Option<&str>,
+    remove_confirmation: Option<&str>,
+    source_input: &gpui::Entity<gpui_component::input::InputState>,
+    ref_input: &gpui::Entity<gpui_component::input::InputState>,
+    sparse_paths_input: &gpui::Entity<gpui_component::input::InputState>,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let busy = mutation.is_some();
+    let upgrade_label = if mutation == Some("upgrade") {
+        "Upgrading…"
+    } else {
+        "Upgrade all"
+    };
+
+    div()
+        .id("marketplace-manager")
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .pt(px(8.0))
+        .border_t_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(section_heading("Marketplaces"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child("Sources used to discover and update plugins."),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("marketplaces-upgrade")
+                        .h(px(28.0))
+                        .px(px(11.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.bg_button_secondary)
+                        .when(available && !busy && !marketplaces.is_empty(), |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(colors.bg_hover))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.upgrade_plugin_marketplaces(cx);
+                                }))
+                        })
+                        .when(!available || busy || marketplaces.is_empty(), |this| {
+                            this.opacity(0.5)
+                        })
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text)
+                        .child(upgrade_label),
+                ),
+        )
+        .children(marketplaces.iter().enumerate().map(|(index, marketplace)| {
+            let name = marketplace.name.clone();
+            let remove_key = format!("remove:{name}");
+            let removing = mutation == Some(remove_key.as_str());
+            let confirming = remove_confirmation == Some(name.as_str());
+            let remove_label = if removing {
+                "Removing…"
+            } else if confirming {
+                "Confirm remove"
+            } else {
+                "Remove"
+            };
+            let name_for_remove = name.clone();
+            div()
+                .id(("marketplace-row", index as u64))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .min_h(px(48.0))
+                .gap(px(12.0))
+                .py(px(7.0))
+                .border_b_1()
+                .border_color(theme::hex_alpha(0xffffff, 0.055))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text)
+                                .w_full()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .w_full()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(
+                                    marketplace
+                                        .path
+                                        .clone()
+                                        .unwrap_or_else(|| "Managed source".to_owned()),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(confirming && !busy, |this| {
+                            this.child(
+                                div()
+                                    .id(("marketplace-cancel-remove", index as u64))
+                                    .h(px(26.0))
+                                    .px(px(9.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(7.0))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.bg_hover))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.cancel_marketplace_removal(cx);
+                                    }))
+                                    .text_xs()
+                                    .text_color(colors.text_secondary)
+                                    .child("Cancel"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id(("marketplace-remove", index as u64))
+                                .h(px(26.0))
+                                .px(px(9.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(7.0))
+                                .border_1()
+                                .border_color(if confirming {
+                                    colors.status_error
+                                } else {
+                                    colors.border
+                                })
+                                .when(available && !busy, |this| {
+                                    this.cursor_pointer()
+                                        .hover(|style| style.bg(colors.bg_hover))
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.remove_plugin_marketplace(
+                                                name_for_remove.clone(),
+                                                cx,
+                                            );
+                                        }))
+                                })
+                                .when(!available || busy, |this| this.opacity(0.5))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if confirming {
+                                    colors.status_error
+                                } else {
+                                    colors.text_secondary
+                                })
+                                .child(remove_label),
+                        ),
+                )
+                .into_any_element()
+        }))
+        .when(available, |this| {
+            this.child(
+                div()
+                    .id("marketplace-add-form")
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .pt(px(4.0))
+                    .child(marketplace_input("marketplace-source", source_input))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(marketplace_input("marketplace-ref", ref_input)),
+                            )
+                            .child(div().flex_1().min_w_0().child(marketplace_input(
+                                "marketplace-sparse-paths",
+                                sparse_paths_input,
+                            ))),
+                    )
+                    .child(
+                        div().flex().flex_row().justify_end().child(
+                            div()
+                                .id("marketplace-add")
+                                .h(px(28.0))
+                                .px(px(12.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(8.0))
+                                .bg(colors.accent)
+                                .when(!busy, |this| {
+                                    this.cursor_pointer()
+                                        .hover(|style| style.opacity(0.9))
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.add_plugin_marketplace(window, cx);
+                                        }))
+                                })
+                                .when(busy, |this| this.opacity(0.5))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.fg_button_primary)
+                                .child(if mutation == Some("add") {
+                                    "Adding…"
+                                } else {
+                                    "Add marketplace"
+                                }),
+                        ),
+                    ),
+            )
+        })
+}
+
+fn marketplace_input(
+    id: &'static str,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .h(px(34.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(theme::hex_alpha(0xffffff, 0.03))
+        .flex()
+        .items_center()
+        .text_sm()
+        .text_color(colors.text)
+        .child(Input::new(input).appearance(false).h(px(28.0)))
 }
 
 /// Max plugin cards shown per marketplace section (bar shows ~6 then "See N more").

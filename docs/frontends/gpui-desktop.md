@@ -70,7 +70,7 @@ live catalog.
 | Account usage/billing | Unsupported; no ChatGPT account projection | Live token summary, all named rate-limit buckets, credits/spend control, workspace messages, confirmed reset redemption, and member owner-nudge actions | Explicit offline fixture snapshot only |
 | Files | Live read-only tree/read/fuzzy adapter; mutations and watches unsupported | Live typed tree/read/fuzzy, create/write/copy/remove, and directory watches | Typed read-only fixture |
 | Processes | Live tracked-process catalog and kill; interactive terminal spawn/stdin/PTY unsupported | Live spawn/stdin/PTY plus selected-thread background-terminal list/clean/terminate | Typed fixture for standalone process flow |
-| Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
+| Extensions/MCP/skills/hooks | Live read-only installed extensions, MCP status, and skills; plugin and marketplace mutations, configuration writes, OAuth, and hooks unsupported | Live catalog, typed plugin install/uninstall, marketplace add/remove/upgrade, MCP OAuth login, HTTP/stdio MCP configuration writes, MCP status, skills, and per-workspace hooks | Typed read-only fixture; no sample hooks |
 | Hive Work | Live catalog plus per-session task/runtime detail; typed dispatch, message, pause/resume, priority, crew, and confirmed cancellation, with idempotent writes and authoritative refresh | Unsupported; no Mitsuro Hive control plane | Local goal/plan behavior only in explicit fixture mode |
 | Hive schedules | Live global schedule catalog; native create/replace plus pause/resume and confirmed cancellation use the complete typed, revisioned, idempotent server contract | Unsupported | Typed fixture UI |
 | Pull requests | No product adapter; explicit unavailable state | No product adapter; explicit unavailable state | No fake catalog |
@@ -127,10 +127,13 @@ their interaction, policy, and refresh lifecycle is implemented against the adap
   remains only for compatibility and explicit fixture testing.
 - The Extensions marketplace renders only backend data. Codex plugin Install/Remove
   actions call typed `plugin/install` and `plugin/uninstall`, disable concurrent
-  mutations, and refresh the live catalog after success. Mitsuro and explicit fixture
-  catalogs are visibly read-only because neither backend exposes a production mutation
-  contract. Search filters the live plugin, skill, and MCP records; expanding a category
-  uses its exact hidden-record count and never pads the catalog with decorative totals.
+  mutations, and refresh the live catalog after success. The Personal view retains exact
+  `plugin/list` marketplace buckets and exposes typed add, upgrade-all, and confirmed
+  remove actions only for Codex. Successful mutations refresh from server authority;
+  no marketplace row is added optimistically. Mitsuro and explicit fixture catalogs are
+  visibly read-only because neither backend exposes a production mutation contract.
+  Search filters the live plugin, skill, and MCP records; expanding a category uses its
+  exact hidden-record count and never pads the catalog with decorative totals.
 - Codex remote-environment registration sends exact `environment/add` parameters after
   local `ws://`/`wss://` validation. Because the protocol returns an empty response and
   has no list method, GPUI retains only successful submissions for the current app
