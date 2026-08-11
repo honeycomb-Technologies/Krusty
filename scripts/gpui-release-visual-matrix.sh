@@ -113,7 +113,7 @@ for backend in "${backends[@]}"; do
     fi
 
     connected_pattern="Connected backend=${backend} "
-    for _ in $(seq 1 200); do
+    for _ in $(seq 1 600); do
       if rg -q --fixed-strings "$connected_pattern" "$log_path"; then
         break
       fi
@@ -128,6 +128,25 @@ for backend in "${backends[@]}"; do
       printf 'Desktop did not connect for backend=%s mode=%s\n' "$backend" "$mode" >&2
       sed -n '1,120p' "$log_path" >&2
       exit 1
+    fi
+
+    if [[ "$mode" == "thread-open" ]]; then
+      for _ in $(seq 1 600); do
+        if rg -q --fixed-strings "thread/open applied" "$log_path"; then
+          break
+        fi
+        if ! kill -0 "$active_pid" 2>/dev/null; then
+          printf 'Desktop exited before thread hydration for backend=%s\n' "$backend" >&2
+          sed -n '1,120p' "$log_path" >&2
+          exit 1
+        fi
+        sleep 0.1
+      done
+      if ! rg -q --fixed-strings "thread/open applied" "$log_path"; then
+        printf 'Thread did not finish hydrating for backend=%s\n' "$backend" >&2
+        sed -n '1,120p' "$log_path" >&2
+        exit 1
+      fi
     fi
 
     # Give post-connect catalog and selected-thread hydration one bounded paint cycle.
@@ -149,4 +168,6 @@ for backend in "${backends[@]}"; do
   done
 done
 
-printf 'Captured %s release visuals in %s\n' "$(find "$output_dir" -maxdepth 1 -type f -name '*.png' | wc -l)" "$output_dir"
+capture_count=$(find "$output_dir" -maxdepth 1 -type f \
+  \( -name 'codex_stdio-*.png' -o -name 'mitsuro_http-*.png' \) | wc -l)
+printf 'Captured %s release visuals in %s\n' "$capture_count" "$output_dir"
