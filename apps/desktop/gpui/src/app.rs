@@ -36,23 +36,23 @@ use mitsuro_desktop_backend::{
     EnvironmentStatusResponse, EnvironmentSummary, ExperimentalFeature,
     ExperimentalFeatureListParams, ExternalAgentConfigDetectParams,
     ExternalAgentConfigImportCompletedNotification, ExternalAgentConfigImportHistory,
-    ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FixtureBackend,
-    FsChangedNotification, FsCopyParams, FsCreateDirectoryParams, FsReadDirectoryEntry,
-    FsReadDirectoryParams, FsReadFileParams, FsRemoveParams, FsUnwatchParams, FsWatchParams,
-    FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult, GetAccountParams,
-    GetAccountRateLimitsResponse, GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse,
-    HookMetadata, HooksListEntry, HooksListParams, InstalledApp, LifecycleNotification,
-    ListMcpServerStatusParams, LiveApprovalBridge, LoginAccountParams, MarketplaceAddParams,
-    MarketplaceRemoveParams, MarketplaceUpgradeParams, McpAuthStatus, McpElicitationMode,
-    McpServerConfigAddParams, McpServerInfo, McpServerOauthLoginCompleted,
-    McpServerOauthLoginParams, McpServerStatus, McpServerTransportConfig, MergeStrategy,
-    MessageRole, ModeKind, ModelInfo, ModelListParams, ModelProviderCapabilitiesReadParams,
-    ModelProviderCapabilitiesReadResponse, ModelServiceTier, PendingApproval,
-    PendingMcpElicitation, PendingUserInput, PermissionProfileListParams, PermissionProfileSummary,
-    PlanType, PluginInstallParams, PluginInterface, PluginListParams, PluginMarketplaceEntry,
-    PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams, ProcessSpawnParams,
-    ProcessWriteStdinParams, ProductAccessMode, ProductAttachment, ProductBackend,
-    ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
+    ExternalAgentConfigImportParams, ExternalAgentConfigMigrationItem, FeedbackUploadParams,
+    FixtureBackend, FsChangedNotification, FsCopyParams, FsCreateDirectoryParams,
+    FsReadDirectoryEntry, FsReadDirectoryParams, FsReadFileParams, FsRemoveParams, FsUnwatchParams,
+    FsWatchParams, FsWriteFileParams, FuzzyFileSearchParams, FuzzyFileSearchResult,
+    GetAccountParams, GetAccountRateLimitsResponse, GetAccountTokenUsageResponse,
+    GetWorkspaceMessagesResponse, GuardianApprovalReviewNotification, HookMetadata, HooksListEntry,
+    HooksListParams, InstalledApp, LifecycleNotification, ListMcpServerStatusParams,
+    LiveApprovalBridge, LoginAccountParams, MarketplaceAddParams, MarketplaceRemoveParams,
+    MarketplaceUpgradeParams, McpAuthStatus, McpElicitationMode, McpServerConfigAddParams,
+    McpServerInfo, McpServerOauthLoginCompleted, McpServerOauthLoginParams, McpServerStatus,
+    McpServerTransportConfig, MergeStrategy, MessageRole, ModeKind, ModelInfo, ModelListParams,
+    ModelProviderCapabilitiesReadParams, ModelProviderCapabilitiesReadResponse, ModelServiceTier,
+    PendingApproval, PendingMcpElicitation, PendingUserInput, PermissionProfileListParams,
+    PermissionProfileSummary, PlanType, PluginInstallParams, PluginInterface, PluginListParams,
+    PluginMarketplaceEntry, PluginSource, PluginSummary, PluginUninstallParams, ProcessKillParams,
+    ProcessSpawnParams, ProcessWriteStdinParams, ProductAccessMode, ProductAttachment,
+    ProductBackend, ProductDstFoldPolicy, ProductDstGapPolicy, ProductDstPolicy, ProductExtension,
     ProductFileMatch, ProductHiveDispatchRequest, ProductHivePriority, ProductHiveSessionAction,
     ProductHiveSessionDetail, ProductHiveSessionMutationRequest, ProductHiveSnapshot,
     ProductMcpServer, ProductMisfireConfig, ProductMisfirePolicy, ProductModel, ProductModelKey,
@@ -833,6 +833,62 @@ pub enum SurfaceDataState {
     Error,
 }
 
+/// Categories exposed by the reference desktop's `/feedback` dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackCategory {
+    Bug,
+    BadResult,
+    GoodResult,
+    SafetyCheck,
+    Other,
+}
+
+impl FeedbackCategory {
+    pub const ALL: [Self; 5] = [
+        Self::Bug,
+        Self::BadResult,
+        Self::GoodResult,
+        Self::SafetyCheck,
+        Self::Other,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bug => "Bug",
+            Self::BadResult => "Bad result",
+            Self::GoodResult => "Good result",
+            Self::SafetyCheck => "Safety check",
+            Self::Other => "Other",
+        }
+    }
+
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Bug => "bug",
+            Self::BadResult => "bad-result",
+            Self::GoodResult => "good-result",
+            Self::SafetyCheck => "safety_check",
+            Self::Other => "other",
+        }
+    }
+}
+
+fn is_feedback_slash_command(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("/feedback")
+}
+
+fn is_guardian_approve_slash_command(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("/approve")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuardianDeniedAction {
+    pub id: String,
+    pub title: String,
+    pub rationale: Option<String>,
+    event: serde_json::Value,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MemorySettingsSnapshot {
     generate_memories: bool,
@@ -1518,6 +1574,18 @@ pub struct MitsuroApp {
     permission_profiles_state: SurfaceDataState,
     /// Managed policy requirements from `configRequirements/read`.
     config_requirements: Option<ConfigRequirements>,
+    /// Reference `/feedback` workflow. This is available only when the active
+    /// Codex backend and managed policy both permit `feedback/upload`.
+    feedback_dialog_open: bool,
+    feedback_category: Option<FeedbackCategory>,
+    feedback_details_input: Entity<InputState>,
+    feedback_include_logs: bool,
+    feedback_upload_in_progress: bool,
+    /// Live denied auto-review events, keyed by raw Codex thread id. These are
+    /// the only events eligible for the reference `/approve` one-retry action.
+    guardian_denials: std::collections::HashMap<String, Vec<GuardianDeniedAction>>,
+    guardian_dialog_open: bool,
+    guardian_approval_in_progress: Option<String>,
     /// Active provider tool gates from `modelProvider/capabilities/read`.
     model_provider_capabilities: Option<ModelProviderCapabilitiesReadResponse>,
     /// Effective named profile from `config.default_permissions`, when present.
@@ -2030,6 +2098,22 @@ impl MitsuroApp {
         });
         let settings_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        let feedback_details_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("What happened? Include the result you expected.")
+                .multi_line(true)
+        });
+        cx.subscribe_in(
+            &feedback_details_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let _ = app;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let plugins_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search plugins and skills…"));
         let marketplace_source_input =
@@ -2201,6 +2285,14 @@ impl MitsuroApp {
             permission_profiles: Vec::new(),
             permission_profiles_state: SurfaceDataState::Loading,
             config_requirements: None,
+            feedback_dialog_open: false,
+            feedback_category: None,
+            feedback_details_input,
+            feedback_include_logs: true,
+            feedback_upload_in_progress: false,
+            guardian_denials: std::collections::HashMap::new(),
+            guardian_dialog_open: false,
+            guardian_approval_in_progress: None,
             model_provider_capabilities: None,
             config_default_permissions: None,
             full_access_confirmation_open: false,
@@ -6065,6 +6157,318 @@ impl MitsuroApp {
         if value != self.settings_search_query {
             self.settings_search_query = value;
         }
+    }
+
+    pub fn feedback_dialog_open(&self) -> bool {
+        self.feedback_dialog_open
+    }
+
+    pub fn feedback_details_input(&self) -> &Entity<InputState> {
+        &self.feedback_details_input
+    }
+
+    pub fn feedback_category(&self) -> Option<FeedbackCategory> {
+        self.feedback_category
+    }
+
+    pub fn feedback_include_logs(&self) -> bool {
+        self.feedback_include_logs
+    }
+
+    pub fn feedback_upload_in_progress(&self) -> bool {
+        self.feedback_upload_in_progress
+    }
+
+    pub fn feedback_submission_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().feedback_upload)
+            && self
+                .config_requirements
+                .as_ref()
+                .and_then(|requirements| requirements.feedback.as_ref())
+                .and_then(|feedback| feedback.enabled)
+                != Some(false)
+    }
+
+    pub fn feedback_submit_enabled(&self, cx: &gpui::App) -> bool {
+        self.feedback_submission_available()
+            && self.feedback_category.is_some()
+            && !self.feedback_upload_in_progress
+            && !self
+                .feedback_details_input
+                .read(cx)
+                .value()
+                .trim()
+                .is_empty()
+            && !self.feedback_details_input.read(cx).value().contains('\0')
+    }
+
+    fn open_feedback_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.feedback_submission_available() {
+            self.status_line = match self.active_backend_kind() {
+                Some(BackendKind::MitsuroHttp) => {
+                    "Feedback upload is not exposed by the Mitsuro server.".into()
+                }
+                _ => "Feedback upload is unavailable for this backend or managed policy.".into(),
+            };
+            cx.notify();
+            return;
+        }
+        self.feedback_category = None;
+        self.feedback_include_logs = true;
+        self.feedback_upload_in_progress = false;
+        self.feedback_dialog_open = true;
+        self.feedback_details_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.status_line = "Feedback · choose a category and describe what happened.".into();
+        cx.notify();
+    }
+
+    pub fn close_feedback_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.feedback_upload_in_progress {
+            return;
+        }
+        self.feedback_dialog_open = false;
+        self.feedback_category = None;
+        self.status_line = "Feedback cancelled.".into();
+        cx.notify();
+    }
+
+    pub fn select_feedback_category(&mut self, category: FeedbackCategory, cx: &mut Context<Self>) {
+        if !self.feedback_upload_in_progress {
+            self.feedback_category = Some(category);
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_feedback_logs(&mut self, cx: &mut Context<Self>) {
+        if !self.feedback_upload_in_progress {
+            self.feedback_include_logs = !self.feedback_include_logs;
+            cx.notify();
+        }
+    }
+
+    pub fn submit_feedback(&mut self, cx: &mut Context<Self>) {
+        if !self.feedback_submit_enabled(cx) {
+            self.status_line =
+                "Feedback · choose a category and enter the required details.".into();
+            cx.notify();
+            return;
+        }
+        let Some(category) = self.feedback_category else {
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !backend.capabilities().feedback_upload {
+            return;
+        }
+        let reason = self
+            .feedback_details_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let thread_id = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.live_session_id(thread_id))
+            .filter(|session| session.backend == BackendKind::CodexStdio)
+            .map(|session| session.raw);
+        let mut tags = BTreeMap::new();
+        tags.insert(
+            "app_version".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        );
+        if let Some(thread_id) = thread_id.as_ref() {
+            tags.insert("client_thread_id".to_owned(), thread_id.clone());
+        }
+        let mut params = FeedbackUploadParams::new(category.wire_value());
+        params.reason = Some(reason);
+        params.thread_id = thread_id;
+        params.include_logs = Some(self.feedback_include_logs);
+        params.tags = Some(tags);
+
+        let generation = self.backend_generation;
+        let window_handle = self.window_handle;
+        let details_input = self.feedback_details_input.clone();
+        self.feedback_upload_in_progress = true;
+        self.status_line = "Feedback · uploading…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .upload_feedback(params)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let uploaded = this
+                .update(cx, |app, cx| {
+                    if app.backend_generation != generation {
+                        return false;
+                    }
+                    app.feedback_upload_in_progress = false;
+                    match result {
+                        Ok(response) => {
+                            app.feedback_dialog_open = false;
+                            app.feedback_category = None;
+                            app.status_line =
+                                format!("Feedback uploaded · {}", response.thread_id).into();
+                            cx.notify();
+                            true
+                        }
+                        Err(error) => {
+                            app.status_line =
+                                format!("Feedback could not be uploaded · {error}").into();
+                            cx.notify();
+                            false
+                        }
+                    }
+                })
+                .ok()
+                .unwrap_or(false);
+            if uploaded {
+                let _ = window_handle.update(cx, move |_root, window, cx| {
+                    details_input.update(cx, |state, cx| state.set_value("", window, cx));
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn guardian_dialog_open(&self) -> bool {
+        self.guardian_dialog_open
+    }
+
+    pub fn guardian_approval_in_progress(&self) -> Option<&str> {
+        self.guardian_approval_in_progress.as_deref()
+    }
+
+    pub fn selected_guardian_denials(&self) -> &[GuardianDeniedAction] {
+        self.selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.live_session_id(thread_id))
+            .and_then(|session| self.guardian_denials.get(&session.raw))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn guardian_approval_available(&self) -> bool {
+        matches!(self.connection, UiConnection::Ready { .. })
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.capabilities().guardian_overrides)
+            && self
+                .selected_thread
+                .as_deref()
+                .and_then(|thread_id| self.live_session_id(thread_id))
+                .is_some_and(|session| session.backend == BackendKind::CodexStdio)
+    }
+
+    fn open_guardian_dialog(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.guardian_approval_available() {
+            self.status_line = match self.active_backend_kind() {
+                Some(BackendKind::MitsuroHttp) => {
+                    "Auto-review retry approval is not exposed by the Mitsuro server.".into()
+                }
+                _ => "Auto-review retry approval is unavailable for this conversation.".into(),
+            };
+            cx.notify();
+            return false;
+        }
+        if self.selected_guardian_denials().is_empty() {
+            self.status_line = "Approve · no recent auto-review denials are eligible.".into();
+            cx.notify();
+            return false;
+        }
+        self.guardian_dialog_open = true;
+        self.status_line = "Approve · select one denied action for a single retry.".into();
+        cx.notify();
+        true
+    }
+
+    pub fn close_guardian_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.guardian_approval_in_progress.is_some() {
+            return;
+        }
+        self.guardian_dialog_open = false;
+        self.status_line = "Approve cancelled.".into();
+        cx.notify();
+    }
+
+    pub fn approve_guardian_denial(&mut self, review_id: String, cx: &mut Context<Self>) {
+        if self.guardian_approval_in_progress.is_some() {
+            return;
+        }
+        let Some(session) = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.live_session_id(thread_id))
+            .filter(|session| session.backend == BackendKind::CodexStdio)
+        else {
+            return;
+        };
+        let Some(denial) = self
+            .guardian_denials
+            .get(&session.raw)
+            .and_then(|denials| denials.iter().find(|denial| denial.id == review_id))
+            .cloned()
+        else {
+            self.status_line = "Approve · that denial is no longer eligible.".into();
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            return;
+        };
+        if !backend.capabilities().guardian_overrides {
+            return;
+        }
+        let generation = self.backend_generation;
+        let raw_thread_id = session.raw.clone();
+        self.guardian_approval_in_progress = Some(review_id.clone());
+        self.status_line = "Approve · recording one retry…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .approve_guardian_denied_action(&session, denial.event)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.backend_generation != generation {
+                    return;
+                }
+                app.guardian_approval_in_progress = None;
+                match result {
+                    Ok(_) => {
+                        if let Some(denials) = app.guardian_denials.get_mut(&raw_thread_id) {
+                            denials.retain(|denial| denial.id != review_id);
+                        }
+                        app.guardian_dialog_open = false;
+                        app.status_line =
+                            "Approval recorded for one retry; auto-review still applies.".into();
+                    }
+                    Err(error) => {
+                        app.status_line =
+                            format!("Could not record auto-review approval · {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn settings_toggle(&self, key: &str, default: bool) -> bool {
@@ -14171,6 +14575,33 @@ impl MitsuroApp {
     ) {
         let text = input.read(cx).value().to_string();
         let trimmed = text.trim();
+        if is_guardian_approve_slash_command(trimmed) {
+            if !self.composer_attachments.is_empty() {
+                self.status_line = "Attachments cannot be added to the /approve command.".into();
+                cx.notify();
+                return;
+            }
+            if self.open_guardian_dialog(cx) {
+                input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+            }
+            return;
+        }
+        if is_feedback_slash_command(trimmed) {
+            if !self.composer_attachments.is_empty() {
+                self.status_line = "Attachments cannot be added to the /feedback command.".into();
+                cx.notify();
+                return;
+            }
+            if self.feedback_submission_available() {
+                input.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+            }
+            self.open_feedback_dialog(window, cx);
+            return;
+        }
         if let Some(prompt) = parse_side_command(trimmed) {
             if !self.composer_attachments.is_empty() {
                 self.status_line = "Attachments cannot be added to the /side command.".into();
@@ -16152,6 +16583,38 @@ impl MitsuroApp {
                 };
             }
         }
+        if event.method == "item/autoApprovalReview/completed" {
+            match event.params.clone().and_then(|params| {
+                serde_json::from_value::<GuardianApprovalReviewNotification>(params).ok()
+            }) {
+                Some(notification) => {
+                    let denials = self
+                        .guardian_denials
+                        .entry(notification.thread_id.clone())
+                        .or_default();
+                    denials.retain(|denial| denial.id != notification.review_id);
+                    if let (Some(event), Some(title)) = (
+                        notification.denied_assessment_event(),
+                        notification.action_title(),
+                    ) {
+                        denials.insert(
+                            0,
+                            GuardianDeniedAction {
+                                id: notification.review_id,
+                                title,
+                                rationale: notification.review.rationale,
+                                event,
+                            },
+                        );
+                        denials.truncate(10);
+                    }
+                }
+                None => {
+                    self.status_line =
+                        "Auto-review · ignored malformed completion notification".into();
+                }
+            }
+        }
 
         let login_completion = account_login_completion(&event);
         if let Some(completion) = login_completion.as_ref() {
@@ -16733,6 +17196,13 @@ impl MitsuroApp {
             BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
         };
         self.config_requirements = None;
+        self.feedback_dialog_open = false;
+        self.feedback_category = None;
+        self.feedback_include_logs = true;
+        self.feedback_upload_in_progress = false;
+        self.guardian_denials.clear();
+        self.guardian_dialog_open = false;
+        self.guardian_approval_in_progress = None;
         self.model_provider_capabilities = None;
         self.config_default_permissions = None;
         self.full_access_confirmation_open = false;
@@ -19048,6 +19518,7 @@ impl Render for MitsuroApp {
 
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(colors.bg_under)
@@ -19067,6 +19538,12 @@ impl Render for MitsuroApp {
                     })
                     .child(components::main_column(self, &self.composer_input, cx)),
             )
+            .when(self.feedback_dialog_open(), |this| {
+                this.child(components::feedback_dialog(self, cx))
+            })
+            .when(self.guardian_dialog_open(), |this| {
+                this.child(components::guardian_dialog(self, cx))
+            })
             .when_some(
                 gpui_component::Root::render_notification_layer(window, cx),
                 |this, layer| this.child(layer),
@@ -19136,6 +19613,21 @@ mod tests {
         assert_eq!(parse_side_command("/sideways"), None);
         assert_eq!(parse_side_command("please /side"), None);
         assert_eq!(parse_side_command("/SIDE"), None);
+    }
+
+    #[test]
+    fn feedback_command_and_categories_match_the_reference_contract() {
+        assert!(is_feedback_slash_command("/feedback"));
+        assert!(is_feedback_slash_command("  /FEEDBACK  "));
+        assert!(!is_feedback_slash_command("/feedback extra"));
+        assert!(!is_feedback_slash_command("send /feedback"));
+        assert!(is_guardian_approve_slash_command("/approve"));
+        assert!(is_guardian_approve_slash_command(" /APPROVE "));
+        assert!(!is_guardian_approve_slash_command("/approve recent"));
+        assert_eq!(
+            FeedbackCategory::ALL.map(FeedbackCategory::wire_value),
+            ["bug", "bad-result", "good-result", "safety_check", "other"]
+        );
     }
 
     #[test]

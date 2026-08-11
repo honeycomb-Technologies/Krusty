@@ -84,7 +84,7 @@ impl LifecycleNotification {
             family,
             severity,
             title: notification_title(method),
-            detail: notification_detail(params),
+            detail: notification_detail(method, params),
             thread_id,
             turn_id,
             item_id,
@@ -152,6 +152,8 @@ fn notification_title(method: &str) -> String {
         "configWarning" => "Configuration warning".to_owned(),
         "deprecationNotice" => "Deprecation notice".to_owned(),
         "guardianWarning" => "Guardian warning".to_owned(),
+        "item/autoApprovalReview/started" => "Auto-reviewing".to_owned(),
+        "item/autoApprovalReview/completed" => "Auto-review completed".to_owned(),
         "windows/worldWritableWarning" => "World-writable directory warning".to_owned(),
         "error" => "Codex error".to_owned(),
         "warning" => "Codex warning".to_owned(),
@@ -169,10 +171,30 @@ fn notification_title(method: &str) -> String {
     }
 }
 
-fn notification_detail(params: Option<&Value>) -> String {
+fn notification_detail(method: &str, params: Option<&Value>) -> String {
     let Some(params) = params else {
         return String::new();
     };
+    if matches!(
+        method,
+        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed"
+    ) {
+        if let Some(rationale) = params
+            .get("review")
+            .and_then(|review| review.get("rationale"))
+            .and_then(Value::as_str)
+            .filter(|rationale| !rationale.is_empty())
+        {
+            return rationale.to_owned();
+        }
+        if let Some(status) = params
+            .get("review")
+            .and_then(|review| review.get("status"))
+            .and_then(Value::as_str)
+        {
+            return status.to_owned();
+        }
+    }
     for key in [
         "message",
         "summary",
@@ -247,5 +269,26 @@ mod tests {
                 .unwrap();
         assert!(!event.is_transcript_activity());
         assert_eq!(event.family, NotificationFamily::Mcp);
+    }
+
+    #[test]
+    fn auto_review_completion_uses_the_server_rationale() {
+        let params = serde_json::json!({
+            "threadId": "t1",
+            "turnId": "u1",
+            "review": {
+                "status": "denied",
+                "rationale": "The command would write outside the workspace"
+            }
+        });
+        let event =
+            LifecycleNotification::from_known("item/autoApprovalReview/completed", Some(&params))
+                .unwrap();
+        assert_eq!(event.title, "Auto-review completed");
+        assert_eq!(
+            event.detail,
+            "The command would write outside the workspace"
+        );
+        assert!(event.is_transcript_activity());
     }
 }

@@ -66,6 +66,9 @@ fn codex_composer(
         .flex()
         .flex_col()
         .gap(px(10.0))
+        .when_some(composer_command_notice(app), |this, notice| {
+            this.child(command_notice(notice))
+        })
         .when(show_usage, |this| this.child(usage_card(cx)))
         // Composer shell — full chrome on open thread
         .child(
@@ -224,6 +227,9 @@ fn chat_slim_composer(
         .flex()
         .flex_col()
         .items_center()
+        .when_some(composer_command_notice(app), |this, notice| {
+            this.child(command_notice(notice))
+        })
         .when(!app.composer_attachments().is_empty(), |this| {
             this.child(attachment_chips(app, cx))
         })
@@ -338,6 +344,10 @@ fn chat_thread_composer(
         .pt(px(4.0))
         .flex()
         .flex_col()
+        .gap(px(8.0))
+        .when_some(composer_command_notice(app), |this, notice| {
+            this.child(command_notice(notice))
+        })
         .child(
             div()
                 .flex()
@@ -438,6 +448,38 @@ fn chat_thread_composer(
                         }),
                 ),
         )
+}
+
+fn composer_command_notice(app: &MitsuroApp) -> Option<String> {
+    let status = app.status_line().as_ref();
+    [
+        "Feedback upload is not exposed",
+        "Feedback upload is unavailable",
+        "Auto-review retry approval is not exposed",
+        "Auto-review retry approval is unavailable",
+        "Approve · no recent auto-review denials",
+        "Attachments cannot be added to the /feedback command",
+        "Attachments cannot be added to the /approve command",
+    ]
+    .into_iter()
+    .any(|prefix| status.starts_with(prefix))
+    .then(|| status.to_owned())
+}
+
+fn command_notice(notice: String) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id("composer-command-notice")
+        .w_full()
+        .px(px(10.0))
+        .py(px(7.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(theme::hex_alpha(0xffffff, 0.025))
+        .text_xs()
+        .text_color(colors.text_secondary)
+        .child(notice)
 }
 
 fn attachment_chips(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {

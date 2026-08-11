@@ -137,6 +137,7 @@ pub use fs::{
     FuzzyFileSearchSessionUpdateParams, FuzzyFileSearchSessionUpdateResponse, FIXTURE_PROJECT_ROOT,
 };
 pub use guardian::{
+    GuardianApprovalReview, GuardianApprovalReviewNotification, GuardianApprovalReviewStatus,
     ThreadApproveGuardianDeniedActionParams, ThreadApproveGuardianDeniedActionResponse,
 };
 pub use hooks::{

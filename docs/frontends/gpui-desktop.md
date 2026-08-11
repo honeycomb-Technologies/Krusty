@@ -104,8 +104,10 @@ add/remove/upgrade, MCP resource read, plugin skill read, plugin share
 list/save/update/delete, and Guardian denied-action approval. Of the remaining raw
 methods, two are Windows-sandbox-only and 12 appear only in the generated inventory or
 unused reference modules; their exact names are asserted by the matrix test. Typed
-transport coverage is not feature-surface completion: controls remain disabled until
-their interaction, policy, and refresh lifecycle is implemented against the adapter.
+transport coverage is not feature-surface completion. In particular,
+`mcpServer/resource/read` serves the reference client's MCP-app runtime; it is not a
+standalone resource catalog. A native MCP-app host, including resource watch/query and
+widget rendering, remains a separate parity requirement.
 
 ## Established recovery baseline
 
@@ -181,6 +183,16 @@ their interaction, policy, and refresh lifecycle is implemented against the adap
   before preserving its model, policy, permission, workspace, and instruction context.
   Ambient MCP startup-status updates refresh Extensions state without being inserted as
   faux chat transcript rows.
+- The composer recognizes the reference `/feedback` command without sending it as a
+  chat turn. Codex presents the five reference categories, requires details, defaults
+  session-log inclusion on, and calls typed `feedback/upload`; validation never submits
+  external feedback. Mitsuro reports feedback upload as unsupported because its HTTP
+  API has no equivalent contract.
+- The reference `/approve` command is driven only by live
+  `item/autoApprovalReview/completed` denials. GPUI keeps at most ten eligible actions
+  per Codex thread and sends the exact server assessment event through typed
+  `thread/approveGuardianDeniedAction` for one retry. It never invents denials, and
+  Mitsuro reports the operation as unsupported.
 - Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
   visibility, and archived-recents visibility can mutate the privacy-safe local
   preference store; Full access and realtime voice retain their specialized live paths.
