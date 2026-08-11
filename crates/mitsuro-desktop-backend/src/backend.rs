@@ -80,10 +80,10 @@ use crate::protocol::{
     ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadListParams,
     ThreadListResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadSearchParams, ThreadSearchResponse, ThreadSetNameParams,
-    ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
-    ThreadUnarchiveResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnSteerParams, TurnSteerResponse,
+    ThreadSetNameResponse, ThreadShellCommandParams, ThreadShellCommandResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
+    ThreadUnsubscribeResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 use crate::remote_control::{
     RemoteControlClientsListParams, RemoteControlClientsListResponse,
@@ -376,6 +376,18 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<ThreadCompactStartResponse> {
         Err(crate::types::AgentError::NotImplemented(
             "thread/compact/start is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    /// Execute a user-authored command through the loaded thread's configured shell.
+    /// The command runs unsandboxed on the app-server host and streams its result as
+    /// normal command-execution lifecycle notifications.
+    async fn thread_shell_command(
+        &self,
+        _params: ThreadShellCommandParams,
+    ) -> Result<ThreadShellCommandResponse> {
+        Err(crate::types::AgentError::NotImplemented(
+            "thread shell commands are not implemented by this backend".to_owned(),
         ))
     }
 

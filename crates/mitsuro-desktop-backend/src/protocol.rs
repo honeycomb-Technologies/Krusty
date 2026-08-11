@@ -1234,6 +1234,31 @@ impl ThreadCompactStartParams {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadCompactStartResponse {}
 
+/// Execute a user-authored command through the loaded thread's configured shell.
+///
+/// This is Codex's host-local shell escape hatch. It preserves shell syntax and
+/// intentionally does not inherit the thread sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadShellCommandParams {
+    pub thread_id: String,
+    pub command: String,
+}
+
+impl ThreadShellCommandParams {
+    pub fn new(thread_id: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            command: command.into(),
+        }
+    }
+}
+
+/// Empty acknowledgement returned after Codex accepts the shell command.
+/// Command output and completion continue over thread lifecycle notifications.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadShellCommandResponse {}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ReviewDelivery {
@@ -3364,6 +3389,24 @@ mod p9_protocol_shape_tests {
         let value = serde_json::to_value(ThreadCompactStartParams::new("thread-1")).unwrap();
         assert_eq!(value, serde_json::json!({"threadId": "thread-1"}));
         let _: ThreadCompactStartResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    }
+
+    #[test]
+    fn thread_shell_command_matches_generated_contract() {
+        let value = serde_json::to_value(ThreadShellCommandParams::new(
+            "thread-1",
+            "printf 'one\\ntwo\\n' | tail -n 1",
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "threadId": "thread-1",
+                "command": "printf 'one\\ntwo\\n' | tail -n 1"
+            })
+        );
+        assert!(value.get("thread_id").is_none());
+        let _: ThreadShellCommandResponse = serde_json::from_value(serde_json::json!({})).unwrap();
     }
 
     #[test]

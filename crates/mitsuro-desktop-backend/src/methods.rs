@@ -254,6 +254,7 @@ pub const TYPED_CLIENT_METHODS: &[&str] = &[
     "thread/search",
     "thread/searchOccurrences",
     "thread/settings/update",
+    "thread/shellCommand",
     "thread/start",
     "thread/turns/list",
     "thread/unarchive",
@@ -380,7 +381,7 @@ mod tests {
 
     #[test]
     fn every_method_has_honest_typed_or_raw_only_coverage() {
-        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 106);
+        assert_eq!(TYPED_CLIENT_METHOD_COUNT, 107);
         assert!(
             TYPED_CLIENT_METHODS
                 .windows(2)

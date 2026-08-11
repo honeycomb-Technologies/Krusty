@@ -40,8 +40,9 @@ use crate::{
     ThreadRealtimeAppendTextParams, ThreadRealtimeAppendTextResponse,
     ThreadRealtimeListVoicesParams, ThreadRealtimeListVoicesResponse, ThreadRealtimeStartParams,
     ThreadRealtimeStartResponse, ThreadRealtimeStopParams, ThreadRealtimeStopResponse,
-    ThreadSearchOccurrence, ThreadTurnItemsView, ThreadTurnsListParams, ThreadTurnsSortDirection,
-    TurnStartParams, TurnStreamEvent,
+    ThreadSearchOccurrence, ThreadShellCommandParams, ThreadShellCommandResponse,
+    ThreadTurnItemsView, ThreadTurnsListParams, ThreadTurnsSortDirection, TurnStartParams,
+    TurnStreamEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -95,6 +96,7 @@ pub struct BackendCapabilities {
     pub file_watches: bool,
     pub processes: bool,
     pub command_exec: bool,
+    pub thread_shell_commands: bool,
     pub background_terminals: bool,
     pub tracked_process_kill: bool,
     pub extensions: bool,
@@ -152,6 +154,7 @@ impl BackendCapabilities {
             file_watches: true,
             processes: true,
             command_exec: true,
+            thread_shell_commands: true,
             background_terminals: true,
             tracked_process_kill: false,
             extensions: true,
@@ -212,6 +215,7 @@ impl BackendCapabilities {
             // the native terminal panel.
             processes: false,
             command_exec: false,
+            thread_shell_commands: false,
             background_terminals: false,
             tracked_process_kill: true,
             extensions: true,
@@ -534,6 +538,30 @@ impl DesktopBackend {
             Self::Codex(backend) => backend.thread_rollback(params).await,
             Self::Mitsuro(_) => Err(AgentError::NotImplemented(
                 "Mitsuro HTTP does not expose destructive turn rollback".to_owned(),
+            )),
+        }
+    }
+
+    /// Start Codex's host-local user shell command for a backend-qualified thread.
+    /// The empty response only acknowledges launch; output is delivered through the
+    /// existing lifecycle notification stream.
+    pub async fn start_thread_shell_command(
+        &self,
+        session: &BackendSessionId,
+        command: impl Into<String>,
+    ) -> Result<ThreadShellCommandResponse> {
+        self.ensure_session_origin(session)?;
+        match self {
+            Self::Codex(backend) => {
+                backend
+                    .thread_shell_command(ThreadShellCommandParams::new(
+                        session.raw.clone(),
+                        command,
+                    ))
+                    .await
+            }
+            Self::Mitsuro(_) => Err(AgentError::NotImplemented(
+                "Mitsuro HTTP does not expose Codex host-local shell commands".to_owned(),
             )),
         }
     }
@@ -1295,6 +1323,8 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().processes);
         assert!(BackendCapabilities::codex().command_exec);
         assert!(!BackendCapabilities::mitsuro().command_exec);
+        assert!(BackendCapabilities::codex().thread_shell_commands);
+        assert!(!BackendCapabilities::mitsuro().thread_shell_commands);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
         assert!(BackendCapabilities::mitsuro().image_attachments);
@@ -1401,6 +1431,24 @@ mod tests {
                 &mitsuro_session,
                 ThreadBackgroundTerminalsListParams::new("ignored"),
             )
+            .await
+            .expect_err("cross-backend session must be rejected before transport");
+        assert!(error.to_string().contains("belongs to mitsuro-http"));
+    }
+
+    #[tokio::test]
+    async fn thread_shell_commands_reject_mitsuro_and_cross_backend_sessions_before_io() {
+        let mitsuro = DesktopBackend::Mitsuro(Arc::new(MitsuroServerBackend::new()));
+        let mitsuro_session = BackendSessionId::new(BackendKind::MitsuroHttp, "mitsuro-thread");
+        let error = mitsuro
+            .start_thread_shell_command(&mitsuro_session, "pwd")
+            .await
+            .expect_err("Mitsuro must reject Codex host-local shell commands");
+        assert!(matches!(error, AgentError::NotImplemented(_)));
+
+        let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
+        let error = codex
+            .start_thread_shell_command(&mitsuro_session, "pwd")
             .await
             .expect_err("cross-backend session must be rejected before transport");
         assert!(error.to_string().contains("belongs to mitsuro-http"));

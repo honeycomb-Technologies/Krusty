@@ -97,8 +97,8 @@ The desktop negotiates experimental APIs because its process, environment, realt
 and background-terminal surfaces require them. Fixture `call_raw` no longer manufactures
 generic success payloads.
 
-The executable client-method coverage matrix currently identifies 106 typed adapters
-and 27 raw-transport-only methods. The reviewed reference client uses 13 of those raw
+The executable client-method coverage matrix currently identifies 107 typed adapters
+and 26 raw-transport-only methods. The reviewed reference client uses 12 of those raw
 methods on Linux product paths; two are Windows-sandbox-only, and 12 appear only in the
 generated inventory or unused reference modules. Raw reachability is treated as
 remaining product work, not as feature completion; the matrix test must change with
@@ -153,8 +153,14 @@ each typed adapter or approved platform/product exclusion.
   one typed `config/batchWrite` transaction, reload and re-read effective state, and
   surface policy overrides or failures. Deleting all memories requires two clicks and
   calls typed `memory/reset`; live validation does not invoke it. Mitsuro and fixture
-  modes cannot inherit or synthesize Codex memory state. The exact
-  `thread/memoryMode/set` contract is typed for the remaining per-thread settings work.
+  modes cannot inherit or synthesize Codex memory state. Per-thread memory mode, model,
+  reasoning effort, service tier, and collaboration settings use typed authoritative
+  thread contracts and reconcile from server notifications.
+- Codex `thread/shellCommand` is represented by its exact typed request and empty
+  acknowledgement, including its explicit unsandboxed host-local semantics. It is not
+  routed from the GPUI composer: the reviewed desktop bundle contains the method in its
+  protocol/request telemetry but no product caller, while Codex TUI's `!command`
+  affordance is a different client. Mitsuro reports this capability as unsupported.
 - Generic Settings controls fail closed. Only Send shortcut, sidebar profile-name
   visibility, and archived-recents visibility can mutate the privacy-safe local
   preference store; Full access and realtime voice retain their specialized live paths.
@@ -319,8 +325,8 @@ each typed adapter or approved platform/product exclusion.
 - The established fixture/live visual matrix, dual-provider acceptance gauntlet,
   focused workspace gates, optimized GPUI build, and isolated runtime provenance check
   are complete for the surfaces already recorded above. The expanded 1:1 completion
-  audit remains open across the raw reference-used method families, per-thread settings,
-  residual disabled destinations, full interaction/visual comparison, and installable
+  audit remains open across the raw reference-used method families, residual disabled
+  destinations, full interaction/visual comparison, and installable
   release lifecycle; the established gates are not evidence that those items are done.
 - The production-data purity matrix was revalidated on both live transports for Work,
   Scheduled, Computer, Extensions, Settings, and Files. A unit regression matrix forbids
@@ -340,6 +346,10 @@ cargo test -p mitsuro-client -p mitsuro-desktop-backend
 cargo check -p mitsuro-gpui-desktop
 cargo test -p mitsuro-gpui-desktop
 scripts/gpui-codex-protocol-check.sh
+
+# Explicit opt-in because this method deliberately executes outside the thread sandbox
+MITSURO_RUN_LIVE_SHELL_ACCEPTANCE=1 cargo test -p mitsuro-desktop-backend \
+  real_app_server_thread_shell_command_round_trip -- --nocapture
 
 # Read-only check against a running local Mitsuro server
 MITSURO_RUN_SERVER_IT=1 cargo test -p mitsuro-desktop-backend \

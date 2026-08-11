@@ -74,10 +74,10 @@ use crate::protocol::{
     ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
     ThreadGoalSetResponse, ThreadListParams, ThreadListResponse, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSearchParams,
-    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
-    ThreadUnsubscribeResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    ThreadSearchResponse, ThreadSetNameParams, ThreadSetNameResponse, ThreadShellCommandParams,
+    ThreadShellCommandResponse, ThreadStartParams, ThreadStartResponse, ThreadUnarchiveParams,
+    ThreadUnarchiveResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::realtime::{
     ThreadRealtimeAppendAudioParams, ThreadRealtimeAppendAudioResponse,
@@ -1361,6 +1361,14 @@ impl AgentBackend for CodexAppServerBackend {
         let value = serde_json::to_value(params)?;
         self.request_typed("thread/compact/start", Some(value))
             .await
+    }
+
+    async fn thread_shell_command(
+        &self,
+        params: ThreadShellCommandParams,
+    ) -> Result<ThreadShellCommandResponse> {
+        let value = serde_json::to_value(params)?;
+        self.request_typed("thread/shellCommand", Some(value)).await
     }
 
     async fn review_start(
@@ -2756,6 +2764,51 @@ mod tests {
                 limit: Some(100),
                 sort_direction: Some(crate::ThreadItemsSortDirection::Desc),
             })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn thread_shell_command_uses_exact_generated_contract() {
+        let (client_writer, mut server_reader) = duplex(64 * 1024);
+        let backend = Arc::new(CodexAppServerBackend::with_defaults());
+        backend.connect_with_mock_writer(client_writer).await;
+        backend.mark_ready_for_test(InitializeResponse {
+            codex_home: "/tmp".into(),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "test".into(),
+        });
+
+        let responder = Arc::clone(&backend);
+        let server = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(&mut server_reader)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["method"], "thread/shellCommand");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({
+                    "threadId": "thread-7",
+                    "command": "printf 'one\\ntwo\\n' | tail -n 1"
+                })
+            );
+            responder
+                .inject_stdout_line(
+                    &serde_json::json!({"id": request["id"], "result": {}}).to_string(),
+                )
+                .await;
+        });
+
+        backend
+            .thread_shell_command(ThreadShellCommandParams::new(
+                "thread-7",
+                "printf 'one\\ntwo\\n' | tail -n 1",
+            ))
             .await
             .unwrap();
         server.await.unwrap();
@@ -4188,6 +4241,96 @@ mod integration_tests {
         assert_eq!(response.exit_code, 0);
         assert_eq!(response.stdout, "mitsuro-command-exec");
         assert!(response.stderr.is_empty());
+        backend.disconnect().await.expect("disconnect");
+    }
+
+    #[tokio::test]
+    async fn real_app_server_thread_shell_command_round_trip() {
+        if std::env::var_os("MITSURO_RUN_LIVE_SHELL_ACCEPTANCE").is_none() {
+            eprintln!(
+                "skip: set MITSURO_RUN_LIVE_SHELL_ACCEPTANCE=1 to exercise unsandboxed thread/shellCommand"
+            );
+            return;
+        }
+        if !should_run_integration() {
+            panic!("MITSURO_RUN_LIVE_SHELL_ACCEPTANCE requires an available Codex binary");
+        }
+
+        let backend = CodexAppServerBackend::with_defaults();
+        backend.connect().await.expect("connect/initialize");
+        let started = backend
+            .thread_start(ThreadStartParams {
+                cwd: Some("/tmp".into()),
+                ephemeral: Some(true),
+                ..Default::default()
+            })
+            .await
+            .expect("thread/start");
+        let thread_id = started.summary().id;
+        let mut events = backend
+            .subscribe_turn_events()
+            .await
+            .expect("turn event subscription");
+
+        backend
+            .thread_shell_command(ThreadShellCommandParams::new(
+                thread_id.clone(),
+                "printf mitsuro-thread-shell",
+            ))
+            .await
+            .expect("thread/shellCommand");
+
+        let observed = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut started_user_shell = false;
+            let mut completed_user_shell = false;
+            let mut output = String::new();
+            while let Some(event) = events.recv().await {
+                match event {
+                    TurnStreamEvent::ItemStarted {
+                        thread_id: event_thread,
+                        kind: crate::ItemKind::CommandExecution,
+                        item: Some(item),
+                        ..
+                    } if event_thread == thread_id => {
+                        started_user_shell =
+                            item.get("source").and_then(Value::as_str) == Some("userShell");
+                    }
+                    TurnStreamEvent::CommandExecutionOutputDelta {
+                        thread_id: event_thread,
+                        delta,
+                        ..
+                    } if event_thread == thread_id => output.push_str(&delta),
+                    TurnStreamEvent::ItemCompleted {
+                        thread_id: event_thread,
+                        kind: crate::ItemKind::CommandExecution,
+                        item: Some(item),
+                        ..
+                    } if event_thread == thread_id => {
+                        completed_user_shell = item.get("source").and_then(Value::as_str)
+                            == Some("userShell")
+                            && item.get("status").and_then(Value::as_str) == Some("completed")
+                            && item
+                                .get("aggregatedOutput")
+                                .and_then(Value::as_str)
+                                .is_some_and(|value| value.contains("mitsuro-thread-shell"));
+                    }
+                    TurnStreamEvent::TurnCompleted {
+                        thread_id: event_thread,
+                        ..
+                    } if event_thread == thread_id => {
+                        return (started_user_shell, completed_user_shell, output);
+                    }
+                    _ => {}
+                }
+            }
+            (started_user_shell, completed_user_shell, output)
+        })
+        .await
+        .expect("thread shell command lifecycle timeout");
+
+        assert!(observed.0, "missing userShell commandExecution start");
+        assert!(observed.1, "missing completed userShell commandExecution");
+        assert!(observed.2.contains("mitsuro-thread-shell"));
         backend.disconnect().await.expect("disconnect");
     }
 

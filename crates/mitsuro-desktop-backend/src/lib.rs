@@ -222,12 +222,12 @@ pub use protocol::{
     ThreadGoalStatus, ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadReadResponse,
     ThreadResumeInitialTurnsPageParams, ThreadResumeParams, ThreadResumeResponse,
     ThreadSearchParams, ThreadSearchResponse, ThreadSearchResult, ThreadSetNameParams,
-    ThreadSetNameResponse, ThreadStartParams, ThreadStartResponse, ThreadSummary,
-    ThreadUnarchiveParams, ThreadUnarchiveResponse, ThreadUnsubscribeParams,
-    ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TranscriptAudio, TranscriptAudioSource,
-    TranscriptImage, TranscriptImageSource, TranscriptMessage, TranscriptReference,
-    TranscriptReferenceKind, TranscriptRole, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    ThreadSetNameResponse, ThreadShellCommandParams, ThreadShellCommandResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadSummary, ThreadUnarchiveParams, ThreadUnarchiveResponse,
+    ThreadUnsubscribeParams, ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TranscriptAudio,
+    TranscriptAudioSource, TranscriptImage, TranscriptImageSource, TranscriptMessage,
+    TranscriptReference, TranscriptReferenceKind, TranscriptRole, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
 };
 pub use realtime::{
     CodexResponseHandoffMode, ConversationTextRole, RealtimeConversationVersion, RealtimeEvent,
