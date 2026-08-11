@@ -33,6 +33,11 @@ pub enum McpAppRuntimeCommand {
     Capture {
         key: String,
     },
+    Resize {
+        key: String,
+        width: u32,
+        height: u32,
+    },
     Close {
         key: String,
     },
@@ -109,6 +114,10 @@ impl McpAppRuntime {
         self.send(McpAppRuntimeCommand::Capture { key })
     }
 
+    pub fn resize(&self, key: String, width: u32, height: u32) -> Result<(), String> {
+        self.send(McpAppRuntimeCommand::Resize { key, width, height })
+    }
+
     pub fn close(&self, key: String) -> Result<(), String> {
         self.send(McpAppRuntimeCommand::Close { key })
     }
@@ -151,11 +160,40 @@ mod platform {
   const send = (kind, payload = {}) => {
     try { window.ipc.postMessage(JSON.stringify({ kind, ...payload })); } catch (_) {}
   };
+  const encodeBlob = async blob => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return {
+      base64: btoa(binary),
+      mimeType: blob.type || 'application/octet-stream',
+      size: bytes.length
+    };
+  };
+  const sendHostMessage = message => {
+    const blob = message?.method === 'ui/download-file' ? message?.params?.blob : null;
+    if (!(blob instanceof Blob)) {
+      send('host-message', { message });
+      return;
+    }
+    encodeBlob(blob).then(encoded => {
+      send('host-message', {
+        message: { ...message, params: { ...message.params, blob: encoded } }
+      });
+    }).catch(error => {
+      send('host-message', {
+        message: { ...message, params: { ...message.params, blob: null },
+          __mitsuroBlobError: String(error || 'Could not read download data') }
+      });
+    });
+  };
   Object.defineProperty(window, '__mitsuroDeliver', {
     value: message => nativePostMessage(message, '*'), configurable: false
   });
   window.postMessage = (message, _targetOrigin, _transfer) => {
-    send('host-message', { message });
+    sendHostMessage(message);
   };
   window.open = url => { send('open-link', { url: String(url || '') }); return null; };
   document.addEventListener('click', event => {
@@ -311,6 +349,23 @@ mod platform {
             }
             McpAppRuntimeCommand::Capture { key } => {
                 if let Some(view) = views.get(&key) {
+                    schedule_frame(
+                        view.window.clone(),
+                        key,
+                        view.width,
+                        view.height,
+                        events.clone(),
+                    );
+                }
+            }
+            McpAppRuntimeCommand::Resize { key, width, height } => {
+                if let Some(view) = views.get_mut(&key) {
+                    view.width = width;
+                    view.height = height;
+                    view.window.set_default_size(width as i32, height as i32);
+                    view.webview
+                        .webview()
+                        .set_size_request(width as i32, height as i32);
                     schedule_frame(
                         view.window.clone(),
                         key,
@@ -516,7 +571,7 @@ mod tests {
         runtime
             .load(
                 "probe".to_owned(),
-                r#"<!doctype html><html><body style="margin:0;background:#112233;color:white"><button id="ready" onclick="window.parent.postMessage({jsonrpc:'2.0',method:'probe/click'},'*')">Ready</button><script>addEventListener('message',event=>{if(event.data?.id===1){document.querySelector('#ready').textContent='Initialized';window.parent.postMessage({jsonrpc:'2.0',method:'probe/host-response'},'*')}});window.parent.postMessage({jsonrpc:'2.0',id:1,method:'ui/initialize',params:{appInfo:{name:'probe',version:'1'}}},'*')</script></body></html>"#.to_owned(),
+                r#"<!doctype html><html><body style="margin:0;background:#112233;color:white"><button id="ready" style="position:absolute;left:0;top:0;width:80px;height:40px" onclick="window.parent.postMessage({jsonrpc:'2.0',method:'probe/click'},'*')">Ready</button><button id="download" style="position:absolute;left:100px;top:0;width:100px;height:40px" onclick="window.parent.postMessage({jsonrpc:'2.0',id:2,method:'ui/download-file',params:{name:'probe.txt',blob:new Blob(['hello'],{type:'text/plain'})}},'*')">Download</button><script>addEventListener('message',event=>{if(event.data?.id===1){document.querySelector('#ready').textContent='Initialized';window.parent.postMessage({jsonrpc:'2.0',method:'probe/host-response'},'*')}});window.parent.postMessage({jsonrpc:'2.0',id:1,method:'ui/initialize',params:{appInfo:{name:'probe',version:'1'}}},'*')</script></body></html>"#.to_owned(),
             )
             .expect("probe load command");
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -579,6 +634,52 @@ mod tests {
             }
         }
         assert!(got_click, "GPUI click forwarding did not reach the MCP app");
+
+        runtime
+            .click("probe".to_owned(), 120.0, 10.0)
+            .expect("download click command");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got_download = false;
+        while Instant::now() < deadline && !got_download {
+            match runtime.try_recv() {
+                Some(McpAppRuntimeEvent::HostMessage { key, message }) if key == "probe" => {
+                    if message["method"] == "ui/download-file" {
+                        assert_eq!(message["params"]["name"], "probe.txt");
+                        assert_eq!(message["params"]["blob"]["base64"], "aGVsbG8=");
+                        assert_eq!(message["params"]["blob"]["size"], 5);
+                        got_download = true;
+                    }
+                }
+                Some(McpAppRuntimeEvent::Error { message, .. }) => panic!("{message}"),
+                Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_download, "MCP app Blob did not reach the host safely");
+
+        runtime
+            .resize("probe".to_owned(), 500, 300)
+            .expect("resize command");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got_resized_frame = false;
+        while Instant::now() < deadline && !got_resized_frame {
+            match runtime.try_recv() {
+                Some(McpAppRuntimeEvent::Frame {
+                    key,
+                    width,
+                    height,
+                    png,
+                }) if key == "probe" && width == 500 && height == 300 => {
+                    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                    got_resized_frame = true;
+                }
+                Some(McpAppRuntimeEvent::Error { message, .. }) => panic!("{message}"),
+                Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_resized_frame,
+            "WebKit view did not resize and recapture"
+        );
     }
 }
 

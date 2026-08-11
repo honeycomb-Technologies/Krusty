@@ -19,7 +19,7 @@ use mitsuro_desktop_backend::{
     DelegationGroupStatus, DelegationTaskStatus, McpAppToolCall, SessionDelegationProjection,
 };
 
-use crate::app::{McpAppViewState, MitsuroApp, ProductMode};
+use crate::app::{McpAppDisplayMode, McpAppViewState, MitsuroApp, ProductMode};
 use crate::components::{approval_bar, composer, markdown};
 use crate::demo::{
     DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
@@ -97,6 +97,140 @@ pub fn main_column(
                     ProductMode::Chat | ProductMode::Codex => thread_main(app, composer_input, cx),
                 }),
         )
+}
+
+pub fn mcp_app_fullscreen_overlay(
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> gpui::AnyElement {
+    let Some((key, frame, bounds, focus)) = app.fullscreen_mcp_app() else {
+        return div().into_any_element();
+    };
+    let colors = theme::colors();
+    let prepaint_bounds = bounds.clone();
+    let click_bounds = bounds;
+    let click_key = key.clone();
+    let keyboard_key = key.clone();
+    let close_key = key;
+    let click_focus = focus.clone();
+    let key_focus = focus.clone();
+    let width = frame.width;
+    let height = frame.height;
+
+    div()
+        .id("mcp-app-fullscreen-overlay")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .flex_col()
+        .bg(colors.bg_under)
+        .child(
+            div()
+                .h(px(48.0))
+                .flex_shrink_0()
+                .px(px(14.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(colors.border_subtle)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(colors.text_secondary)
+                        .child("Interactive app"),
+                )
+                .child(
+                    div()
+                        .id("mcp-app-fullscreen-close")
+                        .w(px(30.0))
+                        .h(px(30.0))
+                        .rounded(px(7.0))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .on_click(cx.listener(move |app, _, _window, cx| {
+                            app.close_fullscreen_mcp_app(close_key.clone(), cx);
+                        }))
+                        .child(
+                            Icon::empty()
+                                .path("icons/close.svg")
+                                .with_size(px(15.0))
+                                .text_color(colors.text_secondary),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .on_children_prepainted(move |child_bounds, _window, _cx| {
+                    if let Some(bounds) = child_bounds.first().copied() {
+                        if let Ok(mut stored) = prepaint_bounds.lock() {
+                            *stored = Some(bounds);
+                        }
+                    }
+                })
+                .id("mcp-app-fullscreen-frame")
+                .key_context("McpApp")
+                .track_focus(&focus)
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .bg(colors.bg_sidebar)
+                .cursor_pointer()
+                .on_click(
+                    cx.listener(move |app, event: &gpui::ClickEvent, window, cx| {
+                        let Some(position) = event.mouse_position() else {
+                            return;
+                        };
+                        let Ok(stored) = click_bounds.lock() else {
+                            return;
+                        };
+                        let Some(bounds) = *stored else {
+                            return;
+                        };
+                        let rendered_width = f32::from(bounds.size.width).max(1.0);
+                        let rendered_height = f32::from(bounds.size.height).max(1.0);
+                        let x =
+                            f32::from(position.x - bounds.origin.x) * width as f32 / rendered_width;
+                        let y = f32::from(position.y - bounds.origin.y) * height as f32
+                            / rendered_height;
+                        window.focus(&click_focus);
+                        app.mcp_app_click(click_key.clone(), x, y, cx);
+                    }),
+                )
+                .on_key_down(
+                    cx.listener(move |app, event: &gpui::KeyDownEvent, window, cx| {
+                        if !key_focus.is_focused(window) {
+                            return;
+                        }
+                        if event.keystroke.key == "escape" {
+                            app.close_fullscreen_mcp_app(keyboard_key.clone(), cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        let value = event
+                            .keystroke
+                            .key_char
+                            .clone()
+                            .unwrap_or_else(|| event.keystroke.key.clone());
+                        app.mcp_app_key(keyboard_key.clone(), value, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                    img(frame.image)
+                        .w_full()
+                        .h_full()
+                        .object_fit(gpui::ObjectFit::Fill),
+                ),
+        )
+        .into_any_element()
 }
 
 /// Soft multi-blob atmosphere (overlapping gradient quads). Mitsuro palette only —
@@ -1785,6 +1919,7 @@ fn activity_block(
             frame,
             bounds,
             focus,
+            display_mode: McpAppDisplayMode::Inline,
             ..
         } => frame
             .clone()

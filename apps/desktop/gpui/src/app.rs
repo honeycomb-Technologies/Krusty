@@ -109,6 +109,12 @@ Sub-agents are off-limits in this side conversation. Do not interact with any ex
 
 Do not modify files, source, git state, permissions, configuration, or workspace state unless the user explicitly asks for that mutation after this boundary. Do not request escalated permissions or broader sandbox access unless the user explicitly asks for a mutation that requires it. If the user explicitly requests a mutation, keep it minimal, local to the request, and avoid disrupting the main thread."#;
 
+const MCP_APP_MAX_DOWNLOAD_BYTES: usize = 100 * 1024 * 1024;
+const MCP_APP_INLINE_WIDTH: u32 = 680;
+const MCP_APP_INLINE_HEIGHT: u32 = 420;
+const MCP_APP_FULLSCREEN_WIDTH: u32 = 1100;
+const MCP_APP_FULLSCREEN_HEIGHT: u32 = 720;
+
 const SIDE_DEVELOPER_INSTRUCTIONS: &str = r#"You are in a side conversation, not the main thread.
 
 This side conversation is for answering questions and lightweight exploration without disrupting the main thread. Do not present yourself as continuing the main thread's active task.
@@ -1445,6 +1451,9 @@ pub(crate) enum McpAppViewState {
         resource: Arc<McpAppHtmlResource>,
         runtime_ready: bool,
         initialized: bool,
+        supports_fullscreen: bool,
+        display_mode: McpAppDisplayMode,
+        model_context: Vec<ProductAttachment>,
         frame: Option<McpAppFrame>,
         bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
         focus: FocusHandle,
@@ -1455,11 +1464,28 @@ pub(crate) enum McpAppViewState {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum McpAppDisplayMode {
+    Inline,
+    Fullscreen,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct McpAppFrame {
     pub image: Arc<gpui::Image>,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMcpAppMessage {
+    key: String,
+    request_id: serde_json::Value,
+    thread_id: String,
+    title: String,
+    text: String,
+    attachments: Vec<ProductAttachment>,
+    demo_images: Vec<DemoImageAttachment>,
 }
 
 impl ConcurrentSideTurnState {
@@ -1530,6 +1556,7 @@ pub struct MitsuroApp {
     mcp_app_runtime: Option<McpAppRuntime>,
     mcp_app_runtime_error: Option<String>,
     mcp_app_poll_scheduled: bool,
+    pending_mcp_app_message: Option<PendingMcpAppMessage>,
     transcript_scroll_handle: ScrollHandle,
     /// Reference-desktop find-in-conversation state backed by
     /// `thread/searchOccurrences` (or Mitsuro's real transcript projection).
@@ -2263,6 +2290,7 @@ impl MitsuroApp {
             mcp_app_runtime,
             mcp_app_runtime_error,
             mcp_app_poll_scheduled: false,
+            pending_mcp_app_message: None,
             transcript_scroll_handle: ScrollHandle::new(),
             thread_find_input,
             thread_find_open: false,
@@ -9900,6 +9928,9 @@ impl MitsuroApp {
                                 resource: Arc::new(resource),
                                 runtime_ready: false,
                                 initialized: false,
+                                supports_fullscreen: false,
+                                display_mode: McpAppDisplayMode::Inline,
+                                model_context: Vec::new(),
                                 frame: None,
                                 bounds: Arc::new(Mutex::new(None)),
                                 focus: cx.focus_handle(),
@@ -10068,6 +10099,19 @@ impl MitsuroApp {
                     .pointer("/params/protocolVersion")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("2026-01-26");
+                let supports_fullscreen = message
+                    .pointer("/params/appCapabilities/availableDisplayModes")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|modes| {
+                        modes.iter().any(|mode| mode.as_str() == Some("fullscreen"))
+                    });
+                if let Some(McpAppViewState::Ready {
+                    supports_fullscreen: supported,
+                    ..
+                }) = self.mcp_app_views.get_mut(&key)
+                {
+                    *supported = supports_fullscreen;
+                }
                 let policy = self
                     .mcp_app_views
                     .get(&key)
@@ -10085,9 +10129,16 @@ impl MitsuroApp {
                             "protocolVersion": protocol_version,
                             "hostCapabilities": {
                                 "openLinks": {},
+                                "downloadFile": {},
                                 "serverTools": {"listChanged": false},
                                 "serverResources": {"listChanged": false},
                                 "logging": {},
+                                "message": {},
+                                "updateModelContext": {
+                                    "text": {},
+                                    "image": {},
+                                    "structuredContent": {}
+                                },
                                 "sandbox": {"csp": {
                                     "connectDomains": policy.connect_domains,
                                     "resourceDomains": policy.resource_domains,
@@ -10099,8 +10150,8 @@ impl MitsuroApp {
                             "hostContext": {
                                 "theme": "dark",
                                 "displayMode": "inline",
-                                "availableDisplayModes": ["inline"],
-                                "containerDimensions": {"width": 680, "height": 420},
+                                "availableDisplayModes": ["inline", "fullscreen"],
+                                "containerDimensions": {"width": MCP_APP_INLINE_WIDTH, "height": MCP_APP_INLINE_HEIGHT},
                                 "userAgent": "mitsuro-gpui-desktop",
                                 "platform": "desktop",
                                 "deviceCapabilities": {"touch": false, "hover": true},
@@ -10168,6 +10219,35 @@ impl MitsuroApp {
                 key,
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"prompts": []}}),
             ),
+            "ui/download-file" if id.is_some() => {
+                self.handle_mcp_app_download(key, id.unwrap(), message, cx);
+            }
+            "ui/request-display-mode" if id.is_some() => {
+                let requested = message
+                    .pointer("/params/mode")
+                    .and_then(serde_json::Value::as_str);
+                let mode = match requested {
+                    Some("inline") => McpAppDisplayMode::Inline,
+                    Some("fullscreen") => McpAppDisplayMode::Fullscreen,
+                    _ => {
+                        self.send_mcp_app_protocol_error(
+                            key,
+                            id,
+                            -32602,
+                            "Display mode must be inline or fullscreen",
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
+                self.set_mcp_app_display_mode(key, mode, id);
+            }
+            "ui/message" if id.is_some() => {
+                self.handle_mcp_app_message_request(key, id.unwrap(), message, cx);
+            }
+            "ui/update-model-context" if id.is_some() => {
+                self.handle_mcp_app_model_context_update(key, id.unwrap(), message);
+            }
             "ui/open-link" if id.is_some() => {
                 let url = message
                     .pointer("/params/url")
@@ -10227,6 +10307,463 @@ impl MitsuroApp {
             }
             _ => None,
         }
+    }
+
+    fn handle_mcp_app_download(
+        &mut self,
+        key: String,
+        id: serde_json::Value,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let name = message
+            .pointer("/params/name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| valid_mcp_app_download_name(name))
+            .map(str::to_owned);
+        let encoded = message
+            .pointer("/params/blob/base64")
+            .and_then(serde_json::Value::as_str);
+        let declared_size = message
+            .pointer("/params/blob/size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|size| usize::try_from(size).ok());
+        let Some(name) = name else {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(id),
+                -32602,
+                "Download name must be a safe file name",
+            );
+            return;
+        };
+        let Some(encoded) = encoded else {
+            let detail = message
+                .get("__mitsuroBlobError")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Download blob is required");
+            self.send_mcp_app_protocol_error(key, Some(id), -32602, detail);
+            return;
+        };
+        let estimated_size = encoded.len().saturating_mul(3) / 4;
+        if estimated_size > MCP_APP_MAX_DOWNLOAD_BYTES
+            || declared_size.is_some_and(|size| size > MCP_APP_MAX_DOWNLOAD_BYTES)
+        {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(id),
+                -32602,
+                "Download exceeds the 100 MB safety limit",
+            );
+            return;
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(id),
+                -32602,
+                "Download blob is not valid base64",
+            );
+            return;
+        };
+        if bytes.len() > MCP_APP_MAX_DOWNLOAD_BYTES
+            || declared_size.is_some_and(|size| size != bytes.len())
+        {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(id),
+                -32602,
+                "Download blob size is invalid",
+            );
+            return;
+        }
+        let directory = self
+            .composer_workspace_dir()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let receiver = cx.prompt_for_new_path(&directory, Some(&name));
+        self.status_line = format!("MCP app download · choose where to save {name}").into();
+        cx.spawn(async move |this, cx| {
+            let selection = receiver.await;
+            let outcome = match selection {
+                Ok(Ok(Some(path))) => {
+                    let write = cx
+                        .background_spawn(async move {
+                            std::fs::write(&path, bytes)
+                                .map(|_| path)
+                                .map_err(|error| error.to_string())
+                        })
+                        .await;
+                    match write {
+                        Ok(path) => Ok(format!("Saved {}", path.display())),
+                        Err(error) => Err(format!("Could not save download: {error}")),
+                    }
+                }
+                Ok(Ok(None)) => Err("Download canceled".to_owned()),
+                Ok(Err(error)) => Err(format!("Could not open save dialog: {error}")),
+                Err(error) => Err(format!("Save dialog closed unexpectedly: {error}")),
+            };
+            let _ = this.update(cx, |app, cx| {
+                if !matches!(
+                    app.mcp_app_views.get(&key),
+                    Some(McpAppViewState::Ready { .. })
+                ) {
+                    return;
+                }
+                match outcome {
+                    Ok(summary) => {
+                        app.status_line = summary.into();
+                        app.send_mcp_app_message(
+                            key,
+                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
+                        );
+                    }
+                    Err(message) => {
+                        app.status_line = message.into();
+                        app.send_mcp_app_message(
+                            key,
+                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true}}),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_mcp_app_display_mode(
+        &mut self,
+        key: String,
+        requested: McpAppDisplayMode,
+        response_id: Option<serde_json::Value>,
+    ) {
+        let actual = self.mcp_app_views.get(&key).and_then(|state| match state {
+            McpAppViewState::Ready {
+                supports_fullscreen,
+                ..
+            } => Some(negotiate_mcp_app_display_mode(
+                requested,
+                *supports_fullscreen,
+            )),
+            _ => None,
+        });
+        let Some(actual) = actual else {
+            if let Some(id) = response_id {
+                self.send_mcp_app_protocol_error(key, Some(id), -32000, "MCP app is not active");
+            }
+            return;
+        };
+        if let Some(McpAppViewState::Ready { display_mode, .. }) = self.mcp_app_views.get_mut(&key)
+        {
+            *display_mode = actual;
+        }
+        let (mode, width, height) = match actual {
+            McpAppDisplayMode::Inline => ("inline", MCP_APP_INLINE_WIDTH, MCP_APP_INLINE_HEIGHT),
+            McpAppDisplayMode::Fullscreen => (
+                "fullscreen",
+                MCP_APP_FULLSCREEN_WIDTH,
+                MCP_APP_FULLSCREEN_HEIGHT,
+            ),
+        };
+        if let Some(runtime) = self.mcp_app_runtime.as_ref() {
+            let _ = runtime.resize(key.clone(), width, height);
+        }
+        if let Some(id) = response_id {
+            self.send_mcp_app_message(
+                key.clone(),
+                serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"mode":mode}}),
+            );
+        }
+        self.send_mcp_app_message(
+            key,
+            serde_json::json!({
+                "jsonrpc":"2.0",
+                "method":"ui/notifications/host-context-changed",
+                "params":{
+                    "displayMode":mode,
+                    "containerDimensions":{"width":width,"height":height}
+                }
+            }),
+        );
+        self.status_line = format!("MCP app display · {mode}").into();
+    }
+
+    fn handle_mcp_app_message_request(
+        &mut self,
+        key: String,
+        request_id: serde_json::Value,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_mcp_app_message.is_some() {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32000,
+                "A follow-up message is already awaiting confirmation",
+            );
+            return;
+        }
+        if self.turn_in_progress() {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32000,
+                "A follow-up message cannot start while a turn is active",
+            );
+            return;
+        }
+        let role = message
+            .pointer("/params/role")
+            .and_then(serde_json::Value::as_str);
+        if role != Some("user") {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32602,
+                "ui/message currently requires role user",
+            );
+            return;
+        }
+        let parsed = parse_mcp_app_message_content(
+            message
+                .pointer("/params/content")
+                .and_then(serde_json::Value::as_array),
+        );
+        let Ok((text, attachments, demo_images)) = parsed else {
+            self.send_mcp_app_protocol_error(key, Some(request_id), -32602, &parsed.unwrap_err());
+            return;
+        };
+        let Some((thread_id, title)) = self.mcp_app_views.get(&key).and_then(|state| match state {
+            McpAppViewState::Ready { session, call, .. } => self
+                .threads
+                .iter()
+                .find(|thread| thread.backend_session_id.as_ref() == Some(session))
+                .map(|thread| {
+                    (
+                        thread.summary.id.clone(),
+                        call.app_name.clone().unwrap_or_else(|| call.server.clone()),
+                    )
+                }),
+            _ => None,
+        }) else {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32000,
+                "MCP app thread is unavailable",
+            );
+            return;
+        };
+        if self.selected_thread.as_deref() != Some(thread_id.as_str()) {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32000,
+                "MCP app thread is no longer selected",
+            );
+            return;
+        }
+        self.pending_mcp_app_message = Some(PendingMcpAppMessage {
+            key,
+            request_id,
+            thread_id,
+            title,
+            text,
+            attachments,
+            demo_images,
+        });
+        self.status_line = "MCP app follow-up requires confirmation.".into();
+        cx.notify();
+    }
+
+    fn handle_mcp_app_model_context_update(
+        &mut self,
+        key: String,
+        request_id: serde_json::Value,
+        message: serde_json::Value,
+    ) {
+        let content = message
+            .pointer("/params/content")
+            .and_then(serde_json::Value::as_array);
+        let structured_content = message.pointer("/params/structuredContent").cloned();
+        let parsed = match content {
+            Some(content) if !content.is_empty() => parse_mcp_app_message_content(Some(content)),
+            Some(_) | None => Ok((String::new(), Vec::new(), Vec::new())),
+        };
+        let Ok((text, mut attachments, _)) = parsed else {
+            self.send_mcp_app_protocol_error(key, Some(request_id), -32602, &parsed.unwrap_err());
+            return;
+        };
+        let Some(McpAppViewState::Ready {
+            call,
+            model_context,
+            ..
+        }) = self.mcp_app_views.get_mut(&key)
+        else {
+            self.send_mcp_app_protocol_error(
+                key,
+                Some(request_id),
+                -32000,
+                "MCP app is not active",
+            );
+            return;
+        };
+        if !text.is_empty() || structured_content.is_some() {
+            attachments.push(ProductAttachment::McpAppContext {
+                source: call.app_name.clone().unwrap_or_else(|| call.server.clone()),
+                text: (!text.is_empty()).then_some(text),
+                structured_content,
+            });
+        }
+        *model_context = attachments;
+        let update_id = uuid::Uuid::new_v4().to_string();
+        self.send_mcp_app_message(
+            key,
+            serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":request_id,
+                "result":{"_meta":{"openai/modelContext":{"updateId":update_id}}}
+            }),
+        );
+        self.status_line = "MCP app model context updated.".into();
+    }
+
+    fn mcp_app_model_context_for_thread(&self, thread_id: &str) -> Vec<ProductAttachment> {
+        let prefix = format!("{thread_id}:");
+        self.mcp_app_views
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .filter_map(|(_, state)| match state {
+                McpAppViewState::Ready { model_context, .. } => Some(model_context),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn pending_mcp_app_message(&self) -> Option<(&str, &str, usize)> {
+        self.pending_mcp_app_message.as_ref().map(|pending| {
+            (
+                pending.title.as_str(),
+                pending.text.as_str(),
+                pending.demo_images.len(),
+            )
+        })
+    }
+
+    pub(crate) fn cancel_mcp_app_message(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_mcp_app_message.take() else {
+            return;
+        };
+        self.send_mcp_app_message(
+            pending.key,
+            serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":pending.request_id,
+                "result":{"isError":true}
+            }),
+        );
+        self.status_line = "MCP app follow-up canceled.".into();
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_mcp_app_message(&mut self, cx: &mut Context<Self>) {
+        let Some(mut pending) = self.pending_mcp_app_message.take() else {
+            return;
+        };
+        if self.turn_in_progress()
+            || self.selected_thread.as_deref() != Some(pending.thread_id.as_str())
+            || self.live_session_id(&pending.thread_id).is_none()
+        {
+            self.send_mcp_app_message(
+                pending.key,
+                serde_json::json!({
+                    "jsonrpc":"2.0",
+                    "id":pending.request_id,
+                    "result":{"isError":true}
+                }),
+            );
+            self.status_line =
+                "MCP app follow-up could not start because the thread changed.".into();
+            cx.notify();
+            return;
+        }
+        if let Some(thread) = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.summary.id == pending.thread_id)
+        {
+            thread.messages.push(DemoMessage::user_with_attachments(
+                pending.text.clone(),
+                pending.demo_images,
+                Vec::new(),
+                Vec::new(),
+            ));
+            thread.summary.preview = Some(pending.text.chars().take(64).collect());
+        }
+        self.send_mcp_app_message(
+            pending.key,
+            serde_json::json!({"jsonrpc":"2.0","id":pending.request_id,"result":{}}),
+        );
+        self.turn_in_progress = true;
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.active_turn_thread_id = Some(pending.thread_id.clone());
+        let model = self.selected_model_slug();
+        let reasoning_effort = self.selected_reasoning_effort.clone();
+        let speed_mode = self.selected_speed_mode();
+        let work_mode = self.selected_work_mode();
+        let working_dir = self.composer_workspace_dir().map(ToOwned::to_owned);
+        let access_mode = self.composer_access_mode();
+        pending
+            .attachments
+            .extend(self.mcp_app_model_context_for_thread(&pending.thread_id));
+        self.status_line = "Starting confirmed MCP app follow-up…".into();
+        self.start_live_turn(
+            pending.thread_id,
+            pending.text,
+            model,
+            reasoning_effort,
+            speed_mode,
+            work_mode,
+            working_dir,
+            access_mode,
+            pending.attachments,
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn close_fullscreen_mcp_app(&mut self, key: String, cx: &mut Context<Self>) {
+        self.set_mcp_app_display_mode(key, McpAppDisplayMode::Inline, None);
+        cx.notify();
+    }
+
+    pub(crate) fn fullscreen_mcp_app(
+        &self,
+    ) -> Option<(
+        String,
+        McpAppFrame,
+        Arc<Mutex<Option<Bounds<Pixels>>>>,
+        FocusHandle,
+    )> {
+        self.mcp_app_views
+            .iter()
+            .find_map(|(key, state)| match state {
+                McpAppViewState::Ready {
+                    display_mode: McpAppDisplayMode::Fullscreen,
+                    frame: Some(frame),
+                    bounds,
+                    focus,
+                    ..
+                } => Some((key.clone(), frame.clone(), bounds.clone(), focus.clone())),
+                _ => None,
+            })
     }
 
     fn handle_mcp_app_tool_call(
@@ -12769,6 +13306,18 @@ impl MitsuroApp {
 
     fn close_mcp_app_views_for_thread(&mut self, thread_id: &str) {
         let prefix = format!("{thread_id}:");
+        if self
+            .pending_mcp_app_message
+            .as_ref()
+            .is_some_and(|pending| pending.key.starts_with(&prefix))
+        {
+            if let Some(pending) = self.pending_mcp_app_message.take() {
+                self.send_mcp_app_message(
+                    pending.key,
+                    serde_json::json!({"jsonrpc":"2.0","id":pending.request_id,"result":{"isError":true}}),
+                );
+            }
+        }
         let keys = self
             .mcp_app_views
             .keys()
@@ -12786,6 +13335,12 @@ impl MitsuroApp {
     }
 
     fn close_all_mcp_app_views(&mut self) {
+        if let Some(pending) = self.pending_mcp_app_message.take() {
+            self.send_mcp_app_message(
+                pending.key,
+                serde_json::json!({"jsonrpc":"2.0","id":pending.request_id,"result":{"isError":true}}),
+            );
+        }
         let keys = self.mcp_app_views.keys().cloned().collect::<Vec<_>>();
         if let Some(runtime) = self.mcp_app_runtime.as_ref() {
             for key in keys {
@@ -15445,7 +16000,7 @@ impl MitsuroApp {
             return;
         }
 
-        let attachments = self
+        let mut attachments = self
             .composer_attachments
             .iter()
             .map(|attachment| match attachment.kind {
@@ -15465,6 +16020,7 @@ impl MitsuroApp {
                 },
             })
             .collect::<Vec<_>>();
+        attachments.extend(self.mcp_app_model_context_for_thread(&thread_id));
         let attachment_names = self
             .composer_attachments
             .iter()
@@ -20333,6 +20889,12 @@ impl Render for MitsuroApp {
             .when(self.guardian_dialog_open(), |this| {
                 this.child(components::guardian_dialog(self, cx))
             })
+            .when(self.fullscreen_mcp_app().is_some(), |this| {
+                this.child(components::mcp_app_fullscreen_overlay(self, cx))
+            })
+            .when(self.pending_mcp_app_message().is_some(), |this| {
+                this.child(components::mcp_app_message_dialog(self, cx))
+            })
             .when_some(
                 gpui_component::Root::render_notification_layer(window, cx),
                 |this, layer| this.child(layer),
@@ -20342,6 +20904,87 @@ impl Render for MitsuroApp {
 
 fn valid_file_child_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+}
+
+fn valid_mcp_app_download_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', '\0'])
+        && std::path::Path::new(name)
+            .file_name()
+            .is_some_and(|file| file == name)
+}
+
+fn parse_mcp_app_message_content(
+    content: Option<&Vec<serde_json::Value>>,
+) -> Result<(String, Vec<ProductAttachment>, Vec<DemoImageAttachment>), String> {
+    let content = content.ok_or_else(|| "ui/message content is required".to_owned())?;
+    if content.is_empty() || content.len() > 32 {
+        return Err("ui/message must contain between 1 and 32 content blocks".to_owned());
+    }
+    let mut text_blocks = Vec::new();
+    let mut attachments = Vec::new();
+    let mut demo_images = Vec::new();
+    let mut image_bytes = 0usize;
+    for (index, block) in content.iter().enumerate() {
+        match block.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => {
+                let text = block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| "ui/message text blocks cannot be empty".to_owned())?;
+                text_blocks.push(text.to_owned());
+            }
+            Some("image") => {
+                let mime = block
+                    .get("mimeType")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|mime| {
+                        mime.starts_with("image/") && !mime.contains(char::is_whitespace)
+                    })
+                    .ok_or_else(|| "ui/message image MIME type is invalid".to_owned())?;
+                let data = block
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "ui/message image data is required".to_owned())?;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|_| "ui/message image data is not valid base64".to_owned())?;
+                image_bytes = image_bytes.saturating_add(decoded.len());
+                if image_bytes > 20 * 1024 * 1024 {
+                    return Err("ui/message images exceed the 20 MB safety limit".to_owned());
+                }
+                let url = format!("data:{mime};base64,{data}");
+                attachments.push(ProductAttachment::ImageUrl { url: url.clone() });
+                demo_images.push(DemoImageAttachment {
+                    label: format!("MCP app image {}", index + 1),
+                    source: DemoImageSource::Url(url.clone()),
+                    resubmit_url: Some(url),
+                });
+            }
+            _ => return Err("ui/message contains an unsupported content block".to_owned()),
+        }
+    }
+    let text = text_blocks.join("\n\n");
+    if text.is_empty() && attachments.is_empty() {
+        return Err("ui/message did not contain usable content".to_owned());
+    }
+    Ok((text, attachments, demo_images))
+}
+
+fn negotiate_mcp_app_display_mode(
+    requested: McpAppDisplayMode,
+    supports_fullscreen: bool,
+) -> McpAppDisplayMode {
+    if requested == McpAppDisplayMode::Fullscreen && !supports_fullscreen {
+        McpAppDisplayMode::Inline
+    } else {
+        requested
+    }
 }
 
 fn duplicate_file_name(path: &str) -> String {
@@ -21501,5 +22144,55 @@ mod tests {
         assert!(!valid_mcp_http_url("https://"));
         assert!(!valid_mcp_http_url("https://?query-without-host"));
         assert!(!valid_mcp_http_url("https://bad host/rpc"));
+    }
+
+    #[test]
+    fn mcp_app_download_names_cannot_escape_the_user_selected_directory() {
+        assert!(valid_mcp_app_download_name("report.csv"));
+        assert!(valid_mcp_app_download_name("report 2026.csv"));
+        assert!(!valid_mcp_app_download_name("../report.csv"));
+        assert!(!valid_mcp_app_download_name("folder/report.csv"));
+        assert!(!valid_mcp_app_download_name("folder\\report.csv"));
+        assert!(!valid_mcp_app_download_name("."));
+        assert!(!valid_mcp_app_download_name(""));
+    }
+
+    #[test]
+    fn mcp_app_fullscreen_requires_the_apps_declared_capability() {
+        assert_eq!(
+            negotiate_mcp_app_display_mode(McpAppDisplayMode::Fullscreen, true),
+            McpAppDisplayMode::Fullscreen
+        );
+        assert_eq!(
+            negotiate_mcp_app_display_mode(McpAppDisplayMode::Fullscreen, false),
+            McpAppDisplayMode::Inline
+        );
+        assert_eq!(
+            negotiate_mcp_app_display_mode(McpAppDisplayMode::Inline, false),
+            McpAppDisplayMode::Inline
+        );
+    }
+
+    #[test]
+    fn mcp_app_message_parser_preserves_real_text_and_image_input() {
+        let content = vec![
+            serde_json::json!({"type":"text","text":"Book the selected time"}),
+            serde_json::json!({
+                "type":"image",
+                "mimeType":"image/png",
+                "data":"cG5n"
+            }),
+        ];
+        let (text, attachments, images) =
+            parse_mcp_app_message_content(Some(&content)).expect("valid message");
+        assert_eq!(text, "Book the selected time");
+        assert!(matches!(
+            attachments.as_slice(),
+            [ProductAttachment::ImageUrl { url }] if url == "data:image/png;base64,cG5n"
+        ));
+        assert_eq!(images.len(), 1);
+
+        let unsupported = vec![serde_json::json!({"type":"resource","resource":{}})];
+        assert!(parse_mcp_app_message_content(Some(&unsupported)).is_err());
     }
 }
