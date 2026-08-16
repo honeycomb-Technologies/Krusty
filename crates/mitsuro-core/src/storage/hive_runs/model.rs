@@ -16,6 +16,8 @@ pub enum HiveRunKind {
     /// One member run of a Hive group turn, executing on the member Worker's
     /// own controller lane.
     GroupTurn,
+    /// A Worker-to-Worker delivery that woke the recipient's private DM lane.
+    WorkerMessage,
 }
 
 impl HiveRunKind {
@@ -26,6 +28,7 @@ impl HiveRunKind {
             Self::ControllerChild => "controller_child",
             Self::LegacyResume => "legacy_resume",
             Self::GroupTurn => "group_turn",
+            Self::WorkerMessage => "worker_message",
         }
     }
 
@@ -36,6 +39,7 @@ impl HiveRunKind {
             "controller_child" => Some(Self::ControllerChild),
             "legacy_resume" => Some(Self::LegacyResume),
             "group_turn" => Some(Self::GroupTurn),
+            "worker_message" => Some(Self::WorkerMessage),
             _ => None,
         }
     }

@@ -78,6 +78,10 @@ fn router_with_wire_identity(legacy_wire: bool) -> Router<AppState> {
         .route("/workers/:id/resume", post(workers::resume_worker))
         .route("/workers/:id/dm", post(workers::ensure_worker_dm))
         .route(
+            "/workers/:id/deliveries",
+            get(workers::list_worker_deliveries),
+        )
+        .route(
             "/groups",
             get(groups::list_groups).post(groups::create_group),
         )

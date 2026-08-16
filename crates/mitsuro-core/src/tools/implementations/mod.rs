@@ -24,6 +24,7 @@ pub mod processes;
 pub mod read;
 pub mod report;
 pub mod search_compaction_segments;
+pub mod send_to_worker;
 pub mod send_user_message;
 pub mod set_dependency;
 pub mod set_work_mode;
@@ -64,6 +65,7 @@ pub use registration::{
 };
 pub use report::ReportTool;
 pub use search_compaction_segments::SearchCompactionSegmentsTool;
+pub use send_to_worker::SendToWorkerTool;
 pub use send_user_message::SendUserMessageTool;
 pub use set_dependency::SetDependencyTool;
 pub use set_work_mode::SetWorkModeTool;

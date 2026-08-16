@@ -3944,6 +3944,116 @@ impl Database {
             group_tx.commit()?;
         }
 
+        // Migration 65: Durable Worker-to-Worker delivery ledger.
+        //
+        // hive_deliveries generalizes hive_control_outbox (dedupe key, status,
+        // attempts, available_at) into one row per message-per-recipient. The
+        // daemon pump claims due rows and delivers by enqueueing a run on the
+        // recipient Worker's DM lane or by steering its active run. hive_runs
+        // gains kind 'worker_message' for those wake runs.
+        if current_version < 65 {
+            info!("Running migration 65: Hive delivery ledger");
+
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 65: checking for hive_runs")?;
+            if runs_table_exists {
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 65: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [GROUP_KINDS, DELIVERY_KINDS],
+                    )
+                    .context("Migration 65: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 65: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_message") || !runs_sql.contains("kind IN"),
+                    "Migration 65 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let delivery_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive delivery migration lock")?;
+            delivery_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_deliveries (
+                        id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL DEFAULT 'worker_message'
+                            CHECK (kind IN ('worker_message')),
+                        from_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        to_worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id),
+                        group_id TEXT
+                            REFERENCES hive_groups(id) ON DELETE SET NULL,
+                        body TEXT NOT NULL,
+                        priority TEXT NOT NULL DEFAULT 'normal'
+                            CHECK (priority IN ('normal', 'high')),
+                        dedupe_key TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'delivering', 'delivered', 'acked', 'dead_letter'
+                            )),
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        max_attempts INTEGER NOT NULL DEFAULT 5
+                            CHECK (max_attempts > 0),
+                        available_at TEXT NOT NULL,
+                        delivered_at TEXT,
+                        acked_at TEXT,
+                        last_error TEXT,
+                        run_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE (dedupe_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_due
+                        ON hive_deliveries(status, available_at)
+                        WHERE status IN ('pending', 'delivering');
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_to_worker
+                        ON hive_deliveries(to_worker_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_from_worker
+                        ON hive_deliveries(from_worker_id, created_at)
+                        WHERE from_worker_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_run
+                        ON hive_deliveries(run_id)
+                        WHERE run_id IS NOT NULL;
+                    "#,
+                )
+                .context("Migration 65: create hive_deliveries")?;
+            delivery_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (65)",
+                [],
+            )?;
+            delivery_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -4066,7 +4176,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 64);
+        assert_eq!(database.get_schema_version(), 65);
         database
             .conn()
             .execute(
@@ -4147,7 +4257,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 64);
+        assert_eq!(database.get_schema_version(), 65);
         let create_sql: String = database
             .conn()
             .query_row(

@@ -261,8 +261,7 @@ fn failed_attempts_back_off_then_dead_letter() {
     let claimed = claim_due_with_conn(db.conn(), Utc::now(), 10).unwrap();
     assert_eq!(claimed[0].attempt_count, 1);
     let status =
-        fail_attempt_with_conn(db.conn(), &enqueued.delivery.id, "no DM lane", Utc::now())
-            .unwrap();
+        fail_attempt_with_conn(db.conn(), &enqueued.delivery.id, "no DM lane", Utc::now()).unwrap();
     assert_eq!(status, HiveDeliveryStatus::Pending);
     let after_first = store.get(&enqueued.delivery.id).unwrap().unwrap();
     assert_eq!(after_first.last_error.as_deref(), Some("no DM lane"));

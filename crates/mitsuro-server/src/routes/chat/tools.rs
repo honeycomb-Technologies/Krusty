@@ -15,6 +15,7 @@ const HIVE_ONLY_TOOLS: &[&str] = &[
     "autonomous_task",
     "report",
     "post_to_group",
+    "send_to_worker",
 ];
 
 /// Return true only when a Code turn is deterministically non-tool-bearing.

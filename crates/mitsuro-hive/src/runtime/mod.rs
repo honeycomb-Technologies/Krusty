@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod deliveries;
 mod events;
 mod groups;
 mod handler;

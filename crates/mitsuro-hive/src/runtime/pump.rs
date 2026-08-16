@@ -23,6 +23,7 @@ use tokio::time::Instant;
 
 use super::backend::{ExecutionEvent, ExecutionEventSink, ExecutionOutcome, ExecutionRequest};
 use super::config::MAX_ABORT_DELIVERY_TIMEOUT;
+use super::deliveries;
 use super::groups;
 use super::handler::{
     CommittedCancellation, RuntimeShared, DAEMON_LEASE_NAME, MAX_RETRY_ATTEMPTS,
@@ -100,6 +101,10 @@ pub(crate) async fn run(shared: Arc<RuntimeShared>, mut shutdown: watch::Receive
                         shared.health.set_scheduler_activated(true);
                         if let Err(error) = deliver_pending_control(&shared, token).await {
                             tracing::warn!(error = ?error, "Hive durable control delivery failed");
+                        }
+                        if let Err(error) = deliveries::deliver_worker_messages(&shared, token).await
+                        {
+                            tracing::warn!(error = ?error, "Hive worker-message delivery failed");
                         }
                         if let Err(error) = materialize_due_schedules(&shared, token).await {
                             tracing::warn!(error = ?error, "Hive schedule materialization failed");

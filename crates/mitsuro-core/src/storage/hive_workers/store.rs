@@ -120,6 +120,27 @@ impl HiveWorkerStore {
             .context("reading Hive worker by slug")
     }
 
+    /// Fetch any Worker with this slug for exactly this owner, including
+    /// archived rows, so callers can distinguish "never existed" from
+    /// "archived".
+    pub fn get_by_slug_any_status(
+        &self,
+        user_id: Option<&str>,
+        slug: &str,
+    ) -> Result<Option<HiveWorker>> {
+        let sql = format!(
+            "SELECT {WORKER_COLUMNS} FROM hive_workers
+             WHERE {OWNER_PREDICATE} AND slug = ?2
+             ORDER BY CASE status WHEN 'archived' THEN 1 ELSE 0 END, updated_at DESC
+             LIMIT 1"
+        );
+        self.db
+            .conn()
+            .query_row(&sql, params![user_id, slug], map_worker)
+            .optional()
+            .context("reading Hive worker by slug including archived")
+    }
+
     pub fn list_for_owner(
         &self,
         user_id: Option<&str>,
@@ -322,6 +343,13 @@ impl HiveWorkerStore {
     pub(super) fn conn(&self) -> &rusqlite::Connection {
         self.db.conn()
     }
+}
+
+pub fn load_worker_with_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<HiveWorker>> {
+    let sql = format!("SELECT {WORKER_COLUMNS} FROM hive_workers WHERE id = ?1");
+    conn.query_row(&sql, [id], map_worker)
+        .optional()
+        .context("reading Hive worker")
 }
 
 fn validate_model_identity(model: Option<&str>, model_key: Option<&ModelKey>) -> Result<()> {

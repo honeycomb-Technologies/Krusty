@@ -3177,7 +3177,7 @@ fn insert_pending_user_message(
     insert_pending_user_content(tx, session_id, pending_id, &content, now)
 }
 
-fn insert_pending_user_content(
+pub(super) fn insert_pending_user_content(
     tx: &Transaction<'_>,
     session_id: &str,
     pending_id: &str,

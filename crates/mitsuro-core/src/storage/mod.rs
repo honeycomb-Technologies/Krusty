@@ -27,6 +27,7 @@ mod hive_attention_state;
 mod hive_controller_events;
 mod hive_controllers;
 mod hive_daemon_leases;
+mod hive_deliveries;
 pub mod hive_groups;
 mod hive_home;
 mod hive_idempotency;
@@ -85,6 +86,13 @@ pub use hive_controller_events::{
 };
 pub use hive_controllers::{HiveController, HiveControllerStatus, HiveControllerStore};
 pub use hive_daemon_leases::{DaemonLease, DaemonLeaseAcquire, HiveDaemonLeaseStore};
+pub use hive_deliveries::{
+    ack_for_terminal_runs_with_conn, claim_due_with_conn, enqueue_with_conn,
+    fail_attempt_with_conn, hive_delivery_retry_backoff, load_delivery, mark_delivered_with_conn,
+    revert_wait_with_conn, HiveDelivery, HiveDeliveryEnqueue, HiveDeliveryKind,
+    HiveDeliveryPriority, HiveDeliveryStatus, HiveDeliveryStore, NewHiveDelivery,
+    DEFAULT_HIVE_DELIVERY_MAX_ATTEMPTS, MAX_HIVE_DELIVERY_BODY_BYTES,
+};
 pub use hive_groups::{
     parse_group_mentions, GroupMentionTarget, HiveGroup, HiveGroupExecutionMode, HiveGroupMember,
     HiveGroupMessage, HiveGroupRunContext, HiveGroupSenderKind, HiveGroupStatus, HiveGroupStore,
@@ -119,9 +127,9 @@ pub use hive_schedules::{
     HiveScheduleStore, OverlapPolicy, OwnedHiveSchedule,
 };
 pub use hive_workers::{
-    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
-    HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore,
-    NewHiveWorker,
+    display_name_from_slug, load_worker_with_conn, HiveWorker, HiveWorkerAutonomy,
+    HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus,
+    HiveWorkerStore, NewHiveWorker,
 };
 pub use knowledge::{
     get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,

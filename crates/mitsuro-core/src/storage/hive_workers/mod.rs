@@ -16,4 +16,4 @@ pub use model::{
     display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
     HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, NewHiveWorker,
 };
-pub use store::HiveWorkerStore;
+pub use store::{load_worker_with_conn, HiveWorkerStore};
