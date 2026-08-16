@@ -3421,6 +3421,325 @@ impl Database {
             session_list_tx.commit()?;
         }
 
+        // Migration 63: first-class Hive Worker identities.
+        //
+        // A Worker is a durable product identity (persona documents, frozen
+        // provider/model choice, autonomy policy, private DM session) layered
+        // over the existing controller/run machinery. Existing crew profiles
+        // and the durable Hive companion session are backfilled as Workers,
+        // and the daemon lease claimant on hive_run_attempts is renamed to
+        // executor_id so "worker" refers only to the product concept.
+        if current_version < 63 {
+            info!("Running migration 63: Hive Worker identities");
+            let worker_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring Hive worker identity migration lock")?;
+
+            worker_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_workers (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        slug TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        avatar_color TEXT,
+                        model TEXT,
+                        model_key_json TEXT
+                            CHECK (model_key_json IS NULL OR json_valid(model_key_json)),
+                        model_catalog_revision TEXT,
+                        permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+                            CHECK (permission_mode IN ('supervised', 'autonomous')),
+                        autonomy TEXT NOT NULL DEFAULT 'manual'
+                            CHECK (autonomy IN ('manual', 'scheduled', 'always_on')),
+                        heartbeat_interval_secs INTEGER
+                            CHECK (
+                                heartbeat_interval_secs IS NULL
+                                OR heartbeat_interval_secs > 0
+                            ),
+                        status TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'paused', 'archived')),
+                        dm_session_id TEXT UNIQUE
+                            REFERENCES sessions(id) ON DELETE SET NULL,
+                        memory_namespace_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_workers_active_slug
+                        ON hive_workers(COALESCE(user_id, ''), slug)
+                        WHERE status <> 'archived';
+                    CREATE INDEX IF NOT EXISTS idx_hive_workers_owner_status
+                        ON hive_workers(user_id, status);
+
+                    CREATE TABLE IF NOT EXISTS hive_worker_documents (
+                        worker_id TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('identity', 'soul')),
+                        content TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (worker_id, kind),
+                        FOREIGN KEY (worker_id)
+                            REFERENCES hive_workers(id) ON DELETE CASCADE
+                    );
+                    "#,
+                )
+                .context("Migration 63: create Hive worker tables")?;
+
+            // Nullable linkage columns. Existing rows keep crew_slug as the
+            // transitional identity; new call sites write worker_id.
+            for table in [
+                "hive_controllers",
+                "hive_runs",
+                "hive_runtime_state",
+                "hive_schedules",
+            ] {
+                if Self::table_exists(&worker_tx, table)
+                    && !Self::column_exists(&worker_tx, table, "worker_id")
+                {
+                    worker_tx
+                        .execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN worker_id TEXT
+                             REFERENCES hive_workers(id) ON DELETE SET NULL;"
+                        ))
+                        .with_context(|| format!("Migration 63: add {table}.worker_id"))?;
+                }
+                if Self::table_exists(&worker_tx, table) {
+                    worker_tx.execute_batch(&format!(
+                        "CREATE INDEX IF NOT EXISTS idx_{table}_worker
+                            ON {table}(worker_id) WHERE worker_id IS NOT NULL;"
+                    ))?;
+                }
+            }
+
+            // Free "worker" for the product concept: the run-attempt claimant
+            // is the daemon executor instance, not a Hive Worker.
+            if Self::table_exists(&worker_tx, "hive_run_attempts")
+                && Self::column_exists(&worker_tx, "hive_run_attempts", "worker_id")
+                && !Self::column_exists(&worker_tx, "hive_run_attempts", "executor_id")
+            {
+                worker_tx
+                    .execute_batch(
+                        "ALTER TABLE hive_run_attempts RENAME COLUMN worker_id TO executor_id;",
+                    )
+                    .context("Migration 63: rename attempt claimant to executor_id")?;
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Backfill: every crew profile becomes a Worker owned by the
+            // profile's user (NULL user_id = local), keeping the crew slug as
+            // the memory namespace so existing crew memories stay reachable.
+            if Self::table_exists(&worker_tx, "hive_crew_profiles")
+                && Self::table_exists(&worker_tx, "hive_profiles")
+            {
+                let mut crew_rows: Vec<(Option<String>, String)> = Vec::new();
+                {
+                    let mut statement = worker_tx.prepare(
+                        "SELECT p.user_id, cp.slug
+                         FROM hive_crew_profiles cp
+                         JOIN hive_profiles p ON p.id = cp.profile_id
+                         ORDER BY cp.slug",
+                    )?;
+                    let rows = statement.query_map([], |row| {
+                        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    for row in rows {
+                        crew_rows.push(row?);
+                    }
+                }
+                for (user_id, slug) in &crew_rows {
+                    worker_tx.execute(
+                        "INSERT OR IGNORE INTO hive_workers (
+                             id, user_id, slug, display_name, permission_mode,
+                             autonomy, status, memory_namespace_id,
+                             created_at, updated_at
+                         ) VALUES (
+                             ?1, ?2, ?3, ?4, 'autonomous',
+                             'manual', 'active', ?3, ?5, ?5
+                         )",
+                        rusqlite::params![
+                            uuid::Uuid::new_v4().to_string(),
+                            user_id,
+                            slug,
+                            crate::storage::hive_workers::display_name_from_slug(slug),
+                            now,
+                        ],
+                    )?;
+                }
+                if Self::table_exists(&worker_tx, "hive_crew_documents") {
+                    worker_tx
+                        .execute(
+                            "INSERT OR IGNORE INTO hive_worker_documents
+                                 (worker_id, kind, content, updated_at)
+                             SELECT w.id, cd.kind, cd.content, cd.updated_at
+                             FROM hive_crew_documents cd
+                             JOIN hive_profiles p ON p.id = cd.profile_id
+                             JOIN hive_workers w
+                               ON w.slug = cd.slug
+                              AND COALESCE(w.user_id, '') = COALESCE(p.user_id, '')
+                              AND w.status <> 'archived'
+                             WHERE cd.kind IN ('identity', 'soul')",
+                            [],
+                        )
+                        .context("Migration 63: copy crew documents to workers")?;
+                }
+            }
+
+            // Backfill: the durable Hive companion chat becomes the default
+            // "assistant" Worker with the companion as its DM session.
+            let sessions_ready = Self::table_exists(&worker_tx, "sessions")
+                && [
+                    "title",
+                    "session_type",
+                    "parent_session_id",
+                    "project_dir",
+                    "user_id",
+                    "updated_at",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&worker_tx, "sessions", column));
+            if sessions_ready {
+                let mut companions: Vec<(String, Option<String>)> = Vec::new();
+                {
+                    let mut statement = worker_tx.prepare(
+                        "SELECT id, user_id FROM sessions
+                         WHERE title = 'Hive' AND session_type = 'hive'
+                           AND parent_session_id IS NULL AND project_dir IS NULL
+                         ORDER BY updated_at ASC",
+                    )?;
+                    let rows = statement.query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?;
+                    for row in rows {
+                        companions.push(row?);
+                    }
+                }
+                let mut seen_owners = std::collections::HashSet::new();
+                for (session_id, user_id) in &companions {
+                    // Mirror ensure_hive_main_session: one companion per
+                    // owner, preferring the oldest matching session.
+                    if !seen_owners.insert(user_id.clone().unwrap_or_default()) {
+                        continue;
+                    }
+                    worker_tx.execute(
+                        "INSERT OR IGNORE INTO hive_workers (
+                             id, user_id, slug, display_name, permission_mode,
+                             autonomy, status, dm_session_id,
+                             memory_namespace_id, created_at, updated_at
+                         ) VALUES (
+                             ?1, ?2, 'assistant', 'Assistant', 'autonomous',
+                             'manual', 'active', ?3,
+                             'assistant', ?4, ?4
+                         )",
+                        rusqlite::params![
+                            uuid::Uuid::new_v4().to_string(),
+                            user_id,
+                            session_id,
+                            now,
+                        ],
+                    )?;
+                    // If an "assistant" Worker already existed for this owner
+                    // (e.g. a crew member with that slug), bind the companion
+                    // as its DM session instead of leaving it dangling.
+                    worker_tx.execute(
+                        "UPDATE hive_workers
+                         SET dm_session_id = ?1, updated_at = ?2
+                         WHERE slug = 'assistant'
+                           AND COALESCE(user_id, '') = COALESCE(?3, '')
+                           AND status <> 'archived'
+                           AND dm_session_id IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1 FROM hive_workers bound
+                               WHERE bound.dm_session_id = ?1
+                           )",
+                        rusqlite::params![session_id, now, user_id],
+                    )?;
+                }
+            }
+
+            // Link controllers whose session is a Worker's DM session (the
+            // Worker's serialized execution lane).
+            if Self::table_exists(&worker_tx, "hive_controllers")
+                && Self::column_exists(&worker_tx, "hive_controllers", "worker_id")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_controllers
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         WHERE w.dm_session_id = hive_controllers.session_id
+                           AND w.status <> 'archived'
+                     )
+                     WHERE worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           WHERE w.dm_session_id = hive_controllers.session_id
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+
+            // Dual-read transition: map persisted crew assignments onto the
+            // backfilled Workers where the slugs match within one owner.
+            if Self::table_exists(&worker_tx, "hive_runtime_state")
+                && Self::column_exists(&worker_tx, "hive_runtime_state", "crew_slug")
+                && Self::column_exists(&worker_tx, "hive_runtime_state", "worker_id")
+                && Self::table_exists(&worker_tx, "sessions")
+                && Self::column_exists(&worker_tx, "sessions", "user_id")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_runtime_state
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         JOIN sessions s ON s.id = hive_runtime_state.session_id
+                         WHERE w.slug = hive_runtime_state.crew_slug
+                           AND COALESCE(w.user_id, '') = COALESCE(s.user_id, '')
+                           AND w.status <> 'archived'
+                     )
+                     WHERE crew_slug IS NOT NULL
+                       AND worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           JOIN sessions s ON s.id = hive_runtime_state.session_id
+                           WHERE w.slug = hive_runtime_state.crew_slug
+                             AND COALESCE(w.user_id, '') = COALESCE(s.user_id, '')
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+            if Self::table_exists(&worker_tx, "hive_schedules")
+                && Self::column_exists(&worker_tx, "hive_schedules", "crew_slug")
+                && Self::column_exists(&worker_tx, "hive_schedules", "worker_id")
+                && Self::table_exists(&worker_tx, "hive_controllers")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_schedules
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         JOIN hive_controllers c ON c.id = hive_schedules.controller_id
+                         WHERE w.slug = hive_schedules.crew_slug
+                           AND COALESCE(w.user_id, '') = COALESCE(c.user_id, '')
+                           AND w.status <> 'archived'
+                     )
+                     WHERE crew_slug IS NOT NULL
+                       AND worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           JOIN hive_controllers c ON c.id = hive_schedules.controller_id
+                           WHERE w.slug = hive_schedules.crew_slug
+                             AND COALESCE(w.user_id, '') = COALESCE(c.user_id, '')
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+
+            worker_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (63)",
+                [],
+            )?;
+            worker_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -3543,7 +3862,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 62);
+        assert_eq!(database.get_schema_version(), 63);
         database
             .conn()
             .execute(
@@ -3624,7 +3943,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 62);
+        assert_eq!(database.get_schema_version(), 63);
         let create_sql: String = database
             .conn()
             .query_row(

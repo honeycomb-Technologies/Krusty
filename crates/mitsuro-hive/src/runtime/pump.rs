@@ -1035,7 +1035,7 @@ async fn claim_next(
 ) -> Result<Option<ClaimedHiveRun>, RuntimeStoreError> {
     let _gate = shared.mutation_gate.lock().await;
     let path = shared.config.database_path.clone();
-    let worker_id = shared.instance_id.clone();
+    let executor_id = shared.instance_id.clone();
     let lease_duration = shared.config.worker_lease_duration;
     let global_concurrency_limit = shared.config.global_concurrency_limit;
     let fence = daemon_fence(shared, fencing_token);
@@ -1044,7 +1044,7 @@ async fn claim_next(
         store
             .claim_next_fenced(
                 &ClaimRunRequest {
-                    worker_id,
+                    executor_id,
                     lease_epoch: fencing_token,
                     now: Utc::now(),
                     lease_duration,

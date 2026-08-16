@@ -117,7 +117,7 @@ fn test_session_list_metadata_migration() {
 
     assert!(columns.contains(&"pinned_at".to_string()));
     assert!(columns.contains(&"archived_at".to_string()));
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -225,7 +225,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -287,7 +287,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
     let claimed: String = db
         .conn()
         .query_row(
@@ -317,7 +317,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -372,7 +372,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -426,7 +426,313 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 62);
+    assert_eq!(db.get_schema_version(), 63);
+}
+
+#[test]
+fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-62-workers.db");
+    let db = crate::storage::database::Database::new(&path).expect("create current database");
+
+    // Seed a schema-62-shaped world: crew profiles for two owners, the
+    // durable Hive companion session per owner, a controller on the local
+    // companion, and crew_slug assignments on runtime state and schedules.
+    db.conn()
+        .execute_batch(
+            r#"
+            INSERT INTO users (id, email) VALUES ('alice', 'alice@example.com');
+
+            INSERT INTO sessions (id, title, created_at, updated_at, session_type, user_id)
+            VALUES
+                ('companion-local', 'Hive', '2026-08-01T00:00:00.000000Z',
+                 '2026-08-01T00:00:00.000000Z', 'hive', NULL),
+                ('companion-alice', 'Hive', '2026-08-01T00:00:00.000000Z',
+                 '2026-08-01T00:00:01.000000Z', 'hive', 'alice'),
+                ('work-1', 'Crew job', '2026-08-01T00:00:00.000000Z',
+                 '2026-08-01T00:00:00.000000Z', 'hive', NULL);
+
+            INSERT INTO hive_profiles (id, user_id, revision)
+            VALUES ('local', NULL, 0), ('user:alice-hash', 'alice', 0);
+            INSERT INTO hive_crew_profiles (profile_id, slug, revision)
+            VALUES ('local', 'builder', 0), ('local', 'researcher', 0),
+                   ('user:alice-hash', 'builder', 0);
+            INSERT INTO hive_crew_documents (profile_id, slug, kind, content, updated_at)
+            VALUES
+                ('local', 'builder', 'identity', 'Local builder identity',
+                 '2026-08-01T00:00:00.000000Z'),
+                ('local', 'builder', 'soul', 'Local builder soul',
+                 '2026-08-01T00:00:00.000000Z'),
+                ('user:alice-hash', 'builder', 'identity', 'Alice builder identity',
+                 '2026-08-01T00:00:00.000000Z');
+
+            INSERT INTO hive_controllers (
+                id, scope_key, user_id, session_id, status, timezone,
+                max_concurrent_runs, created_at, updated_at
+            ) VALUES (
+                'controller-local', 'scope-local', NULL, 'companion-local',
+                'active', 'UTC', 1, '2026-08-01T00:00:00.000000Z',
+                '2026-08-01T00:00:00.000000Z'
+            );
+
+            INSERT INTO hive_runtime_state (session_id, status, crew_slug, priority, updated_at)
+            VALUES ('work-1', 'idle', 'builder', 'normal', '2026-08-01T00:00:00.000000Z');
+
+            INSERT INTO hive_schedules (
+                id, controller_id, title, summary, objective, recurrence_kind,
+                recurrence_json, timezone, gap_policy, fold_policy, status,
+                crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit,
+                overlap_policy, max_attempts, retry_base_secs, retry_max_secs,
+                retry_jitter, created_by, created_at, updated_at
+            ) VALUES (
+                'schedule-1', 'controller-local', 'Sweep', 'Sweep', 'Do the sweep',
+                'interval', '{}', 'UTC', 'shift_forward', 'first', 'enabled',
+                'researcher', 'skip', 0, 0,
+                'skip', 1, 0, 0,
+                'none', 'test', '2026-08-01T00:00:00.000000Z', '2026-08-01T00:00:00.000000Z'
+            );
+
+            INSERT INTO hive_runs (
+                id, controller_id, session_id, kind, objective, config_json,
+                status, available_at, max_attempts, created_at, updated_at
+            ) VALUES (
+                'run-1', 'controller-local', 'companion-local', 'dispatch', 'obj',
+                '{}', 'succeeded', '2026-08-01T00:00:00.000000Z', 3,
+                '2026-08-01T00:00:00.000000Z', '2026-08-01T00:00:00.000000Z'
+            );
+            INSERT INTO hive_run_attempts (
+                id, run_id, attempt_no, executor_id, lease_token, lease_epoch,
+                started_at, outcome
+            ) VALUES (
+                'attempt-1', 'run-1', 1, 'daemon-a', 'token-1', 1,
+                '2026-08-01T00:00:00.000000Z', 'succeeded'
+            );
+            "#,
+        )
+        .expect("seed schema-62 fixture data");
+
+    // Rewind the schema 63 surface so the migration re-applies on top of the
+    // seeded rows: drop the worker tables/columns and restore the legacy
+    // attempt claimant column name.
+    db.conn()
+        .execute_batch(
+            r#"
+            DROP TABLE hive_worker_documents;
+            DROP INDEX idx_hive_controllers_worker;
+            ALTER TABLE hive_controllers DROP COLUMN worker_id;
+            DROP INDEX idx_hive_runs_worker;
+            ALTER TABLE hive_runs DROP COLUMN worker_id;
+            DROP INDEX idx_hive_runtime_state_worker;
+            ALTER TABLE hive_runtime_state DROP COLUMN worker_id;
+            DROP INDEX idx_hive_schedules_worker;
+            ALTER TABLE hive_schedules DROP COLUMN worker_id;
+            DROP TABLE hive_workers;
+            ALTER TABLE hive_run_attempts RENAME COLUMN executor_id TO worker_id;
+            DELETE FROM schema_version WHERE version >= 63;
+            "#,
+        )
+        .expect("rewind worker identity migration");
+    drop(db);
+
+    let db = crate::storage::database::Database::new(&path).expect("apply migration 63");
+    assert_eq!(db.get_schema_version(), 63);
+
+    let count_workers = |predicate: &str| -> i64 {
+        db.conn()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM hive_workers WHERE {predicate}"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("count workers")
+    };
+    assert_eq!(count_workers("1 = 1"), 5, "3 crew + 2 companions");
+    assert_eq!(
+        count_workers(
+            "slug = 'builder' AND user_id IS NULL AND memory_namespace_id = 'builder' \
+         AND display_name = 'Builder' AND status = 'active' AND autonomy = 'manual'"
+        ),
+        1
+    );
+    assert_eq!(count_workers("slug = 'researcher' AND user_id IS NULL"), 1);
+    assert_eq!(count_workers("slug = 'builder' AND user_id = 'alice'"), 1);
+    assert_eq!(
+        count_workers(
+            "slug = 'assistant' AND user_id IS NULL AND dm_session_id = 'companion-local'"
+        ),
+        1
+    );
+    assert_eq!(
+        count_workers(
+            "slug = 'assistant' AND user_id = 'alice' AND dm_session_id = 'companion-alice'"
+        ),
+        1
+    );
+
+    // Crew persona documents were copied onto the backfilled workers.
+    let local_builder_documents: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_worker_documents d
+             JOIN hive_workers w ON w.id = d.worker_id
+             WHERE w.slug = 'builder' AND w.user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count local builder documents");
+    assert_eq!(local_builder_documents, 2);
+    let alice_builder_identity: String = db
+        .conn()
+        .query_row(
+            "SELECT d.content FROM hive_worker_documents d
+             JOIN hive_workers w ON w.id = d.worker_id
+             WHERE w.slug = 'builder' AND w.user_id = 'alice' AND d.kind = 'identity'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read alice builder identity");
+    assert_eq!(alice_builder_identity, "Alice builder identity");
+
+    // The companion controller became the assistant worker's execution lane.
+    let controller_link_matches: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_controllers c
+             JOIN hive_workers w ON w.id = c.worker_id
+             WHERE c.id = 'controller-local' AND w.slug = 'assistant'
+               AND w.user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read controller worker link");
+    assert_eq!(controller_link_matches, 1);
+
+    // crew_slug assignments resolved to worker ids while keeping the slug.
+    let runtime_link_matches: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_runtime_state r
+             JOIN hive_workers w ON w.id = r.worker_id
+             WHERE r.session_id = 'work-1' AND r.crew_slug = 'builder'
+               AND w.slug = 'builder' AND w.user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read runtime state worker link");
+    assert_eq!(runtime_link_matches, 1);
+    let schedule_link_matches: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM hive_schedules s
+             JOIN hive_workers w ON w.id = s.worker_id
+             WHERE s.id = 'schedule-1' AND s.crew_slug = 'researcher'
+               AND w.slug = 'researcher' AND w.user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read schedule worker link");
+    assert_eq!(schedule_link_matches, 1);
+
+    // The rename preserved attempt data under the new executor column.
+    let executor: String = db
+        .conn()
+        .query_row(
+            "SELECT executor_id FROM hive_run_attempts WHERE id = 'attempt-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read renamed executor column");
+    assert_eq!(executor, "daemon-a");
+    let attempt_columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(hive_run_attempts)")
+        .expect("prepare attempt columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query attempt columns")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect attempt columns");
+    assert!(!attempt_columns.contains(&"worker_id".to_string()));
+
+    // Re-running the migration is a no-op: no duplicate workers, links keep
+    // their targets, and the rename guard skips cleanly.
+    let assistant_id: String = db
+        .conn()
+        .query_row(
+            "SELECT id FROM hive_workers WHERE slug = 'assistant' AND user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read assistant id");
+    db.conn()
+        .execute("DELETE FROM schema_version WHERE version >= 63", [])
+        .expect("rewind migration marker");
+    db.run_migrations().expect("reapply migration 63");
+    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(count_workers("1 = 1"), 5, "idempotent backfill");
+    let assistant_id_after: String = db
+        .conn()
+        .query_row(
+            "SELECT id FROM hive_workers WHERE slug = 'assistant' AND user_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read assistant id after replay");
+    assert_eq!(assistant_id, assistant_id_after);
+}
+
+#[test]
+fn migration_63_fresh_database_uses_executor_id_and_worker_linkage_columns() {
+    let (db, _temp) = create_test_db();
+
+    let table_columns = |table: &str| -> Vec<String> {
+        db.conn()
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect table columns")
+    };
+
+    let worker_columns = table_columns("hive_workers");
+    for column in [
+        "id",
+        "user_id",
+        "slug",
+        "display_name",
+        "avatar_color",
+        "model",
+        "model_key_json",
+        "model_catalog_revision",
+        "permission_mode",
+        "autonomy",
+        "heartbeat_interval_secs",
+        "status",
+        "dm_session_id",
+        "memory_namespace_id",
+    ] {
+        assert!(
+            worker_columns.contains(&column.to_string()),
+            "hive_workers missing {column}"
+        );
+    }
+    assert!(table_columns("hive_worker_documents").contains(&"kind".to_string()));
+
+    let attempt_columns = table_columns("hive_run_attempts");
+    assert!(attempt_columns.contains(&"executor_id".to_string()));
+    assert!(!attempt_columns.contains(&"worker_id".to_string()));
+
+    for table in [
+        "hive_controllers",
+        "hive_runs",
+        "hive_runtime_state",
+        "hive_schedules",
+    ] {
+        assert!(
+            table_columns(table).contains(&"worker_id".to_string()),
+            "{table} missing worker_id"
+        );
+    }
 }
 
 #[test]

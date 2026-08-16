@@ -127,7 +127,10 @@ pub struct HiveRunAttempt {
     pub id: String,
     pub run_id: String,
     pub attempt_no: u32,
-    pub worker_id: String,
+    /// Daemon instance that claimed this attempt. This is execution-plane
+    /// identity; "worker" is reserved for the Hive Worker product concept.
+    #[serde(alias = "worker_id")]
+    pub executor_id: String,
     pub lease_token: String,
     pub lease_epoch: u64,
     pub started_at: String,
@@ -142,16 +145,18 @@ pub struct HiveRunAttempt {
 
 #[derive(Debug, Clone)]
 pub struct ClaimRunRequest {
-    pub worker_id: String,
+    /// Claiming daemon instance id, persisted as the attempt's executor.
+    pub executor_id: String,
     pub lease_epoch: u64,
     pub now: DateTime<Utc>,
     pub lease_duration: Duration,
     pub global_concurrency_limit: u32,
 }
 
-/// The scheduler-level lease that fences a worker mutation. Run leases stop
-/// duplicate workers for one run; this additional fence stops an entire stale
-/// daemon generation after another process takes over the scheduler lease.
+/// The scheduler-level lease that fences an executor mutation. Run leases
+/// stop duplicate executors for one run; this additional fence stops an
+/// entire stale daemon generation after another process takes over the
+/// scheduler lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonFence {
     pub lease_name: String,

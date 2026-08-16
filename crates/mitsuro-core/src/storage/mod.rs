@@ -33,6 +33,7 @@ mod hive_profiles;
 mod hive_runs;
 mod hive_runtime_state;
 mod hive_schedules;
+mod hive_workers;
 mod knowledge;
 mod learning_candidates;
 pub mod live_activity_tokens;
@@ -109,6 +110,11 @@ pub use hive_runtime_state::{
 pub use hive_schedules::{
     HiveSchedule, HiveScheduleOccurrence, HiveScheduleOccurrenceStatus, HiveScheduleStatus,
     HiveScheduleStore, OverlapPolicy, OwnedHiveSchedule,
+};
+pub use hive_workers::{
+    display_name_from_slug, HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument,
+    HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore,
+    NewHiveWorker,
 };
 pub use knowledge::{
     get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,

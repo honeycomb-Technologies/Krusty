@@ -78,7 +78,7 @@ fn run(id: &str, priority: i32, max_attempts: u32) -> HiveRun {
 
 fn claim_request(now: DateTime<Utc>, epoch: u64) -> ClaimRunRequest {
     ClaimRunRequest {
-        worker_id: "worker-1".into(),
+        executor_id: "executor-1".into(),
         lease_epoch: epoch,
         now,
         lease_duration: Duration::from_secs(10),
@@ -436,7 +436,7 @@ fn execution_host_revalidates_exact_claim_and_immutable_inputs() {
     let lease = match lease_store
         .acquire(
             "hive-scheduler",
-            "worker-1",
+            "executor-1",
             instant(0),
             Duration::from_secs(10),
         )
@@ -559,7 +559,7 @@ fn committed_cancellation_requires_exact_live_claim_and_daemon_fence() {
     )
     .acquire(
         "hive-scheduler",
-        "worker-1",
+        "executor-1",
         instant(0),
         Duration::from_secs(10),
     )

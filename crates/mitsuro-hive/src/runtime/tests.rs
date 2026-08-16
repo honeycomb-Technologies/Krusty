@@ -1280,7 +1280,7 @@ async fn dropped_producer_after_tool_event_is_recovery_required_and_unclaimable(
 
     let claim = HiveRunStore::new(Database::new(&runtime_config.database_path).unwrap())
         .claim_next(&ClaimRunRequest {
-            worker_id: "replacement-worker".into(),
+            executor_id: "replacement-executor".into(),
             lease_epoch: 999,
             now: chrono::Utc::now(),
             lease_duration: Duration::from_secs(10),
@@ -1403,7 +1403,7 @@ async fn restart_marks_expired_running_work_recovery_required_without_replay() {
                  'running', 0, '{now}', 1, 3, 'old-daemon', 'old-token', 1, '{expired}',
                  '{expired}', '{now}', '{now}');
              INSERT INTO hive_run_attempts (
-                 id, run_id, attempt_no, worker_id, lease_token, lease_epoch, started_at, outcome
+                 id, run_id, attempt_no, executor_id, lease_token, lease_epoch, started_at, outcome
              ) VALUES ('attempt-1', 'run-1', 1, 'old-daemon', 'old-token', 1, '{now}', 'leased');"
         ))
         .unwrap();
@@ -2319,7 +2319,7 @@ async fn leased_cancel_closes_unstarted_attempt_immediately() {
     );
     let claimed = HiveRunStore::new(Database::new(&runtime_config.database_path).unwrap())
         .claim_next(&ClaimRunRequest {
-            worker_id: "test-worker".into(),
+            executor_id: "test-executor".into(),
             lease_epoch: 9,
             now: chrono::Utc::now(),
             lease_duration: Duration::from_secs(30),
