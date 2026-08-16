@@ -28,6 +28,7 @@ mod attention;
 mod capabilities;
 mod control_plane;
 mod current;
+mod groups;
 mod home;
 mod learning;
 mod sessions;
@@ -76,6 +77,23 @@ fn router_with_wire_identity(legacy_wire: bool) -> Router<AppState> {
         .route("/workers/:id/pause", post(workers::pause_worker))
         .route("/workers/:id/resume", post(workers::resume_worker))
         .route("/workers/:id/dm", post(workers::ensure_worker_dm))
+        .route(
+            "/groups",
+            get(groups::list_groups).post(groups::create_group),
+        )
+        .route(
+            "/groups/:id",
+            get(groups::get_group)
+                .patch(groups::update_group)
+                .delete(groups::archive_group),
+        )
+        .route(
+            "/groups/:id/messages",
+            get(groups::list_group_messages).post(groups::send_group_message),
+        )
+        .route("/groups/:id/turns/:turn_id", get(groups::get_group_turn))
+        .route("/groups/:id/stop", post(groups::stop_group))
+        .route("/groups/:id/events", get(groups::observe_group))
         .route("/current", get(current::current))
         .route("/attention", get(attention::attention))
         .route("/attention/:id/read", post(attention::set_attention_read))

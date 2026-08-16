@@ -9,7 +9,13 @@ use mitsuro_core::tools::registry::{MutationToolSurface, PermissionMode, ToolReq
 use crate::types::ThinkingLevel;
 
 /// Tools exclusive to Hive sessions -- excluded from Code sessions.
-const HIVE_ONLY_TOOLS: &[&str] = &["send_user_message", "sleep", "autonomous_task", "report"];
+const HIVE_ONLY_TOOLS: &[&str] = &[
+    "send_user_message",
+    "sleep",
+    "autonomous_task",
+    "report",
+    "post_to_group",
+];
 
 /// Return true only when a Code turn is deterministically non-tool-bearing.
 ///

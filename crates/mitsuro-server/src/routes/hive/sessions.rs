@@ -787,7 +787,7 @@ pub(super) async fn cancel_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn hive_control_error(error: anyhow::Error) -> AppError {
+pub(super) fn hive_control_error(error: anyhow::Error) -> AppError {
     crate::hive_runtime::control_plane_app_error(error)
 }
 
