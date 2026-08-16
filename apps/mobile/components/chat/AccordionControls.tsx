@@ -158,7 +158,7 @@ function DesktopFilterPill({
       >
         <AdaptiveMaterial
           borderRadius={18}
-          tone="elevated"
+          tone="regular"
         />
         <View
           style={[
@@ -166,7 +166,7 @@ function DesktopFilterPill({
             {
               backgroundColor: active
                 ? theme.colors.thinking + '18'
-                : g.backgroundElevated,
+                : 'transparent',
               borderColor: active
                 ? theme.colors.thinking + '80'
                 : g.borderLight,
@@ -259,13 +259,13 @@ function AccordionPill({
         >
           <AdaptiveMaterial
             borderRadius={18}
-            tone="elevated"
+            tone="regular"
           />
           <View
             style={[
               styles.pill,
               {
-                backgroundColor: active ? theme.colors.thinking + '18' : g.backgroundElevated,
+                backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
                 borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
               },
             ]}
@@ -350,7 +350,7 @@ function InlineActionPill({
       >
         <AdaptiveMaterial
           borderRadius={size >= 56 ? 18 : 14}
-          tone="elevated"
+          tone="regular"
         />
         <View
           style={[
@@ -359,7 +359,7 @@ function InlineActionPill({
               width: size,
               height: size,
               borderRadius: size >= 56 ? 18 : 14,
-              backgroundColor: active ? theme.colors.thinking + '18' : g.backgroundElevated,
+              backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
               borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
             },
           ]}
@@ -632,14 +632,14 @@ function ProviderDockPill({
       >
         <AdaptiveMaterial
           borderRadius={18}
-          tone="elevated"
+          tone="regular"
         />
         <View
           style={[
             styles.inlinePill,
             styles.providerDockPill,
             {
-              backgroundColor: active ? theme.colors.thinking + '18' : g.backgroundElevated,
+              backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
               borderColor: editMode || active ? theme.colors.thinking + '70' : g.borderLight,
             },
           ]}
@@ -1218,7 +1218,7 @@ export function AccordionControls({
 
 const styles = StyleSheet.create({
   materialHost: {
-    isolation: 'isolate',
+    position: 'relative',
   },
   pointerBoxNone: {
     pointerEvents: 'box-none',

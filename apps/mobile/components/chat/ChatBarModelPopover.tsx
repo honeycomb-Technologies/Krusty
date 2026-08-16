@@ -154,6 +154,7 @@ const styles = StyleSheet.create({
   },
   // Model popover — slides out from behind accordion
   modelPopover: {
+    position: 'relative',
     width: '100%',
     height: '100%',
     borderRadius: RADIUS,

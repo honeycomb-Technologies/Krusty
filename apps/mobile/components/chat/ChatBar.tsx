@@ -1368,13 +1368,12 @@ function ChatBarComponent(props: ChatBarProps) {
                 {
                   borderColor: kBorder,
                   borderRadius: RADIUS,
-                  backgroundColor: t.glass.backgroundElevated,
                 },
               ]}
             >
               <AdaptiveMaterial
                 borderRadius={RADIUS}
-                tone="elevated"
+                tone="regular"
               />
               <View style={styles.kInner}>
                 <MitsuroMark size={26} color={kColor} strokeWidth={62} />
@@ -1532,7 +1531,7 @@ const styles = StyleSheet.create({
   },
   lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP, minHeight: PILL },
   bar: {
-    isolation: 'isolate',
+    position: 'relative',
     flex: 1,
     height: PILL,
     maxHeight: COMPOSER_MAX_HEIGHT,
@@ -1594,7 +1593,7 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   kWrap: {
-    isolation: 'isolate',
+    position: 'relative',
     width: PILL,
     height: PILL,
     // Rounded square — matches accordion FAB pills (not a circle).

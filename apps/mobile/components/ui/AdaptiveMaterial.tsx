@@ -89,7 +89,6 @@ function AdaptiveMaterialComponent({
       : t.surface);
   const materialStyle = [
     StyleSheet.absoluteFill,
-    platform === "web" ? styles.webBackgroundLayer : null,
     borderRadius === undefined ? null : { borderRadius },
     styles.clip,
     style,
@@ -115,13 +114,21 @@ function AdaptiveMaterialComponent({
 
   if (materialMode === "liquid-glass") {
     return (
-      <GlassView
-        testID={testID}
-        colorScheme={theme.scheme}
-        glassEffectStyle={tone === "subtle" ? "clear" : "regular"}
-        tintColor={glassTintColor}
-        style={materialStyle}
-      />
+      <View testID={testID} style={materialStyle}>
+        <GlassView
+          colorScheme={theme.scheme}
+          glassEffectStyle={tone === "subtle" ? "clear" : "regular"}
+          tintColor={glassTintColor}
+          style={StyleSheet.absoluteFill}
+        />
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            styles.ignorePointerEvents,
+            { backgroundColor: overlayColor },
+          ]}
+        />
+      </View>
     );
   }
 
@@ -158,13 +165,6 @@ export const AdaptiveMaterial = memo(AdaptiveMaterialComponent);
 AdaptiveMaterial.displayName = "AdaptiveMaterial";
 
 const styles = StyleSheet.create({
-  // RN Web gives positioned siblings the same default stack level. Keep the
-  // backdrop strictly behind icons/text so Chrome cannot include foreground
-  // controls in a later backdrop-filter rasterization pass.
-  webBackgroundLayer: {
-    isolation: "isolate",
-    zIndex: -1,
-  },
   clip: {
     overflow: "hidden",
     pointerEvents: "none",

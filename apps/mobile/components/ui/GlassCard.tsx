@@ -52,6 +52,7 @@ export function GlassCard({ children, style, elevated, intensity, compact = fals
 
 const styles = StyleSheet.create({
   wrapper: {
+    position: 'relative',
     borderRadius: 22,
     overflow: 'hidden',
   },

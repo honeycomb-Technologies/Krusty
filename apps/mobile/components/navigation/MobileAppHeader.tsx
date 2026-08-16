@@ -122,7 +122,10 @@ export function MobileAppHeader({
                     color={active ? t.foreground : t.mutedForeground}
                   />
                   {active ? (
-                    <Text style={[styles.modeLabel, { color: t.foreground }]}>
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.modeLabel, { color: t.foreground }]}
+                    >
                       {item.label}
                     </Text>
                   ) : null}
@@ -144,7 +147,7 @@ export function MobileAppHeader({
                 },
               ]}
             >
-              <AdaptiveMaterial borderRadius={10} tone="elevated" />
+              <AdaptiveMaterial borderRadius={10} tone="regular" />
               <Text
                 numberOfLines={1}
                 style={[styles.titleText, { color: t.foreground }]}
@@ -202,6 +205,7 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   headerButton: {
+    position: "relative",
     width: 40,
     height: 40,
     borderRadius: 12,
@@ -211,6 +215,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   modeIsland: {
+    position: "relative",
+    maxWidth: "100%",
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 12,
@@ -226,6 +232,7 @@ const styles = StyleSheet.create({
     overflow: "visible",
   },
   modeButton: {
+    flexShrink: 1,
     height: 34,
     minWidth: 38,
     paddingHorizontal: 10,
@@ -242,6 +249,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   titleTag: {
+    position: "relative",
     marginTop: 8,
     maxWidth: "100%",
     minHeight: 32,

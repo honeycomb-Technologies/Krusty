@@ -310,6 +310,12 @@ Deno.test("stress controls remain native automation targets", async () => {
       && !header.includes("exiting="),
     "mode text must swap in one native layout transaction instead of cross-fading competing labels",
   );
+  assert(
+    header.includes('maxWidth: "100%"')
+      && header.includes("flexShrink: 1")
+      && header.includes("numberOfLines={1}"),
+    "the mobile mode island must shrink cleanly instead of pushing edge controls off-screen",
+  );
   for (
     const label of [
       "Start diagnostic capture",

@@ -17,21 +17,30 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   const material = await Deno.readTextFile(
     new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
   );
+  const header = await Deno.readTextFile(
+    new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url),
+  );
+  const modelPopover = await Deno.readTextFile(
+    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
+  );
+  const glassCard = await Deno.readTextFile(
+    new URL("../components/ui/GlassCard.tsx", import.meta.url),
+  );
 
   assert(
     !accordion.includes("style={styles.fabMaterialLayer}")
       && !composer.includes("style={styles.fabMaterialLayer}"),
-    "FABs must preserve AdaptiveMaterial's protected web compositor layer",
+    "FABs must use the centralized AdaptiveMaterial compositor layer",
   );
   assert(
-    accordion.match(/: g\.backgroundElevated,/g)?.length === 4,
-    "every accordion FAB family must paint the elevated idle glass token",
+    !accordion.includes("g.backgroundElevated")
+      && accordion.match(/: 'transparent'/g)?.length === 4,
+    "every idle accordion FAB must expose the shared material instead of stacking a private tint",
   );
   assert(
-    accordion.match(/tone="elevated"/g)?.length === 4
-      && composer.includes(": t.glass.backgroundElevated,")
-      && composer.includes('tone="elevated"'),
-    "FAB blur and scrim strength must not depend on a first tap",
+    accordion.match(/tone="regular"/g)?.length === 4
+      && composer.match(/tone="regular"/g)?.length === 2,
+    "composer and FAB controls must use one floating material tone",
   );
   assert(
     material.includes('const [webBlurReady, setWebBlurReady]')
@@ -40,20 +49,29 @@ Deno.test("FAB material strength is stable before and after interaction", async 
     "web blur must promote from zero after the underlying frame is committed",
   );
   assert(
-    material.includes('isolation: "isolate"')
-      && material.includes("zIndex: -1"),
-    "the protected negative-z blur layer must contain its own web raster",
+    !material.includes('isolation: "isolate"')
+      && !material.includes("zIndex: -1")
+      && !accordion.includes("isolation: 'isolate'")
+      && !composer.includes("isolation: 'isolate'"),
+    "floating materials must see the real page backdrop instead of an isolated negative stack",
   );
   assert(
     material.includes("export const AdaptiveMaterial = memo(AdaptiveMaterialComponent)")
-      && composer.includes("backgroundColor: t.glass.backgroundElevated,"),
-    "composer state changes must not re-render or retint stable blur nodes",
+      && material.includes("{ backgroundColor: overlayColor }")
+      && !composer.includes("backgroundColor: t.glass.backgroundElevated,"),
+    "native glass, blur fallback, composer, and FABs must share the same readable scrim",
   );
   assert(
     accordion.match(/styles\.materialHost/g)?.length === 4
-      && accordion.includes("isolation: 'isolate'")
-      && composer.match(/isolation: 'isolate'/g)?.length === 2,
-    "every composer and FAB material host must contain its negative-z backdrop",
+      && accordion.includes("position: 'relative'")
+      && (composer.match(/position: 'relative'/g)?.length ?? 0) >= 2,
+    "every composer and FAB material host must anchor its background layer",
+  );
+  assert(
+    (header.match(/position: "relative"/g)?.length ?? 0) >= 3
+      && modelPopover.includes("position: 'relative'")
+      && glassCard.includes("position: 'relative'"),
+    "every non-absolute material host must bound its backdrop to the component",
   );
   assert(
     accordion.includes("<Animated.View style={animatedStyle}>")
