@@ -9,7 +9,7 @@ import {
   Target,
 } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
-import { BlurView } from "../../platform/blur";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 import { useThemeContext } from "../../hooks/useTheme";
 import { usePlanStore, useSessionStore } from "../../hooks/useStores";
 import type { SessionType } from "@mitsuro/api";
@@ -25,7 +25,6 @@ export function PlanTracker({
 }: PlanTrackerProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const isDark = theme.scheme === "dark";
   const lastReportedHeightRef = useRef(0);
   const [commandPending, setCommandPending] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
@@ -147,26 +146,14 @@ export function PlanTracker({
   };
 
   const renderMaterial = () => (
-    <>
-      <BlurView
-        intensity={30}
-        tint={isDark ? "systemMaterialDark" : "systemMaterialLight"}
-        style={StyleSheet.absoluteFill}
-      />
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          { backgroundColor: t.surfaceOverlay },
-        ]}
-      />
-    </>
+    <AdaptiveMaterial tone="elevated" borderRadius={14} />
   );
 
   return (
     <View style={styles.trackerStack} onLayout={handleLayout}>
       {goalAvailable && goalExpanded
         ? (
-          <View style={styles.panel}>
+          <View style={[styles.panel, { borderColor: t.glass.border }]}>
             {renderMaterial()}
             <View style={styles.goalSection}>
               <View style={styles.sectionHeading}>
@@ -248,7 +235,7 @@ export function PlanTracker({
 
       {planAvailable && planExpanded
         ? (
-          <View style={styles.panel}>
+          <View style={[styles.panel, { borderColor: t.glass.border }]}>
             {renderMaterial()}
             <View style={styles.planHeading}>
               <ListChecks size={15} color={t.thinking} strokeWidth={1.8} />
@@ -506,7 +493,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.08)",
   },
   collapsedChip: {
     flexDirection: "row",

@@ -1,5 +1,6 @@
 import { Modal, Pressable, StyleSheet, View } from "react-native";
 import { useThemeContext } from "../hooks/useTheme";
+import { AdaptiveMaterial } from "./ui/AdaptiveMaterial";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
 interface SettingsModalProps {
@@ -18,11 +19,11 @@ export function SettingsModal({ visible, onClose }: SettingsModalProps) {
           style={[
             styles.panel,
             {
-              backgroundColor: theme.colors.surfaceOverlayStrong,
               borderColor: theme.colors.border,
             },
           ]}
         >
+          <AdaptiveMaterial tone="strong" borderRadius={14} />
           <SettingsPanel active={visible} onClose={onClose} />
         </View>
       </View>

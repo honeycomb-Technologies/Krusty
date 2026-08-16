@@ -6,9 +6,8 @@ import {
   FlatList,
   ScrollView,
   StyleSheet,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
-import { BlurView } from '../platform/blur';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -18,16 +17,16 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { ArrowLeft, X } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
+import { AdaptiveMaterial } from './ui/AdaptiveMaterial';
 import { DetailPaneSkeleton, ListRowsSkeleton } from './ui/Skeleton';
 import { useConnection } from '../hooks/useConnection';
 import { ReportDetailContent } from './reports/ReportDetailContent';
 import { reportSummariesFromResponse } from './reports/reportResponse';
 import type { ReportSummary, Report } from '@mitsuro/api';
 
-const SCREEN_HEIGHT = Dimensions.get('window').height;
-const PANEL_HEIGHT = SCREEN_HEIGHT * 0.88;
 const SPRING = { damping: 22, stiffness: 280, mass: 0.8 };
 
 interface ReportsViewerProps {
@@ -55,6 +54,9 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
   const { theme } = useThemeContext();
   const { client } = useConnection();
   const t = theme.colors;
+  const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const panelHeight = windowHeight * 0.88;
 
   const progress = useSharedValue(0);
   const [mounted, setMounted] = useState(false);
@@ -115,10 +117,10 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
 
   const panelStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: interpolate(progress.value, [0, 1], [PANEL_HEIGHT, 0]) },
+      { translateY: interpolate(progress.value, [0, 1], [panelHeight, 0]) },
     ],
     opacity: progress.value,
-  }));
+  }), [panelHeight]);
 
   const backdropStyle = useAnimatedStyle(() => ({
     opacity: interpolate(progress.value, [0, 1], [0, 1]),
@@ -168,21 +170,9 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
       </Animated.View>
 
       <Animated.View
-        style={[styles.panel, { height: PANEL_HEIGHT }, panelStyle]}
+        style={[styles.panel, { height: panelHeight }, panelStyle]}
       >
-        <BlurView
-          intensity={50}
-          tint={theme.scheme === 'dark' ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight'}
-          style={StyleSheet.absoluteFill}
-        />
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            {
-              backgroundColor: t.surfaceOverlayElevated,
-            },
-          ]}
-        />
+        <AdaptiveMaterial tone="strong" borderRadius={20} />
 
         {/* Header */}
         <View style={[styles.header, { borderBottomColor: t.border }]}>
@@ -205,7 +195,10 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
         {selectedReport ? (
           <ScrollView
             style={styles.detailScroll}
-            contentContainerStyle={styles.detailContent}
+            contentContainerStyle={[
+              styles.detailContent,
+              { paddingBottom: Math.max(insets.bottom, 16) + 24 },
+            ]}
             showsVerticalScrollIndicator={false}
           >
             <ReportDetailContent report={selectedReport} />
@@ -225,7 +218,10 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
             data={reports}
             keyExtractor={(item) => item.id}
             renderItem={renderReportCard}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: Math.max(insets.bottom, 16) + 24 },
+            ]}
             showsVerticalScrollIndicator={false}
           />
         )}

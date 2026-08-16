@@ -15,36 +15,26 @@ export function GlassCard({ children, style, elevated, intensity, compact = fals
   const { theme } = useThemeContext();
   const g = theme.colors.glass;
 
+  const radius = compact ? 8 : theme.radii.xl;
+
   return (
-    <View style={[styles.wrapper, compact && styles.compactWrapper, style]}>
-      {compact ? (
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            styles.ignorePointerEvents,
-            { backgroundColor: theme.colors.background, borderRadius: 8 },
-          ]}
-        />
-      ) : (
-        <AdaptiveMaterial
-          borderRadius={theme.radii.xl}
-          blurIntensity={intensity}
-          tone={elevated ? "elevated" : "regular"}
-        />
-      )}
-      {compact ? null : (
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            styles.ignorePointerEvents,
-            {
-              borderRadius: theme.radii.xl,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: g.border,
-            },
-          ]}
-        />
-      )}
+    <View style={[styles.wrapper, { borderRadius: radius }, style]}>
+      <AdaptiveMaterial
+        borderRadius={radius}
+        blurIntensity={intensity}
+        tone={elevated ? "elevated" : "regular"}
+      />
+      <View
+        style={[
+          StyleSheet.absoluteFill,
+          styles.ignorePointerEvents,
+          {
+            borderRadius: radius,
+            borderWidth: StyleSheet.hairlineWidth,
+            borderColor: g.border,
+          },
+        ]}
+      />
       <View style={[styles.content, compact && styles.compactContent]}>{children}</View>
     </View>
   );
@@ -53,14 +43,10 @@ export function GlassCard({ children, style, elevated, intensity, compact = fals
 const styles = StyleSheet.create({
   wrapper: {
     position: 'relative',
-    borderRadius: 22,
     overflow: 'hidden',
   },
   content: {
     padding: 16,
-  },
-  compactWrapper: {
-    borderRadius: 8,
   },
   compactContent: {
     padding: 0,

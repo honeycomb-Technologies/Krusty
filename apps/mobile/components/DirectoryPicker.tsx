@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -8,7 +9,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { BlurView } from '../platform/blur';
+import { AdaptiveMaterial } from './ui/AdaptiveMaterial';
 import { Folder, ChevronLeft, X, Check } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
@@ -99,17 +100,15 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
 
         <View style={styles.modalContainer}>
           <View style={styles.card}>
-            <BlurView
-              intensity={theme.colors.glassBlurIntense}
-              tint={theme.scheme === 'dark' ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight'}
-              style={StyleSheet.absoluteFill}
+            <AdaptiveMaterial tone="strong" borderRadius={22} />
+            <View
+              pointerEvents="none"
+              style={[StyleSheet.absoluteFill, {
+                borderRadius: 22,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: g.border,
+              }]}
             />
-            <View style={[StyleSheet.absoluteFill, {
-              backgroundColor: t.surfaceOverlayElevated,
-              borderRadius: 22,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: g.border,
-            }]} />
 
             {/* Header */}
             <View style={[styles.header, { borderBottomColor: t.border }]}>
@@ -172,7 +171,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
                 onPress={handleSelect}
                 style={[styles.selectBtn, { backgroundColor: t.userMessage }]}
               >
-                <Check size={18} color="#fff" strokeWidth={2.5} />
+                <Check size={18} color={t.onAccent} strokeWidth={2.5} />
                 <Text style={styles.selectBtnText}>Select This Directory</Text>
               </Pressable>
             </View>
@@ -283,7 +282,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   selectBtnText: {
-    color: '#fff',
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: '600',
   },
