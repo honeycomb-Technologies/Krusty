@@ -27,6 +27,7 @@ mod hive_attention_state;
 mod hive_controller_events;
 mod hive_controllers;
 mod hive_daemon_leases;
+pub mod hive_groups;
 mod hive_home;
 mod hive_idempotency;
 mod hive_profiles;
@@ -84,6 +85,12 @@ pub use hive_controller_events::{
 };
 pub use hive_controllers::{HiveController, HiveControllerStatus, HiveControllerStore};
 pub use hive_daemon_leases::{DaemonLease, DaemonLeaseAcquire, HiveDaemonLeaseStore};
+pub use hive_groups::{
+    parse_group_mentions, GroupMentionTarget, HiveGroup, HiveGroupExecutionMode, HiveGroupMember,
+    HiveGroupMessage, HiveGroupRunContext, HiveGroupSenderKind, HiveGroupStatus, HiveGroupStore,
+    HiveGroupTurn, HiveGroupTurnPolicy, HiveGroupTurnStatus, HiveGroupUpdate, HiveMemberCursor,
+    MentionResolution, NewHiveGroup, NewHiveGroupMessage, MAX_HIVE_GROUP_MESSAGE_BYTES,
+};
 pub use hive_home::{
     bootstrap_hive_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
     write_hive_crew_document, write_hive_home_document, HiveBootstrapResult, HiveChannelBinding,

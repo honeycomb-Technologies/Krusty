@@ -14,7 +14,7 @@ use super::model::{
     HiveWorkerDocumentKind, HiveWorkerProfileUpdate, HiveWorkerStatus, NewHiveWorker,
 };
 
-const WORKER_COLUMNS: &str = "id, user_id, slug, display_name, avatar_color, model, model_key_json, model_catalog_revision, permission_mode, autonomy, heartbeat_interval_secs, status, dm_session_id, memory_namespace_id, created_at, updated_at";
+pub(crate) const WORKER_COLUMNS: &str = "id, user_id, slug, display_name, avatar_color, model, model_key_json, model_catalog_revision, permission_mode, autonomy, heartbeat_interval_secs, status, dm_session_id, memory_namespace_id, created_at, updated_at";
 
 /// Matches rows owned by exactly the given user (NULL = local), mirroring
 /// the exact-owner semantics used across the rest of the hive stores.
@@ -334,7 +334,7 @@ fn validate_model_identity(model: Option<&str>, model_key: Option<&ModelKey>) ->
     Ok(())
 }
 
-fn map_worker(row: &Row<'_>) -> rusqlite::Result<HiveWorker> {
+pub(crate) fn map_worker(row: &Row<'_>) -> rusqlite::Result<HiveWorker> {
     let permission_mode_raw: String = row.get(8)?;
     let permission_mode = permission_mode_raw
         .parse::<PermissionMode>()

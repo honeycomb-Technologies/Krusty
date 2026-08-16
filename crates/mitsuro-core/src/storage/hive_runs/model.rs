@@ -13,6 +13,9 @@ pub enum HiveRunKind {
     Scheduled,
     ControllerChild,
     LegacyResume,
+    /// One member run of a Hive group turn, executing on the member Worker's
+    /// own controller lane.
+    GroupTurn,
 }
 
 impl HiveRunKind {
@@ -22,6 +25,7 @@ impl HiveRunKind {
             Self::Scheduled => "scheduled",
             Self::ControllerChild => "controller_child",
             Self::LegacyResume => "legacy_resume",
+            Self::GroupTurn => "group_turn",
         }
     }
 
@@ -31,6 +35,7 @@ impl HiveRunKind {
             "scheduled" => Some(Self::Scheduled),
             "controller_child" => Some(Self::ControllerChild),
             "legacy_resume" => Some(Self::LegacyResume),
+            "group_turn" => Some(Self::GroupTurn),
             _ => None,
         }
     }

@@ -117,7 +117,7 @@ fn test_session_list_metadata_migration() {
 
     assert!(columns.contains(&"pinned_at".to_string()));
     assert!(columns.contains(&"archived_at".to_string()));
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -225,7 +225,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -287,7 +287,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     let claimed: String = db
         .conn()
         .query_row(
@@ -317,7 +317,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -372,7 +372,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -426,7 +426,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
 }
 
 #[test]
@@ -535,7 +535,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 63");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
 
     let count_workers = |predicate: &str| -> i64 {
         db.conn()
@@ -667,7 +667,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
         .execute("DELETE FROM schema_version WHERE version >= 63", [])
         .expect("rewind migration marker");
     db.run_migrations().expect("reapply migration 63");
-    assert_eq!(db.get_schema_version(), 63);
+    assert_eq!(db.get_schema_version(), 64);
     assert_eq!(count_workers("1 = 1"), 5, "idempotent backfill");
     let assistant_id_after: String = db
         .conn()
@@ -733,6 +733,93 @@ fn migration_63_fresh_database_uses_executor_id_and_worker_linkage_columns() {
             "{table} missing worker_id"
         );
     }
+}
+
+#[test]
+fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-63-groups.db");
+    let db = crate::storage::database::Database::new(&path).expect("create current database");
+    // Rewind to a schema-63-shaped world: no group tables and no group
+    // linkage on hive_runs. The partial index must go before its column.
+    db.conn()
+        .execute_batch(
+            r#"
+            DROP TABLE hive_member_cursors;
+            DROP TABLE hive_group_turns;
+            DROP TABLE hive_group_messages;
+            DROP TABLE hive_group_members;
+            DROP TABLE hive_groups;
+            DROP INDEX idx_hive_runs_group_turn;
+            ALTER TABLE hive_runs DROP COLUMN group_id;
+            ALTER TABLE hive_runs DROP COLUMN group_turn_id;
+            ALTER TABLE hive_runs DROP COLUMN trigger_message_id;
+            DELETE FROM schema_version WHERE version >= 64;
+            "#,
+        )
+        .expect("rewind group room migration");
+    drop(db);
+
+    let db = crate::storage::database::Database::new(&path).expect("apply migration 64");
+    assert_eq!(db.get_schema_version(), 64);
+
+    let table_exists = |table: &str| -> bool {
+        db.conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("read table existence")
+    };
+    for table in [
+        "hive_groups",
+        "hive_group_members",
+        "hive_group_messages",
+        "hive_group_turns",
+        "hive_member_cursors",
+    ] {
+        assert!(table_exists(table), "missing table {table}");
+    }
+    let run_columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(hive_runs)")
+        .expect("prepare run columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query run columns")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect run columns");
+    for column in ["group_id", "group_turn_id", "trigger_message_id"] {
+        assert!(
+            run_columns.contains(&column.to_string()),
+            "hive_runs missing {column}"
+        );
+    }
+
+    // The per-group sequence is unique and the mode CHECK holds.
+    db.conn()
+        .execute_batch(
+            "INSERT INTO hive_groups (id, user_id, title, created_at, updated_at)
+             VALUES ('group-1', NULL, 'Room', '2026-08-16T00:00:00Z', '2026-08-16T00:00:00Z');
+             INSERT INTO hive_group_messages (
+                 id, group_id, seq, sender_kind, content, created_at
+             ) VALUES ('message-1', 'group-1', 1, 'user', 'hi', '2026-08-16T00:00:00Z');",
+        )
+        .expect("seed a group and message");
+    let duplicate_seq = db.conn().execute(
+        "INSERT INTO hive_group_messages (id, group_id, seq, sender_kind, content, created_at)
+         VALUES ('message-2', 'group-1', 1, 'user', 'again', '2026-08-16T00:00:01Z')",
+        [],
+    );
+    assert!(duplicate_seq.is_err(), "seq must be unique per group");
+    let invalid_mode = db.conn().execute(
+        "UPDATE hive_groups SET execution_mode = 'swarm' WHERE id = 'group-1'",
+        [],
+    );
+    assert!(invalid_mode.is_err(), "execution mode CHECK must hold");
+
+    db.run_migrations().expect("migration 64 is idempotent");
+    assert_eq!(db.get_schema_version(), 64);
 }
 
 #[test]

@@ -7,7 +7,7 @@
 //! bridges legacy `crew_slug` call sites until they migrate to worker ids.
 
 mod model;
-mod store;
+pub(crate) mod store;
 
 #[cfg(test)]
 mod tests;

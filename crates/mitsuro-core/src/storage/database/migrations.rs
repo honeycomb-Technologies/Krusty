@@ -3740,6 +3740,210 @@ impl Database {
             worker_tx.commit()?;
         }
 
+        // Migration 64: Group rooms where Workers collaborate.
+        //
+        // A group references Workers (never owns them; deleting a group
+        // cascades membership but leaves Workers intact), stores an
+        // append-only per-group-sequenced message timeline, and records each
+        // user-triggered fan-out as a durable hive_group_turns aggregate with
+        // per-member outcomes. hive_runs gains nullable group linkage so one
+        // member run can be traced back to its turn and trigger message.
+        if current_version < 64 {
+            info!("Running migration 64: Hive group rooms");
+
+            // hive_runs.kind gains 'group_turn'. The table is a cascade
+            // parent (attempts, occurrences, control outbox), so a
+            // drop-and-rebuild would destroy child rows; edit the CHECK in
+            // place instead. Any DDL later in this migration bumps the schema
+            // cookie, so other connections reparse the edited definition.
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 64: checking for hive_runs")?;
+            if runs_table_exists {
+                const LEGACY_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume')";
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 64: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [LEGACY_KINDS, GROUP_KINDS],
+                    )
+                    .context("Migration 64: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 64: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("group_turn") || !runs_sql.contains("kind IN"),
+                    "Migration 64 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let group_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring Hive group migration lock")?;
+
+            group_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_groups (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        title TEXT NOT NULL,
+                        execution_mode TEXT NOT NULL DEFAULT 'workbench'
+                            CHECK (execution_mode IN ('workbench', 'roundtable', 'direct')),
+                        max_rounds INTEGER NOT NULL DEFAULT 3
+                            CHECK (max_rounds > 0),
+                        max_member_messages_per_turn INTEGER NOT NULL DEFAULT 2
+                            CHECK (max_member_messages_per_turn > 0),
+                        parallelism INTEGER NOT NULL DEFAULT 3
+                            CHECK (parallelism > 0),
+                        context_window_messages INTEGER NOT NULL DEFAULT 24
+                            CHECK (context_window_messages > 0),
+                        status TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'archived')),
+                        default_assignee_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_groups_owner_status
+                        ON hive_groups(user_id, status);
+
+                    CREATE TABLE IF NOT EXISTS hive_group_members (
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id),
+                        position INTEGER NOT NULL,
+                        added_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, worker_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_members_worker
+                        ON hive_group_members(worker_id);
+
+                    -- Append-only room timeline. seq is allocated
+                    -- transactionally per group (like hive_controller_events
+                    -- sequences); message rows are never updated or deleted.
+                    -- turn_id has no FK because the trigger message and its
+                    -- turn reference each other and are inserted in one
+                    -- transaction, message first.
+                    CREATE TABLE IF NOT EXISTS hive_group_messages (
+                        id TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        seq INTEGER NOT NULL,
+                        sender_kind TEXT NOT NULL
+                            CHECK (sender_kind IN ('user', 'worker', 'system')),
+                        sender_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        sender_run_id TEXT,
+                        content TEXT NOT NULL,
+                        -- SET NULL keeps whole-group cascade deletes safe under
+                        -- enforced foreign keys; the store API itself never
+                        -- updates or deletes message rows.
+                        reply_to_message_id TEXT
+                            REFERENCES hive_group_messages(id) ON DELETE SET NULL,
+                        turn_id TEXT,
+                        idempotency_key TEXT,
+                        created_at TEXT NOT NULL,
+                        UNIQUE (group_id, seq),
+                        UNIQUE (group_id, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_messages_turn
+                        ON hive_group_messages(turn_id)
+                        WHERE turn_id IS NOT NULL;
+
+                    CREATE TABLE IF NOT EXISTS hive_group_turns (
+                        id TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        trigger_message_id TEXT NOT NULL
+                            REFERENCES hive_group_messages(id) ON DELETE CASCADE,
+                        execution_mode TEXT NOT NULL
+                            CHECK (execution_mode IN ('workbench', 'roundtable', 'direct')),
+                        policy_json TEXT NOT NULL
+                            CHECK (json_valid(policy_json)),
+                        speaker_plan_json TEXT NOT NULL
+                            CHECK (json_valid(speaker_plan_json)),
+                        next_speaker_index INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN (
+                                'running', 'completed', 'partial', 'failed', 'cancelled'
+                            )),
+                        member_outcomes_json TEXT
+                            CHECK (
+                                member_outcomes_json IS NULL
+                                OR json_valid(member_outcomes_json)
+                            ),
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_turns_group
+                        ON hive_group_turns(group_id, started_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_turns_running
+                        ON hive_group_turns(group_id)
+                        WHERE status = 'running';
+
+                    CREATE TABLE IF NOT EXISTS hive_member_cursors (
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        worker_id TEXT NOT NULL,
+                        last_seen_seq INTEGER NOT NULL DEFAULT 0,
+                        last_spoke_seq INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, worker_id)
+                    );
+                    "#,
+                )
+                .context("Migration 64: create Hive group tables")?;
+
+            // Nullable group linkage for member runs of a group turn.
+            if Self::table_exists(&group_tx, "hive_runs") {
+                for column in ["group_id", "group_turn_id", "trigger_message_id"] {
+                    if !Self::column_exists(&group_tx, "hive_runs", column) {
+                        group_tx
+                            .execute_batch(&format!(
+                                "ALTER TABLE hive_runs ADD COLUMN {column} TEXT;"
+                            ))
+                            .with_context(|| format!("Migration 64: add hive_runs.{column}"))?;
+                    }
+                }
+                group_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_hive_runs_group_turn
+                        ON hive_runs(group_turn_id) WHERE group_turn_id IS NOT NULL;",
+                )?;
+            }
+
+            group_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (64)",
+                [],
+            )?;
+            group_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -3862,7 +4066,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 63);
+        assert_eq!(database.get_schema_version(), 64);
         database
             .conn()
             .execute(
@@ -3943,7 +4147,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 63);
+        assert_eq!(database.get_schema_version(), 64);
         let create_sql: String = database
             .conn()
             .query_row(
