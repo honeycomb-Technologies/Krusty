@@ -7,6 +7,23 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+Deno.test("native Ghostty keeps its required iOS deployment target", async () => {
+  const appConfig = JSON.parse(
+    await Deno.readTextFile(
+      new URL("../app.json", import.meta.url).pathname,
+    ),
+  );
+  const deploymentTarget = appConfig.expo?.plugins
+    ?.find((plugin: unknown) =>
+      Array.isArray(plugin) && plugin[0] === "expo-build-properties"
+    )?.[1]?.ios?.deploymentTarget;
+
+  assert(
+    deploymentTarget === "16.4",
+    "expo-libghostty requires the generated iOS project to target iOS 16.4 or newer",
+  );
+});
+
 Deno.test("Live Activity replacement keeps an owned handle until exact end", async () => {
   const source = await Deno.readTextFile(
     new URL("../hooks/useLiveActivity.ts", import.meta.url).pathname,
