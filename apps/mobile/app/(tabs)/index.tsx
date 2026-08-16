@@ -1138,7 +1138,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
                 { backgroundColor: t.userMessage },
               ]}
             >
-              <Text style={[styles.renameButtonText, { color: "#fff" }]}>
+              <Text style={[styles.renameButtonText, { color: t.onAccent }]}>
                 {renameSaving ? "Saving…" : "Save"}
               </Text>
             </Pressable>

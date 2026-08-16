@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { StyleSheet } from "react-native";
 
 /**
@@ -67,7 +68,7 @@ export const styles = StyleSheet.create({
     alignItems: "center",
   },
   bootButtonText: {
-    color: "#fff",
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: "600",
   },

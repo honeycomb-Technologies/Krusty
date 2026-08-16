@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useState } from 'react';
 import {
   View,
@@ -125,7 +126,7 @@ export default function OnboardingScreen() {
             disabled={isConnecting || !canConnect}
           >
             {isConnecting ? (
-              <ActivityIndicator color="#fff" size="small" />
+              <ActivityIndicator color={t.onAccent} size="small" />
             ) : (
               <Text style={styles.buttonText}>Connect</Text>
             )}
@@ -187,7 +188,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   buttonText: {
-    color: '#fff',
+    color: colors.onAccent,
     fontSize: 17,
     fontWeight: '600',
   },

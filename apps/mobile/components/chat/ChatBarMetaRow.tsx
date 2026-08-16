@@ -46,7 +46,7 @@ function ChatBarMetaRowComponent({
               cx={GAUGE_SIZE / 2}
               cy={GAUGE_SIZE / 2}
               r={gaugeRadius}
-              stroke="rgba(255,255,255,0.06)"
+              stroke={`${mutedForeground}26`}
               strokeWidth={gaugeStroke}
               fill="none"
             />

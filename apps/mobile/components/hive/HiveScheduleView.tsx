@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Modal,
@@ -1266,7 +1267,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   primaryActionLabel: {
-    color: "#ffffff",
+    color: colors.onAccent,
     fontSize: 13,
     fontWeight: "600",
   },

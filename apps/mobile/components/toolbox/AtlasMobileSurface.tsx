@@ -25,6 +25,7 @@ import {
   X,
 } from 'lucide-react-native';
 
+import { colors } from '@mitsuro/ui';
 import { useConnection } from '../../hooks/useConnection';
 import { useThemeContext } from '../../hooks/useTheme';
 
@@ -123,7 +124,7 @@ function streamDocument(url: string): string {
   return `<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
-html,body,#surface{margin:0;width:100%;height:100%;overflow:hidden;background:#0b1119;touch-action:none}
+html,body,#surface{margin:0;width:100%;height:100%;overflow:hidden;background:#0e0e11;touch-action:none}
 #frame{width:100%;height:100%;object-fit:contain;object-position:center top;display:block;user-select:none;-webkit-user-select:none}
 #status{position:fixed;inset:0;display:grid;place-items:center;color:#9aa7b5;font:13px system-ui;pointer-events:none}
 #keyboard{position:fixed;left:-1000px;top:-1000px;width:1px;height:1px;opacity:0}
@@ -621,7 +622,7 @@ const styles = StyleSheet.create({
     gap: 2,
     paddingHorizontal: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.06)',
+    borderBottomColor: colors.glass.border,
   },
   addressInput: {
     flex: 1,
@@ -644,7 +645,7 @@ const styles = StyleSheet.create({
     top: 38,
     right: 8,
     width: 226,
-    backgroundColor: '#151a24',
+    backgroundColor: colors.surfaceElevated,
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 10,
     paddingVertical: 6,
@@ -671,8 +672,8 @@ const styles = StyleSheet.create({
   },
   liveDot: { width: 6, height: 6, borderRadius: 3 },
   portName: { flex: 1, fontSize: 13 },
-  viewport: { flex: 1, backgroundColor: '#0b1119' },
-  webview: { flex: 1, backgroundColor: '#0b1119' },
+  viewport: { flex: 1, backgroundColor: colors.background },
+  webview: { flex: 1, backgroundColor: colors.background },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   note: { fontSize: 12, lineHeight: 17, paddingHorizontal: 10, paddingBottom: 8 },
 });

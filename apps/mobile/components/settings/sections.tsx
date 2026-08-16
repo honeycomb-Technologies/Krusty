@@ -337,7 +337,7 @@ export function ConnectionSection({
               ]}
             >
               {isConnecting ? (
-                <ActivityIndicator color="#fff" size="small" />
+                <ActivityIndicator color={t.onAccent} size="small" />
               ) : (
                 <Text style={styles.connectBtnText}>Connect</Text>
               )}

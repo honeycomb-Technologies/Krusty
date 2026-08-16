@@ -111,7 +111,7 @@ export default function SessionsScreen() {
             },
           ]}
         >
-          <Plus size={20} color="#fff" strokeWidth={2.5} />
+          <Plus size={20} color={t.onAccent} strokeWidth={2.5} />
         </Pressable>
       </View>
 

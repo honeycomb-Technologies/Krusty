@@ -1002,7 +1002,7 @@ function ChatTranscriptComponent({
             accessibilityRole="button"
             accessibilityLabel="Jump to latest"
             onPress={handleJumpToLatest}
-            style={styles.jumpToLatest}
+            style={[styles.jumpToLatest, { borderColor: t.glass.border }]}
           >
             <AdaptiveMaterial
               borderRadius={BOTTOM_CONTROL_RADIUS}
@@ -1161,7 +1161,6 @@ const styles = StyleSheet.create({
     borderRadius: BOTTOM_CONTROL_RADIUS,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.08)",
   },
   jumpToLatestInner: {
     flex: 1,

@@ -1,5 +1,6 @@
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
+import { colors } from "@mitsuro/ui";
 
 import { MitsuroTraceMark } from "./mitsuro-mark";
 import { MitsuroWordmark } from "./mitsuro-wordmark";
@@ -15,8 +16,8 @@ interface MitsuroLogoProps {
 }
 
 export function MitsuroLogo({
-  color = "#e8e5ea",
-  markColor = "#9d73ff",
+  color = colors.foreground,
+  markColor = colors.pulse,
   markFill = "rgba(157, 115, 255, 0.09)",
   markSize = 84,
   wordmarkWidth = 216,

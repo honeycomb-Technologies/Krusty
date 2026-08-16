@@ -18,6 +18,8 @@ export const colors = {
   accentPressed: '#66536f',
   accentSurface: 'rgba(117, 97, 126, 0.22)',
   onAccent: '#f7f4f8',
+  // Pulse — activity accent used by the brand mark and running-line beam.
+  pulse: '#9d73ff',
 
   // Messages
   userMessage: '#75617e',

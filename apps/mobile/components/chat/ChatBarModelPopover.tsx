@@ -77,7 +77,6 @@ function ChatBarModelPopoverComponent({
               // The list does not overlap the FAB/filter hit areas, so it
               // can safely sit above their full-width responder shell.
               zIndex: MODEL_POPOVER_Z_INDEX,
-              elevation: MODEL_POPOVER_Z_INDEX,
             }
           : [
               styles.modelClip,
@@ -150,7 +149,6 @@ const styles = StyleSheet.create({
     height: 4 * PILL + 3 * GAP,
     overflow: 'hidden',
     zIndex: MODEL_POPOVER_Z_INDEX,
-    elevation: MODEL_POPOVER_Z_INDEX,
   },
   // Model popover — slides out from behind accordion
   modelPopover: {
@@ -160,6 +158,8 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
+    // CSS-form shadow: shadow* props are clipped by overflow:'hidden' on iOS,
+    // RN's native boxShadow is not.
     boxShadow: '0 10px 20px rgba(0,0,0,0.28)',
   },
   modelList: {

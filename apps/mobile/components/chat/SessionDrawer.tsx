@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import {
   createRef,
   useCallback,
@@ -970,15 +971,15 @@ export function SessionDrawer({
               ? swipeAction(
                   "Restore",
                   t.success,
-                  <ArchiveRestore size={19} color="#fff" strokeWidth={2} />,
+                  <ArchiveRestore size={19} color={t.onAccent} strokeWidth={2} />,
                   () => void runArchiveChange(session, false, methods),
                 )
               : swipeAction(
                   pinned ? "Unpin" : "Pin",
                   t.userMessage,
                   pinned
-                    ? <PinOff size={19} color="#fff" strokeWidth={2} />
-                    : <Pin size={19} color="#fff" strokeWidth={2} />,
+                    ? <PinOff size={19} color={t.onAccent} strokeWidth={2} />
+                    : <Pin size={19} color={t.onAccent} strokeWidth={2} />,
                   () => void runPinChange(session, !pinned, methods),
                 )}
           </View>
@@ -989,14 +990,14 @@ export function SessionDrawer({
               ? swipeAction(
                   "Archive",
                   t.warning,
-                  <Archive size={19} color="#fff" strokeWidth={2} />,
+                  <Archive size={19} color={t.onAccent} strokeWidth={2} />,
                   () => void runArchiveChange(session, true, methods),
                 )
               : null}
             {swipeAction(
               "Delete",
               t.error,
-              <Trash2 size={19} color="#fff" strokeWidth={2} />,
+              <Trash2 size={19} color={t.onAccent} strokeWidth={2} />,
               () => {
                 methods.close();
                 onDeleteSession(session.id, () => {
@@ -1335,8 +1336,8 @@ export function SessionDrawer({
               pinned ? "Unpin" : "Pin",
               t.userMessage,
               pinned
-                ? <PinOff size={19} color="#fff" strokeWidth={2} />
-                : <Pin size={19} color="#fff" strokeWidth={2} />,
+                ? <PinOff size={19} color={t.onAccent} strokeWidth={2} />
+                : <Pin size={19} color={t.onAccent} strokeWidth={2} />,
               () => void runProjectPinChange(group, !pinned, methods),
             )}
           </View>
@@ -1346,13 +1347,13 @@ export function SessionDrawer({
             {swipeAction(
               "Archive",
               t.warning,
-              <Archive size={19} color="#fff" strokeWidth={2} />,
+              <Archive size={19} color={t.onAccent} strokeWidth={2} />,
               () => void runProjectArchiveChange(group, true, methods),
             )}
             {swipeAction(
               "Delete",
               t.error,
-              <Trash2 size={19} color="#fff" strokeWidth={2} />,
+              <Trash2 size={19} color={t.onAccent} strokeWidth={2} />,
               () => {
                 methods.close();
                 onDeleteProjectSessions(
@@ -1799,7 +1800,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   swipeActionLabel: {
-    color: "#fff",
+    color: colors.onAccent,
     fontSize: 10,
     fontWeight: "700",
   },

@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useState } from "react";
 import {
   Pressable,
@@ -221,7 +222,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   buttonLabel: {
-    color: "#ffffff",
+    color: colors.onAccent,
     fontSize: 13,
     fontWeight: "600",
   },

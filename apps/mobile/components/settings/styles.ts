@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { StyleSheet } from "react-native";
 
 export const styles = StyleSheet.create({
@@ -132,7 +133,7 @@ export const styles = StyleSheet.create({
     alignItems: "center",
   },
   connectBtnText: {
-    color: "#fff",
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: "700",
   },
@@ -245,7 +246,7 @@ export const styles = StyleSheet.create({
     width: 20,
     height: 20,
     borderRadius: 8,
-    backgroundColor: "#fff",
+    backgroundColor: colors.onAccent,
   },
   portRow: {
     borderTopWidth: StyleSheet.hairlineWidth,

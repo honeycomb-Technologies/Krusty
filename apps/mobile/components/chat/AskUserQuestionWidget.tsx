@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput, StyleSheet } from "react-native";
 import { HelpCircle, Check, Send } from "lucide-react-native";
@@ -177,7 +178,7 @@ export function AskUserQuestionWidget({
                         ]}
                       >
                         {selected ? (
-                          <Check size={10} color="#fff" strokeWidth={3} />
+                          <Check size={10} color={t.onAccent} strokeWidth={3} />
                         ) : null}
                       </View>
                       <View style={styles.optionTextWrap}>
@@ -246,7 +247,7 @@ export function AskUserQuestionWidget({
               },
             ]}
           >
-            <Send size={16} color="#fff" strokeWidth={2} />
+            <Send size={16} color={t.onAccent} strokeWidth={2} />
             <Text style={styles.submitLabel}>
               {isSubmitting ? "Submitting..." : "Submit Answer"}
             </Text>
@@ -355,7 +356,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   submitLabel: {
-    color: "#fff",
+    color: colors.onAccent,
     fontSize: 14,
     fontWeight: "600",
   },

@@ -144,8 +144,11 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
               style={({ pressed }) => [
                 markdownImageStyles.frame,
                 {
+                  backgroundColor: t.glass.background,
                   borderColor:
-                    hoveredImageKey === node.key ? t.userMessage : t.border,
+                    hoveredImageKey === node.key || pressed
+                      ? t.userMessage
+                      : t.border,
                   opacity: pressed ? 0.88 : 1,
                 },
               ]}
@@ -167,7 +170,7 @@ export const MarkdownContent = memo(function MarkdownContent({ content, isUser }
             style={{
               fontFamily: 'Courier',
               fontSize: 13,
-              backgroundColor: isUser ? `${t.userMessage}14` : 'rgba(255,255,255,0.08)',
+              backgroundColor: isUser ? `${t.userMessage}14` : t.glass.backgroundElevated,
               color: isUser ? t.userMessage : t.foreground,
               paddingHorizontal: 4,
               paddingVertical: 1,
@@ -282,7 +285,7 @@ function getStyles(t: any, isUser?: boolean) {
     bullet_list_icon: { color: mutedColor, fontSize: 15, marginRight: 8 },
     ordered_list_icon: { color: mutedColor, fontSize: 15, marginRight: 8 },
     table: { borderWidth: StyleSheet.hairlineWidth, borderColor: t.border, borderRadius: 8, marginVertical: 6 },
-    thead: { backgroundColor: 'rgba(255,255,255,0.05)' },
+    thead: { backgroundColor: t.glass.background },
     th: { color: textColor, fontWeight: '600', padding: 8, fontSize: 13 },
     td: { color: textColor, padding: 8, fontSize: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border },
     hr: { backgroundColor: t.border, height: StyleSheet.hairlineWidth, marginVertical: 8 },
@@ -345,7 +348,6 @@ const markdownImageStyles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   image: {
     width: '100%',

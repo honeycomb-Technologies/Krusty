@@ -388,8 +388,11 @@ function MessageAttachments({
               style={({ pressed }) => [
                 styles.messageImageThumb,
                 {
+                  backgroundColor: t.glass.background,
                   borderColor:
-                    hoveredAttachmentIndex === index ? t.userMessage : t.border,
+                    hoveredAttachmentIndex === index || pressed
+                      ? t.userMessage
+                      : t.border,
                   opacity: pressed ? 0.86 : 1,
                 },
               ]}
@@ -537,7 +540,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    backgroundColor: "rgba(255,255,255,0.06)",
   },
   messageImage: {
     width: "100%",
