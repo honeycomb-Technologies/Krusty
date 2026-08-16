@@ -96,8 +96,6 @@ const SPRING_CONFIG = { damping: 18, stiffness: 350, mass: 0.6 };
 const MAX_PILL_INDEX = 5;
 const OPEN_STAGGER_MS = 40;
 const CLOSE_STAGGER_MS = 28;
-const ACTION_FADE_IN_MS = 70;
-const ACTION_FADE_OUT_MS = 120;
 const ATTACH_ACTION_COUNT = 3;
 const DOCK_FADE_WIDTH = 34;
 const MODEL_BUTTON_GAP = 10;
@@ -136,7 +134,6 @@ function DesktopFilterPill({
   }, [index, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: progress.value,
     transform: [
       { translateX: interpolate(progress.value, [0, 1], [16, 0]) },
       { scale: interpolate(progress.value, [0, 1], [0.88, 1]) },
@@ -211,7 +208,6 @@ function AccordionPill({
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
-  const opacityProgress = useSharedValue(0);
 
   useEffect(() => {
     const delayMs = isOpen
@@ -221,19 +217,12 @@ function AccordionPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    opacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [index, isOpen, maxIndex, opacityProgress, progress]);
+  }, [index, isOpen, maxIndex, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacityProgress.value,
     transform: [
       { translateY: interpolate(progress.value, [0, 1], [20, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.8, 1]) },
+      { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
     ],
   }));
 
@@ -301,7 +290,6 @@ function InlineActionPill({
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
-  const opacityProgress = useSharedValue(0);
 
   useEffect(() => {
     const delayMs = isOpen
@@ -311,16 +299,9 @@ function InlineActionPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    opacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [isOpen, itemCount, closeStaggerMs, opacityProgress, progress]);
+  }, [isOpen, itemCount, closeStaggerMs, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacityProgress.value,
     transform: [
       { translateX: interpolate(progress.value, [0, 1], [size * 0.75, 0]) },
       { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
@@ -415,7 +396,6 @@ function ProviderDockPill({
   const { theme } = useThemeContext();
   const editProgress = useSharedValue(0);
   const revealProgress = useSharedValue(0);
-  const revealOpacityProgress = useSharedValue(0);
   const reorderX = useSharedValue(0);
   const dragging = useSharedValue(0);
   const rawDragX = useSharedValue(0);
@@ -436,13 +416,7 @@ function ProviderDockPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    revealOpacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [index, isOpen, itemCount, revealOpacityProgress, revealProgress]);
+  }, [index, isOpen, itemCount, revealProgress]);
 
   useEffect(() => {
     reorderX.value = 0;
@@ -587,7 +561,6 @@ function ProviderDockPill({
     );
 
     return {
-      opacity: revealOpacityProgress.value,
       zIndex,
       transform: [
         {

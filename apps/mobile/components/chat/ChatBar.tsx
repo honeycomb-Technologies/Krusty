@@ -37,7 +37,6 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
-  withTiming,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
@@ -514,7 +513,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const [expandedEditorOpen, setExpandedEditorOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const modelPopoverScale = useSharedValue(0);
-  const modelPopoverOpacity = useSharedValue(0);
   const transcriptRef = useRef('');
   const textRef = useRef(text);
   const inputRef = useRef<TextInput>(null);
@@ -968,26 +966,22 @@ function ChatBarComponent(props: ChatBarProps) {
     }));
     setSelectedProviderFilter(null);
     modelPopoverScale.value = 0;
-    modelPopoverOpacity.value = 0;
     setModelRailOpen(true);
     setModelPickerOpen(true);
     modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
-    modelPopoverOpacity.value = withTiming(1, { duration: 140 });
   };
   const closeModelPicker = useCallback(() => {
     clearModelCloseTimer();
     setModelRailOpen(false);
     modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
-    modelPopoverOpacity.value = withTiming(0, { duration: 120 });
     modelCloseTimerRef.current = setTimeout(() => {
       setModelPickerOpen(false);
       setSelectedProviderFilter(null);
       modelCloseTimerRef.current = null;
     }, 180);
-  }, [clearModelCloseTimer, modelPopoverOpacity, modelPopoverScale]);
+  }, [clearModelCloseTimer, modelPopoverScale]);
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
-    opacity: modelPopoverOpacity.value,
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
 
@@ -1005,7 +999,6 @@ function ChatBarComponent(props: ChatBarProps) {
     if (modelPickerOpen) {
       setModelRailOpen(false);
       modelPopoverScale.value = 0;
-      modelPopoverOpacity.value = 0;
       setModelPickerOpen(false);
       setSelectedProviderFilter(null);
     }

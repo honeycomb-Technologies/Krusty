@@ -335,3 +335,43 @@ Deno.test("stress controls remain native automation targets", async () => {
     "the visible sheet grabber must expose a working tap action in addition to its pan gesture",
   );
 });
+
+Deno.test("mobile header owns the top safe-area inset", async () => {
+  const header = await Deno.readTextFile(
+    new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url).pathname,
+  );
+  const chatScreen = await Deno.readTextFile(
+    new URL("../app/(tabs)/index.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    header.includes("useSafeAreaInsets")
+      && header.includes("paddingTop: topInset")
+      && header.includes("styles.statusBarFill")
+      && header.includes("event.nativeEvent.layout.height) - topInset"),
+    "header chrome must sit below the status bar and report height without that inset",
+  );
+  assert(
+    chatScreen.includes("const mobileContent =")
+      && chatScreen.includes('edges={["top"]}'),
+    "the mobile transcript must keep the system status bar as a safe edge",
+  );
+});
+
+Deno.test("connect deep links have a real route", async () => {
+  const connect = await Deno.readTextFile(
+    new URL("../app/connect.tsx", import.meta.url).pathname,
+  );
+  const layout = await Deno.readTextFile(
+    new URL("../app/_layout.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    connect.includes('router.replace("/")'),
+    "the connect host must hand off to chat after useDeepLink applies credentials",
+  );
+  assert(
+    layout.includes('name="connect"'),
+    "the root stack must register the connect landing screen",
+  );
+});

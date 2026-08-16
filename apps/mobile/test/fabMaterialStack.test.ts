@@ -97,3 +97,39 @@ Deno.test("FAB material strength is stable before and after interaction", async 
     "web glass controls must stay mounted after first use without staying visually active",
   );
 });
+
+Deno.test("glass chrome never sits under an animated opacity ancestor", async () => {
+  const entrance = await Deno.readTextFile(
+    new URL("../hooks/useEntranceAnimation.ts", import.meta.url),
+  );
+  const accordion = await Deno.readTextFile(
+    new URL("../components/chat/AccordionControls.tsx", import.meta.url),
+  );
+  const composer = await Deno.readTextFile(
+    new URL("../components/chat/ChatBar.tsx", import.meta.url),
+  );
+  const layout = await Deno.readTextFile(
+    new URL("../app/_layout.tsx", import.meta.url),
+  );
+
+  assert(
+    !entrance.includes("opacity:")
+      && !entrance.includes("Opacity"),
+    "entrance wrappers must slide/scale only; ancestor alpha kills iOS liquid glass",
+  );
+  assert(
+    !accordion.includes("opacity: opacityProgress")
+      && !accordion.includes("opacity: revealOpacityProgress")
+      && !accordion.includes("opacity: progress.value"),
+    "accordion glass pills must hide with scale/translate, not Reanimated opacity",
+  );
+  assert(
+    !composer.includes("modelPopoverOpacity")
+      && !composer.includes("opacity: modelPopoverOpacity"),
+    "the model popover must not fade its AdaptiveMaterial ancestor",
+  );
+  assert(
+    layout.includes("animation: 'none'"),
+    "the root stack must not fade-in screens that host liquid glass",
+  );
+});
