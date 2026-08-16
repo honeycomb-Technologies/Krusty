@@ -42,6 +42,15 @@ import type {
 	HiveWorkersResponse,
 	CreateHiveWorkerRequest,
 	UpdateHiveWorkerRequest,
+	HiveGroupDetail,
+	HiveGroupEvent,
+	HiveGroupMessagesResponse,
+	HiveGroupTurn,
+	HiveGroupsResponse,
+	CreateHiveGroupRequest,
+	SendHiveGroupMessageRequest,
+	SendHiveGroupMessageResponse,
+	UpdateHiveGroupRequest,
 	McpServerResponse,
 	McpToolResponse,
 	MemorySnapshotResponse,
@@ -1479,6 +1488,139 @@ export class MitsuroClient {
 	/** Ensure the Worker's private DM session exists and return its summary. */
 	async ensureHiveWorkerDm(id: string): Promise<HiveWorkerDmResponse> {
 		return this.request(`/hive/workers/${id}/dm`, { method: "POST" });
+	}
+
+	// ============================================================================
+	// Hive Groups
+	// ============================================================================
+
+	async listHiveGroups(): Promise<HiveGroupsResponse> {
+		return this.request("/hive/groups");
+	}
+
+	async createHiveGroup(
+		request: CreateHiveGroupRequest,
+	): Promise<HiveGroupDetail> {
+		return this.request("/hive/groups", {
+			method: "POST",
+			body: JSON.stringify(request),
+		});
+	}
+
+	async getHiveGroup(id: string): Promise<HiveGroupDetail> {
+		return this.request(`/hive/groups/${id}`);
+	}
+
+	async updateHiveGroup(
+		id: string,
+		request: UpdateHiveGroupRequest,
+	): Promise<HiveGroupDetail> {
+		return this.request(`/hive/groups/${id}`, {
+			method: "PATCH",
+			body: JSON.stringify(request),
+		});
+	}
+
+	/** Archive (never hard-delete); the room timeline and Workers survive. */
+	async archiveHiveGroup(id: string): Promise<SimpleOkResponse> {
+		return this.request(`/hive/groups/${id}`, { method: "DELETE" });
+	}
+
+	/** Send one room message; the daemon fans out a durable group turn. */
+	async sendHiveGroupMessage(
+		id: string,
+		request: SendHiveGroupMessageRequest,
+		idempotencyKey?: string,
+	): Promise<SendHiveGroupMessageResponse> {
+		return this.request(`/hive/groups/${id}/messages`, {
+			method: "POST",
+			body: JSON.stringify(request),
+			headers: idempotencyKey
+				? { "Idempotency-Key": idempotencyKey }
+				: undefined,
+		});
+	}
+
+	async listHiveGroupMessages(
+		id: string,
+		options: { afterSeq?: number; limit?: number } = {},
+	): Promise<HiveGroupMessagesResponse> {
+		const query = new URLSearchParams();
+		if (options.afterSeq !== undefined) {
+			query.set("after_seq", String(options.afterSeq));
+		}
+		if (options.limit !== undefined) {
+			query.set("limit", String(options.limit));
+		}
+		const encoded = query.toString();
+		const suffix = encoded ? `?${encoded}` : "";
+		return this.request(`/hive/groups/${id}/messages${suffix}`);
+	}
+
+	async getHiveGroupTurn(id: string, turnId: string): Promise<HiveGroupTurn> {
+		return this.request(`/hive/groups/${id}/turns/${turnId}`);
+	}
+
+	/** Cancel the active turn's in-flight member runs. */
+	async stopHiveGroup(id: string): Promise<SimpleOkResponse> {
+		return this.request(`/hive/groups/${id}/stop`, { method: "POST" });
+	}
+
+	/**
+	 * Tail the room event stream (message appends and turn transitions).
+	 * Passing `afterSeq` replays messages after that cursor; omitting it
+	 * starts live at the current high-water mark.
+	 */
+	async observeHiveGroup(
+		id: string,
+		onEvent: (event: HiveGroupEvent) => void,
+		options: { afterSeq?: number; signal?: AbortSignal } = {},
+	): Promise<void> {
+		const query =
+			options.afterSeq !== undefined ? `?after_seq=${options.afterSeq}` : "";
+		const response = await this.fetchWithHiveCompatibility(
+			`/hive/groups/${id}/events${query}`,
+			{
+				method: "GET",
+				headers: this.headers(),
+				signal: options.signal,
+			},
+		);
+		if (!response.ok || !response.body) {
+			const text = await response.text().catch(() => "Stream failed");
+			throw new MitsuroApiError(
+				response.status,
+				apiErrorMessage(text, "Group event stream failed"),
+				text,
+			);
+		}
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const frames = buffer.split("\n\n");
+				buffer = frames.pop() ?? "";
+				for (const frame of frames) {
+					for (const line of frame.split("\n")) {
+						if (!line.startsWith("data:")) continue;
+						const payload = line.slice(5).trim();
+						if (!payload) continue;
+						try {
+							onEvent(JSON.parse(payload) as HiveGroupEvent);
+						} catch {
+							// Skip malformed frames; the durable cursor makes
+							// a reconnect lossless.
+						}
+					}
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
 	}
 
 	// ============================================================================

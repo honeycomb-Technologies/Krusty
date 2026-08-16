@@ -51,11 +51,13 @@ import {
   Settings,
   SquarePlus,
   Trash2,
+  Users,
   Wifi,
   WifiOff,
 } from "lucide-react-native";
 import type {
   GitChangedFile,
+  HiveGroup,
   HiveSessionSummary,
   HiveWorker,
   SessionResponse,
@@ -66,8 +68,10 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { SessionListSkeleton } from "../ui/Skeleton";
 import { useConnection } from "../../hooks/useConnection";
 import * as Haptics from "../../platform/haptics";
+import { HiveGroupRoomView } from "../hive/HiveGroupRoomView";
 import {
   workerAvatarColor,
+  workerFallbackColor,
   workerInitials,
   workerMetaLine,
 } from "../hive/workerAppearance";
@@ -120,6 +124,8 @@ type ChatListItem =
 type HiveListItem =
   | { kind: "workers-header"; count: number }
   | { kind: "worker"; worker: HiveWorker }
+  | { kind: "groups-header"; count: number }
+  | { kind: "group"; group: HiveGroup }
   | { kind: "threads-header" }
   | {
       kind: "hive-session";
@@ -262,6 +268,9 @@ export function SessionDrawer({
   const lastAutoExpandedRecentSessionDayRef = useRef<string | null>(null);
   const [hiveSessions, setHiveSessions] = useState<HiveSessionSummary[]>([]);
   const [hiveWorkers, setHiveWorkers] = useState<HiveWorker[]>([]);
+  const [hiveGroups, setHiveGroups] = useState<HiveGroup[]>([]);
+  // The room mounts only while open; closing tears down its event tail.
+  const [openGroupRoomId, setOpenGroupRoomId] = useState<string | null>(null);
   const openingWorkerIdRef = useRef<string | null>(null);
 
   const pickerProgress = useSharedValue(0);
@@ -359,8 +368,20 @@ export function SessionDrawer({
               kind: "worker" as const,
               worker,
             })),
-            { kind: "threads-header" as const },
           ]
+        : []),
+      // Groups next: opening one lands in its room as a lightweight surface.
+      ...(hiveGroups.length > 0
+        ? [
+            { kind: "groups-header" as const, count: hiveGroups.length },
+            ...hiveGroups.map((group) => ({
+              kind: "group" as const,
+              group,
+            })),
+          ]
+        : []),
+      ...(hiveWorkers.length > 0 || hiveGroups.length > 0
+        ? [{ kind: "threads-header" as const }]
         : []),
       ...(activeHiveSessions.length > 0
         ? activeHiveSessions.map((session) => ({
@@ -371,7 +392,13 @@ export function SessionDrawer({
         : [{ kind: "active-empty" as const, label: "No Hive threads yet" }]),
       ...archiveListItems,
     ],
-    [activeHiveSessions, archiveListItems, hiveSummariesById, hiveWorkers],
+    [
+      activeHiveSessions,
+      archiveListItems,
+      hiveGroups,
+      hiveSummariesById,
+      hiveWorkers,
+    ],
   );
 
   const codeListItems = useMemo<CodeListItem[]>(() => {
@@ -593,6 +620,18 @@ export function SessionDrawer({
       .catch(() => {
         if (active) {
           setHiveWorkers([]);
+        }
+      });
+    void client
+      .listHiveGroups()
+      .then((response) => {
+        if (active) {
+          setHiveGroups(response.groups);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setHiveGroups([]);
         }
       });
     return () => {
@@ -1345,6 +1384,61 @@ export function SessionDrawer({
     );
   };
 
+  const renderGroupRow = (group: HiveGroup) => {
+    const memberCount = group.members.length;
+    const active = Boolean(group.active_turn_id);
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open group ${group.title}`}
+        onPress={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setOpenGroupRoomId(group.id);
+        }}
+        style={[styles.sessionItem, { backgroundColor: t.background }]}
+      >
+        <View style={styles.sessionRow}>
+          <View
+            style={[
+              styles.workerAvatar,
+              {
+                backgroundColor: `${t.mutedForeground}14`,
+                borderColor: `${t.mutedForeground}33`,
+              },
+            ]}
+          >
+            <Users size={15} color={t.mutedForeground} strokeWidth={1.8} />
+          </View>
+          <View style={styles.sessionCopy}>
+            <View style={styles.sessionTitleRow}>
+              <Text
+                numberOfLines={1}
+                style={[styles.sessionTitle, { color: t.foreground }]}
+              >
+                {group.title}
+              </Text>
+            </View>
+            <View style={styles.sessionMeta}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: active ? t.success : t.mutedForeground },
+                ]}
+              />
+              <Text
+                numberOfLines={1}
+                style={[styles.sessionModel, { color: t.mutedForeground }]}
+              >
+                {memberCount} Worker{memberCount === 1 ? "" : "s"}
+                {active ? " · turn running" : ""}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Pressable>
+    );
+  };
+
   const renderHiveListItem = ({ item }: { item: HiveListItem }) => {
     if (item.kind === "workers-header") {
       return (
@@ -1365,6 +1459,16 @@ export function SessionDrawer({
     }
     if (item.kind === "hive-session") {
       return renderSession(item.session, { hiveSummary: item.summary });
+    }
+    if (item.kind === "groups-header") {
+      return (
+        <Text style={[styles.hiveSectionHeader, { color: t.mutedForeground }]}>
+          Groups · {item.count}
+        </Text>
+      );
+    }
+    if (item.kind === "group") {
+      return renderGroupRow(item.group);
     }
     if (item.kind === "active-empty") {
       return (
@@ -1726,23 +1830,31 @@ export function SessionDrawer({
             showsVerticalScrollIndicator={false}
           />
         ) : activeMode === "hive" ? (
-          <FlatList
-            style={styles.list}
-            contentContainerStyle={styles.listContent}
-            data={hiveListItems}
-            keyExtractor={(item) => {
-              if (item.kind === "worker") return `worker:${item.worker.id}`;
-              if (item.kind === "hive-session") return `hive:${item.session.id}`;
-              if (item.kind === "archived-session") return `archived:${item.session.id}`;
-              return item.kind;
-            }}
-            renderItem={renderHiveListItem}
-            windowSize={7}
-            maxToRenderPerBatch={10}
-            initialNumToRender={14}
-            removeClippedSubviews={false}
-            showsVerticalScrollIndicator={false}
-          />
+          openGroupRoomId ? (
+            <HiveGroupRoomView
+              groupId={openGroupRoomId}
+              onBack={() => setOpenGroupRoomId(null)}
+            />
+          ) : (
+            <FlatList
+              style={styles.list}
+              contentContainerStyle={styles.listContent}
+              data={hiveListItems}
+              keyExtractor={(item) => {
+                if (item.kind === "worker") return `worker:${item.worker.id}`;
+                if (item.kind === "group") return `group:${item.group.id}`;
+                if (item.kind === "hive-session") return `hive:${item.session.id}`;
+                if (item.kind === "archived-session") return `archived:${item.session.id}`;
+                return item.kind;
+              }}
+              renderItem={renderHiveListItem}
+              windowSize={7}
+              maxToRenderPerBatch={10}
+              initialNumToRender={14}
+              removeClippedSubviews={false}
+              showsVerticalScrollIndicator={false}
+            />
+          )
         ) : (
           <FlatList
             style={styles.list}

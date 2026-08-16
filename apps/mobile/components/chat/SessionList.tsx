@@ -199,10 +199,37 @@ export function SessionList({
           );
         });
 
+  const renderHiveViewItem = (
+    view: Extract<HiveTopLevelView, 'crew' | 'groups'>,
+    title: string,
+    detail: string,
+  ) => {
+    const isActive = activeHiveView === view;
+    return (
+      <Pressable
+        key={view}
+        onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onSelectHiveView?.(view); }}
+        style={[styles.hiveItem, isActive && { backgroundColor: t.userMessage + '12' }]}
+      >
+        <View style={styles.hiveCopy}>
+          <Text style={[styles.hiveTitle, { color: isActive ? t.userMessage : t.foreground }]}>{title}</Text>
+          <Text style={[styles.hiveDetail, { color: t.mutedForeground }]} numberOfLines={1}>{detail}</Text>
+        </View>
+      </Pressable>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <ScrollView style={styles.listArea} showsVerticalScrollIndicator={false}>
-        <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Conversations</Text>
+        {onSelectHiveView && activeTab === 2 && (
+          <>
+            <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Hive</Text>
+            {renderHiveViewItem('crew', 'Workers', 'Durable identities with private DMs')}
+            {renderHiveViewItem('groups', 'Groups', 'Rooms where Workers collaborate')}
+          </>
+        )}
+        <Text style={[styles.sectionLabel, onSelectHiveView && activeTab === 2 ? styles.codeSection : undefined, { color: t.mutedForeground }]}>Conversations</Text>
         {chatSessions.length === 0
           ? <Text style={[styles.sectionEmpty, { color: t.mutedForeground }]}>No conversations</Text>
           : chatSessions.map(renderSessionItem)}

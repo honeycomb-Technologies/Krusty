@@ -1362,6 +1362,138 @@ export interface HiveWorkerDmResponse {
 	agent_state: string;
 }
 
+export type HiveGroupExecutionMode = "workbench" | "roundtable" | "direct";
+export type HiveGroupStatus = "active" | "archived";
+export type HiveGroupTurnStatus =
+	| "running"
+	| "completed"
+	| "partial"
+	| "failed"
+	| "cancelled";
+export type HiveGroupSenderKind = "user" | "worker" | "system";
+
+/** One member of a group, with roster display data. */
+export interface HiveGroupMember {
+	worker_id: string;
+	slug: string;
+	display_name: string;
+	avatar_color?: string | null;
+	model?: string | null;
+	provider?: string | null;
+	status: string;
+}
+
+/** A group room referencing Workers, with its turn execution policy. */
+export interface HiveGroup {
+	id: string;
+	title: string;
+	execution_mode: HiveGroupExecutionMode;
+	max_rounds: number;
+	max_member_messages_per_turn: number;
+	parallelism: number;
+	context_window_messages: number;
+	status: HiveGroupStatus;
+	default_assignee_worker_id?: string | null;
+	members: HiveGroupMember[];
+	active_turn_id?: string | null;
+	latest_seq: number;
+	created_at: string;
+	updated_at: string;
+}
+
+/** The durable aggregate of one group turn with per-member outcomes. */
+export interface HiveGroupTurn {
+	id: string;
+	group_id: string;
+	trigger_message_id: string;
+	execution_mode: HiveGroupExecutionMode;
+	status: HiveGroupTurnStatus;
+	speaker_plan: string[];
+	next_speaker_index: number;
+	/** Worker-id keyed outcome summaries ({status, run_id?, error?}). */
+	member_outcomes?: Record<
+		string,
+		{ status: string; run_id?: string; error?: string }
+	> | null;
+	started_at: string;
+	finished_at?: string | null;
+}
+
+export interface HiveGroupDetail extends HiveGroup {
+	active_turn?: HiveGroupTurn | null;
+}
+
+export interface HiveGroupsResponse {
+	groups: HiveGroup[];
+}
+
+/** One append-only room message with a per-group monotonic sequence. */
+export interface HiveGroupMessage {
+	id: string;
+	group_id: string;
+	seq: number;
+	sender_kind: HiveGroupSenderKind;
+	sender_worker_id?: string | null;
+	sender_run_id?: string | null;
+	content: string;
+	reply_to_message_id?: string | null;
+	turn_id?: string | null;
+	created_at: string;
+}
+
+export interface HiveGroupMessagesResponse {
+	messages: HiveGroupMessage[];
+	latest_seq: number;
+}
+
+export interface CreateHiveGroupRequest {
+	title: string;
+	execution_mode?: HiveGroupExecutionMode;
+	max_rounds?: number;
+	max_member_messages_per_turn?: number;
+	parallelism?: number;
+	context_window_messages?: number;
+	default_assignee_worker_id?: string;
+	member_worker_ids: string[];
+}
+
+/**
+ * Partial update: absent fields keep their value. An empty
+ * default_assignee_worker_id clears the assignment; member_worker_ids
+ * replaces the ordered membership (add/remove/reorder).
+ */
+export interface UpdateHiveGroupRequest {
+	title?: string;
+	execution_mode?: HiveGroupExecutionMode;
+	max_rounds?: number;
+	max_member_messages_per_turn?: number;
+	parallelism?: number;
+	context_window_messages?: number;
+	default_assignee_worker_id?: string;
+	member_worker_ids?: string[];
+}
+
+export interface SendHiveGroupMessageRequest {
+	message: string;
+	/** Explicit target slugs; omitted = server-side mention parsing. */
+	mentions_override?: string[];
+}
+
+/** Durable acceptance of one group turn. */
+export interface SendHiveGroupMessageResponse {
+	group_id: string;
+	turn_id: string;
+	message_id: string;
+	message_seq: number;
+	status: string;
+	target_worker_ids: string[];
+}
+
+/** Room event stream payloads: message appends and turn transitions. */
+export type HiveGroupEvent =
+	| { type: "message"; message: HiveGroupMessage }
+	| { type: "turn"; turn: HiveGroupTurn };
+
 // Content-free mobile diagnostics. Keep this contract operational and bounded:
 // never add prompts, responses, credentials, terminal/file contents, or raw URLs.
 export interface MobileDiagnosticUploadBatch {

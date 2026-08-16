@@ -7,6 +7,7 @@ import { HiveAttentionView } from "./HiveAttentionView";
 import { HiveChannelsView } from "./HiveChannelsView";
 import { HiveCurrentView } from "./HiveCurrentView";
 import { HiveCrewView } from "./HiveCrewView";
+import { HiveGroupsView } from "./HiveGroupsView";
 import { HiveLogbookView } from "./HiveLogbookView";
 import { HiveRunView } from "./HiveRunView";
 import { HiveRunsView } from "./HiveRunsView";
@@ -14,6 +15,7 @@ import { HiveScheduleView } from "./HiveScheduleView";
 import { HiveStatusView } from "./HiveStatusView";
 import { HiveTopBar } from "./HiveTopBar";
 import { useHiveCurrent } from "./hooks/useHiveCurrent";
+import { useHiveGroups } from "./hooks/useHiveGroups";
 import { useHiveHome } from "./hooks/useHiveHome";
 import { useHiveNavigation } from "./hooks/useHiveNavigation";
 import { useHiveWorkers } from "./hooks/useHiveWorkers";
@@ -49,9 +51,13 @@ export function HiveScreen({
   const current = useHiveCurrent(true);
   const home = useHiveHome(true);
   const navigation = useHiveNavigation();
-  // Workers are fetched only while the roster is visible; opening a DM works
-  // from cached rows without keeping a background poll alive.
-  const workers = useHiveWorkers(navigation.topLevel === "crew");
+  // Workers are fetched only while a surface that needs the roster is
+  // visible (the Workers view, or the Groups editor picking members);
+  // opening a DM works from cached rows without a background poll.
+  const workers = useHiveWorkers(
+    navigation.topLevel === "crew" || navigation.topLevel === "groups",
+  );
+  const groups = useHiveGroups(navigation.topLevel === "groups");
   const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
   const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
@@ -104,6 +110,7 @@ export function HiveScreen({
     runs: "Runs",
     details: "Details",
     crew: "Workers",
+    groups: "Groups",
     channels: "Channels",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
@@ -210,6 +217,9 @@ export function HiveScreen({
                 navigation.setTopLevel("hive");
               }}
             />
+          ) : null}
+          {navigation.topLevel === "groups" ? (
+            <HiveGroupsView state={groups} workers={workers} />
           ) : null}
           {navigation.topLevel === "channels" ? <HiveChannelsView state={home} /> : null}
         </>
