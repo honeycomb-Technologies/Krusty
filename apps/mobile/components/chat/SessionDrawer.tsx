@@ -57,6 +57,7 @@ import {
 import type {
   GitChangedFile,
   HiveSessionSummary,
+  HiveWorker,
   SessionResponse,
   SessionType,
 } from "@mitsuro/api";
@@ -65,6 +66,11 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { SessionListSkeleton } from "../ui/Skeleton";
 import { useConnection } from "../../hooks/useConnection";
 import * as Haptics from "../../platform/haptics";
+import {
+  workerAvatarColor,
+  workerInitials,
+  workerMetaLine,
+} from "../hive/workerAppearance";
 import { AppBottomSheet } from "../sheets/AppBottomSheet";
 import {
   archivedSessions as archivedSessionsForType,
@@ -112,6 +118,9 @@ type ChatListItem =
   | ArchiveListItem;
 
 type HiveListItem =
+  | { kind: "workers-header"; count: number }
+  | { kind: "worker"; worker: HiveWorker }
+  | { kind: "threads-header" }
   | {
       kind: "hive-session";
       session: SessionResponse;
@@ -252,6 +261,8 @@ export function SessionDrawer({
   const lastAutoExpandedRecentDayRef = useRef<string | null>(null);
   const lastAutoExpandedRecentSessionDayRef = useRef<string | null>(null);
   const [hiveSessions, setHiveSessions] = useState<HiveSessionSummary[]>([]);
+  const [hiveWorkers, setHiveWorkers] = useState<HiveWorker[]>([]);
+  const openingWorkerIdRef = useRef<string | null>(null);
 
   const pickerProgress = useSharedValue(0);
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -339,6 +350,18 @@ export function SessionDrawer({
   );
   const hiveListItems = useMemo<HiveListItem[]>(
     () => [
+      // Workers first: opening one lands in its private DM. Threads keep the
+      // existing companion/run session listing below.
+      ...(hiveWorkers.length > 0
+        ? [
+            { kind: "workers-header" as const, count: hiveWorkers.length },
+            ...hiveWorkers.map((worker) => ({
+              kind: "worker" as const,
+              worker,
+            })),
+            { kind: "threads-header" as const },
+          ]
+        : []),
       ...(activeHiveSessions.length > 0
         ? activeHiveSessions.map((session) => ({
             kind: "hive-session" as const,
@@ -348,7 +371,7 @@ export function SessionDrawer({
         : [{ kind: "active-empty" as const, label: "No Hive threads yet" }]),
       ...archiveListItems,
     ],
-    [activeHiveSessions, archiveListItems, hiveSummariesById],
+    [activeHiveSessions, archiveListItems, hiveSummariesById, hiveWorkers],
   );
 
   const codeListItems = useMemo<CodeListItem[]>(() => {
@@ -558,6 +581,18 @@ export function SessionDrawer({
       .catch(() => {
         if (active) {
           setHiveSessions([]);
+        }
+      });
+    void client
+      .listHiveWorkers()
+      .then((response) => {
+        if (active) {
+          setHiveWorkers(response.workers);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setHiveWorkers([]);
         }
       });
     return () => {
@@ -1228,7 +1263,106 @@ export function SessionDrawer({
     return renderArchiveListItem(item);
   };
 
+  const openWorkerDm = async (worker: HiveWorker) => {
+    // A bound DM opens instantly; an unbound Worker ensures its DM first.
+    if (worker.dm_session_id) {
+      onSelectHiveSession(worker.dm_session_id);
+      return;
+    }
+    if (!client || openingWorkerIdRef.current) {
+      return;
+    }
+    openingWorkerIdRef.current = worker.id;
+    try {
+      const dm = await client.ensureHiveWorkerDm(worker.id);
+      setHiveWorkers((current) =>
+        current.map((candidate) =>
+          candidate.id === worker.id
+            ? { ...candidate, dm_session_id: dm.session_id }
+            : candidate,
+        ),
+      );
+      onSelectHiveSession(dm.session_id);
+    } catch {
+      // The drawer stays open; the Worker row remains tappable to retry.
+    } finally {
+      openingWorkerIdRef.current = null;
+    }
+  };
+
+  const renderWorkerRow = (worker: HiveWorker) => {
+    const color = workerAvatarColor(worker);
+    const paused = worker.status === "paused";
+    const working = worker.dm_agent_state === "running";
+    const statusColor = paused
+      ? t.warning
+      : working
+        ? t.success
+        : t.mutedForeground;
+
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open DM with Worker ${worker.display_name}`}
+        onPress={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          void openWorkerDm(worker);
+        }}
+        style={[styles.sessionItem, { backgroundColor: t.background }]}
+      >
+        <View style={styles.sessionRow}>
+          <View
+            style={[
+              styles.workerAvatar,
+              { backgroundColor: `${color}22`, borderColor: `${color}55` },
+            ]}
+          >
+            <Text style={[styles.workerAvatarText, { color }]}>
+              {workerInitials(worker.display_name)}
+            </Text>
+          </View>
+          <View style={styles.sessionCopy}>
+            <View style={styles.sessionTitleRow}>
+              <Text
+                numberOfLines={1}
+                style={[styles.sessionTitle, { color: t.foreground }]}
+              >
+                {worker.display_name}
+              </Text>
+            </View>
+            <View style={styles.sessionMeta}>
+              <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+              <Text
+                numberOfLines={1}
+                style={[styles.sessionModel, { color: t.mutedForeground }]}
+              >
+                {paused ? `Paused · ${workerMetaLine(worker)}` : workerMetaLine(worker)}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Pressable>
+    );
+  };
+
   const renderHiveListItem = ({ item }: { item: HiveListItem }) => {
+    if (item.kind === "workers-header") {
+      return (
+        <Text style={[styles.hiveSectionHeader, { color: t.mutedForeground }]}>
+          Workers · {item.count}
+        </Text>
+      );
+    }
+    if (item.kind === "worker") {
+      return renderWorkerRow(item.worker);
+    }
+    if (item.kind === "threads-header") {
+      return (
+        <Text style={[styles.hiveSectionHeader, { color: t.mutedForeground }]}>
+          Threads
+        </Text>
+      );
+    }
     if (item.kind === "hive-session") {
       return renderSession(item.session, { hiveSummary: item.summary });
     }
@@ -1597,6 +1731,7 @@ export function SessionDrawer({
             contentContainerStyle={styles.listContent}
             data={hiveListItems}
             keyExtractor={(item) => {
+              if (item.kind === "worker") return `worker:${item.worker.id}`;
               if (item.kind === "hive-session") return `hive:${item.session.id}`;
               if (item.kind === "archived-session") return `archived:${item.session.id}`;
               return item.kind;
@@ -1864,6 +1999,27 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 4,
+  },
+  hiveSectionHeader: {
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.45,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  workerAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  workerAvatarText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
   dirHeader: {
     minHeight: 50,

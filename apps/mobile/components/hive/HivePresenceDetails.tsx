@@ -18,6 +18,11 @@ import type { HiveHomeState } from "./types";
 interface HivePresenceDetailsProps {
   state: HiveHomeState;
   showChannelsRow?: boolean;
+  /**
+   * Legacy crew roster rows. The Workers view renders the durable Worker
+   * roster itself and hides this transitional section.
+   */
+  showCrewRoster?: boolean;
 }
 
 type EditorTarget =
@@ -153,6 +158,7 @@ function crewActivitySummary(member: NonNullable<HiveHomeState["crew"]>["members
 export function HivePresenceDetails({
   state,
   showChannelsRow = true,
+  showCrewRoster = true,
 }: HivePresenceDetailsProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -292,64 +298,68 @@ export function HivePresenceDetails({
         </>
       ) : null}
 
-      <View style={styles.sectionHeader}>
-        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Hive Agents</Text>
-        <Text style={[styles.countText, { color: t.mutedForeground }]}>
-          {crew.length}
-        </Text>
-      </View>
-
-      {crew.length === 0 ? (
-        <View style={[styles.detailRow, { borderColor: t.border }]}>
-          <View style={styles.detailCopy}>
-            <Text style={[styles.detailValue, { color: t.foreground }]}>
-              No crew members are configured yet.
+      {showCrewRoster ? (
+        <>
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { color: t.foreground }]}>Hive Agents</Text>
+            <Text style={[styles.countText, { color: t.mutedForeground }]}>
+              {crew.length}
             </Text>
           </View>
-        </View>
-      ) : (
-        crew.map((member) => (
-          <CrewMemberRow
-            key={member.slug}
-            slug={member.slug}
-            status={member.status}
-            identity={member.identity?.preview}
-            soul={member.soul?.preview}
-            memory={member.memory?.preview}
-            activitySummary={crewActivitySummary(member)}
-            onEditIdentity={() => {
-              setEditorTarget({
-                scope: "crew",
-                slug: member.slug,
-                kind: "identity",
-                title: `Edit ${member.slug} identity`,
-                subtitle: "Name, role, and external presence for this Hive Agent.",
-                initialValue: member.identity?.content ?? "",
-              });
-            }}
-            onEditSoul={() => {
-              setEditorTarget({
-                scope: "crew",
-                slug: member.slug,
-                kind: "soul",
-                title: `Edit ${member.slug} soul`,
-                subtitle: "How this Hive Agent thinks, writes, and behaves.",
-                initialValue: member.soul?.content ?? "",
-              });
-            }}
-            onEditMemory={() => {
-              setEditorTarget({
-                scope: "crew",
-                slug: member.slug,
-                kind: "memory",
-                title: `Edit ${member.slug} memory`,
-                subtitle: "Durable notes and role-specific memory for this Hive Agent.",
-                initialValue: member.memory?.content ?? "",
-              });
-            }}
-          />
-        ))
-      )}
+
+          {crew.length === 0 ? (
+            <View style={[styles.detailRow, { borderColor: t.border }]}>
+              <View style={styles.detailCopy}>
+                <Text style={[styles.detailValue, { color: t.foreground }]}>
+                  No crew members are configured yet.
+                </Text>
+              </View>
+            </View>
+          ) : (
+            crew.map((member) => (
+              <CrewMemberRow
+                key={member.slug}
+                slug={member.slug}
+                status={member.status}
+                identity={member.identity?.preview}
+                soul={member.soul?.preview}
+                memory={member.memory?.preview}
+                activitySummary={crewActivitySummary(member)}
+                onEditIdentity={() => {
+                  setEditorTarget({
+                    scope: "crew",
+                    slug: member.slug,
+                    kind: "identity",
+                    title: `Edit ${member.slug} identity`,
+                    subtitle: "Name, role, and external presence for this Hive Agent.",
+                    initialValue: member.identity?.content ?? "",
+                  });
+                }}
+                onEditSoul={() => {
+                  setEditorTarget({
+                    scope: "crew",
+                    slug: member.slug,
+                    kind: "soul",
+                    title: `Edit ${member.slug} soul`,
+                    subtitle: "How this Hive Agent thinks, writes, and behaves.",
+                    initialValue: member.soul?.content ?? "",
+                  });
+                }}
+                onEditMemory={() => {
+                  setEditorTarget({
+                    scope: "crew",
+                    slug: member.slug,
+                    kind: "memory",
+                    title: `Edit ${member.slug} memory`,
+                    subtitle: "Durable notes and role-specific memory for this Hive Agent.",
+                    initialValue: member.memory?.content ?? "",
+                  });
+                }}
+              />
+            ))
+          )}
+        </>
+      ) : null}
 
       <HiveEditorModal
         visible={editorTarget !== null}

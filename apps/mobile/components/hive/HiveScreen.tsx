@@ -16,6 +16,7 @@ import { HiveTopBar } from "./HiveTopBar";
 import { useHiveCurrent } from "./hooks/useHiveCurrent";
 import { useHiveHome } from "./hooks/useHiveHome";
 import { useHiveNavigation } from "./hooks/useHiveNavigation";
+import { useHiveWorkers } from "./hooks/useHiveWorkers";
 import type { HiveChatContext, HiveTopLevelView } from "./types";
 
 interface HiveScreenProps {
@@ -48,6 +49,9 @@ export function HiveScreen({
   const current = useHiveCurrent(true);
   const home = useHiveHome(true);
   const navigation = useHiveNavigation();
+  // Workers are fetched only while the roster is visible; opening a DM works
+  // from cached rows without keeping a background poll alive.
+  const workers = useHiveWorkers(navigation.topLevel === "crew");
   const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
   const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
@@ -99,7 +103,7 @@ export function HiveScreen({
     logbook: "Logbook",
     runs: "Runs",
     details: "Details",
-    crew: "Agents",
+    crew: "Workers",
     channels: "Channels",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
@@ -194,7 +198,19 @@ export function HiveScreen({
               onDenyTool={chat.onDenyTool}
             />
           ) : null}
-          {navigation.topLevel === "crew" ? <HiveCrewView state={home} /> : null}
+          {navigation.topLevel === "crew" ? (
+            <HiveCrewView
+              state={home}
+              workers={workers}
+              models={chat.models}
+              onOpenWorkerDm={(sessionId) => {
+                // Load the Worker's DM into the hive session store, then land
+                // on the thread surface that renders it.
+                void onOpenRunById(sessionId);
+                navigation.setTopLevel("hive");
+              }}
+            />
+          ) : null}
           {navigation.topLevel === "channels" ? <HiveChannelsView state={home} /> : null}
         </>
       )}

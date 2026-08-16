@@ -4,6 +4,7 @@ import { Alert, Platform } from "react-native";
 import type { ModelInfo, SessionResponse, SessionType } from "@mitsuro/api";
 import {
   beginMitsuroPerformanceSpan,
+  resolveHiveSendTarget,
   type Attachment as SessionAttachment,
 } from "@mitsuro/state";
 import type { useConnection } from "../../hooks/useConnection";
@@ -343,7 +344,8 @@ export function useSessionActions({
 
   /**
    * Ensure the durable per-user Hive companion is the active session.
-   * Used when opening the Hive tab and before any Hive composer send.
+   * Used when opening the Hive tab, for New in hive mode, and as the send
+   * fallback when no hive session is loaded yet.
    */
   const ensureHiveCompanionSession = useCallback(async (): Promise<string | null> => {
     if (!client) {
@@ -353,11 +355,20 @@ export function useSessionActions({
   }, [client, sessionStore]);
 
   const ensureSessionForSend = useCallback(async (): Promise<ResolvedSendIntent | null> => {
-    // Hive always sends on the durable main companion — never ad-hoc createSession.
+    // Hive never precreates ad-hoc sessions from the composer. Send to the
+    // hive session that is already loaded (the durable companion or a Worker
+    // DM); only ensure the companion when nothing is loaded yet.
     if (activeTab === 2 || sessionTypeForTab(activeTab) === "hive") {
-      const mainId = await ensureHiveCompanionSession();
-      if (!mainId) {
-        return null;
+      const hiveState = sessionStore.getState();
+      const target = resolveHiveSendTarget({
+        sessionId: hiveState.sessionId,
+        sessionType: hiveState.sessionType,
+      });
+      if (target.kind === "ensure-companion") {
+        const mainId = await ensureHiveCompanionSession();
+        if (!mainId) {
+          return null;
+        }
       }
       return {
         shouldPrecreate: false,
