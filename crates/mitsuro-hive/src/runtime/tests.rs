@@ -1390,8 +1390,8 @@ async fn restart_marks_expired_running_work_recovery_required_without_replay() {
     let expired = canonical_timestamp(chrono::Utc::now() - chrono::Duration::seconds(1));
     db.conn()
         .execute_batch(&format!(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, session_type)
-             VALUES ('session-1', 'Hive', '{now}', '{now}', 'test:model', 'hive');
+            "INSERT INTO sessions (id, title, created_at, updated_at, working_dir, project_dir, model, session_type)
+             VALUES ('session-1', 'Hive', '{now}', '{now}', '/work', '/work', 'test:model', 'hive');
              INSERT INTO hive_controllers (
                  id, scope_key, session_id, status, timezone, max_concurrent_runs, created_at, updated_at
              ) VALUES ('controller-1', 'session:session-1', 'session-1', 'active', 'UTC', 1, '{now}', '{now}');
@@ -2584,6 +2584,83 @@ async fn noncooperative_cancel_terminalizes_after_grace_and_rejects_late_worker_
             .unwrap(),
         0
     );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn workspace_less_legacy_session_rejects_enqueue_instead_of_dooming_runs() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::new(FakeBackend::default()),
+    )
+    .await
+    .unwrap();
+    let now = canonical_timestamp(chrono::Utc::now());
+    let db = Database::new(&runtime_config.database_path).unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (
+                id, title, created_at, updated_at, model, session_type
+             ) VALUES ('workspace-less', 'Legacy', ?1, ?1, 'test:model', 'hive')",
+            [&now],
+        )
+        .unwrap();
+    drop(db);
+    let handler = runtime.handler();
+
+    // The execution host refuses claims without an explicit workspace, so the
+    // enqueue surfaces must fail with an actionable error instead of
+    // manufacturing runs that instantly fail with a redacted generic error.
+    let start = handler
+        .handle(
+            context(Actor::local("test"), "workspace-less-start"),
+            Command::StartSession(SessionCommand {
+                session_id: "workspace-less".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(start.code, "state_conflict");
+    assert!(
+        start.message.contains("working or project directory"),
+        "unexpected start message: {}",
+        start.message
+    );
+
+    let message = handler
+        .handle(
+            context(Actor::local("test"), "workspace-less-message"),
+            Command::SendMessage(MessageCommand {
+                session_id: "workspace-less".into(),
+                message: "please run".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(message.code, "state_conflict");
+    assert!(
+        message.message.contains("working or project directory"),
+        "unexpected message-turn message: {}",
+        message.message
+    );
+
+    let db = Database::new(&runtime_config.database_path).unwrap();
+    assert_eq!(
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM hive_runs WHERE session_id = 'workspace-less'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "no run may be enqueued for a workspace-less session"
+    );
+    drop(db);
     runtime.shutdown().await;
 }
 

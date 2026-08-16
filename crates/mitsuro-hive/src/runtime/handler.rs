@@ -828,6 +828,9 @@ fn start_session(
             vec![event],
         ));
     }
+    // Surfacing an uncertain prior attempt above takes precedence; everything
+    // past this point wakes or creates work, which needs a claimable workspace.
+    require_session_workspace(&session)?;
     tx.execute(
         "UPDATE hive_controllers SET status = 'active', updated_at = ?2 WHERE id = ?1",
         params![controller.id, now],
@@ -1834,6 +1837,7 @@ fn queue_message_turn_if_idle(
     now: &str,
 ) -> Result<Option<PersistedEvent>, RuntimeStoreError> {
     let _ = require_frozen_session_model(session)?;
+    require_session_workspace(session)?;
     let unfinished: i64 = tx.query_row(
         "SELECT COUNT(*) FROM hive_runs
          WHERE controller_id = ?1
@@ -2028,6 +2032,36 @@ fn require_frozen_session_permission_mode(
             "Hive session has an invalid permission mode".into(),
         )),
     }
+}
+
+/// Enqueue-time mirror of the execution host's claim validation, which
+/// refuses a daemon-default workspace and requires absolute paths. Sessions
+/// predating explicit Hive workspaces would otherwise enqueue runs that are
+/// doomed to fail their claim with a redacted, non-actionable error.
+fn require_session_workspace(
+    session: &super::persistence::OwnedSession,
+) -> Result<(), RuntimeStoreError> {
+    let paths: Vec<&str> = [
+        session.working_dir.as_deref(),
+        session.project_dir.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|path| !path.is_empty())
+    .collect();
+    if paths.is_empty() {
+        return Err(RuntimeStoreError::StateConflict(
+            "Hive session has no working or project directory; set a workspace before starting it"
+                .into(),
+        ));
+    }
+    if paths.iter().any(|path| !Path::new(path).is_absolute()) {
+        return Err(RuntimeStoreError::StateConflict(
+            "Hive session workspace paths must be absolute".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn freeze_session_model_into_open_runs(
