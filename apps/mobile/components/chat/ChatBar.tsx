@@ -1036,14 +1036,14 @@ function ChatBarComponent(props: ChatBarProps) {
 
   // The composer keeps one stable closed-screen inset. KeyboardAvoidingView
   // moves this mounted surface natively without changing transcript padding.
+  // Native phones must clear the full home-indicator inset (typically 34pt);
+  // capping below it parks the meta row inside the gesture band.
   const closedGap = isDesktop
     ? CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP
     : CLOSED_COMPOSER_BOTTOM_GAP;
   const closedBottomOffset = isDesktop
     ? Math.max(closedGap, insets.bottom + 12)
-    : Platform.OS === 'web'
-      ? Math.max(closedGap, insets.bottom)
-      : Math.max(10, Math.min(insets.bottom, closedGap));
+    : Math.max(closedGap, insets.bottom);
   const bottomOffset = closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
@@ -1255,7 +1255,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 }}
                 style={styles.attachX}
               >
-                <X size={12} color="#fff" strokeWidth={3} />
+                <X size={12} color={t.onAccent} strokeWidth={3} />
               </Pressable>
             </View>
           );
@@ -1295,7 +1295,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 }}
                 style={({ pressed }) => [
                   styles.expandEditorButton,
-                  pressed && styles.expandEditorButtonPressed,
+                  pressed && { backgroundColor: t.glass.backgroundElevated },
                 ]}
               >
                 <Maximize2
@@ -1495,6 +1495,7 @@ function ChatBarComponent(props: ChatBarProps) {
         mutedForeground={t.mutedForeground}
         foreground={t.foreground}
         userMessage={t.userMessage}
+        onAccent={t.onAccent}
         border={t.border}
         keyboardAppearance={theme.scheme}
       />
@@ -1555,9 +1556,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  expandEditorButtonPressed: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   input: {
