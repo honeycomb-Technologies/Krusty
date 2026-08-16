@@ -21,11 +21,11 @@ use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::reports::CreateReportInput;
 use mitsuro_core::storage::{
-    bootstrap_hive_home, AutonomousTaskStore, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, HiveProfileDocumentKind, HiveProfileOwner,
-    HiveProfileStore, HiveRunPriority, HiveRuntimeStateStatus, HiveRuntimeStateStore, MemoryStore,
-    MemoryType, Preferences, ReportStore, RuntimeTraceEvent, RuntimeTraceStore, SessionType,
-    WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    bootstrap_hive_home, refresh_current_snapshot, AutonomousTaskStore, Database, DelegatedRunRole,
+    DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore, HiveProfileDocumentKind,
+    HiveProfileOwner, HiveProfileStore, HiveRunPriority, HiveRuntimeStateStatus,
+    HiveRuntimeStateStore, MemoryStore, MemoryType, Preferences, ReportStore, RuntimeTraceEvent,
+    RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::SessionManager;
@@ -1325,24 +1325,80 @@ async fn current_summarizes_knowledge_snapshot_health() {
         0
     );
 
+    // A legacy snapshot-titled row in `agent_memories` must not satisfy
+    // knowledge health: migration 39 moved generated snapshots into the
+    // dedicated `knowledge_snapshots` store.
     let memory_store =
         MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
-    let snapshot = memory_store
+    memory_store
         .save(
             MemoryType::Project,
             CURRENT_SNAPSHOT_TITLE,
-            "Initial knowledge snapshot",
+            "Legacy snapshot location",
             Some(project_dir.to_string_lossy().as_ref()),
             Some("alice"),
         )
-        .expect("snapshot should persist");
+        .expect("legacy memory should persist");
 
+    let Json(legacy_summary) = current(
+        State(state.clone()),
+        Some(current_user("alice", &user_root)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("current should succeed"));
+    assert_eq!(
+        legacy_summary.diagnostics.knowledge.missing_snapshot_count, 1,
+        "agent_memories rows must not count as knowledge snapshots"
+    );
+
+    // A real snapshot produced by the canonical refresh path is healthy.
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Build notes",
+            "Use the staging branch for release work",
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("memory should persist");
+    let snapshot = refresh_current_snapshot(
+        &state.db_path,
+        Some(project_dir.to_string_lossy().as_ref()),
+        Some("alice"),
+    )
+    .expect("refresh should succeed")
+    .expect("snapshot should materialize");
+
+    let Json(fresh_summary) = current(
+        State(state.clone()),
+        Some(current_user("alice", &user_root)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("current should succeed"));
+    assert_eq!(fresh_summary.diagnostics.knowledge.scope_count, 1);
+    assert_eq!(
+        fresh_summary.diagnostics.knowledge.missing_snapshot_count,
+        0
+    );
+    assert_eq!(fresh_summary.diagnostics.knowledge.stale_snapshot_count, 0);
+    let latest_snapshot_at = fresh_summary
+        .diagnostics
+        .knowledge
+        .latest_snapshot_at
+        .expect("snapshot timestamp should be reported");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&latest_snapshot_at).is_ok(),
+        "latest_snapshot_at should be RFC 3339, got {latest_snapshot_at}"
+    );
+
+    // Backdate the stored snapshot using the store's native SQLite timestamp
+    // format; newer session/report signals must mark the scope stale.
     Database::new(&state.db_path)
         .expect("database should open")
         .conn()
         .execute(
-            "UPDATE agent_memories SET updated_at = ?1 WHERE id = ?2",
-            ("2025-01-01T00:00:00Z", snapshot.id.as_str()),
+            "UPDATE knowledge_snapshots SET updated_at = '2025-01-01 00:00:00' WHERE id = ?1",
+            [snapshot.id.as_str()],
         )
         .expect("snapshot should backdate");
 
