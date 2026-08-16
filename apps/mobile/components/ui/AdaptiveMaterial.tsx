@@ -1,9 +1,10 @@
 import {
   GlassView,
+  type GlassViewProps,
   isGlassEffectAPIAvailable,
   isLiquidGlassAvailable,
 } from "expo-glass-effect";
-import { memo, useEffect, useState } from "react";
+import { type ComponentType, memo, useEffect, useState } from "react";
 import {
   Platform,
   type StyleProp,
@@ -26,6 +27,14 @@ import {
 const platform = Platform.OS;
 const glassApiAvailable = isGlassEffectAPIAvailable();
 const liquidGlassAvailable = isLiquidGlassAvailable();
+
+// expo-glass-effect binds a native `borderRadius` prop (setBorderRadius on the
+// effect view) that its public TS types do not declare. Shaping the effect
+// natively keeps the glass sampling correct instead of relying on JS-side
+// overflow clipping alone.
+const NativeGlassView = GlassView as ComponentType<
+  GlassViewProps & { borderRadius?: number }
+>;
 
 export type { AdaptiveMaterialTone } from "./adaptiveMaterialPolicy";
 
@@ -66,9 +75,6 @@ function AdaptiveMaterialComponent({
     glassBackground: t.glass.background,
     glassBackgroundElevated: t.glass.backgroundElevated,
     glassBackgroundPressed: t.glass.backgroundPressed,
-    surfaceOverlaySubtle: t.surfaceOverlaySubtle,
-    surfaceOverlay: t.surfaceOverlay,
-    surfaceOverlayElevated: t.surfaceOverlayElevated,
   };
   const resolvedBlurIntensity = blurIntensity ??
     resolveAdaptiveMaterialBlurIntensity(
@@ -77,6 +83,7 @@ function AdaptiveMaterialComponent({
       theme.colors.glassBlurIntense,
     );
   const overlayColor = resolveAdaptiveMaterialOverlayColor(
+    materialMode,
     tone,
     materialSurfaces,
   );
@@ -113,22 +120,17 @@ function AdaptiveMaterialComponent({
   }, [webBlurReady]);
 
   if (materialMode === "liquid-glass") {
+    // The GlassView is the surface. Never stack a scrim over the native
+    // effect; the tone tint is the only readability layer it needs.
     return (
-      <View testID={testID} style={materialStyle}>
-        <GlassView
-          colorScheme={theme.scheme}
-          glassEffectStyle={tone === "subtle" ? "clear" : "regular"}
-          tintColor={glassTintColor}
-          style={StyleSheet.absoluteFill}
-        />
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            styles.ignorePointerEvents,
-            { backgroundColor: overlayColor },
-          ]}
-        />
-      </View>
+      <NativeGlassView
+        testID={testID}
+        colorScheme={theme.scheme}
+        glassEffectStyle={tone === "subtle" ? "clear" : "regular"}
+        tintColor={glassTintColor}
+        borderRadius={borderRadius}
+        style={materialStyle}
+      />
     );
   }
 
@@ -142,13 +144,15 @@ function AdaptiveMaterialComponent({
             : "systemChromeMaterialLight"}
           style={StyleSheet.absoluteFill}
         />
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            styles.ignorePointerEvents,
-            { backgroundColor: overlayColor },
-          ]}
-        />
+        {overlayColor === undefined ? null : (
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              styles.ignorePointerEvents,
+              { backgroundColor: overlayColor },
+            ]}
+          />
+        )}
       </View>
     );
   }

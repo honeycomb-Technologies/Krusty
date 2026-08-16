@@ -76,25 +76,65 @@ Deno.test("material tones form a restrained blur progression", () => {
   assertEquals(resolveAdaptiveMaterialBlurIntensity("strong", 20, 40), 40);
 });
 
-Deno.test("fallback scrims prioritize readability while liquid glass stays lightly tinted", () => {
+Deno.test("liquid glass never receives a stacked scrim", () => {
   const surfaces = {
     glassBackground: "glass",
     glassBackgroundElevated: "glass-elevated",
     glassBackgroundPressed: "glass-pressed",
-    surfaceOverlaySubtle: "overlay-subtle",
-    surfaceOverlay: "overlay",
-    surfaceOverlayElevated: "overlay-elevated",
   };
 
   assertEquals(
-    resolveAdaptiveMaterialOverlayColor("regular", surfaces),
-    "overlay-subtle",
+    resolveAdaptiveMaterialOverlayColor("liquid-glass", "subtle", surfaces),
+    undefined,
   );
   assertEquals(
-    resolveAdaptiveMaterialOverlayColor("elevated", surfaces),
-    "overlay",
+    resolveAdaptiveMaterialOverlayColor("liquid-glass", "regular", surfaces),
+    undefined,
   );
+  assertEquals(
+    resolveAdaptiveMaterialOverlayColor("liquid-glass", "strong", surfaces),
+    undefined,
+  );
+});
+
+Deno.test("blur fallback uses translucent glass fills, not opaque scrims", () => {
+  const surfaces = {
+    glassBackground: "glass",
+    glassBackgroundElevated: "glass-elevated",
+    glassBackgroundPressed: "glass-pressed",
+  };
+
+  assertEquals(
+    resolveAdaptiveMaterialOverlayColor("blur", "subtle", surfaces),
+    "glass",
+  );
+  assertEquals(
+    resolveAdaptiveMaterialOverlayColor("blur", "regular", surfaces),
+    "glass",
+  );
+  assertEquals(
+    resolveAdaptiveMaterialOverlayColor("blur", "elevated", surfaces),
+    "glass-elevated",
+  );
+  assertEquals(
+    resolveAdaptiveMaterialOverlayColor("blur", "strong", surfaces),
+    "glass-pressed",
+  );
+});
+
+Deno.test("liquid glass stays lightly tinted per tone", () => {
+  const surfaces = {
+    glassBackground: "glass",
+    glassBackgroundElevated: "glass-elevated",
+    glassBackgroundPressed: "glass-pressed",
+  };
+
   assertEquals(resolveLiquidGlassTintColor("subtle", surfaces), undefined);
+  assertEquals(resolveLiquidGlassTintColor("regular", surfaces), "glass");
+  assertEquals(
+    resolveLiquidGlassTintColor("elevated", surfaces),
+    "glass-elevated",
+  );
   assertEquals(
     resolveLiquidGlassTintColor("strong", surfaces),
     "glass-pressed",

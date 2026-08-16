@@ -57,9 +57,22 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
   assert(
     material.includes("export const AdaptiveMaterial = memo(AdaptiveMaterialComponent)")
-      && material.includes("{ backgroundColor: overlayColor }")
       && !composer.includes("backgroundColor: t.glass.backgroundElevated,"),
-    "native glass, blur fallback, composer, and FABs must share the same readable scrim",
+    "composer and FABs must expose the shared material instead of private tints",
+  );
+  const liquidGlassBranch = material.slice(
+    material.indexOf('if (materialMode === "liquid-glass")'),
+    material.indexOf('if (materialMode === "blur")'),
+  );
+  assert(
+    liquidGlassBranch.includes("<NativeGlassView")
+      && liquidGlassBranch.includes("borderRadius={borderRadius}")
+      && !liquidGlassBranch.includes("overlayColor"),
+    "liquid glass must render the bare native effect with its native corner radius and no stacked scrim",
+  );
+  assert(
+    (material.match(/\{ backgroundColor: overlayColor \}/g)?.length ?? 0) === 1,
+    "only the blur fallback may add a translucent glass-fill overlay",
   );
   assert(
     accordion.match(/styles\.materialHost/g)?.length === 4

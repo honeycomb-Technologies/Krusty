@@ -9,9 +9,6 @@ export interface AdaptiveMaterialSurfaces {
   glassBackground: string;
   glassBackgroundElevated: string;
   glassBackgroundPressed: string;
-  surfaceOverlaySubtle: string;
-  surfaceOverlay: string;
-  surfaceOverlayElevated: string;
 }
 
 interface ResolveAdaptiveMaterialModeArgs {
@@ -55,13 +52,19 @@ export function resolveAdaptiveMaterialBlurIntensity(
 }
 
 export function resolveAdaptiveMaterialOverlayColor(
+  mode: AdaptiveMaterialMode,
   tone: AdaptiveMaterialTone,
   surfaces: AdaptiveMaterialSurfaces,
-): string {
-  if (tone === "subtle") return surfaces.glassBackground;
-  if (tone === "regular") return surfaces.surfaceOverlaySubtle;
-  if (tone === "elevated") return surfaces.surfaceOverlay;
-  return surfaces.surfaceOverlayElevated;
+): string | undefined {
+  // Liquid glass owns its own adaptive contrast; a stacked scrim buries the
+  // native effect. Readability tuning happens through the glass tint instead.
+  if (mode === "liquid-glass") return undefined;
+
+  // Blur fallback gets the designed translucent glass fills, never the heavy
+  // surfaceOverlay* scrims that read as a solid slab over the material.
+  if (tone === "subtle" || tone === "regular") return surfaces.glassBackground;
+  if (tone === "elevated") return surfaces.glassBackgroundElevated;
+  return surfaces.glassBackgroundPressed;
 }
 
 export function resolveLiquidGlassTintColor(
