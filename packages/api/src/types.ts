@@ -1294,6 +1294,74 @@ export interface HiveRecoverDaemonResponse {
 	recovered_count: number;
 }
 
+export type HiveWorkerStatus = "active" | "paused" | "archived";
+export type HiveWorkerAutonomy = "manual" | "scheduled" | "always_on";
+
+/** A durable Hive Worker identity with its own persona, model, and DM lane. */
+export interface HiveWorker {
+	id: string;
+	slug: string;
+	display_name: string;
+	avatar_color?: string | null;
+	model?: string | null;
+	model_key?: ModelKey | null;
+	permission_mode: string;
+	autonomy: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number | null;
+	status: HiveWorkerStatus;
+	dm_session_id?: string | null;
+	/** Agent state of the bound DM session ("idle", "running", ...), when bound. */
+	dm_agent_state?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface HiveWorkersResponse {
+	workers: HiveWorker[];
+}
+
+/** Worker plus its persona documents. */
+export interface HiveWorkerDetail extends HiveWorker {
+	identity?: string | null;
+	soul?: string | null;
+}
+
+export interface CreateHiveWorkerRequest {
+	slug: string;
+	display_name?: string;
+	avatar_color?: string;
+	model?: string;
+	model_key?: ModelKey;
+	permission_mode?: string;
+	autonomy?: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number;
+	identity?: string;
+	soul?: string;
+}
+
+/** Partial update: absent fields keep their current value. */
+export interface UpdateHiveWorkerRequest {
+	display_name?: string;
+	avatar_color?: string;
+	model?: string;
+	model_key?: ModelKey;
+	permission_mode?: string;
+	autonomy?: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number;
+	identity?: string;
+	soul?: string;
+}
+
+export interface HiveWorkerDmResponse {
+	worker_id: string;
+	session_id: string;
+	title: string;
+	session_type: string;
+	permission_mode: string;
+	created: boolean;
+	agent_state: string;
+}
+
 // Content-free mobile diagnostics. Keep this contract operational and bounded:
 // never add prompts, responses, credentials, terminal/file contents, or raw URLs.
 export interface MobileDiagnosticUploadBatch {

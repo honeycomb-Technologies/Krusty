@@ -36,6 +36,12 @@ import type {
 	HiveScheduleWriteRequest,
 	HiveSessionStatus,
 	HiveSessionSummary,
+	HiveWorker,
+	HiveWorkerDetail,
+	HiveWorkerDmResponse,
+	HiveWorkersResponse,
+	CreateHiveWorkerRequest,
+	UpdateHiveWorkerRequest,
 	McpServerResponse,
 	McpToolResponse,
 	MemorySnapshotResponse,
@@ -1424,6 +1430,55 @@ export class MitsuroClient {
 			callbacks,
 			signal,
 		);
+	}
+
+	// ============================================================================
+	// Hive Workers
+	// ============================================================================
+
+	async listHiveWorkers(): Promise<HiveWorkersResponse> {
+		return this.request("/hive/workers");
+	}
+
+	async createHiveWorker(
+		request: CreateHiveWorkerRequest,
+	): Promise<HiveWorkerDetail> {
+		return this.request("/hive/workers", {
+			method: "POST",
+			body: JSON.stringify(request),
+		});
+	}
+
+	async getHiveWorker(id: string): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}`);
+	}
+
+	async updateHiveWorker(
+		id: string,
+		request: UpdateHiveWorkerRequest,
+	): Promise<HiveWorkerDetail> {
+		return this.request(`/hive/workers/${id}`, {
+			method: "PATCH",
+			body: JSON.stringify(request),
+		});
+	}
+
+	async pauseHiveWorker(id: string): Promise<HiveWorker> {
+		return this.request(`/hive/workers/${id}/pause`, { method: "POST" });
+	}
+
+	async resumeHiveWorker(id: string): Promise<HiveWorker> {
+		return this.request(`/hive/workers/${id}/resume`, { method: "POST" });
+	}
+
+	/** Archive (never hard-delete); the Worker's history and DM survive. */
+	async archiveHiveWorker(id: string): Promise<SimpleOkResponse> {
+		return this.request(`/hive/workers/${id}`, { method: "DELETE" });
+	}
+
+	/** Ensure the Worker's private DM session exists and return its summary. */
+	async ensureHiveWorkerDm(id: string): Promise<HiveWorkerDmResponse> {
+		return this.request(`/hive/workers/${id}/dm`, { method: "POST" });
 	}
 
 	// ============================================================================

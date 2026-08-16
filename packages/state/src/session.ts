@@ -1,6 +1,7 @@
 export { createSessionStore } from './session/store';
 export * from './session/types';
 export * from './session/modelSelection';
+export * from './session/hiveSendTarget';
 export {
   createDelegatedArtifactState,
   resolveDelegatedKind,
