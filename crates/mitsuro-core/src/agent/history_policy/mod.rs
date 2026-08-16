@@ -246,12 +246,28 @@ pub(crate) fn truncate_utf8(text: &str, limit: usize) -> String {
     }
 
     let truncated = &text[..boundary];
-    let window_start = boundary.saturating_sub(160);
+    let window_start = align_char_boundary_back(truncated, boundary.saturating_sub(160));
     let break_point = truncated[window_start..]
         .rfind('\n')
         .map(|relative| window_start + relative)
         .unwrap_or(boundary);
     truncated[..break_point].trim_end().to_string()
+}
+
+fn align_char_boundary_back(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn align_char_boundary_forward(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 pub(crate) fn truncate_utf8_head_tail(text: &str, head_limit: usize, tail_limit: usize) -> String {
@@ -263,7 +279,7 @@ pub(crate) fn truncate_utf8_head_tail(text: &str, head_limit: usize, tail_limit:
     while head_end > 0 && !text.is_char_boundary(head_end) {
         head_end -= 1;
     }
-    let head_window_start = head_end.saturating_sub(160);
+    let head_window_start = align_char_boundary_back(text, head_end.saturating_sub(160));
     if let Some(relative_break) = text[head_window_start..head_end].rfind('\n') {
         head_end = head_window_start + relative_break;
     }
@@ -272,7 +288,7 @@ pub(crate) fn truncate_utf8_head_tail(text: &str, head_limit: usize, tail_limit:
     while tail_start < text.len() && !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
-    let tail_window_end = tail_start.saturating_add(160).min(text.len());
+    let tail_window_end = align_char_boundary_forward(text, tail_start.saturating_add(160));
     if let Some(relative_break) = text[tail_start..tail_window_end].find('\n') {
         tail_start += relative_break + 1;
     }
@@ -297,6 +313,53 @@ mod tests {
 
         assert!(truncated.starts_with("# Plan\n"));
         assert!(truncated.len() > 500);
+    }
+
+    #[test]
+    fn prefix_truncation_survives_multibyte_chars_in_the_break_window() {
+        let limit: usize = 600;
+        let mut value = "a".repeat(limit.saturating_sub(161));
+        value.push('⎯');
+        value.push_str(&"b".repeat(800));
+
+        let truncated = truncate_utf8(&value, limit);
+        assert!(!truncated.is_empty());
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn head_tail_truncation_survives_multibyte_chars_in_the_break_window() {
+        use super::truncate_utf8_head_tail;
+
+        let mut value = "a".repeat(439);
+        value.push('⎯');
+        value.push_str(&"c".repeat(2_000));
+        value.push('⎯');
+        value.push_str(&"d".repeat(439));
+
+        let truncated = truncate_utf8_head_tail(&value, 600, 600);
+        assert!(truncated.contains("[middle truncated]"));
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn bash_vitest_output_with_box_drawings_does_not_panic() {
+        let glyph = "\u{23af}";
+        let line = format!(" {glyph}{glyph}{glyph}{glyph}{glyph} Failed Tests 5 {glyph}{glyph}{glyph}{glyph}{glyph}\n");
+        let output = json!({
+            "ok": false,
+            "data": {
+                "stdout": line.repeat(400),
+                "stderr": format!("FAIL  src/engine.test.ts > rotate {glyph} wall kick"),
+                "exit_code": 1
+            }
+        })
+        .to_string();
+
+        let history = std::panic::catch_unwind(|| build_history_tool_result("bash", &output, true))
+            .expect("history packaging must not panic on Vitest box-drawing glyphs");
+        let encoded = serde_json::to_string(&history).expect("history json");
+        assert!(std::str::from_utf8(encoded.as_bytes()).is_ok());
     }
 
     #[test]
@@ -490,6 +553,24 @@ mod tests {
 
     #[test]
     fn agent_lifecycle_history_keeps_bounded_durable_run_evidence() {
+        let agent_report = json!({
+            "agent": "storage verifier",
+            "success": true,
+            "termination": "completed",
+            "outcome_reason": "usable_evidence",
+            "confidence": "high",
+            "summary": "The storage transition is atomic and the focused regression passed.",
+            "key_findings": ["Transaction boundary verified", "Regression passed"],
+            "objective_status": "complete",
+            "handoff": {
+                "status": "complete",
+                "acceptance_checks": [{
+                    "id": "marker",
+                    "status": "passed",
+                    "evidence": "alpha-live-proof"
+                }]
+            }
+        });
         let output = json!({
             "ok": true,
             "data": {
@@ -516,7 +597,8 @@ mod tests {
                         "usable_agents": 1,
                         "files_examined_count": 4,
                         "findings": "Implemented the atomic transition.",
-                        "next_action_hint": "Integrate and validate."
+                        "next_action_hint": "Integrate and validate.",
+                        "agents": [agent_report]
                     }
                 },
                 "live": null
@@ -543,7 +625,79 @@ mod tests {
             run["artifact"]["next_action_hint"],
             "Integrate and validate."
         );
+        assert_eq!(
+            run["artifact"]["agent_reports"][0]["agent"],
+            "storage verifier"
+        );
+        assert_eq!(
+            run["artifact"]["agent_reports"][0]["key_findings"],
+            json!(["Transaction boundary verified", "Regression passed"])
+        );
+        assert!(run["artifact"]["agent_reports"][0]["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("focused regression passed")));
+        assert_eq!(
+            run["artifact"]["agent_reports"][0]["objective_status"],
+            "complete"
+        );
+        assert_eq!(
+            run["artifact"]["agent_reports"][0]["acceptance_checks"][0]["evidence"],
+            "alpha-live-proof"
+        );
         assert!(!history.to_string().contains("unbounded_nested_payload"));
+    }
+
+    #[test]
+    fn agent_lifecycle_history_caps_large_task_graph_handoffs() {
+        let reports = (0..32)
+            .map(|index| {
+                json!({
+                    "agent": format!("auditor-{index}"),
+                    "success": true,
+                    "termination": "completed".repeat(2_000),
+                    "confidence": "high".repeat(2_000),
+                    "summary": "s".repeat(8_000),
+                    "key_findings": (0..20)
+                        .map(|finding| format!("finding-{finding}-{}", "x".repeat(2_000)))
+                        .collect::<Vec<_>>(),
+                    "handoff": {
+                        "status": "complete",
+                        "acceptance_checks": (0..20).map(|check| json!({
+                            "id": format!("check-{check}-{}", "i".repeat(2_000)),
+                            "status": "passed".repeat(2_000),
+                            "evidence": "e".repeat(8_000),
+                        })).collect::<Vec<_>>()
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = json!({
+            "ok": true,
+            "data": {
+                "run": {
+                    "delegated_run_id": "large-task-graph",
+                    "stage": "complete",
+                    "artifact": { "agents": reports }
+                }
+            }
+        })
+        .to_string();
+
+        let history = build_history_tool_result("agent", &output, false);
+        let retained = &history["result"]["run"]["artifact"]["agent_reports"];
+        assert_eq!(retained.as_array().map(Vec::len), Some(12));
+        assert!(
+            retained.to_string().len() < 48_000,
+            "bounded handoff unexpectedly large: {} bytes",
+            retained.to_string().len()
+        );
+        assert_eq!(
+            retained[0]["acceptance_checks"].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert!(retained[0]["acceptance_checks"][0]["evidence"]
+            .as_str()
+            .is_some_and(|evidence| evidence.len() <= 400));
     }
 
     #[test]

@@ -1,35 +1,36 @@
 //! Main chat column: empty-state centered greeting OR transcript scroll.
-//! Composer + transcript share one centered max-width content rail (~720).
+//! Composer + transcript share one centered, tokenized content rail.
 //!
 //! Transcript blocks (Codex-like): user / assistant bubbles, muted reasoning,
 //! plan list surface, command `$ cmd` + output, file-change patch preview.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    deferred, div, img, px, relative, Context, Entity, InteractiveElement as _, IntoElement,
+    deferred, div, img, px, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, Window,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, Sizable as _};
+use gpui_component::{Icon, IconName, Sizable as _};
 use mitsuro_desktop_backend::{
     DelegationGroupStatus, DelegationTaskStatus, McpAppToolCall, SessionDelegationProjection,
 };
 
-use crate::app::{McpAppDisplayMode, McpAppViewState, MitsuroApp, ProductMode};
-use crate::components::{approval_bar, composer, markdown};
+use crate::app::{
+    ActionAvailability, McpAppDisplayMode, McpAppViewState, MitsuroApp, ProductMode, ThreadAction,
+};
+use crate::components::ui_button::{ButtonSize, ButtonState, ButtonTone};
+use crate::components::{approval_bar, composer, markdown, ui_button};
 use crate::demo::{
     DemoAudioAttachment, DemoAudioSource, DemoImageAttachment, DemoImageSource, DemoMessage,
     DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind, ThreadSurface,
 };
 use crate::preferences::DesktopProject;
 use crate::theme;
-
-/// Shared content width for transcript + composer (Codex chat density).
-const CONTENT_MAX_W: f32 = 720.0;
 
 /// History grows in deliberate pages instead of laying out an entire long session.
 const TRANSCRIPT_PAGE_SIZE: usize = 16;
@@ -39,10 +40,10 @@ const DISPLAY_BODY_CAP: usize = 4_000;
 pub fn main_column(
     app: &MitsuroApp,
     composer_input: &Entity<InputState>,
+    main_column_width: f32,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
-    let calm =
-        matches!(app.active_mode(), ProductMode::Chat | ProductMode::Codex) && app.is_calm_stage();
+    let colors = theme::colors();
 
     div()
         .id("main-column")
@@ -53,10 +54,7 @@ pub fn main_column(
         .min_w_0()
         .h_full()
         .overflow_hidden()
-        // Soft ambient wash (dark blue → near-black) — product polish, not OpenAI bloom IP.
-        .bg(theme::ambient_main_bg())
-        // Multi soft radial-like layers via overlapping linear gradients.
-        .when(calm, |this| this.child(ambient_atmosphere_layers()))
+        .bg(colors.bg_main)
         .child(
             div()
                 .relative()
@@ -94,7 +92,9 @@ pub fn main_column(
                     ProductMode::Scheduled => {
                         crate::components::scheduled_panel(app, cx).into_any_element()
                     }
-                    ProductMode::Chat | ProductMode::Codex => thread_main(app, composer_input, cx),
+                    ProductMode::Chat | ProductMode::Codex => {
+                        thread_main(app, composer_input, main_column_width, cx)
+                    }
                 }),
         )
 }
@@ -127,7 +127,7 @@ pub fn mcp_app_fullscreen_overlay(
         .bg(colors.bg_under)
         .child(
             div()
-                .h(px(48.0))
+                .h(px(theme::metrics().toolbar_height))
                 .flex_shrink_0()
                 .px(px(14.0))
                 .flex()
@@ -233,59 +233,10 @@ pub fn mcp_app_fullscreen_overlay(
         .into_any_element()
 }
 
-/// Soft multi-blob atmosphere (overlapping gradient quads). Mitsuro palette only —
-/// not a clone of OpenAI bloom / logo IP.
-fn ambient_atmosphere_layers() -> impl IntoElement {
-    div()
-        .id("ambient-atmosphere")
-        .absolute()
-        .inset_0()
-        .overflow_hidden()
-        // Upper-left cool pool
-        .child(
-            div()
-                .absolute()
-                .top(px(-80.0))
-                .left(px(-120.0))
-                .w(relative(0.72))
-                .h(relative(0.58))
-                .bg(theme::ambient_wash_cool()),
-        )
-        // Lower-left warm ember
-        .child(
-            div()
-                .absolute()
-                .bottom(px(-60.0))
-                .left(px(-40.0))
-                .w(relative(0.55))
-                .h(relative(0.5))
-                .bg(theme::ambient_wash_warm()),
-        )
-        // Upper-right teal
-        .child(
-            div()
-                .absolute()
-                .top(px(-40.0))
-                .right(px(-100.0))
-                .w(relative(0.6))
-                .h(relative(0.55))
-                .bg(theme::ambient_wash_teal()),
-        )
-        // Soft bottom vignette so hero stays readable
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .h(relative(0.55))
-                .bg(theme::ambient_wash_vignette()),
-        )
-}
-
 fn thread_main(
     app: &MitsuroApp,
     composer_input: &Entity<InputState>,
+    main_column_width: f32,
     cx: &mut Context<MitsuroApp>,
 ) -> gpui::AnyElement {
     let surface = app.active_thread_surface();
@@ -320,6 +271,11 @@ fn thread_main(
         && app.selected_transcript_is_loading();
     let empty = thread.is_none();
     let calm = app.is_calm_stage();
+    let thread_content_max_width = if chat_mode {
+        theme::metrics().chat_thread_content_max_width
+    } else {
+        theme::metrics().thread_content_max_width
+    };
     // Open-thread chrome whenever a recent is selected (not calm home).
     let show_title = thread.is_some();
     let request_input = app.server_request_input(false).clone();
@@ -352,74 +308,109 @@ fn thread_main(
         // Full-bleed stage on calm empty; constrained column once threads exist.
         .child(
             div()
+                .relative()
                 .flex()
-                .flex_col()
+                .flex_row()
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .items_center()
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
                         .min_h_0()
-                        .w_full()
-                        .when(calm, |this| {
-                            // Full-bleed stage; center hero + quiet composer column.
-                            this.items_center()
-                        })
-                        .when(!calm, |this| this.max_w(px(CONTENT_MAX_W)))
-                        .child(if loading_transcript {
-                            loading_transcript_state().into_any_element()
-                        } else if empty {
-                            empty_state(surface, chat_mode, calm, composer_input, cx)
-                                .into_any_element()
-                        } else {
-                            transcript(
-                                messages,
-                                surface,
-                                delegation,
-                                transcript_visible_limit,
-                                has_older_server_history,
-                                older_history_loading,
-                                transcript_thread_id,
-                                app,
-                                cx,
-                            )
-                            .into_any_element()
-                        })
-                        .when_some(app.pending_approval().cloned(), |this, pending| {
-                            this.child(approval_bar::approval_bar(&pending, cx))
-                        })
-                        .when_some(
-                            app.pending_user_input()
-                                .map(|(pending, index)| (pending.clone(), index)),
-                            |this, (pending, index)| {
-                                this.child(super::server_request_bar::user_input_bar(
-                                    &pending,
-                                    index,
-                                    &request_input,
-                                    &request_secret_input,
-                                    cx,
-                                ))
-                            },
-                        )
-                        .when_some(
-                            app.pending_mcp_elicitation()
-                                .map(|(pending, index)| (pending.clone(), index)),
-                            |this, (pending, index)| {
-                                this.child(super::server_request_bar::mcp_elicitation_bar(
-                                    &pending,
-                                    index,
-                                    current_mcp_form_field.clone(),
-                                    &request_input,
-                                    cx,
-                                ))
-                            },
-                        )
-                        .child(composer::composer(app, composer_input, cx)),
-                ),
+                        .min_w_0()
+                        .h_full()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .when(calm, |this| {
+                                    // Full-bleed stage; center hero + quiet composer column.
+                                    this.items_center()
+                                })
+                                .when(!calm, |this| this.max_w(px(thread_content_max_width)))
+                                .child(if loading_transcript {
+                                    loading_transcript_state().into_any_element()
+                                } else if empty {
+                                    empty_state(app, chat_mode).into_any_element()
+                                } else {
+                                    transcript_stage(
+                                        messages,
+                                        surface,
+                                        delegation,
+                                        transcript_visible_limit,
+                                        has_older_server_history,
+                                        older_history_loading,
+                                        transcript_thread_id,
+                                        app,
+                                        cx,
+                                    )
+                                    .into_any_element()
+                                })
+                                .when_some(app.pending_approval().cloned(), |this, pending| {
+                                    this.child(approval_bar::approval_bar(&pending, cx))
+                                })
+                                .when_some(
+                                    app.pending_user_input()
+                                        .map(|(pending, index)| (pending.clone(), index)),
+                                    |this, (pending, index)| {
+                                        this.child(super::server_request_bar::user_input_bar(
+                                            &pending,
+                                            index,
+                                            &request_input,
+                                            &request_secret_input,
+                                            cx,
+                                        ))
+                                    },
+                                )
+                                .when_some(
+                                    app.pending_mcp_elicitation()
+                                        .map(|(pending, index)| (pending.clone(), index)),
+                                    |this, (pending, index)| {
+                                        this.child(super::server_request_bar::mcp_elicitation_bar(
+                                            &pending,
+                                            index,
+                                            current_mcp_form_field.clone(),
+                                            &request_input,
+                                            cx,
+                                        ))
+                                    },
+                                )
+                                .child(if calm {
+                                    // The reference Home stage is two equal rows. The hero
+                                    // finishes the upper row and the composer begins the lower
+                                    // row with a deliberate overlap; it is not a bottom dock.
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_grow()
+                                        .flex_basis(px(0.0))
+                                        .min_h_0()
+                                        .w_full()
+                                        .items_center()
+                                        .mt(px(-64.0))
+                                        .child(composer::composer(
+                                            app,
+                                            composer_input,
+                                            main_column_width,
+                                            cx,
+                                        ))
+                                        .into_any_element()
+                                } else {
+                                    composer::composer(app, composer_input, main_column_width, cx)
+                                        .into_any_element()
+                                }),
+                        ),
+                )
+                .when(show_title && app.thread_inspector_open(), |this| {
+                    this.child(thread_inspector(messages))
+                }),
         )
         .into_any_element()
 }
@@ -554,30 +545,22 @@ fn thread_title_bar(
         .selected_thread()
         .and_then(|t| t.summary.archived)
         .unwrap_or(false);
-    let status = app.status_line().to_string();
-    // Quiet lifecycle / read feedback only (avoid dumping full connection noise).
-    let quiet_status = if status.starts_with("thread/")
-        || status.starts_with("thread ·")
-        || status.starts_with("Archive")
-        || status.starts_with("Delete")
-        || status.starts_with("Fork")
-        || status.starts_with("Side")
-        || status.starts_with("Opening side")
-        || status.starts_with("Could not open side")
-        || status.starts_with("Returned to main")
-        || status.starts_with("Compact")
-        || status.starts_with("Compaction")
-        || status.starts_with("Review")
-        || status.starts_with("Find")
-        || status.starts_with("Pinned")
-        || status.starts_with("Unpinned")
-        || status.starts_with("Moved chat")
-        || status.starts_with("Couldn’t move chat")
-    {
-        Some(status)
+    let archive_availability = app.thread_action_availability(if is_archived {
+        ThreadAction::Unarchive
     } else {
-        None
-    };
+        ThreadAction::Archive
+    });
+    let rename_availability = app.thread_action_availability(ThreadAction::Rename);
+    let fork_availability = app.thread_action_availability(ThreadAction::Fork);
+    let delete_availability = app.thread_action_availability(ThreadAction::Delete);
+    let rename_open = app.thread_rename_open();
+    let rename_in_progress = app.thread_rename_in_progress();
+    let rename_error = app.thread_rename_error().map(str::to_owned);
+    let rename_input = app.thread_rename_input().clone();
+    let status = app.status_line().to_string();
+    // Only user-facing action results belong in primary chrome. Protocol method
+    // names, timings, message counts, and transport state remain diagnostic data.
+    let quiet_status = primary_chrome_notice(&status);
 
     div()
         .id("thread-title-bar")
@@ -586,9 +569,8 @@ fn thread_title_bar(
         .flex_row()
         .items_center()
         .justify_between()
-        .h(px(48.0))
+        .h(px(theme::metrics().toolbar_height))
         .px(px(20.0))
-        .pr(px(56.0)) // room for absolute panel toggles
         .border_b_1()
         .border_color(colors.border_subtle)
         .child(
@@ -599,17 +581,121 @@ fn thread_title_bar(
                 .gap(px(10.0))
                 .min_w_0()
                 .flex_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .child(title.to_string()),
-                )
-                .when_some(project_path.map(str::to_string), |this, path| {
-                    this.child(project_path_chip(&path, cx))
+                .when(!rename_open, |this| {
+                    let full_title = title.to_string();
+                    this.child(
+                        div()
+                            .id("thread-title-label")
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(colors.text)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(full_title.clone()).build(window, cx)
+                            })
+                            .child(title.to_string()),
+                    )
+                })
+                .when(rename_open, |this| {
+                    this.child(
+                        div()
+                            .id("thread-rename-wrap")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .h(px(32.0))
+                            .w(px(420.0))
+                            .px(px(8.0))
+                            .rounded(px(8.0))
+                            .bg(colors.bg_elevated)
+                            .border_1()
+                            .border_color(if rename_error.is_some() {
+                                colors.status_error
+                            } else {
+                                colors.border
+                            })
+                            .on_key_down(cx.listener(
+                                |app, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "escape" {
+                                        app.cancel_thread_rename(window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .opacity(if rename_in_progress { 0.68 } else { 1.0 })
+                            .child(
+                                div()
+                                    .min_w(px(160.0))
+                                    .flex_1()
+                                    .child(Input::new(&rename_input).appearance(false).h(px(26.0))),
+                            )
+                            .when_some(rename_error.clone(), |this, error| {
+                                this.child(
+                                    div()
+                                        .id("thread-rename-error")
+                                        .max_w(px(150.0))
+                                        .text_xs()
+                                        .text_color(colors.status_error)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(error.clone()).build(window, cx)
+                                        })
+                                        .child("Rename failed"),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("thread-rename-save")
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(!rename_in_progress, |this| {
+                                        this.cursor_pointer()
+                                            .hover(|style| style.bg(colors.bg_hover))
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.commit_thread_rename(window, cx);
+                                            }))
+                                    })
+                                    .child(
+                                        Icon::new(IconName::Check)
+                                            .with_size(px(13.0))
+                                            .text_color(colors.text_secondary),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("thread-rename-cancel")
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(!rename_in_progress, |this| {
+                                        this.cursor_pointer()
+                                            .hover(|style| style.bg(colors.bg_hover))
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.cancel_thread_rename(window, cx);
+                                            }))
+                                    })
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .with_size(px(13.0))
+                                            .text_color(colors.text_tertiary),
+                                    ),
+                            ),
+                    )
+                })
+                .when(!rename_open, |this| {
+                    this.when_some(project_path.map(str::to_string), |this, path| {
+                        this.child(project_path_chip(&path, cx))
+                    })
                 }),
         )
         .child(
@@ -636,6 +722,7 @@ fn thread_title_bar(
                     )
                 })
                 .child(thread_find_button(app.thread_find_open(), cx))
+                .child(thread_inspector_button(app.thread_inspector_open(), cx))
                 .when(!is_side_chat, |this| {
                     this.child(thread_overflow_menu(menu_open, is_archived, cx))
                 }),
@@ -644,6 +731,10 @@ fn thread_title_bar(
             this.child(
                 deferred(thread_overflow_dropdown(
                     is_archived,
+                    archive_availability,
+                    rename_availability,
+                    fork_availability,
+                    delete_availability,
                     can_pin,
                     is_pinned,
                     can_review,
@@ -658,6 +749,217 @@ fn thread_title_bar(
                 .with_priority(10),
             )
         })
+}
+
+fn thread_inspector_button(active: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+    ui_button::icon_button(
+        "thread-inspector-toggle",
+        Icon::new(if active {
+            IconName::PanelRightClose
+        } else {
+            IconName::PanelRightOpen
+        })
+        .with_size(px(theme::shape().icon_sm)),
+        if active {
+            "Hide outputs and sources"
+        } else {
+            "Show outputs and sources"
+        },
+        ButtonTone::Ghost,
+        ButtonSize::Medium,
+        ButtonState {
+            selected: active,
+            ..ButtonState::default()
+        },
+        cx,
+    )
+    .on_click(cx.listener(|app, _, _, cx| app.toggle_thread_inspector(cx)))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThreadInspectorEntry {
+    title: String,
+    detail: Option<String>,
+}
+
+fn thread_inspector_entries(
+    messages: &[DemoMessage],
+) -> (Vec<ThreadInspectorEntry>, Vec<ThreadInspectorEntry>) {
+    let mut outputs = Vec::new();
+    let mut sources = Vec::new();
+    let mut output_seen = HashSet::new();
+    let mut source_seen = HashSet::new();
+
+    for message in messages {
+        match &message.kind {
+            DemoMessageKind::FileChange { paths_summary, .. } => {
+                let title = paths_summary.trim();
+                if !title.is_empty() && output_seen.insert(title.to_owned()) {
+                    outputs.push(ThreadInspectorEntry {
+                        title: title.to_owned(),
+                        detail: Some("File change".to_owned()),
+                    });
+                }
+            }
+            DemoMessageKind::Activity {
+                kind, title, body, ..
+            } if is_source_activity(kind, title) => {
+                let title = title.trim();
+                let detail = body.trim();
+                let key = format!("{title}\n{detail}");
+                if !title.is_empty() && source_seen.insert(key) {
+                    sources.push(ThreadInspectorEntry {
+                        title: title.to_owned(),
+                        detail: (!detail.is_empty()).then(|| detail.to_owned()),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (outputs, sources)
+}
+
+fn is_source_activity(kind: &str, title: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    let title = title.to_ascii_lowercase();
+    kind.contains("search")
+        || kind.contains("source")
+        || title.contains("web search")
+        || title.contains("source")
+}
+
+fn thread_inspector(messages: &[DemoMessage]) -> impl IntoElement {
+    let colors = theme::colors();
+    let (outputs, sources) = thread_inspector_entries(messages);
+
+    div()
+        .id("thread-inspector")
+        .absolute()
+        .top(px(12.0))
+        .right(px(12.0))
+        .w(px(300.0))
+        .max_h(px(440.0))
+        .overflow_y_scroll()
+        .rounded(px(theme::metrics().popover_radius))
+        .border_1()
+        .border_color(colors.border_subtle)
+        .bg(colors.bg_elevated)
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(thread_inspector_section(
+            "thread-inspector-outputs",
+            "Outputs",
+            "No outputs yet",
+            IconName::File,
+            outputs,
+        ))
+        .child(thread_inspector_section(
+            "thread-inspector-sources",
+            "Sources",
+            "No sources yet",
+            IconName::Globe,
+            sources,
+        ))
+}
+
+fn thread_inspector_section(
+    id: &'static str,
+    label: &'static str,
+    empty_label: &'static str,
+    icon: IconName,
+    entries: Vec<ThreadInspectorEntry>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.text_tertiary)
+                .child(label),
+        )
+        .when(entries.is_empty(), |this| {
+            this.child(
+                div()
+                    .py(px(4.0))
+                    .text_sm()
+                    .text_color(colors.text_tertiary)
+                    .child(empty_label),
+            )
+        })
+        .children(entries.into_iter().enumerate().map(move |(index, entry)| {
+            div()
+                .id((id, index))
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
+                .py(px(4.0))
+                .child(
+                    Icon::new(icon.clone())
+                        .with_size(px(theme::shape().icon_sm))
+                        .text_color(colors.text_tertiary),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.text_secondary)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(entry.title),
+                        )
+                        .when_some(entry.detail, |this, detail| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.text_tertiary)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(detail),
+                            )
+                        }),
+                )
+        }))
+}
+
+fn primary_chrome_notice(status: &str) -> Option<String> {
+    const USER_ACTION_PREFIXES: [&str; 16] = [
+        "Archive",
+        "Delete",
+        "Fork",
+        "Side",
+        "Opening side",
+        "Could not open side",
+        "Returned to main",
+        "Compact",
+        "Compaction",
+        "Review",
+        "Find",
+        "Pinned",
+        "Unpinned",
+        "Moved chat",
+        "Couldn’t move chat",
+        "Project ·",
+    ];
+    USER_ACTION_PREFIXES
+        .iter()
+        .any(|prefix| status.starts_with(prefix))
+        .then(|| status.to_owned())
 }
 
 fn thread_find_button(active: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -730,6 +1032,12 @@ fn thread_find_bar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         .bg(colors.bg_sidebar)
         .border_b_1()
         .border_color(colors.border_subtle)
+        .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                app.close_thread_find(window, cx);
+                cx.stop_propagation();
+            }
+        }))
         .child(
             div()
                 .flex()
@@ -797,7 +1105,7 @@ fn thread_find_bar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         .when_some(detail, |this, detail| {
             this.child(
                 div()
-                    .max_w(px(CONTENT_MAX_W))
+                    .max_w(px(theme::metrics().thread_content_max_width))
                     .text_xs()
                     .text_color(if app.thread_find_error().is_some() {
                         colors.status_error
@@ -926,6 +1234,10 @@ fn thread_overflow_menu(
 /// Dense dropdown under the ⋯ control — Codex-like lifecycle actions.
 fn thread_overflow_dropdown(
     is_archived: bool,
+    archive_availability: ActionAvailability,
+    rename_availability: ActionAvailability,
+    fork_availability: ActionAvailability,
+    delete_availability: ActionAvailability,
     can_pin: bool,
     is_pinned: bool,
     can_review: bool,
@@ -995,6 +1307,17 @@ fn thread_overflow_dropdown(
                 |app, _window, cx| app.toggle_selected_thread_pin(cx),
             ))
         })
+        .when(!project_menu_open, |this| {
+            this.child(thread_action_menu_item(
+                "thread-menu-rename",
+                "Rename",
+                "icons/pen-line.svg",
+                false,
+                rename_availability,
+                cx,
+                |app, window, cx| app.open_thread_rename(window, cx),
+            ))
+        })
         .when(
             !project_menu_open && can_assign_project && has_local_projects,
             |this| {
@@ -1009,21 +1332,23 @@ fn thread_overflow_dropdown(
             },
         )
         .when(!project_menu_open, |this| {
-            this.child(thread_menu_item(
+            this.child(thread_action_menu_item(
                 "thread-menu-archive",
                 archive_label,
                 "icons/inbox.svg",
                 false,
+                archive_availability,
                 cx,
                 |app, _window, cx| app.archive_selected_thread(cx),
             ))
         })
         .when(!project_menu_open, |this| {
-            this.child(thread_menu_item(
+            this.child(thread_action_menu_item(
                 "thread-menu-fork",
                 "Fork",
                 "icons/git-branch.svg",
                 false,
+                fork_availability,
                 cx,
                 |app, _window, cx| app.fork_selected_thread(cx),
             ))
@@ -1068,11 +1393,12 @@ fn thread_overflow_dropdown(
             )
         })
         .when(!project_menu_open, |this| {
-            this.child(thread_menu_item(
+            this.child(thread_action_menu_item(
                 "thread-menu-delete",
                 "Delete",
                 "icons/delete.svg",
                 true,
+                delete_availability,
                 cx,
                 |app, _window, cx| app.delete_selected_thread(cx),
             ))
@@ -1242,48 +1568,125 @@ fn thread_menu_item(
         .child(div().text_sm().text_color(fg).child(label))
 }
 
-/// Home empty state: Codex “What should we build?” vs Chat “Ready when you are.”
-fn empty_state(
-    surface: ThreadSurface,
-    chat_mode: bool,
-    calm: bool,
-    composer_input: &Entity<InputState>,
+fn thread_action_menu_item(
+    id: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    destructive: bool,
+    availability: ActionAvailability,
     cx: &mut Context<MitsuroApp>,
+    on_click: impl Fn(&mut MitsuroApp, &mut Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {
-    let _ = (composer_input, cx, surface, calm);
     let colors = theme::colors();
-    let headline = if chat_mode {
-        "Ready when you are."
+    let enabled = availability.is_available();
+    let reason = availability.reason().unwrap_or("Available");
+    let fg = if !enabled {
+        colors.text_tertiary
+    } else if destructive {
+        colors.status_error
     } else {
-        "What should we build?"
+        colors.text
     };
+    let icon_fg = if !enabled {
+        colors.text_tertiary
+    } else if destructive {
+        colors.status_error
+    } else {
+        colors.text_tertiary
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(10.0))
+        .py(px(7.0))
+        .rounded(px(7.0))
+        .when(enabled, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover))
+                .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
+        })
+        .when(!enabled, |row| {
+            row.opacity(0.58)
+                .tooltip(move |window, cx| Tooltip::new(reason).build(window, cx))
+        })
+        .child(
+            Icon::empty()
+                .path(icon)
+                .with_size(px(14.0))
+                .text_color(icon_fg),
+        )
+        .child(div().text_sm().text_color(fg).child(label))
+}
+
+/// Reference-shaped Home hero: bottom-aligned in the upper half of the stage.
+fn empty_state(app: &MitsuroApp, chat_mode: bool) -> impl IntoElement {
+    let colors = theme::colors();
+    let headline = home_headline(app, chat_mode);
 
     div()
         .flex()
-        .flex_1()
+        .flex_col()
+        .flex_grow()
+        .flex_basis(px(0.0))
         .min_h_0()
         .w_full()
         .items_center()
-        .justify_center()
+        .justify_end()
+        .pt(px(24.0))
+        .pb(px(96.0))
         .px(px(32.0))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(if chat_mode { px(14.0) } else { px(18.0) })
+                .justify_end()
+                .min_h(px(112.0))
+                .gap(px(24.0))
                 .max_w(px(560.0))
                 // Soft cloud / blob Mitsuro mark (not OpenAI logo IP) — quieter on Chat home.
                 .when(!chat_mode, |this| this.child(mitsuro_cloud_mark()))
                 .when(chat_mode, |this| this.child(mitsuro_chat_mark()))
                 .child(
                     div()
-                        .text_3xl()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .max_w_full()
+                        .text_center()
+                        .text_size(px(theme::typography().title))
+                        .line_height(gpui::relative(1.2))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(colors.text)
                         .child(headline),
                 ),
         )
+}
+
+fn home_headline(app: &MitsuroApp, chat_mode: bool) -> SharedString {
+    let selected_project = app
+        .selected_project_id()
+        .and_then(|project_id| {
+            app.local_projects()
+                .iter()
+                .find(|project| project.id == project_id)
+        })
+        .map(|project| project.name.trim())
+        .filter(|name| !name.is_empty());
+    home_headline_text(chat_mode, selected_project).into()
+}
+
+fn home_headline_text(chat_mode: bool, selected_project: Option<&str>) -> String {
+    if chat_mode {
+        return "Ready when you are.".to_owned();
+    }
+    match selected_project
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(project_name) => format!("What should we build in {project_name}?"),
+        None => "What should we build?".to_owned(),
+    }
 }
 
 /// Minimal mark for Chat home (no Codex cloud stack).
@@ -1390,6 +1793,8 @@ fn transcript(
     let hidden_count = visible_range.start;
     let first_visible_index = visible_range.start;
     let visible = &messages[visible_range];
+    let unread_anchor = app.transcript_unread_anchor_index();
+    let unseen_messages = app.transcript_unseen_message_count();
     div()
         .id("transcript")
         .flex()
@@ -1404,6 +1809,9 @@ fn transcript(
         .gap(if simple_bubbles { px(12.0) } else { px(14.0) })
         .overflow_y_scroll()
         .track_scroll(app.transcript_scroll_handle())
+        .on_scroll_wheel(cx.listener(|app, event, window, cx| {
+            app.note_transcript_scroll(event, window, cx);
+        }))
         .when(hidden_count > 0 || has_older_server_history, |this| {
             this.child(show_earlier_button(
                 hidden_count,
@@ -1428,25 +1836,154 @@ fn transcript(
                 .is_some_and(|item_id| msg.item_id.as_deref() == Some(item_id));
             let editing = app.transcript_message_is_being_edited(absolute_index);
             let editable = app.can_edit_transcript_message(absolute_index);
-            transcript_block(
-                absolute_index as u64,
-                msg,
-                simple_bubbles,
-                message_key,
-                expanded,
-                highlighted,
-                editable,
-                editing,
-                editing.then(|| app.latest_message_edit_input().clone()),
-                app.latest_message_edit_in_progress(),
-                app.latest_message_edit_error().map(str::to_owned),
-                mcp_app_state,
-                cx,
-            )
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .when(unread_anchor == Some(absolute_index), |this| {
+                    this.child(unread_divider(unseen_messages))
+                })
+                .child(transcript_block(
+                    absolute_index as u64,
+                    msg,
+                    simple_bubbles,
+                    message_key,
+                    expanded,
+                    highlighted,
+                    editable,
+                    editing,
+                    editing.then(|| app.latest_message_edit_input().clone()),
+                    app.latest_message_edit_in_progress(),
+                    app.latest_message_edit_error().map(str::to_owned),
+                    mcp_app_state,
+                    cx,
+                ))
         }))
         .when_some(delegation, |this, projection| {
             this.child(delegation_block(projection))
         })
+}
+
+fn transcript_stage(
+    messages: &[DemoMessage],
+    surface: ThreadSurface,
+    delegation: Option<&SessionDelegationProjection>,
+    visible_limit: usize,
+    has_older_server_history: bool,
+    older_history_loading: bool,
+    thread_id: &str,
+    app: &MitsuroApp,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let show_jump = app.transcript_jump_to_latest_visible();
+    let unseen_messages = app.transcript_unseen_message_count();
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .child(transcript(
+            messages,
+            surface,
+            delegation,
+            visible_limit,
+            has_older_server_history,
+            older_history_loading,
+            thread_id,
+            app,
+            cx,
+        ))
+        .when(show_jump, |this| {
+            this.child(deferred(jump_to_latest_control(unseen_messages, cx)))
+        })
+}
+
+fn unread_divider(unseen_messages: usize) -> impl IntoElement {
+    let colors = theme::colors();
+    let label = if unseen_messages == 1 {
+        "1 new message".to_owned()
+    } else {
+        format!("{unseen_messages} new messages")
+    };
+    div()
+        .id("transcript-unread-divider")
+        .flex()
+        .items_center()
+        .w_full()
+        .py(px(5.0))
+        .gap(px(9.0))
+        .child(div().h(px(1.0)).flex_1().bg(colors.accent))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(colors.accent)
+                .child(label),
+        )
+        .child(div().h(px(1.0)).flex_1().bg(colors.accent))
+}
+
+fn jump_to_latest_control(
+    unseen_messages: usize,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let focus = cx.focus_handle();
+    let keyboard_focus = focus.clone();
+    let label = match unseen_messages {
+        0 => None,
+        1 => Some("1 new".to_owned()),
+        count => Some(format!("{count} new")),
+    };
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(10.0))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("transcript-jump-to-latest")
+                .track_focus(&focus)
+                .tab_index(0)
+                .h(px(32.0))
+                .min_w(px(32.0))
+                .px(if label.is_some() { px(10.0) } else { px(0.0) })
+                .rounded(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .bg(colors.bg_elevated)
+                .border_1()
+                .border_color(colors.border)
+                .text_xs()
+                .text_color(colors.text_secondary)
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.bg_hover).border_color(colors.border_heavy))
+                .focus(|style| style.border_color(colors.accent))
+                .tooltip(|window, cx| Tooltip::new("Jump to latest").build(window, cx))
+                .on_click(cx.listener(|app, _, _, cx| app.jump_to_latest(cx)))
+                .on_key_down(
+                    cx.listener(move |app, event: &gpui::KeyDownEvent, window, cx| {
+                        if keyboard_focus.is_focused(window)
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            app.jump_to_latest(cx);
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .child(
+                    Icon::new(IconName::ArrowDown)
+                        .with_size(px(13.0))
+                        .text_color(colors.text_secondary),
+                )
+                .when_some(label, |this, label| this.child(label)),
+        )
 }
 
 fn transcript_tail_range(total: usize, visible_limit: usize) -> std::ops::Range<usize> {
@@ -1726,7 +2263,8 @@ fn transcript_block(
                 )
                 .into_any_element()
             } else {
-                reasoning_block(index, body, msg.streaming).into_any_element()
+                reasoning_block(index, body, msg.streaming, message_key, expanded, cx)
+                    .into_any_element()
             }
         }
         DemoMessageKind::Plan { body } => {
@@ -1879,15 +2417,8 @@ fn activity_block(
     } else {
         colors.text_tertiary
     };
-    let display_body = if body.is_empty() {
-        if streaming {
-            "Working…".to_owned()
-        } else {
-            "No additional details".to_owned()
-        }
-    } else {
-        body.to_owned()
-    };
+    let display_body = activity_detail(body, streaming);
+    let status_label = activity_status_label(status, streaming);
     let app_status = match mcp_app_state {
         None => None,
         Some(McpAppViewState::Loading { .. }) => Some("Loading interactive app…".to_owned()),
@@ -1932,24 +2463,20 @@ fn activity_block(
         .flex()
         .flex_row()
         .items_start()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .w_full()
-        .py(px(7.0))
+        .py(px(4.0))
         .child(
             div()
-                .w(px(26.0))
-                .h(px(26.0))
-                .rounded(px(7.0))
-                .bg(colors.bg_sidebar)
-                .border_1()
-                .border_color(colors.border_subtle)
+                .w(px(20.0))
+                .h(px(20.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
                     Icon::empty()
                         .path(icon)
-                        .with_size(px(13.0))
+                        .with_size(px(14.0))
                         .text_color(colors.text_tertiary),
                 ),
         )
@@ -1973,22 +2500,19 @@ fn activity_block(
                                 .text_color(colors.text_secondary)
                                 .child(title.to_owned()),
                         )
-                        .when(!status.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(status_color)
-                                    .child(status.to_owned()),
-                            )
+                        .when_some(status_label, |this, label| {
+                            this.child(div().text_xs().text_color(status_color).child(label))
                         }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.text_tertiary)
-                        .whitespace_normal()
-                        .child(display_body),
-                )
+                .when_some(display_body, |this, body| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .whitespace_normal()
+                            .child(body),
+                    )
+                })
                 .when_some(mcp_app, |this, app| {
                     this.child(
                         div()
@@ -2131,6 +2655,30 @@ fn activity_block(
         )
 }
 
+fn activity_detail(body: &str, streaming: bool) -> Option<String> {
+    let body = body.trim();
+    if !body.is_empty() {
+        Some(body.to_owned())
+    } else if streaming {
+        Some("Working…".to_owned())
+    } else {
+        None
+    }
+}
+
+fn activity_status_label(status: &str, streaming: bool) -> Option<String> {
+    let status = status.trim();
+    if status.is_empty() {
+        return streaming.then(|| "Running".to_owned());
+    }
+    let normalized = status.to_ascii_lowercase();
+    if normalized.contains("complete") || normalized.contains("success") {
+        None
+    } else {
+        Some(status.to_owned())
+    }
+}
+
 fn error_block(index: u64, body: &str) -> impl IntoElement {
     let colors = theme::colors();
     div()
@@ -2167,7 +2715,7 @@ fn error_block(index: u64, body: &str) -> impl IntoElement {
 /// The user is the elevated object; assistant content stays cardless in the workspace.
 fn chat_bubble(
     index: u64,
-    label: &str,
+    _label: &str,
     body: &str,
     images: &[DemoImageAttachment],
     audio: &[DemoAudioAttachment],
@@ -2186,7 +2734,6 @@ fn chat_bubble(
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
-    let label_color = colors.text_tertiary;
     let bubble_bg = if is_user {
         colors.bg_elevated
     } else {
@@ -2215,7 +2762,7 @@ fn chat_bubble(
             .max_w(if is_user {
                 px(560.0)
             } else {
-                px(CONTENT_MAX_W)
+                px(theme::metrics().thread_content_max_width)
             })
             .bg(bubble_bg)
             .when(is_user, |this| {
@@ -2238,15 +2785,6 @@ fn chat_bubble(
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .when(!is_user, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(label_color)
-                        .child(label.to_string()),
-                )
-            })
             .when(!images.is_empty(), |this| {
                 this.child(user_image_grid(index, images))
             })
@@ -2626,52 +3164,76 @@ fn user_image_grid(index: u64, images: &[DemoImageAttachment]) -> impl IntoEleme
         }))
 }
 
-/// Collapsible-looking muted reasoning / thinking block (smaller text).
-fn reasoning_block(index: u64, body: &str, streaming: bool) -> impl IntoElement {
+/// Quiet reasoning disclosure matching the reference transcript hierarchy.
+///
+/// Provider reasoning remains available on demand, but the collapsed transcript
+/// never exposes raw Markdown or a decorative card.
+fn reasoning_block(
+    index: u64,
+    body: &str,
+    streaming: bool,
+    message_key: String,
+    expanded: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let display = stream_body(body, streaming);
-    let preview: String = display
-        .lines()
-        .next()
-        .unwrap_or("Thinking…")
-        .chars()
-        .take(96)
-        .collect();
-    let multi = display.lines().count() > 1 || display.chars().count() > 96;
-    let shown = if multi && !streaming {
-        format!("▸ {preview}")
-    } else if streaming && body.is_empty() {
-        "▸ Thinking…".into()
-    } else {
-        format!("▾ {display}")
-    };
+    let has_detail = !display.trim().is_empty();
+    let key = message_key;
 
     div()
         .id(("msg-reason", index))
         .flex()
         .flex_col()
-        .gap(px(4.0))
         .w_full()
         .child(
             div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(colors.text_tertiary)
-                .child("Reasoning"),
-        )
-        .child(
-            div()
-                .rounded(px(10.0))
-                .px(px(12.0))
+                .id(("reasoning-disclosure", index))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
                 .py(px(8.0))
-                .bg(colors.bg_sidebar)
-                .border_1()
+                .border_b_1()
                 .border_color(colors.border_subtle)
-                .text_xs()
+                .text_sm()
                 .text_color(colors.text_tertiary)
-                .whitespace_normal()
-                .child(shown),
+                .when(has_detail, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.text_color(colors.text_secondary))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.toggle_transcript_message_expanded(key.clone(), cx);
+                        }))
+                })
+                .child(reasoning_status_label(streaming))
+                .when(has_detail, |this| {
+                    this.child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .with_size(px(13.0))
+                        .text_color(colors.text_tertiary),
+                    )
+                }),
         )
+        .when(expanded && has_detail, |this| {
+            this.child(
+                div()
+                    .pt(px(8.0))
+                    .text_color(colors.text_secondary)
+                    .child(markdown::markdown_body(index, &display)),
+            )
+        })
+}
+
+fn reasoning_status_label(streaming: bool) -> &'static str {
+    if streaming {
+        "Working…"
+    } else {
+        "Worked"
+    }
 }
 
 /// Numbered plan list surface.
@@ -3043,7 +3605,7 @@ fn status_chip_label(status: &str, streaming: bool) -> String {
     }
 }
 
-fn status_color(status: &str, colors: theme::CodexColors) -> gpui::Hsla {
+fn status_color(status: &str, colors: theme::MitsuroColors) -> gpui::Hsla {
     match status {
         "completed" => colors.status_ready,
         "failed" => colors.status_error,
@@ -3053,7 +3615,7 @@ fn status_color(status: &str, colors: theme::CodexColors) -> gpui::Hsla {
     }
 }
 
-fn diff_line_color(line: &str, colors: theme::CodexColors) -> gpui::Hsla {
+fn diff_line_color(line: &str, colors: theme::MitsuroColors) -> gpui::Hsla {
     let t = line.trim_start();
     if t.starts_with("+++") || t.starts_with("---") || t.starts_with("@@") || t.starts_with("diff ")
     {
@@ -3106,5 +3668,74 @@ mod tests {
         let (expanded, still_truncated) = display_body_light(&body, false, true);
         assert!(!still_truncated);
         assert_eq!(expanded, body);
+    }
+
+    #[test]
+    fn primary_chrome_rejects_protocol_and_transport_diagnostics() {
+        assert_eq!(
+            primary_chrome_notice("Pinned to sidebar"),
+            Some("Pinned to sidebar".to_owned())
+        );
+        assert_eq!(primary_chrome_notice("thread/open · 547 msgs"), None);
+        assert_eq!(primary_chrome_notice("Connected · 40 threads · auth"), None);
+        assert_eq!(primary_chrome_notice("turn/start · 82 ms"), None);
+    }
+
+    #[test]
+    fn reasoning_disclosure_uses_quiet_work_status_copy() {
+        assert_eq!(reasoning_status_label(true), "Working…");
+        assert_eq!(reasoning_status_label(false), "Worked");
+    }
+
+    #[test]
+    fn thread_inspector_projects_only_real_outputs_and_sources() {
+        let messages = vec![
+            DemoMessage::file_change(
+                "apps/desktop/gpui/src/main.rs",
+                "+ changed",
+                "completed",
+                Some("file-1".to_owned()),
+            ),
+            DemoMessage::activity(
+                "web_search",
+                "Web search",
+                "docs.rs gpui",
+                "completed",
+                Some("search-1".to_owned()),
+            ),
+            DemoMessage::assistant("No fabricated inspector entries."),
+        ];
+        let (outputs, sources) = thread_inspector_entries(&messages);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].title, "apps/desktop/gpui/src/main.rs");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].detail.as_deref(), Some("docs.rs gpui"));
+    }
+
+    #[test]
+    fn completed_activity_omits_synthetic_empty_detail_and_success_badge() {
+        assert_eq!(activity_detail("", false), None);
+        assert_eq!(activity_status_label("completed", false), None);
+        assert_eq!(activity_detail("", true).as_deref(), Some("Working…"));
+        assert_eq!(
+            activity_status_label("failed", false).as_deref(),
+            Some("failed")
+        );
+    }
+
+    #[test]
+    fn home_headline_uses_the_selected_real_project() {
+        assert_eq!(
+            home_headline_text(false, Some("Mitsuro")),
+            "What should we build in Mitsuro?"
+        );
+        assert_eq!(
+            home_headline_text(false, Some("  ")),
+            "What should we build?"
+        );
+        assert_eq!(
+            home_headline_text(true, Some("Mitsuro")),
+            "Ready when you are."
+        );
     }
 }

@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
-import { Alert } from "react-native";
+import { Alert, Platform } from "react-native";
 
 import type { ModelInfo, SessionResponse, SessionType } from "@mitsuro/api";
 import {
   beginMitsuroPerformanceSpan,
   type Attachment as SessionAttachment,
 } from "@mitsuro/state";
-import type { useConnection } from "../../../hooks/useConnection";
-import type { useStores } from "../../../hooks/useStores";
-import * as Haptics from "../../../platform/haptics";
-import * as SecureStore from "../../../platform/secure-store";
+import type { useConnection } from "../../hooks/useConnection";
+import type { useStores } from "../../hooks/useStores";
+import * as Haptics from "../../platform/haptics";
+import * as SecureStore from "../../platform/secure-store";
 import {
   getWorkspaceMode,
   sessionTypeForTab,
@@ -19,7 +19,7 @@ import {
 import {
   IDENTITY_STORAGE_KEYS,
   writeCanonicalAsyncValue,
-} from "../../../platform/identity-storage";
+} from "../../platform/identity-storage";
 import {
   findCodeSessionForProject,
   resolveSendIntent,
@@ -29,7 +29,7 @@ import { createSessionCreationCoordinator } from "./sessionCreationCoordinator";
 import {
   createLatestIntentScheduler,
   type LatestIntentScheduler,
-} from "../../../components/navigation/latestIntentScheduler";
+} from "../navigation/latestIntentScheduler";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -43,6 +43,41 @@ type SessionSelectionIntent = {
   sessionType: SessionType;
   force?: boolean;
 };
+
+function showActionMessage(title: string, message: string) {
+  if (Platform.OS === "web") {
+    if (typeof window !== "undefined") {
+      window.alert(`${title}\n\n${message}`);
+    }
+    return;
+  }
+  Alert.alert(title, message);
+}
+
+function confirmDestructiveAction(
+  title: string,
+  message: string,
+  onConfirm: () => void | Promise<void>,
+) {
+  if (Platform.OS === "web") {
+    // react-native-web intentionally implements Alert.alert as a no-op. Use
+    // the browser's real confirmation boundary so destructive callbacks are
+    // reachable in the shared web preview.
+    if (typeof window !== "undefined" && window.confirm(`${title}\n\n${message}`)) {
+      void onConfirm();
+    }
+    return;
+  }
+
+  Alert.alert(title, message, [
+    { text: "Cancel", style: "cancel" },
+    {
+      text: "Delete",
+      style: "destructive",
+      onPress: () => void onConfirm(),
+    },
+  ]);
+}
 
 interface UseSessionActionsArgs {
   client: ConnectionClient;
@@ -535,38 +570,155 @@ export function useSessionActions({
   );
 
   const handleDeleteSession = useCallback(
-    (id: string) => {
-      Alert.alert("Delete Session", "Delete this session?", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
+    (id: string, onDeleted?: () => void) => {
+      confirmDestructiveAction("Delete Session", "Delete this session?", async () => {
+        const activeEntry = (["chat", "code", "hive"] as const).find(
+          (mode) => modeStores[mode].session.getState().sessionId === id,
+        );
+        const targetStore = activeEntry
+          ? modeStores[activeEntry].session
+          : null;
+
+        if (targetStore?.getState().isStreaming) {
+          targetStore.getState().stopStreaming();
+        }
+
+        const deleted = await sessionsStore.getState().deleteSession(id);
+        if (!deleted) {
+          return;
+        }
+
+        if (targetStore) {
+          targetStore.getState().clearSession();
+          setActiveToolCallId(null);
+        }
+
+        onDeleted?.();
+
+        void sessionsStore.getState().loadSessions();
+      });
+    },
+    [modeStores, sessionsStore, setActiveToolCallId],
+  );
+
+  const handleSetSessionPinned = useCallback(
+    async (id: string, pinned: boolean): Promise<boolean> => {
+      if (!client) return false;
+      try {
+        const updated = await client.updateSession(id, { pinned });
+        sessionsStore.getState().upsertSession(updated);
+        return true;
+      } catch {
+        showActionMessage(
+          pinned ? "Couldn’t pin conversation" : "Couldn’t unpin conversation",
+          "The conversation was not changed. Please try again.",
+        );
+        return false;
+      }
+    },
+    [client, sessionsStore],
+  );
+
+  const handleSetSessionArchived = useCallback(
+    async (id: string, archived: boolean): Promise<boolean> => {
+      if (!client) return false;
+      try {
+        const updated = await client.updateSession(id, { archived });
+        if (!archived) {
+          sessionsStore.getState().upsertSession(updated);
+        }
+        await sessionsStore.getState().loadSessions();
+        return true;
+      } catch {
+        showActionMessage(
+          archived ? "Couldn’t archive conversation" : "Couldn’t restore conversation",
+          "The conversation was not changed. Please try again.",
+        );
+        return false;
+      }
+    },
+    [client, sessionsStore],
+  );
+
+  const handleSetProjectPinned = useCallback(
+    async (ids: string[], pinned: boolean): Promise<boolean> => {
+      if (!client || ids.length === 0) return false;
+      try {
+        const updated = await Promise.all(
+          ids.map((id) => client.updateSession(id, { pinned })),
+        );
+        for (const session of updated) {
+          sessionsStore.getState().upsertSession(session);
+        }
+        return true;
+      } catch {
+        await sessionsStore.getState().loadSessions();
+        showActionMessage(
+          pinned ? "Couldn’t pin project" : "Couldn’t unpin project",
+          "Some conversations may not have changed. The list has been refreshed.",
+        );
+        return false;
+      }
+    },
+    [client, sessionsStore],
+  );
+
+  const handleSetProjectArchived = useCallback(
+    async (ids: string[], archived: boolean): Promise<boolean> => {
+      if (!client || ids.length === 0) return false;
+      try {
+        await Promise.all(ids.map((id) => client.updateSession(id, { archived })));
+        await sessionsStore.getState().loadSessions();
+        return true;
+      } catch {
+        await sessionsStore.getState().loadSessions();
+        showActionMessage(
+          archived ? "Couldn’t archive project" : "Couldn’t restore project",
+          "Some conversations may not have changed. The list has been refreshed.",
+        );
+        return false;
+      }
+    },
+    [client, sessionsStore],
+  );
+
+  const handleDeleteProjectSessions = useCallback(
+    (projectName: string, ids: string[], onDeleted?: () => void) => {
+      if (ids.length === 0) return;
+      confirmDestructiveAction(
+        "Delete project conversations?",
+        `Delete ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} from ${projectName}? The project folder and its files will not be deleted.`,
+        async () => {
+          let failed = 0;
+          for (const id of ids) {
             const activeEntry = (["chat", "code", "hive"] as const).find(
               (mode) => modeStores[mode].session.getState().sessionId === id,
             );
-            const targetStore = activeEntry
-              ? modeStores[activeEntry].session
-              : null;
-
+            const targetStore = activeEntry ? modeStores[activeEntry].session : null;
             if (targetStore?.getState().isStreaming) {
               targetStore.getState().stopStreaming();
             }
-
             const deleted = await sessionsStore.getState().deleteSession(id);
             if (!deleted) {
-              return;
+              failed += 1;
+              continue;
             }
-
             if (targetStore) {
               targetStore.getState().clearSession();
               setActiveToolCallId(null);
             }
-
-            void sessionsStore.getState().loadSessions();
-          },
+          }
+          await sessionsStore.getState().loadSessions();
+          if (failed > 0) {
+            showActionMessage(
+              "Some conversations weren’t deleted",
+              `${failed} ${failed === 1 ? "conversation remains" : "conversations remain"}.`,
+            );
+            return;
+          }
+          onDeleted?.();
         },
-      ]);
+      );
     },
     [modeStores, sessionsStore, setActiveToolCallId],
   );
@@ -687,6 +839,11 @@ export function useSessionActions({
     handleNewSession,
     handleDirectorySelected,
     handleDeleteSession,
+    handleSetSessionPinned,
+    handleSetSessionArchived,
+    handleSetProjectPinned,
+    handleSetProjectArchived,
+    handleDeleteProjectSessions,
     handleInteractiveToolResult,
     handlePlanConfirm,
     handleSend,

@@ -11,9 +11,9 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
-use mitsuro_desktop_backend::{BackendKind, ProductProcess, ThreadBackgroundTerminal};
+use mitsuro_desktop_backend::{ProductProcess, ThreadBackgroundTerminal};
 
-use crate::app::{MitsuroApp, SurfaceDataState, TerminalSessionStatus};
+use crate::app::{MitsuroApp, SurfaceDataState, TerminalBackgroundContract, TerminalSessionStatus};
 use crate::theme;
 
 /// Full-height Terminal panel: command bar + scrollable output + stdin + kill.
@@ -25,7 +25,10 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
     let running = session.running;
     let handle = session.process_handle.clone();
     let status = session.status;
-    let contract = app.terminal_contract_label();
+    let interactive = app.terminal_interactive_available();
+    let contract = app.terminal_background_contract();
+    let provider = app.terminal_provider_label();
+    let cwd = app.terminal_working_directory();
 
     div()
         .id("terminal-panel")
@@ -37,50 +40,68 @@ pub fn terminal_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl In
         .bg(colors.bg_main)
         .child(terminal_title_bar(
             session.status_label(),
-            session.backend_label.as_ref(),
+            provider,
+            &cwd,
+            interactive,
             contract,
         ))
-        .child(command_bar(
-            &cmd_input,
-            running,
-            app.terminal_interactive_available(),
-            cx,
-        ))
-        .child(background_processes_panel(app, cx))
-        .child(output_scroll(
-            session.output.as_ref(),
-            handle.as_deref(),
-            contract,
-        ))
-        .child(stdin_bar(app, &stdin_input, running, cx))
-        .child(status_footer(
-            status,
-            handle.as_deref(),
-            session.exit_code,
-            contract,
-        ))
+        .child(if interactive {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(command_bar(&cmd_input, running, cx))
+                .child(background_processes_panel(app, false, cx))
+                .child(output_scroll(
+                    session.output.as_ref(),
+                    handle.as_deref(),
+                    &cwd,
+                ))
+                .child(stdin_bar(app, &stdin_input, running, cx))
+                .child(status_footer(
+                    status,
+                    handle.as_deref(),
+                    session.exit_code,
+                    provider,
+                    &cwd,
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(background_processes_panel(app, true, cx))
+                .into_any_element()
+        })
 }
 
-fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> gpui::AnyElement {
+fn background_processes_panel(
+    app: &MitsuroApp,
+    expanded: bool,
+    cx: &mut Context<MitsuroApp>,
+) -> gpui::AnyElement {
     let colors = theme::colors();
-    let kind = app.terminal_background_backend_kind();
+    let contract = app.terminal_background_contract();
     let mutating = app.background_process_mutation_in_progress();
     let codex_entries = app.thread_background_terminals();
     let mitsuro_entries = app.tracked_background_processes();
-    let title = match kind {
-        Some(BackendKind::CodexStdio) => app
+    let title = match contract {
+        TerminalBackgroundContract::ThreadTerminals => app
             .terminal_background_thread_label()
             .map(|thread| format!("Thread background terminals · {thread}"))
             .unwrap_or_else(|| "Thread background terminals".to_owned()),
-        Some(BackendKind::MitsuroHttp) => "Mitsuro tracked processes".to_owned(),
-        _ => "Background processes".to_owned(),
+        TerminalBackgroundContract::TrackedProcesses => "Tracked processes".to_owned(),
+        TerminalBackgroundContract::Unsupported => "Background processes".to_owned(),
     };
-    let count = match kind {
-        Some(BackendKind::CodexStdio) => codex_entries.len(),
-        Some(BackendKind::MitsuroHttp) => mitsuro_entries.len(),
-        _ => 0,
+    let count = match contract {
+        TerminalBackgroundContract::ThreadTerminals => codex_entries.len(),
+        TerminalBackgroundContract::TrackedProcesses => mitsuro_entries.len(),
+        TerminalBackgroundContract::Unsupported => 0,
     };
-    let can_clean = kind == Some(BackendKind::CodexStdio)
+    let can_clean = contract == TerminalBackgroundContract::ThreadTerminals
         && app.terminal_background_thread_label().is_some()
         && mutating.is_none();
 
@@ -88,23 +109,27 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
         .id("terminal-background-list")
         .flex()
         .flex_col()
-        .max_h(px(190.0))
+        .when(expanded, |this| this.flex_1().min_h_0())
+        .when(!expanded, |this| this.max_h(px(190.0)))
         .overflow_y_scroll();
-    match kind {
-        Some(BackendKind::CodexStdio) => {
+    match contract {
+        TerminalBackgroundContract::ThreadTerminals => {
             if app.thread_background_terminals_state() == SurfaceDataState::Loading {
-                list = list.child(background_empty("Loading thread processes…"));
+                list = list.child(background_empty("Loading thread processes…", expanded));
             } else if app.thread_background_terminals_state() == SurfaceDataState::Error {
                 list = list.child(background_empty(
                     "The selected thread's process catalog could not be loaded.",
+                    expanded,
                 ));
             } else if app.terminal_background_thread_label().is_none() {
                 list = list.child(background_empty(
                     "Select a Codex thread, then return here to inspect its shell processes.",
+                    expanded,
                 ));
             } else if codex_entries.is_empty() {
                 list = list.child(background_empty(
                     "No background terminals are retained by this thread.",
+                    expanded,
                 ));
             } else {
                 for (index, terminal) in codex_entries.iter().enumerate() {
@@ -112,16 +137,18 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
                 }
             }
         }
-        Some(BackendKind::MitsuroHttp) => {
+        TerminalBackgroundContract::TrackedProcesses => {
             if app.tracked_background_processes_state() == SurfaceDataState::Loading {
-                list = list.child(background_empty("Loading Mitsuro tracked processes…"));
+                list = list.child(background_empty("Loading tracked processes…", expanded));
             } else if app.tracked_background_processes_state() == SurfaceDataState::Error {
                 list = list.child(background_empty(
-                    "The Mitsuro process catalog could not be loaded.",
+                    "The tracked-process catalog could not be loaded.",
+                    expanded,
                 ));
             } else if mitsuro_entries.is_empty() {
                 list = list.child(background_empty(
-                    "No processes are currently tracked by the Mitsuro server.",
+                    "No processes are currently tracked by this backend.",
+                    expanded,
                 ));
             } else {
                 for (index, process) in mitsuro_entries.iter().enumerate() {
@@ -129,9 +156,10 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
                 }
             }
         }
-        _ => {
+        TerminalBackgroundContract::Unsupported => {
             list = list.child(background_empty(
                 "Connect a live backend to inspect background processes.",
+                expanded,
             ));
         }
     }
@@ -140,6 +168,7 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
         .id("terminal-background-processes")
         .flex()
         .flex_col()
+        .when(expanded, |this| this.flex_1().min_h_0())
         .border_b_1()
         .border_color(colors.border)
         .bg(colors.bg_main)
@@ -174,16 +203,19 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .when(kind == Some(BackendKind::CodexStdio), |this| {
-                            this.child(
-                                compact_action("terminal-background-clean", "Clean", can_clean)
-                                    .when(can_clean, |button| {
-                                        button.on_click(cx.listener(|app, _, _, cx| {
-                                            app.clean_thread_background_terminals(cx);
-                                        }))
-                                    }),
-                            )
-                        })
+                        .when(
+                            contract == TerminalBackgroundContract::ThreadTerminals,
+                            |this| {
+                                this.child(
+                                    compact_action("terminal-background-clean", "Clean", can_clean)
+                                        .when(can_clean, |button| {
+                                            button.on_click(cx.listener(|app, _, _, cx| {
+                                                app.clean_thread_background_terminals(cx);
+                                            }))
+                                        }),
+                                )
+                            },
+                        )
                         .child(
                             compact_action(
                                 "terminal-background-refresh",
@@ -202,12 +234,19 @@ fn background_processes_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) ->
         .into_any_element()
 }
 
-fn background_empty(message: &'static str) -> impl IntoElement {
+fn background_empty(message: &'static str, expanded: bool) -> impl IntoElement {
     let colors = theme::colors();
     div()
+        .when(expanded, |this| {
+            this.flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_center()
+        })
         .px(px(14.0))
         .py(px(10.0))
-        .text_xs()
+        .text_sm()
         .text_color(colors.text_tertiary)
         .child(message)
 }
@@ -329,7 +368,7 @@ fn background_row_shell(
     command: String,
     detail: String,
     action: gpui::Stateful<gpui::Div>,
-    colors: theme::CodexColors,
+    colors: theme::MitsuroColors,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -378,16 +417,29 @@ fn format_memory_kb(kb: u64) -> String {
     }
 }
 
-fn terminal_title_bar(status: &str, backend: &str, contract: &str) -> impl IntoElement {
+fn terminal_title_bar(
+    status: &str,
+    provider: &str,
+    cwd: &str,
+    interactive: bool,
+    contract: TerminalBackgroundContract,
+) -> impl IntoElement {
     let colors = theme::colors();
+    let subtitle = if interactive {
+        format!("{provider} · {cwd}")
+    } else if contract == TerminalBackgroundContract::TrackedProcesses {
+        format!("{provider} · tracked processes")
+    } else {
+        format!("{provider} · terminal unavailable")
+    };
     div()
         .id("terminal-title")
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .px(px(16.0))
-        .py(px(12.0))
+        .px(px(20.0))
+        .h(px(64.0))
         .border_b_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
@@ -409,7 +461,7 @@ fn terminal_title_bar(status: &str, backend: &str, contract: &str) -> impl IntoE
                         .gap(px(2.0))
                         .child(
                             div()
-                                .text_sm()
+                                .text_base()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
                                 .child("Terminal"),
@@ -418,45 +470,33 @@ fn terminal_title_bar(status: &str, backend: &str, contract: &str) -> impl IntoE
                             div()
                                 .text_xs()
                                 .text_color(colors.text_tertiary)
-                                .child(format!("{contract} · {backend}")),
+                                .child(subtitle),
                         ),
                 ),
         )
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .bg(colors.bg_elevated)
-                        .border_1()
-                        .border_color(colors.border)
-                        .text_color(colors.text_secondary)
-                        .child(status.to_string()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .bg(theme::hex_alpha(0xffffff, 0.04))
-                        .text_color(colors.text_tertiary)
-                        .child("bash -lc"),
-                ),
+                .text_xs()
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .bg(colors.bg_elevated)
+                .border_1()
+                .border_color(colors.border)
+                .text_color(colors.text_secondary)
+                .child(if interactive {
+                    status.to_string()
+                } else if contract == TerminalBackgroundContract::TrackedProcesses {
+                    "Process controls".to_owned()
+                } else {
+                    "Unavailable".to_owned()
+                }),
         )
 }
 
 fn command_bar(
     cmd_input: &gpui::Entity<gpui_component::input::InputState>,
     running: bool,
-    interactive: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -511,7 +551,7 @@ fn command_bar(
                 })
                 .border_1()
                 .border_color(colors.border)
-                .when(!running && interactive, |this| {
+                .when(!running, |this| {
                     this.cursor_pointer()
                         .hover(|s| s.bg(colors.bg_hover))
                         .on_click(cx.listener(|app, _, window, cx| {
@@ -527,13 +567,7 @@ fn command_bar(
                         } else {
                             colors.accent
                         })
-                        .child(if running {
-                            "Running"
-                        } else if interactive {
-                            "Start"
-                        } else {
-                            "Read-only"
-                        }),
+                        .child(if running { "Running" } else { "Start" }),
                 ),
         )
         .child(
@@ -570,7 +604,7 @@ fn command_bar(
         )
 }
 
-fn output_scroll(output: &str, handle: Option<&str>, contract: &str) -> impl IntoElement {
+fn output_scroll(output: &str, handle: Option<&str>, cwd: &str) -> impl IntoElement {
     let colors = theme::colors();
     let empty = output.is_empty();
     div()
@@ -589,7 +623,6 @@ fn output_scroll(output: &str, handle: Option<&str>, contract: &str) -> impl Int
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                // Prompt / session line (finished-page density)
                 .child(
                     div()
                         .flex()
@@ -600,16 +633,8 @@ fn output_scroll(output: &str, handle: Option<&str>, contract: &str) -> impl Int
                             div()
                                 .text_xs()
                                 .font_family("monospace")
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(colors.accent)
-                                .child("mitsuro@local"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_family("monospace")
                                 .text_color(colors.text_tertiary)
-                                .child("~/Work/Mitsuro"),
+                                .child(cwd.to_owned()),
                         )
                         .child(
                             div()
@@ -638,7 +663,7 @@ fn output_scroll(output: &str, handle: Option<&str>, contract: &str) -> impl Int
                                 .text_sm()
                                 .font_family("monospace")
                                 .text_color(colors.text_tertiary)
-                                .child(format!("# Ready · {contract}")),
+                                .child("# Ready"),
                         )
                         .child(
                             div()
@@ -740,7 +765,8 @@ fn status_footer(
     status: TerminalSessionStatus,
     handle: Option<&str>,
     exit_code: Option<i32>,
-    contract: &str,
+    provider: &str,
+    cwd: &str,
 ) -> impl IntoElement {
     let colors = theme::colors();
     let detail = match (status, handle, exit_code) {
@@ -749,7 +775,7 @@ fn status_footer(
             format!("exited {code} · {h}")
         }
         (TerminalSessionStatus::Error, _, _) => "error".into(),
-        _ => format!("idle · {contract}"),
+        _ => "idle".to_owned(),
     };
     div()
         .id("terminal-status")
@@ -772,6 +798,6 @@ fn status_footer(
             div()
                 .text_xs()
                 .text_color(colors.text_tertiary)
-                .child(format!("Mitsuro · {contract}")),
+                .child(format!("{provider} · {cwd}")),
         )
 }

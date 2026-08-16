@@ -14,6 +14,7 @@
 //! - `execution`: Agent loop and API communication
 
 pub mod build_context;
+mod dependency;
 mod execution;
 mod identity;
 mod isolation;
@@ -42,6 +43,9 @@ use crate::ai::client::AiClient;
 use self::build_context::SharedBuildContext;
 
 // Re-export public types
+#[cfg(test)]
+pub(crate) use dependency::MAX_DEPENDENCY_CONTEXT_BYTES;
+pub use dependency::{attach_direct_dependency_evidence, direct_dependency_evidence_block};
 pub use identity::AgentIdentity;
 pub(crate) use isolation::BuildIsolationMaterializationGuard;
 pub use isolation::BuildIsolationSet;
@@ -57,8 +61,10 @@ pub use scheduler::{
 pub use spec::{AgentCapability, AgentContextMode, AgentExecutionProfile, AgentSpec};
 pub use tools::BuilderTools;
 pub use types::{
-    AgentProgress, AgentProgressStatus, DelegatedEvidenceKind, DelegatedEvidenceSummary,
-    DelegatedProcessArtifact, SubAgentApiError, SubAgentResult, SubAgentTask, SubAgentTermination,
+    AgentConversationEvent, AgentConversationToolCall, AgentProgress, AgentProgressStatus,
+    DelegatedAcceptanceCheck, DelegatedEvidenceKind, DelegatedEvidenceSummary,
+    DelegatedProcessArtifact, DelegatedTaskHandoff, SubAgentApiError, SubAgentResult, SubAgentTask,
+    SubAgentTermination, TaskObjectiveStatus,
 };
 
 // Re-export single agent entry points
@@ -221,6 +227,7 @@ impl SubAgentPool {
                     if let Err(error) = coordinator.validate_task_runtime(
                         &delegation_task_id,
                         task.delegation_policy.as_ref(),
+                        task.reasoning_effort,
                         &task.working_dir,
                     ) {
                         emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Failed);
@@ -404,6 +411,7 @@ impl SubAgentPool {
                     if let Err(error) = coordinator.validate_task_runtime(
                         &delegation_task_id,
                         task.delegation_policy.as_ref(),
+                        task.reasoning_effort,
                         &task.working_dir,
                     ) {
                         emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Failed);
@@ -600,6 +608,8 @@ fn finish_coordinated_task(
         "agent_name": result.agent_name,
         "success": result.success,
         "termination": result.termination,
+        "objective_status": result.objective_status(),
+        "handoff": result.bounded_delegated_handoff(),
         "summary": result.brief_summary(),
         "files_examined": result.files_examined.iter().take(50).collect::<Vec<_>>(),
         "duration_ms": result.duration_ms,
@@ -616,7 +626,10 @@ fn finish_coordinated_task(
             DelegationTaskOutcome::Cancelled,
             AgentProgressStatus::Cancelled,
         )
-    } else if result.success && !result.is_degraded_success() {
+    } else if result.success
+        && result.objective_status() == TaskObjectiveStatus::Complete
+        && !result.is_degraded_success()
+    {
         (
             DelegationTaskOutcome::Complete(artifact),
             AgentProgressStatus::Complete,

@@ -5994,6 +5994,7 @@ name = "mitsuro-server"
 version = "0.9.22"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64ct",
  "chrono",

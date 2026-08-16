@@ -74,3 +74,37 @@ Deno.test("auto-follow history growth retains at least the initial window", asyn
     "must not collapse to a single historical turn",
   );
 });
+
+Deno.test("transcript scroll has one measured auto-follow authority", async () => {
+  const transcriptSource = await Deno.readTextFile(
+    new URL("../components/chat/ChatTranscript.tsx", import.meta.url).pathname,
+  );
+  assert(
+    !transcriptSource.includes("BOTTOM_SCROLL_OVERSHOOT"),
+    "bottom anchoring must not ask the native list to clamp an overshoot",
+  );
+  assert(
+    !transcriptSource.includes("lastMessageLayoutSignature"),
+    "message deltas must not issue a pre-measurement scroll to stale geometry",
+  );
+  assert(
+    transcriptSource.includes("Geometry callbacks are the sole auto-follow authority"),
+    "measured list geometry must own auto-follow movement",
+  );
+  assert(
+    transcriptSource.includes("scrollToOffset({ animated, offset: targetOffset })")
+      && !transcriptSource.includes("STREAM_STICK_MIN_INTERVAL_MS")
+      && !transcriptSource.includes("streamStickFallbackRef"),
+    "bottom follow must use one coalesced measured request without timer races",
+  );
+  assert(
+    transcriptSource.includes("windowSize={7}")
+      && transcriptSource.includes("maxToRenderPerBatch={6}")
+      && transcriptSource.includes("initialNumToRender={8}"),
+    "virtualization must keep enough rows mounted for a normal phone fling",
+  );
+  assert(
+    transcriptSource.includes("isNearBottom ? undefined : { minIndexForVisible: 0 }"),
+    "native visible-position maintenance must disengage while bottom-follow owns the offset",
+  );
+});

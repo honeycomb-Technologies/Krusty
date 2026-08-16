@@ -179,11 +179,21 @@ Use multiline:true for multi-line patterns; -C for context; -i for case-insensit
             cmd.arg("-C").arg(c.to_string());
         }
 
-        if let Some(glob) = &params.glob {
+        if let Some(glob) = params
+            .glob
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             cmd.arg("--glob").arg(glob);
         }
 
-        if let Some(file_type) = &params.file_type {
+        if let Some(file_type) = params
+            .file_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             cmd.arg("--type").arg(file_type);
         }
 
@@ -361,5 +371,25 @@ mod tests {
         let result = validate_pattern(&long_pattern);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("1500 chars"));
+    }
+
+    #[tokio::test]
+    async fn empty_optional_filters_are_omitted() {
+        let result = GrepTool
+            .execute(
+                json!({
+                    "pattern": "Grep tool",
+                    "path": "src/tools/implementations/grep.rs",
+                    "glob": "   ",
+                    "type": ""
+                }),
+                &ToolContext {
+                    working_dir: std::env::current_dir().expect("current directory"),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.output);
     }
 }

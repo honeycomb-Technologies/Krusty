@@ -82,7 +82,9 @@ pub use command::{
     CommandExecWriteParams, CommandExecWriteResponse,
 };
 pub use desktop::{
-    BackendCapabilities, BackendKind, BackendSelection, BackendSessionId, DesktopBackend,
+    BackendCapabilities, BackendKind, BackendProvenance, BackendSelection, BackendSessionId,
+    CapabilityNegotiation, ComposerAccessModeContract, ComposerSpeedModeContract,
+    ComposerWorkModeContract, DesktopBackend, DESKTOP_CAPABILITY_SCHEMA_VERSION,
 };
 pub use environment::{
     fixture_added_environment_summary, fixture_demo_collaboration_modes, fixture_demo_environments,
@@ -230,7 +232,7 @@ pub use product::{
     ProductScheduleMutation, ProductScheduleMutationRequest, ProductScheduleRecurrence,
     ProductScheduleReplaceRequest, ProductScheduleWeekday, ProductSkill, ProductSpeedMode,
     ProductSpeedOption, ProductSteer, ProductTurn, ProductWorkMode, SessionConversation,
-    SessionHistoryPage, SessionHistoryState, SessionOpenMode, SessionSummary,
+    SessionHistoryPage, SessionHistoryState, SessionOpenMode, SessionProviderData, SessionSummary,
 };
 pub use protocol::{
     activity_item_fields, command_execution_fields, extract_chat_tail_from_thread,

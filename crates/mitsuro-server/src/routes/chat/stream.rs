@@ -16,7 +16,7 @@ use mitsuro_core::agent::{
 use mitsuro_core::ai::transport_policy::StreamTransportPolicy;
 use mitsuro_core::storage::{
     Database, DelegatedRunAgentSnapshot, DelegatedRunSnapshot, DelegatedRunStore, DelegationStore,
-    SessionType, WorkMode,
+    DelegationTaskActivity, SessionType, WorkMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
 use mitsuro_core::SessionManager;
@@ -544,6 +544,63 @@ fn persist_delegated_progress_snapshot(
     }
 }
 
+fn persist_delegated_task_activity(
+    durable: Option<&DelegationStore>,
+    event: &DelegatedProgressEvent,
+) {
+    let Some(durable) = durable else {
+        return;
+    };
+    // Canonical task-graph children use group-owned task IDs. Compatibility
+    // single-child runs have no delegation_tasks row and retain their existing
+    // snapshot-only presentation.
+    if !event
+        .progress
+        .task_id
+        .starts_with(&format!("{}:task:", event.delegated_run_id))
+    {
+        return;
+    }
+    if let Some(conversation_event) = event.progress.conversation_event.as_ref() {
+        if let Err(error) = durable.record_task_conversation(
+            &event.delegated_run_id,
+            &event.progress.task_id,
+            conversation_event,
+        ) {
+            tracing::warn!(
+                delegated_run_id = %event.delegated_run_id,
+                delegation_task_id = %event.progress.task_id,
+                %error,
+                "Failed to persist child conversation event"
+            );
+        }
+        return;
+    }
+    let status =
+        crate::types::DelegatedProgressStatus::from_progress(&event.progress.status, event.stage);
+    let activity = DelegationTaskActivity {
+        agent_name: event.progress.name.clone(),
+        status: delegated_progress_status_label(status).to_string(),
+        tool_count: event.progress.tool_count,
+        tokens: event.progress.tokens,
+        current_action: event.progress.current_action.clone(),
+        completion_summary: event.progress.completion_summary.clone(),
+        lines_added: event.progress.lines_added,
+        lines_removed: event.progress.lines_removed,
+        completed_plan_task: event.progress.completed_plan_task.clone(),
+    };
+    if let Err(error) =
+        durable.record_task_activity(&event.delegated_run_id, &event.progress.task_id, &activity)
+    {
+        tracing::warn!(
+            delegated_run_id = %event.delegated_run_id,
+            delegation_task_id = %event.progress.task_id,
+            %error,
+            "Failed to persist delegated task activity"
+        );
+    }
+}
+
 async fn forward_delegated_progress(
     sse_tx: &WeakSender<Result<Event, Infallible>>,
     sse_open: &Arc<Mutex<bool>>,
@@ -716,6 +773,17 @@ pub(super) async fn run_delegated_progress_bridge(
             None
         }
     };
+    let activity = match Database::new(db_path.as_ref()) {
+        Ok(database) => Some(DelegationStore::new(database)),
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                %error,
+                "Delegated task activity will remain process-local"
+            );
+            None
+        }
+    };
     let canonical = match (delegation_event_cursor, Database::new(db_path.as_ref())) {
         (Some(cursor), Ok(database)) => Some((DelegationStore::new(database), cursor)),
         (Some(_), Err(error)) => {
@@ -747,6 +815,7 @@ pub(super) async fn run_delegated_progress_bridge(
             continue;
         };
         let snapshot_key = (event.delegated_run_id.clone(), event.tool_call_id.clone());
+        persist_delegated_task_activity(activity.as_ref(), &event);
         let retained_snapshot = {
             let mut state = delegated_state.write().await;
             apply_delegated_progress_snapshot(&mut state, &event)

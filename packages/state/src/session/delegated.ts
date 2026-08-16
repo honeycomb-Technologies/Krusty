@@ -186,6 +186,8 @@ function applyGroupProjection(
     ...delegated,
     delegatedRunId: group.delegation_group_id,
     groupState: group.state,
+    maxParallelism: group.max_parallelism,
+    effectiveParallelism: group.effective_parallelism,
     agents: groupAgents(group, delegated.agents),
     agentCount: tasks.length,
     totalTargets: tasks.length,
@@ -401,6 +403,38 @@ function buildSeedDelegatedAgents(
   kind: DelegatedToolKind,
   args?: Record<string, unknown>,
 ): DelegatedAgentState[] {
+  const declaredTasks = Array.isArray(args?.tasks)
+    ? args.tasks.filter(
+        (value): value is Record<string, unknown> =>
+          Boolean(value) && typeof value === 'object' && !Array.isArray(value),
+      )
+    : [];
+  if (declaredTasks.length > 0) {
+    return declaredTasks.map((task, index) => {
+      const taskId = typeof task.id === 'string' && task.id.trim()
+        ? task.id.trim()
+        : `task-${index + 1}`;
+      const taskName = typeof task.name === 'string' && task.name.trim()
+        ? task.name.trim()
+        : taskId;
+      const instructions = typeof task.instructions === 'string'
+        ? task.instructions
+        : typeof task.scope === 'string'
+          ? task.scope
+          : undefined;
+      return {
+        taskId: `declared:${taskId}`,
+        name: taskName,
+        status: 'pending' as const,
+        toolCount: 0,
+        tokens: 0,
+        currentAction: instructions?.slice(0, 80),
+        linesAdded: 0,
+        linesRemoved: 0,
+      };
+    });
+  }
+
   const sources = buildDelegatedTargets(kind, args);
   const fallbackName = defaultAgentName(kind, args);
 
@@ -544,6 +578,7 @@ export function createDelegatedArtifactState(
   kind: DelegatedToolKind,
   args?: Record<string, unknown>,
 ): DelegatedArtifactState {
+  const agents = buildSeedDelegatedAgents(kind, args);
   return {
     kind,
     name:
@@ -559,10 +594,10 @@ export function createDelegatedArtifactState(
     delegatedRunId: undefined,
     stage: 'created',
     thinking: undefined,
-    agents: buildSeedDelegatedAgents(kind, args),
+    agents,
     filesExamined: [],
     errors: [],
-    totalTargets: buildSeedDelegatedAgents(kind, args).length,
+    totalTargets: agents.length,
   };
 }
 
@@ -585,6 +620,13 @@ function mergeDelegatedAgents(
     }
   }
   return merged;
+}
+
+function canonicalTaskOrdinal(taskId: string, delegatedRunId: string): number | undefined {
+  const prefix = `${delegatedRunId}:task:`;
+  if (!taskId.startsWith(prefix)) return undefined;
+  const ordinal = Number(taskId.slice(prefix.length));
+  return Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : undefined;
 }
 
 export function annotateDelegatedArtifactState(
@@ -634,10 +676,31 @@ export function mergeDelegatedArtifactState(
   current: DelegatedArtifactState | undefined,
   next: DelegatedArtifactState,
 ): DelegatedArtifactState {
+  const delegatedRunId = next.delegatedRunId || current?.delegatedRunId;
+  const canonicalAgents = delegatedRunId
+    ? (current?.agents || []).filter(
+        (agent) => canonicalTaskOrdinal(agent.taskId, delegatedRunId) !== undefined,
+      )
+    : [];
+  const nextHasCanonicalAgents = delegatedRunId
+    ? next.agents.some(
+        (agent) => canonicalTaskOrdinal(agent.taskId, delegatedRunId) !== undefined,
+      )
+    : false;
+  // The terminal Agent result contains report-oriented agent labels, while
+  // live progress already carries canonical group task IDs. Keep those
+  // canonical rows until durable group hydration arrives instead of briefly
+  // appending a second set of report rows to the visible team.
+  const preserveCanonicalAgents = canonicalAgents.length > 0
+    && isTerminalDelegatedStage(next.stage)
+    && next.agents.length > 0
+    && !nextHasCanonicalAgents;
   return annotateDelegatedArtifactState({
     ...current,
     ...next,
-    agents: mergeDelegatedAgents(current?.agents, next.agents),
+    agents: preserveCanonicalAgents
+      ? canonicalAgents
+      : mergeDelegatedAgents(current?.agents, next.agents),
     filesExamined:
       next.filesExamined.length > 0
         ? next.filesExamined
@@ -959,7 +1022,20 @@ export function applyDelegatedProgress(
   delegated.delegatedRunId = event.delegated_run_id;
   delegated.stage = event.stage;
   delegated.kind = delegatedKind;
-  const index = delegated.agents.findIndex((agent) => agent.taskId === event.task_id);
+  const ordinal = canonicalTaskOrdinal(event.task_id, event.delegated_run_id);
+  if (ordinal !== undefined) {
+    delegated.agents = delegated.agents.filter((agent) => agent.taskId !== 'main');
+  }
+  let index = delegated.agents.findIndex((agent) => agent.taskId === event.task_id);
+  if (
+    index < 0
+    && ordinal !== undefined
+    && delegated.agents[ordinal]?.taskId.startsWith('declared:')
+  ) {
+    // Admission replaces the matching optimistic task row in place. This
+    // keeps the table stable even when task progress arrives out of order.
+    index = ordinal;
+  }
   const previous = index >= 0 ? delegated.agents[index] : undefined;
   const agent: DelegatedAgentState = {
     ...previous,

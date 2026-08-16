@@ -3390,6 +3390,37 @@ impl Database {
             event_tx.commit()?;
         }
 
+        // Migration 62: durable conversation-list organization. Pinning is an
+        // ordering preference, while archiving is a reversible visibility
+        // state; neither mutates conversation history or project files.
+        if current_version < 62 {
+            info!("Running migration 62: session pin and archive metadata");
+            let session_list_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring session list metadata migration lock")?;
+            if Self::table_exists(&session_list_tx, "sessions") {
+                if !Self::column_exists(&session_list_tx, "sessions", "pinned_at") {
+                    session_list_tx
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN pinned_at TEXT;")?;
+                }
+                if !Self::column_exists(&session_list_tx, "sessions", "archived_at") {
+                    session_list_tx
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN archived_at TEXT;")?;
+                }
+                if Self::column_exists(&session_list_tx, "sessions", "updated_at") {
+                    session_list_tx.execute_batch(
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_archive_pin_updated
+                            ON sessions(archived_at, pinned_at, updated_at DESC);",
+                    )?;
+                }
+            }
+            session_list_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (62)",
+                [],
+            )?;
+            session_list_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -3512,7 +3543,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 61);
+        assert_eq!(database.get_schema_version(), 62);
         database
             .conn()
             .execute(
@@ -3593,7 +3624,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 61);
+        assert_eq!(database.get_schema_version(), 62);
         let create_sql: String = database
             .conn()
             .query_row(

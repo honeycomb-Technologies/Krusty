@@ -6,8 +6,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, Context, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, StyledText,
+    div, px, AnyElement, Context, HighlightStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledText,
 };
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
@@ -2730,7 +2730,9 @@ fn remote_control_host_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> im
 
 fn remote_control_refresh_row(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
-    let available = app.active_backend_kind() == Some(BackendKind::CodexStdio)
+    let available = app
+        .active_backend_capabilities()
+        .is_some_and(|capabilities| capabilities.remote_control)
         && app.remote_control_mutation().is_none();
     div()
         .id("remote-control-refresh")
@@ -3217,6 +3219,23 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
         .unwrap_or("No transport detail available")
         .to_string();
     let active = app.active_backend_kind();
+    let connection_summaries = app.connection_summaries();
+    let active_connection = connection_summaries
+        .iter()
+        .find(|connection| connection.selected);
+    let connection_rows = connection_summaries
+        .iter()
+        .cloned()
+        .enumerate()
+        .flat_map(|(index, connection)| {
+            let mut rows = Vec::new();
+            if index > 0 {
+                rows.push(card_divider().into_any_element());
+            }
+            rows.push(configured_backend_choice_row(connection, cx));
+            rows
+        })
+        .collect::<Vec<_>>();
     let servers: Vec<_> = app.mcp_servers().to_vec();
     const CONNECTOR_PREVIEW_LIMIT: usize = 16;
     let connector_total = app.connector_apps().len();
@@ -3251,23 +3270,13 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
         .child(group_label("Agent backend"))
         .child(
             settings_card()
-                .child(backend_choice_row(
-                    BackendKind::MitsuroHttp,
-                    "Mitsuro server",
-                    "Sessions and streamed turns over HTTP/SSE; Hive is read-only, schedules support create/edit/pause/resume/cancel, and process catalogs support termination",
-                    active,
-                    app.connection(),
-                    cx,
-                ))
-                .child(card_divider())
-                .child(backend_choice_row(
-                    BackendKind::CodexStdio,
-                    "ChatGPT / Codex",
-                    "Managed local Codex app-server process over stdio",
-                    active,
-                    app.connection(),
-                    cx,
-                )),
+                .children(connection_rows)
+                .when_some(app.connection_specs_error(), |card, error| {
+                    card.child(card_divider()).child(empty_list_message(
+                        "Additional connection configuration error",
+                        error,
+                    ))
+                }),
         )
         .child(group_label("Connection"))
         .child(
@@ -3282,6 +3291,20 @@ fn connections_body(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Into
                 ))
                 .child(card_divider())
                 .child(info_row("Detail", &detail))
+                .when_some(
+                    active_connection.and_then(|connection| connection.provenance.as_deref()),
+                    |card, provenance| {
+                        card.child(card_divider())
+                            .child(info_row("Provenance", provenance))
+                    },
+                )
+                .when_some(
+                    active_connection.and_then(|connection| connection.last_error.as_deref()),
+                    |card, error| {
+                        card.child(card_divider())
+                            .child(info_row("Last error", error))
+                    },
+                )
                 .child(card_divider())
                 .child(reconnect_backend_row(cx)),
         )
@@ -3522,25 +3545,38 @@ fn mcp_add_input(
         .child(Input::new(&input).appearance(false).h(px(30.0)))
 }
 
-fn backend_choice_row(
-    kind: BackendKind,
-    title: &str,
-    subtitle: &str,
-    active: Option<BackendKind>,
-    connection: &UiConnection,
+fn configured_backend_choice_row(
+    connection: crate::app::UiConnectionSummary,
     cx: &mut Context<MitsuroApp>,
-) -> impl IntoElement {
+) -> AnyElement {
     let colors = theme::colors();
-    let selected = active == Some(kind);
-    let state = if selected {
-        connection.chip_label()
-    } else {
-        "Switch"
+    let selected = connection.selected;
+    let state = match &connection.state {
+        crate::app::UiConnectionState::Connecting => "Connecting",
+        crate::app::UiConnectionState::Online { .. } => "Online",
+        crate::app::UiConnectionState::Degraded { .. } => "Degraded",
+        crate::app::UiConnectionState::Offline { .. } => "Offline",
+        crate::app::UiConnectionState::Reconnecting => "Reconnecting",
+        crate::app::UiConnectionState::Unsupported { .. } => "Unsupported",
     };
-    let title = title.to_owned();
-    let subtitle = subtitle.to_owned();
+    let kind = connection.kind;
+    let connection_id = connection.connection_id;
+    let title = connection.label;
+    let subtitle = match kind {
+        BackendKind::MitsuroHttp => "Sessions and streamed turns over HTTP/SSE",
+        BackendKind::CodexStdio => "Managed Codex app-server process over stdio",
+        BackendKind::CodexWebSocket => "Codex WebSocket transport",
+        BackendKind::Fixture => "Explicit offline fixtures",
+    };
+    let provenance = connection.provenance;
+    let capability_detail = connection.capability_schema_version.map(|schema| {
+        connection.provider_version.map_or_else(
+            || format!("Desktop capability schema v{schema}"),
+            |provider| format!("Desktop capability schema v{schema} · {provider}"),
+        )
+    });
     div()
-        .id(SharedId(format!("backend-choice-{}", kind.id())))
+        .id(SharedId(format!("backend-choice-{connection_id}")))
         .flex()
         .flex_row()
         .items_center()
@@ -3550,7 +3586,9 @@ fn backend_choice_row(
         .py(px(13.0))
         .cursor_pointer()
         .hover(|style| style.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| app.switch_backend(kind, cx)))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            app.switch_connection(connection_id.clone(), cx);
+        }))
         .child(
             div()
                 .flex()
@@ -3570,7 +3608,25 @@ fn backend_choice_row(
                         .text_xs()
                         .text_color(colors.text_tertiary)
                         .child(subtitle),
-                ),
+                )
+                .when_some(provenance, |column, provenance| {
+                    column.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(provenance),
+                    )
+                })
+                .when_some(capability_detail, |column, detail| {
+                    column.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_tertiary)
+                            .child(detail),
+                    )
+                }),
         )
         .child(
             div()
@@ -3599,6 +3655,7 @@ fn backend_choice_row(
                 })
                 .child(state),
         )
+        .into_any_element()
 }
 
 fn reconnect_backend_row(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -3622,36 +3679,68 @@ fn reconnect_backend_row(cx: &mut Context<MitsuroApp>) -> impl IntoElement {
                         .text_sm()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(colors.text)
-                        .child("Reconnect"),
+                        .child("Transport controls"),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(colors.text_tertiary)
-                        .child("Restart the selected transport and reload its catalogs"),
+                        .child("Disconnect or restart only the selected provider"),
                 ),
         )
         .child(
             div()
-                .id("reconnect-backend-button")
-                .h(px(28.0))
-                .px(px(12.0))
-                .rounded(px(8.0))
-                .bg(colors.bg_button_secondary)
-                .border_1()
-                .border_color(colors.border)
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.bg_hover))
                 .flex()
+                .flex_row()
                 .items_center()
-                .justify_center()
-                .on_click(cx.listener(|app, _, _, cx| app.reconnect_backend(cx)))
+                .gap(px(8.0))
                 .child(
                     div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_secondary)
-                        .child("Reconnect"),
+                        .id("disconnect-backend-button")
+                        .h(px(28.0))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_button_secondary)
+                        .border_1()
+                        .border_color(colors.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.disconnect_selected_connection(cx);
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text_secondary)
+                                .child("Disconnect"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("reconnect-backend-button")
+                        .h(px(28.0))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        .bg(colors.bg_button_secondary)
+                        .border_1()
+                        .border_color(colors.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.bg_hover))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(|app, _, _, cx| app.reconnect_backend(cx)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(colors.text_secondary)
+                                .child("Reconnect"),
+                        ),
                 ),
         )
 }

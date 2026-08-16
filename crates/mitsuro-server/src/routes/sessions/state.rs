@@ -69,7 +69,15 @@ pub(super) async fn get_session_state(
         .get_snapshot(&id)
         .map_err(|error| AppError::Internal(error.to_string()))?;
 
-    let agent_state = load_agent_state_or_idle(&session_manager, &id)?;
+    let mut agent_state = load_agent_state_or_idle(&session_manager, &id)?;
+    // Registering the input channel is the in-process authority that a run
+    // has started. The orchestrator persists its first `streaming` state from
+    // the spawned loop, leaving a narrow launch window where durable state is
+    // still `idle`. Project that registered run as active so reconnecting
+    // clients cannot mistake a promoted child continuation for completion.
+    if agent_state.state == "idle" && state.session_inputs.read().await.contains_key(&id) {
+        agent_state.state = "streaming".to_string();
+    }
     let recovery = session_manager.load_recovery_state(&id)?;
     let pending_interactions = recovery
         .as_ref()

@@ -85,6 +85,9 @@ impl ChatStreamRunOutcome {
             NotificationTerminalDisposition::Complete => {
                 notify_chat_completion(push_service, apns_service, user_id, session_id, db_path);
             }
+            NotificationTerminalDisposition::Partial => {
+                notify_chat_partial(push_service, apns_service, user_id, session_id, db_path);
+            }
             NotificationTerminalDisposition::Attention => {
                 notify_chat_error(push_service, apns_service, user_id, session_id);
             }
@@ -97,6 +100,42 @@ impl ChatStreamRunOutcome {
             }
         }
     }
+}
+
+fn notify_chat_partial(
+    push_service: &Option<Arc<PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+    db_path: &Path,
+) {
+    let title = session_title(db_path, session_id);
+    let data = chat_session_notification_data("partial", session_id);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mitsuro".into(),
+            body: format!("{title} finished with partial results"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("session-{session_id}")),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(data.clone()),
+        },
+        PushEventType::Completion,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: format!("{title} — Partial"),
+            body: "Review the remaining work".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(data),
+        },
+        ApnsEventType::Completion,
+    );
 }
 
 fn notify_chat_awaiting_input(

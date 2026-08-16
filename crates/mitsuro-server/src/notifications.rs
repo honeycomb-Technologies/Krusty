@@ -17,6 +17,7 @@ pub(crate) const APNS_CATEGORY_HIVE_SESSION: &str = "HIVE_SESSION";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotificationTerminalDisposition {
     Complete,
+    Partial,
     Attention,
     Skip,
 }
@@ -26,10 +27,11 @@ pub(crate) fn notification_terminal_disposition(
 ) -> NotificationTerminalDisposition {
     match stop_reason {
         Some(LoopStopReason::Completed) => NotificationTerminalDisposition::Complete,
+        Some(LoopStopReason::BudgetExhausted | LoopStopReason::LoopGuardTriggered) => {
+            NotificationTerminalDisposition::Partial
+        }
         Some(
-            LoopStopReason::BudgetExhausted
-            | LoopStopReason::ProviderError
-            | LoopStopReason::LoopGuardTriggered
+            LoopStopReason::ProviderError
             | LoopStopReason::StreamIdleTimeout
             | LoopStopReason::PinchFailed,
         )
@@ -236,15 +238,23 @@ mod tests {
 
         for reason in [
             None,
-            Some(LoopStopReason::BudgetExhausted),
             Some(LoopStopReason::ProviderError),
-            Some(LoopStopReason::LoopGuardTriggered),
             Some(LoopStopReason::StreamIdleTimeout),
             Some(LoopStopReason::PinchFailed),
         ] {
             assert_eq!(
                 notification_terminal_disposition(reason.as_ref()),
                 NotificationTerminalDisposition::Attention
+            );
+        }
+
+        for reason in [
+            LoopStopReason::BudgetExhausted,
+            LoopStopReason::LoopGuardTriggered,
+        ] {
+            assert_eq!(
+                notification_terminal_disposition(Some(&reason)),
+                NotificationTerminalDisposition::Partial
             );
         }
 

@@ -113,6 +113,38 @@ fn test_list_sessions_for_user_filters_by_working_dir_and_user() {
 }
 
 #[test]
+fn archived_sessions_are_hidden_by_default_and_available_for_management() {
+    let (db, _temp) = create_test_db();
+    let user = "alice";
+    create_test_user(&db, user);
+    let manager = SessionManager::new(db);
+
+    let active = manager
+        .create_session_for_user("Active", None, Some("/tmp"), Some(user))
+        .expect("create active session");
+    let archived = manager
+        .create_session_for_user("Archived", None, Some("/tmp"), Some(user))
+        .expect("create archived session");
+    manager
+        .update_session_archived(&archived, true)
+        .expect("archive session");
+
+    let visible = manager
+        .list_sessions_for_user(None, Some(user))
+        .expect("list active sessions");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, active);
+
+    let all = manager
+        .list_sessions_for_user_including_archived(None, Some(user))
+        .expect("list all sessions");
+    assert_eq!(all.len(), 2);
+    assert!(all
+        .iter()
+        .any(|session| { session.id == archived && session.archived_at.is_some() }));
+}
+
+#[test]
 fn test_list_sessions_for_user_by_type_filters_surface() {
     let (db, _temp) = create_test_db();
     let user = "alice";

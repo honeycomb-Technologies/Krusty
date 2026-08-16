@@ -3,6 +3,7 @@
 //! Mirrors process completion wake so the parent does not thrash-poll
 //! `agent action=status` for a finished delegated_run_id.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,12 +12,14 @@ use anyhow::{ensure, Context};
 use chrono::Utc;
 use mitsuro_core::agent::context::build_subagent_project_context;
 use mitsuro_core::agent::subagent::{
-    execute_single_child, AgentRuntimeManager, BuildIsolationSet, ChildCompletionEvent,
-    SubAgentResult, SubAgentTask, SubAgentTermination,
+    direct_dependency_evidence_block, execute_single_child, AgentRuntimeManager, BuildIsolationSet,
+    ChildCompletionEvent, DelegatedEvidenceSummary, SubAgentResult, SubAgentTask,
+    SubAgentTermination,
 };
 use mitsuro_core::agent::{
     AgentCancellation, DelegatedRunStage, DelegationCoordinator, DelegationTaskOutcome, LoopInput,
 };
+use mitsuro_core::ai::providers::ReasoningEffort;
 use mitsuro_core::storage::{
     Database, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
     DelegationExecutionMode, DelegationExecutorKind, DelegationExecutorSessionType,
@@ -38,19 +41,49 @@ const REPLAY_OWNER_LEASE_TTL: Duration = Duration::from_secs(30);
 const REPLAY_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const STARTUP_DELEGATION_RECOVERY_LIMIT: usize = 1_000;
 
+/// Process-local acknowledgement that an exact durable pending ID has already
+/// entered the currently active parent input channel. The durable message
+/// remains the crash-replay authority; this set only prevents the 15-second
+/// reconciler from enqueueing the same steering repeatedly while that parent
+/// turn is still running.
+#[derive(Clone, Default)]
+struct ActiveChildWakeDeliveries {
+    pending: Arc<tokio::sync::Mutex<HashSet<(String, String)>>>,
+}
+
+impl ActiveChildWakeDeliveries {
+    async fn claim(&self, session_id: &str, pending_id: &str) -> bool {
+        self.pending
+            .lock()
+            .await
+            .insert((session_id.to_string(), pending_id.to_string()))
+    }
+
+    async fn release(&self, session_id: &str, pending_id: &str) {
+        self.pending
+            .lock()
+            .await
+            .remove(&(session_id.to_string(), pending_id.to_string()));
+    }
+}
+
 /// Wire the shared agent runtime manager to session wake handling.
 pub async fn install_child_completion_wake(runtime: AgentRuntimeManager, state: AppState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChildCompletionEvent>();
     runtime.set_completion_sender(tx.clone());
     let (reconcile_tx, mut reconcile_rx) = mpsc::unbounded_channel::<String>();
     runtime.set_completion_reconciliation_sender(reconcile_tx);
+    let active_deliveries = ActiveChildWakeDeliveries::default();
 
     let recovery_state = state.clone();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let state = state.clone();
+            let active_deliveries = active_deliveries.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle_child_completion(&state, event).await {
+                if let Err(error) =
+                    handle_child_completion_with_tracker(&state, event, &active_deliveries).await
+                {
                     tracing::warn!(%error, "Failed to deliver child agent completion wake");
                 }
             });
@@ -852,59 +885,99 @@ async fn recover_isolated_build_integration(
     let isolated_tasks = group
         .tasks
         .iter()
-        .filter(|task| task.specification.writer_mode == DelegationWriterMode::Isolated)
+        .filter(|task| {
+            task.specification.writer_mode == DelegationWriterMode::Isolated
+                && task.state.is_terminal()
+                && task
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("integration_state"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("complete")
+        })
         .collect::<Vec<_>>();
     if isolated_tasks.is_empty() {
         return Ok(());
     }
-    let durable_workspaces = isolated_tasks
-        .iter()
-        .map(|task| {
-            Ok::<_, anyhow::Error>((
-                task.specification.task_key.clone(),
-                PathBuf::from(
-                    task.specification
-                        .attempt_workspace
-                        .as_deref()
-                        .context("isolated build task has no durable workspace")?,
-                ),
-                task.specification
-                    .workspace_baseline
-                    .clone()
-                    .context("isolated build task has no durable baseline")?,
-            ))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let isolation = BuildIsolationSet::restore(
-        project_dir,
-        delegation_group_id.to_string(),
-        durable_workspaces,
-    )
-    .await?;
     let recovered_results = recovered_build_results(group);
-    let db_path = state.db_path.clone();
-    let fence_group_id = delegation_group_id.to_string();
-    let fence_owner_id = replay_owner_id.to_string();
-    let replay_cancellation = cancellation.child_token();
-    let owner_fence = Arc::new(move || {
-        ensure!(
-            !replay_cancellation.is_cancelled(),
-            "detached build recovery ownership was cancelled"
+    let mut batches = BTreeMap::<String, Vec<&DelegationTaskRecord>>::new();
+    for task in &isolated_tasks {
+        let workspace = PathBuf::from(
+            task.specification
+                .attempt_workspace
+                .as_deref()
+                .context("isolated build task has no durable workspace")?,
         );
-        let store = DelegationStore::new(Database::new(&db_path)?);
+        let batch_id = workspace
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .context("isolated build workspace has no durable batch identity")?;
         ensure!(
-            store.renew_replay_owner(&fence_group_id, &fence_owner_id)?,
-            "detached build recovery owner lease is no longer current"
+            batch_id == delegation_group_id
+                || batch_id.starts_with(&format!("{delegation_group_id}-wave-")),
+            "isolated build workspace belongs to another durable batch"
         );
-        ensure!(
-            !replay_cancellation.is_cancelled(),
-            "detached build recovery ownership was lost during renewal"
+        batches.entry(batch_id.to_string()).or_default().push(task);
+    }
+
+    let mut integrated = Vec::new();
+    for (batch_id, batch_tasks) in batches {
+        let durable_workspaces = batch_tasks
+            .iter()
+            .map(|task| {
+                Ok::<_, anyhow::Error>((
+                    task.specification.task_key.clone(),
+                    PathBuf::from(
+                        task.specification
+                            .attempt_workspace
+                            .as_deref()
+                            .context("isolated build task has no durable workspace")?,
+                    ),
+                    task.specification
+                        .workspace_baseline
+                        .clone()
+                        .context("isolated build task has no durable baseline")?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let isolation =
+            BuildIsolationSet::restore(project_dir.clone(), batch_id, durable_workspaces).await?;
+        let batch_results = recovered_results
+            .iter()
+            .filter(|result| {
+                batch_tasks
+                    .iter()
+                    .any(|task| task.specification.task_key == result.task_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let db_path = state.db_path.clone();
+        let fence_group_id = delegation_group_id.to_string();
+        let fence_owner_id = replay_owner_id.to_string();
+        let replay_cancellation = cancellation.child_token();
+        let owner_fence = Arc::new(move || {
+            ensure!(
+                !replay_cancellation.is_cancelled(),
+                "detached build recovery ownership was cancelled"
+            );
+            let store = DelegationStore::new(Database::new(&db_path)?);
+            ensure!(
+                store.renew_replay_owner(&fence_group_id, &fence_owner_id)?,
+                "detached build recovery owner lease is no longer current"
+            );
+            ensure!(
+                !replay_cancellation.is_cancelled(),
+                "detached build recovery ownership was lost during renewal"
+            );
+            Ok(())
+        });
+        integrated.extend(
+            isolation
+                .integrate_recovered(batch_results, owner_fence)
+                .await,
         );
-        Ok(())
-    });
-    let integrated = isolation
-        .integrate_recovered(recovered_results, owner_fence)
-        .await;
+    }
     let store = DelegationStore::new(Database::new(&state.db_path)?);
     for task in &isolated_tasks {
         if let Some(result) = integrated
@@ -956,7 +1029,8 @@ async fn replay_detached_task(
     .with_delegation_task(
         task.delegation_group_id.clone(),
         task.specification.delegation_task_id.clone(),
-    );
+    )
+    .with_dependencies(task.specification.depends_on.clone());
     let group = coordinator
         .get_group(&task.delegation_group_id)?
         .context("replay task group disappeared")?;
@@ -967,19 +1041,31 @@ async fn replay_detached_task(
         .unwrap_or_else(|| group.contract.governance.delegation_policy.clone());
     runtime_task = runtime_task
         .with_delegation_policy(policy.clone())
-        .with_max_turns(
-            policy
-                .max_turns
-                .unwrap_or(group.contract.governance.delegated_turn_budget),
-        )
+        .with_reasoning_effort(group.contract.governance.reasoning_effort)
         .with_process_context(
             Some(state.process_registry.clone()),
             envelope.user_id.clone(),
             Some(envelope.session_id.clone()),
         );
+    let dependency_results = recovered_dependency_results(&group, &runtime_task.depends_on);
+    if let Some(block) = direct_dependency_evidence_block(
+        &runtime_task,
+        &dependency_results,
+        &runtime_task.working_dir,
+    ) {
+        runtime_task.prompt.push_str("\n\n");
+        runtime_task.prompt.push_str(&block);
+    }
+    if let Some(turn_budget) = policy
+        .max_turns
+        .or(group.contract.governance.delegated_turn_budget)
+    {
+        runtime_task = runtime_task.with_max_turns(turn_budget);
+    }
     coordinator.validate_task_runtime(
         &task.specification.delegation_task_id,
         Some(&policy),
+        runtime_task.reasoning_effort,
         &runtime_task.working_dir,
     )?;
     let Some(permit) = coordinator
@@ -1028,6 +1114,77 @@ async fn replay_detached_task(
     .await;
     permit.complete(replay_task_outcome(&result))?;
     Ok(())
+}
+
+fn recovered_dependency_results(
+    group: &DelegationGroupRecord,
+    dependency_ids: &[String],
+) -> Vec<SubAgentResult> {
+    dependency_ids
+        .iter()
+        .filter_map(|dependency_id| {
+            let task = group
+                .tasks
+                .iter()
+                .find(|task| task.specification.task_key == *dependency_id)?;
+            let artifact = task.result.as_ref();
+            let handoff = artifact.and_then(|value| value.get("handoff"));
+            let output = handoff
+                .filter(|value| !value.is_null())
+                .and_then(|value| serde_json::to_string(value).ok())
+                .map(|handoff| format!("<delegated_handoff>{handoff}</delegated_handoff>"))
+                .unwrap_or_default();
+            let termination = artifact
+                .and_then(|value| value.get("termination"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or(match task.state {
+                    DelegationTaskState::Complete | DelegationTaskState::Degraded => {
+                        SubAgentTermination::Completed
+                    }
+                    DelegationTaskState::Cancelled => SubAgentTermination::Cancelled,
+                    _ => SubAgentTermination::Failed,
+                });
+            let evidence = artifact
+                .and_then(|value| value.get("evidence"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_else(DelegatedEvidenceSummary::default);
+            Some(SubAgentResult {
+                task_id: task.specification.task_key.clone(),
+                agent_name: artifact
+                    .and_then(|value| value.get("agent_name"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&task.specification.task_key)
+                    .to_string(),
+                delegated_run_id: Some(group.delegation_group_id.clone()),
+                success: task.state == DelegationTaskState::Complete,
+                output,
+                files_examined: artifact
+                    .and_then(|value| value.get("files_examined"))
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                duration_ms: artifact
+                    .and_then(|value| value.get("duration_ms"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                turns_used: artifact
+                    .and_then(|value| value.get("turns_used"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or_default(),
+                error: task.error_summary.clone(),
+                termination,
+                policy_violations: Vec::new(),
+                evidence,
+                background_processes: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn recovered_build_results(group: &DelegationGroupRecord) -> Vec<SubAgentResult> {
@@ -1098,6 +1255,8 @@ fn replay_task_outcome(result: &SubAgentResult) -> DelegationTaskOutcome {
         "duration_ms": result.duration_ms,
         "turns_used": result.turns_used,
         "outcome_reason": bounded_recovery_text(result.outcome_reason(), 1_200),
+        "handoff": result.bounded_delegated_handoff(),
+        "evidence": result.evidence,
     });
     if result.termination == SubAgentTermination::Cancelled {
         DelegationTaskOutcome::Cancelled
@@ -1212,6 +1371,7 @@ struct ValidatedChildCompletion {
     event: ChildCompletionEvent,
     session_id: String,
     workspace_root: PathBuf,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn recover_pending_child_completions(
@@ -1539,6 +1699,14 @@ async fn handle_child_completion(
     state: &AppState,
     event: ChildCompletionEvent,
 ) -> anyhow::Result<()> {
+    handle_child_completion_with_tracker(state, event, &ActiveChildWakeDeliveries::default()).await
+}
+
+async fn handle_child_completion_with_tracker(
+    state: &AppState,
+    event: ChildCompletionEvent,
+    active_deliveries: &ActiveChildWakeDeliveries,
+) -> anyhow::Result<()> {
     if event.session_id.is_none() {
         tracing::debug!(
             delegated_run_id = %event.delegated_run_id,
@@ -1550,6 +1718,18 @@ async fn handle_child_completion(
     let session_id = completion.session_id.as_str();
     let sender = state.session_inputs.read().await.get(session_id).cloned();
     if let Some(sender) = sender {
+        if !active_deliveries
+            .claim(session_id, &completion.event.pending_id)
+            .await
+        {
+            tracing::debug!(
+                session_id,
+                delegated_run_id = %completion.event.delegated_run_id,
+                pending_id = %completion.event.pending_id,
+                "Skipped duplicate child completion delivery to the active parent run"
+            );
+            return Ok(());
+        }
         let input = LoopInput::Steer {
             pending_id: Some(completion.event.pending_id.clone()),
             content: completion.event.content.clone(),
@@ -1568,15 +1748,28 @@ async fn handle_child_completion(
             // run promoted the durable row. Re-check after its canonical lock
             // is released and resume only if this exact pending ID remains.
             let state = state.clone();
+            let active_deliveries = active_deliveries.clone();
+            let claimed_session_id = session_id.to_string();
+            let claimed_pending_id = completion.event.pending_id.clone();
             tokio::spawn(async move {
-                if let Err(error) = ensure_completion_resumed(&state, completion).await {
+                let recovery = ensure_completion_resumed(&state, completion).await;
+                active_deliveries
+                    .release(&claimed_session_id, &claimed_pending_id)
+                    .await;
+                if let Err(error) = recovery {
                     tracing::warn!(%error, "Failed child completion post-run recovery");
                 }
             });
             return Ok(());
         }
+        active_deliveries
+            .release(session_id, &completion.event.pending_id)
+            .await;
     }
 
+    active_deliveries
+        .release(session_id, &completion.event.pending_id)
+        .await;
     ensure_completion_resumed(state, completion).await?;
     Ok(())
 }
@@ -1606,7 +1799,8 @@ fn validate_child_completion(
         "child completion delegated run is not publishable"
     );
     let group_store = DelegationStore::new(Database::new(&state.db_path)?);
-    if group_store.get_group(&event.delegated_run_id)?.is_some() {
+    let group = group_store.get_group(&event.delegated_run_id)?;
+    if group.is_some() {
         ensure!(
             group_store
                 .authorize_parent_continuation(&event.delegated_run_id, &event.pending_id,)?,
@@ -1718,6 +1912,7 @@ fn validate_child_completion(
         event,
         session_id,
         workspace_root: durable_workspace_root,
+        reasoning_effort: group.and_then(|group| group.contract.governance.reasoning_effort),
     })
 }
 
@@ -1745,46 +1940,119 @@ fn group_terminal_state(stage: DelegatedRunStage) -> DelegationGroupState {
     }
 }
 
+fn mark_group_parent_continuation_promoted(
+    db_path: &std::path::Path,
+    pending_id: &str,
+) -> Result<(), crate::error::AppError> {
+    let Some(delegation_group_id) = pending_id.strip_prefix("child-wake-") else {
+        return Ok(());
+    };
+    let group_store =
+        DelegationStore::new(Database::new(db_path).map_err(crate::error::AppError::from)?);
+    if group_store
+        .get_group(delegation_group_id)
+        .map_err(crate::error::AppError::from)?
+        .is_some()
+        && !group_store
+            .mark_parent_continuation_promoted(delegation_group_id, pending_id)
+            .map_err(crate::error::AppError::from)?
+    {
+        return Err(crate::error::AppError::Conflict(
+            "delegation group lost its promoted continuation fence".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn ensure_completion_resumed(
     state: &AppState,
     completion: ValidatedChildCompletion,
 ) -> anyhow::Result<bool> {
     let pending_id = completion.event.pending_id.clone();
+    let reasoning_effort = completion.reasoning_effort;
     ensure_completion_resumed_with(
         state,
         completion,
         move |state, session_id, user_id, workspace_root, guard| {
             let pending_id = pending_id.clone();
+            let reasoning_effort = reasoning_effort;
             async move {
+                let auto_resume = parent_stop_reason_allows_child_auto_resume(
+                    state.db_path.as_path(),
+                    &session_id,
+                )?;
                 let promoted = SessionManager::new(Database::new(&state.db_path)?)
                     .promote_pending_steering(&session_id, &pending_id)?;
                 if promoted.is_none() {
                     return Ok(());
                 }
-                if let Some(delegation_group_id) = pending_id.strip_prefix("child-wake-") {
-                    let group_store = DelegationStore::new(
-                        Database::new(&state.db_path).map_err(crate::error::AppError::from)?,
+
+                if !auto_resume {
+                    mark_group_parent_continuation_promoted(
+                        state.db_path.as_path(),
+                        &pending_id,
+                    )?;
+                    tracing::info!(
+                        session_id,
+                        pending_id,
+                        "Promoted child completion after an abnormal parent stop without starting a hidden continuation"
                     );
-                    if group_store
-                        .get_group(delegation_group_id)
-                        .map_err(crate::error::AppError::from)?
-                        .is_some()
-                        && !group_store
-                            .mark_parent_continuation_promoted(delegation_group_id, &pending_id)
-                            .map_err(crate::error::AppError::from)?
-                    {
-                        return Err(crate::error::AppError::Conflict(
-                            "delegation group lost its promoted continuation fence".to_string(),
-                        ));
-                    }
+                    drop(guard);
+                    return Ok(());
                 }
 
-                resume_child_completion_session(&state, &session_id, user_id, workspace_root, guard)
-                    .await
+                resume_child_completion_session(
+                    &state,
+                    &session_id,
+                    user_id,
+                    workspace_root,
+                    reasoning_effort,
+                    guard,
+                )
+                .await?;
+                // `promoted` is the durable UI/proof fence that the
+                // continuation has started, not merely that its steering row
+                // moved into conversation history. Publish it only after the
+                // detached run has registered its live input channel.
+                mark_group_parent_continuation_promoted(state.db_path.as_path(), &pending_id)?;
+                Ok(())
             }
         },
     )
     .await
+}
+
+fn parent_stop_reason_allows_child_auto_resume(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> Result<bool, crate::error::AppError> {
+    let db = Database::new(db_path).map_err(crate::error::AppError::from)?;
+    let mut statement = db
+        .conn()
+        .prepare(
+            "SELECT stop_reason
+               FROM runtime_traces
+              WHERE session_id = ?1
+                AND event_type = 'finished'
+                AND stop_reason IS NOT NULL
+              ORDER BY sequence DESC
+              LIMIT 1",
+        )
+        .map_err(|error| crate::error::AppError::from(anyhow::Error::new(error)))?;
+    let mut rows = statement
+        .query([session_id])
+        .map_err(|error| crate::error::AppError::from(anyhow::Error::new(error)))?;
+    let stop_reason = rows
+        .next()
+        .map_err(|error| crate::error::AppError::from(anyhow::Error::new(error)))?
+        .map(|row| row.get::<_, String>(0))
+        .transpose()
+        .map_err(|error| crate::error::AppError::from(anyhow::Error::new(error)))?;
+    Ok(stop_reason_allows_child_auto_resume(stop_reason.as_deref()))
+}
+
+fn stop_reason_allows_child_auto_resume(stop_reason: Option<&str>) -> bool {
+    stop_reason.is_none_or(|reason| reason == "completed")
 }
 
 async fn ensure_completion_resumed_with<R, F>(
@@ -1823,6 +2091,46 @@ where
         // future owns this guard, so a failed attempt releases it before the
         // bounded delay and next durable pending-row check.
         let guard = state.lock_session(&completion.session_id).await;
+        // A live input channel is the canonical foreground-run handoff even
+        // during the narrow interval after that run releases its session
+        // mutex and before stream cleanup removes the channel. Starting a
+        // detached continuation in that interval creates two concurrent
+        // parent runs and can publish a false terminal state for the healthy
+        // foreground run. Leave the durable wake pending; the active run will
+        // promote it, or the recurring reconciler will revisit it after the
+        // channel is removed and the foreground stop reason is durable.
+        if state
+            .session_inputs
+            .read()
+            .await
+            .contains_key(&completion.session_id)
+        {
+            drop(guard);
+            tracing::debug!(
+                session_id = %completion.session_id,
+                delegated_run_id = %completion.event.delegated_run_id,
+                pending_id = %completion.event.pending_id,
+                "Deferred child completion recovery while the foreground input channel remains active"
+            );
+            return Ok(false);
+        }
+        // The input registry is intentionally ephemeral and can have a short
+        // handoff gap during transport rollover or recovery. Durable run
+        // traces close that gap: a newer parent run without its Finished
+        // boundary still owns continuation authority even when no channel is
+        // momentarily registered. Keep the wake pending so the foreground run
+        // can consume it, or so a later reconciliation can classify its
+        // terminal stop reason.
+        if parent_latest_run_is_unfinished(state.db_path.as_path(), &completion.session_id)? {
+            drop(guard);
+            tracing::debug!(
+                session_id = %completion.session_id,
+                delegated_run_id = %completion.event.delegated_run_id,
+                pending_id = %completion.event.pending_id,
+                "Deferred child completion recovery while the latest durable parent run remains unfinished"
+            );
+            return Ok(false);
+        }
         let session_manager = SessionManager::new(Database::new(&state.db_path)?);
         if !session_manager
             .has_pending_steering(&completion.session_id, &completion.event.pending_id)?
@@ -1895,6 +2203,37 @@ where
     unreachable!("at least one child completion resume attempt is required")
 }
 
+fn parent_latest_run_is_unfinished(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    let db = Database::new(db_path)?;
+    let unfinished = db.conn().query_row(
+        "WITH latest_run AS (
+             SELECT run_id
+               FROM runtime_traces
+              WHERE session_id = ?1
+                AND event_type = 'run_budget_resolved'
+              ORDER BY sequence DESC
+              LIMIT 1
+         )
+         SELECT EXISTS (
+             SELECT 1
+               FROM latest_run latest
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM runtime_traces finished
+                     WHERE finished.session_id = ?1
+                       AND finished.run_id = latest.run_id
+                       AND finished.event_type = 'finished'
+              )
+         )",
+        [session_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(unfinished)
+}
+
 fn resume_error_is_transient(error: &crate::error::AppError) -> bool {
     matches!(
         error,
@@ -1929,6 +2268,78 @@ mod tests {
     use tokio::sync::{mpsc, Mutex, RwLock};
 
     use super::*;
+
+    #[test]
+    fn child_auto_resume_requires_a_normal_parent_stop() {
+        assert!(stop_reason_allows_child_auto_resume(None));
+        assert!(stop_reason_allows_child_auto_resume(Some("completed")));
+        for reason in [
+            "provider_error",
+            "budget_exhausted",
+            "loop_guard",
+            "cancelled",
+        ] {
+            assert!(!stop_reason_allows_child_auto_resume(Some(reason)));
+        }
+    }
+
+    #[tokio::test]
+    async fn recovered_dependency_uses_durable_handoff_without_summary_transcript() {
+        let (state, _temp, workspace) = test_state();
+        let (_event, session_id) = seed_completion(&state, &workspace);
+        let group_id = "dependency-replay";
+        seed_recoverable_group(
+            &state,
+            &workspace,
+            &session_id,
+            group_id,
+            DelegationExecutionMode::Detached,
+        );
+        let mut group =
+            DelegationStore::new(Database::new(&state.db_path).expect("group database"))
+                .get_group(group_id)
+                .expect("group lookup")
+                .expect("group");
+        let mut dependency = group.tasks[0].clone();
+        dependency.specification.task_key = "foundation".to_string();
+        dependency.state = DelegationTaskState::Complete;
+        dependency.result = Some(serde_json::json!({
+            "agent_name": "foundation",
+            "termination": "completed",
+            "summary": "SUMMARY TRANSCRIPT MUST NOT CROSS",
+            "handoff": {
+                "status": "complete",
+                "summary": "durable contract ready",
+                "acceptance_checks": [{
+                    "id": "contract",
+                    "status": "passed",
+                    "evidence": "schema parsed"
+                }],
+                "remaining_work": [],
+                "blockers": [],
+                "generated_artifacts": []
+            },
+            "evidence": {
+                "attempted": 1,
+                "succeeded": 1,
+                "observations": 1,
+                "mutations": 0,
+                "executions": 0,
+                "acceptance_proofs": []
+            }
+        }));
+        group.tasks.push(dependency);
+
+        let recovered = recovered_dependency_results(&group, &["foundation".to_string()]);
+        let task = SubAgentTask::new("consumer", "consume")
+            .with_dependencies(vec!["foundation".to_string()]);
+        let block = direct_dependency_evidence_block(&task, &recovered, &workspace)
+            .expect("durable dependency evidence");
+
+        assert!(block.contains("durable contract ready"));
+        assert!(block.contains("schema parsed"));
+        assert!(!block.contains("SUMMARY TRANSCRIPT MUST NOT CROSS"));
+    }
 
     fn test_state() -> (AppState, tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2090,7 +2501,8 @@ mod tests {
                     failure_policy: DelegationFailurePolicy::Continue,
                     governance: DelegationGovernance {
                         permission_mode: PermissionMode::Supervised,
-                        delegated_turn_budget: 12,
+                        reasoning_effort: None,
+                        delegated_turn_budget: Some(12),
                         max_parallelism: 1,
                         execution_tool_allowlist: Some(BTreeSet::from(["read".to_string()])),
                         delegation_policy: DelegationPolicy::for_subagent_explore(
@@ -2209,7 +2621,7 @@ mod tests {
             .expect("session");
         validate_replayable_detached_group(&group, &session).expect("valid replay envelope");
 
-        let mut shared_writer = group.clone();
+        let mut shared_writer = group;
         let writer_task = shared_writer.tasks.first_mut().expect("writer task");
         writer_task.specification.role = DelegatedRunRole::Build;
         let writer_envelope = writer_task
@@ -2275,6 +2687,45 @@ mod tests {
             serde_json::to_string(&delivered_content).expect("serialize delivered completion"),
             serde_json::to_string(&event.content).expect("serialize expected completion")
         );
+
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"))
+            .promote_pending_steering(&session_id, &event.pending_id)
+            .expect("completion should promote");
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn active_completion_is_enqueued_once_across_reconciliation_ticks() {
+        let (state, _temp, workspace) = test_state();
+        let (event, session_id) = seed_completion(&state, &workspace);
+        let guard = state.lock_session(&session_id).await;
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), input_tx);
+        let deliveries = ActiveChildWakeDeliveries::default();
+
+        handle_child_completion_with_tracker(&state, event.clone(), &deliveries)
+            .await
+            .expect("first reconciliation should deliver");
+        handle_child_completion_with_tracker(&state, event.clone(), &deliveries)
+            .await
+            .expect("duplicate reconciliation should be idempotent");
+
+        let delivered = input_rx.recv().await.expect("completion should arrive");
+        assert!(matches!(
+            delivered,
+            LoopInput::Steer {
+                pending_id: Some(ref pending_id),
+                ..
+            } if pending_id == &event.pending_id
+        ));
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         SessionManager::new(Database::new(&state.db_path).expect("database should open"))
             .promote_pending_steering(&session_id, &event.pending_id)
@@ -2785,6 +3236,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detached_completion_retains_the_launch_reasoning_effort() {
+        let (state, _temp, workspace) = test_state();
+        let (event, session_id) = seed_completion(&state, &workspace);
+        let group_store = DelegationStore::new(
+            Database::new(&state.db_path).expect("delegation database should open"),
+        );
+        group_store
+            .create_group(&DelegationGroupStartInput {
+                delegation_group_id: event.delegated_run_id.clone(),
+                parent_session_id: session_id,
+                parent_tool_call_id: Some("tool-1".to_string()),
+                contract: DelegationGroupContract {
+                    execution_mode: DelegationExecutionMode::Detached,
+                    completion_policy: DelegationCompletionPolicy::AllSettled,
+                    failure_policy: DelegationFailurePolicy::Continue,
+                    governance: DelegationGovernance {
+                        permission_mode: PermissionMode::Autonomous,
+                        reasoning_effort: Some(ReasoningEffort::XHigh),
+                        delegated_turn_budget: None,
+                        max_parallelism: 1,
+                        execution_tool_allowlist: Some(BTreeSet::from(["read".to_string()])),
+                        delegation_policy: DelegationPolicy::for_subagent_explore(
+                            PermissionMode::Autonomous,
+                            None,
+                        ),
+                    },
+                },
+                tasks: vec![DelegationTaskSpec {
+                    delegation_task_id: format!("{}:task:0", event.delegated_run_id),
+                    task_key: "child".to_string(),
+                    objective: "Complete detached work".to_string(),
+                    role: DelegatedRunRole::Explore,
+                    target_scope: vec![DelegatedRunScope {
+                        label: "launch workspace".to_string(),
+                        path: workspace
+                            .canonicalize()
+                            .expect("canonical workspace")
+                            .to_string_lossy()
+                            .into_owned(),
+                        kind: "workspace".to_string(),
+                    }],
+                    max_attempts: 1,
+                    depends_on: Vec::new(),
+                    write_intent: Vec::new(),
+                    task_policy: None,
+                    writer_mode: DelegationWriterMode::Shared,
+                    attempt_workspace: None,
+                    workspace_baseline: None,
+                    executor_envelope: None,
+                }],
+            })
+            .expect("detached group should create");
+        group_store
+            .fail_group_recovery(&event.delegated_run_id, "test terminal handoff")
+            .expect("group should become terminal");
+
+        let completion =
+            validate_child_completion(&state, event).expect("completion authority should validate");
+        assert_eq!(completion.reasoning_effort, Some(ReasoningEffort::XHigh));
+    }
+
+    #[tokio::test]
     async fn idle_completion_resumes_once_and_duplicate_event_is_a_noop() {
         let (state, _temp, workspace) = test_state();
         let (event, session_id) = seed_completion(&state, &workspace);
@@ -2824,6 +3337,68 @@ mod tests {
         )
         .await
         .expect("duplicate completion should be harmless"));
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_race_a_registered_foreground_input_channel() {
+        let (state, _temp, workspace) = test_state();
+        let (event, session_id) = seed_completion(&state, &workspace);
+        let completion = validate_child_completion(&state, event.clone())
+            .expect("completion authority should validate");
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), input_tx);
+
+        assert!(!ensure_completion_resumed_with(
+            &state,
+            completion,
+            |_state, _session, _owner, _root, _guard| async move {
+                panic!("registered foreground input must retain continuation authority")
+            },
+        )
+        .await
+        .expect("active foreground handoff should defer recovery"));
+        assert!(
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"))
+                .has_pending_steering(&session_id, &event.pending_id)
+                .expect("pending state should load")
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_race_an_unfinished_durable_parent_run() {
+        let (state, _temp, workspace) = test_state();
+        let (event, session_id) = seed_completion(&state, &workspace);
+        let completion = validate_child_completion(&state, event.clone())
+            .expect("completion authority should validate");
+        Database::new(&state.db_path)
+            .expect("trace database should open")
+            .conn()
+            .execute(
+                "INSERT INTO runtime_traces (
+                     session_id, run_id, sequence, turn, event_type, payload_json, created_at
+                 ) VALUES (?1, 'active-run', 1, 1, 'run_budget_resolved', '{}', ?2)",
+                [session_id.as_str(), Utc::now().to_rfc3339().as_str()],
+            )
+            .expect("unfinished run boundary should insert");
+
+        assert!(!ensure_completion_resumed_with(
+            &state,
+            completion,
+            |_state, _session, _owner, _root, _guard| async move {
+                panic!("unfinished durable parent run must retain continuation authority")
+            },
+        )
+        .await
+        .expect("unfinished foreground run should defer recovery"));
+        assert!(
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"))
+                .has_pending_steering(&session_id, &event.pending_id)
+                .expect("pending state should load")
+        );
     }
 
     #[tokio::test]

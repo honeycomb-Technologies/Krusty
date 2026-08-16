@@ -1,4 +1,4 @@
-import { createSessionCreationCoordinator } from "../app/(tabs)/chat-screen/sessionCreationCoordinator";
+import { createSessionCreationCoordinator } from "../components/chat-screen/sessionCreationCoordinator";
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;

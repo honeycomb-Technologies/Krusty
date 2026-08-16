@@ -11,6 +11,15 @@ use crate::tools::registry::PermissionMode;
 pub struct SessionInfo {
     pub id: String,
     pub title: String,
+    /// Latest durable execution state for list and recovery surfaces.
+    #[serde(default = "default_agent_state")]
+    pub agent_state: String,
+    /// When present, this session is promoted ahead of ordinary recent sessions.
+    #[serde(default)]
+    pub pinned_at: Option<DateTime<Utc>>,
+    /// When present, this session is hidden from ordinary active-session lists.
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub token_count: Option<usize>,
     /// Parent session ID for linked sessions (pinch)
@@ -39,6 +48,10 @@ pub struct SessionInfo {
     pub target_branch: Option<String>,
     /// Permission mode selected for this session's tool execution.
     pub permission_mode: PermissionMode,
+}
+
+fn default_agent_state() -> String {
+    "idle".to_string()
 }
 
 /// Session type for high-level product surfaces.

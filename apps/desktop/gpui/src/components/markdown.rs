@@ -33,6 +33,7 @@ enum InlineKind {
     Italic,
     Code,
     Link,
+    Muted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,45 +138,15 @@ fn render_block(message_index: u64, block_index: u64, block: MarkdownBlock) -> A
             .into_any_element(),
         MarkdownBlock::List { ordered, items } => div()
             .id(("md-list", id))
-            .flex()
-            .flex_col()
             .w_full()
-            .gap(px(4.0))
-            .children(
-                items
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(item_index, item)| {
-                        div()
-                            .id(("md-list-item", id.saturating_mul(1_000) + item_index as u64))
-                            .flex()
-                            .items_start()
-                            .gap(px(8.0))
-                            .pl(px(2.0))
-                            .child(
-                                div()
-                                    .min_w(px(18.0))
-                                    .text_sm()
-                                    .line_height(relative(1.48))
-                                    .text_color(colors.text_tertiary)
-                                    .child(if ordered {
-                                        format!("{}.", item_index + 1)
-                                    } else {
-                                        "•".to_owned()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .text_sm()
-                                    .line_height(relative(1.48))
-                                    .text_color(colors.text)
-                                    .child(styled_inline(item)),
-                            )
-                            .into_any_element()
-                    }),
-            )
+            .pl(px(2.0))
+            .text_sm()
+            .line_height(relative(1.48))
+            .text_color(colors.text)
+            // One GPUI text element preserves list semantics while avoiding a
+            // child element per streamed bullet. Large model-generated lists
+            // otherwise repeatedly rebuild hundreds of layout nodes per delta.
+            .child(styled_inline(join_list_items(ordered, items)))
             .into_any_element(),
         MarkdownBlock::Rule => div()
             .id(("md-rule", id))
@@ -208,10 +179,42 @@ fn styled_inline(text: RichText) -> StyledText {
                 color: Some(colors.accent),
                 ..Default::default()
             },
+            InlineKind::Muted => HighlightStyle {
+                color: Some(colors.text_tertiary),
+                ..Default::default()
+            },
         };
         (mark.range, style)
     });
     StyledText::new(text.text).with_highlights(highlights)
+}
+
+fn join_list_items(ordered: bool, items: Vec<RichText>) -> RichText {
+    let mut text = String::new();
+    let mut marks = Vec::new();
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        let prefix = if ordered {
+            format!("{}. ", index + 1)
+        } else {
+            "• ".to_owned()
+        };
+        let prefix_start = text.len();
+        text.push_str(&prefix);
+        marks.push(InlineMark {
+            range: prefix_start..text.len(),
+            kind: InlineKind::Muted,
+        });
+        let item_start = text.len();
+        text.push_str(&item.text);
+        marks.extend(item.marks.into_iter().map(|mark| InlineMark {
+            range: item_start + mark.range.start..item_start + mark.range.end,
+            kind: mark.kind,
+        }));
+    }
+    RichText { text, marks }
 }
 
 fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
@@ -450,5 +453,30 @@ mod tests {
             .iter()
             .all(|mark| rich.text.is_char_boundary(mark.range.start)
                 && rich.text.is_char_boundary(mark.range.end)));
+    }
+
+    #[test]
+    fn large_lists_join_into_one_styled_text_payload() {
+        let joined = join_list_items(
+            true,
+            (0..500)
+                .map(|index| parse_inline(&format!("anchor **{index}**")))
+                .collect(),
+        );
+        assert!(joined.text.starts_with("1. anchor 0\n2. anchor 1"));
+        assert!(joined.text.contains("500. anchor 499"));
+        assert_eq!(
+            joined
+                .marks
+                .iter()
+                .filter(|mark| mark.kind == InlineKind::Muted)
+                .count(),
+            500
+        );
+        assert!(joined
+            .marks
+            .iter()
+            .all(|mark| joined.text.is_char_boundary(mark.range.start)
+                && joined.text.is_char_boundary(mark.range.end)));
     }
 }

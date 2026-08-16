@@ -9,12 +9,37 @@ use serde::{Deserialize, Serialize};
 
 use mitsuro_desktop_backend::{BackendKind, BackendSessionId};
 
-const CURRENT_VERSION: u32 = 8;
+const CURRENT_VERSION: u32 = 11;
 const STATE_FILE: &str = "gpui-desktop-state.json";
 const MAX_PINNED_SESSIONS_PER_BACKEND: usize = 200;
 const MAX_LOCAL_PROJECTS: usize = 50;
 const MAX_PROJECT_ROOTS: usize = 8;
 const MAX_PROJECT_MEMBERSHIPS_PER_BACKEND: usize = 1_000;
+const MAX_COMPOSER_DRAFTS: usize = 100;
+const MAX_DRAFT_TEXT_BYTES: usize = 64 * 1024;
+const MAX_DRAFT_ATTACHMENTS: usize = 16;
+const MAX_DRAFT_FIELD_BYTES: usize = 4 * 1024;
+const SIDEBAR_GROUPS: [&str; 5] = ["connections", "projects", "pinned", "recents", "priority"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedDraftAttachment {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedComposerDraft {
+    pub backend: BackendKind,
+    #[serde(default)]
+    pub connection_id: String,
+    pub provider_session_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<PersistedDraftAttachment>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -30,11 +55,17 @@ pub struct DesktopProject {
 #[serde(default)]
 pub struct DesktopPreferences {
     pub version: u32,
+    /// Exact configured connection identity. Legacy provider-only fields below
+    /// remain compatibility mirrors for older preference files.
+    #[serde(default)]
+    pub selected_connection_id: Option<String>,
     pub selected_backend: Option<BackendKind>,
     /// Compatibility mirror for the active backend and v1 preference files.
     pub selected_session: Option<BackendSessionId>,
     #[serde(default)]
     pub sessions_by_backend: HashMap<BackendKind, BackendSessionId>,
+    #[serde(default)]
+    pub sessions_by_connection: HashMap<String, BackendSessionId>,
     /// Desktop-local settings values. These are intentionally separate from
     /// Mitsuro/Codex server configuration and contain no credentials.
     #[serde(default)]
@@ -70,15 +101,25 @@ pub struct DesktopPreferences {
     /// This mirrors the reference host's separate projectless-thread identity set.
     #[serde(default)]
     pub projectless_sessions_by_backend: HashMap<BackendKind, Vec<String>>,
+    /// Unsent user-authored input only. Server transcripts and credentials are
+    /// never persisted here; the containing state file is written mode 0600.
+    #[serde(default)]
+    pub composer_drafts: Vec<PersistedComposerDraft>,
+    /// Native-host disclosure state only. Provider data and transcript state
+    /// never enter this map; keys are restricted to known sidebar groups.
+    #[serde(default)]
+    pub sidebar_group_expanded: HashMap<String, bool>,
 }
 
 impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
             version: CURRENT_VERSION,
+            selected_connection_id: None,
             selected_backend: None,
             selected_session: None,
             sessions_by_backend: HashMap::new(),
+            sessions_by_connection: HashMap::new(),
             settings_toggles: HashMap::new(),
             settings_choices: HashMap::new(),
             models_by_backend: HashMap::new(),
@@ -89,6 +130,8 @@ impl Default for DesktopPreferences {
             local_projects: Vec::new(),
             project_assignments_by_backend: HashMap::new(),
             projectless_sessions_by_backend: HashMap::new(),
+            composer_drafts: Vec::new(),
+            sidebar_group_expanded: HashMap::new(),
         }
     }
 }
@@ -103,6 +146,9 @@ impl DesktopPreferences {
             Ok(bytes) => {
                 let mut preferences: Self =
                     serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                let needs_connection_migration = preferences.version < 11
+                    || (preferences.selected_connection_id.is_none()
+                        && preferences.sessions_by_connection.is_empty());
                 if let Some(session) = preferences.selected_session.clone() {
                     preferences
                         .sessions_by_backend
@@ -112,6 +158,36 @@ impl DesktopPreferences {
                 if let Some(backend) = preferences.selected_backend {
                     preferences.selected_session =
                         preferences.sessions_by_backend.get(&backend).cloned();
+                }
+                if needs_connection_migration {
+                    for (backend, session) in preferences.sessions_by_backend.clone() {
+                        preferences
+                            .sessions_by_connection
+                            .entry(backend.id().to_owned())
+                            .or_insert(session);
+                    }
+                }
+                preferences
+                    .sessions_by_connection
+                    .retain(|connection_id, session| {
+                        persisted_connection_kind(connection_id) == Some(session.backend)
+                    });
+                if preferences
+                    .selected_connection_id
+                    .as_deref()
+                    .and_then(persisted_connection_kind)
+                    .is_none()
+                {
+                    preferences.selected_connection_id = preferences
+                        .selected_backend
+                        .map(|backend| backend.id().to_owned());
+                }
+                if let Some(connection_id) = preferences.selected_connection_id.as_deref() {
+                    preferences.selected_backend = persisted_connection_kind(connection_id);
+                    preferences.selected_session = preferences
+                        .sessions_by_connection
+                        .get(connection_id)
+                        .cloned();
                 }
                 for ids in preferences.pinned_sessions_by_backend.values_mut() {
                     let mut seen = std::collections::HashSet::new();
@@ -123,6 +199,10 @@ impl DesktopPreferences {
                     .retain(|_, ids| !ids.is_empty());
                 sanitize_local_projects(&mut preferences.local_projects);
                 sanitize_project_memberships(&mut preferences);
+                sanitize_composer_drafts(&mut preferences.composer_drafts);
+                preferences
+                    .sidebar_group_expanded
+                    .retain(|group, _| SIDEBAR_GROUPS.contains(&group.as_str()));
                 preferences.version = CURRENT_VERSION;
                 Ok(preferences)
             }
@@ -151,15 +231,44 @@ impl DesktopPreferences {
         fs::rename(temp, path)
     }
 
+    #[allow(dead_code)]
     pub fn remember_backend(&mut self, backend: BackendKind) {
-        self.selected_backend = Some(backend);
-        self.selected_session = self.sessions_by_backend.get(&backend).cloned();
+        self.remember_connection(backend.id(), backend);
     }
 
+    #[allow(dead_code)]
     pub fn remember_session(&mut self, session: BackendSessionId) {
+        self.remember_session_for_connection(session.backend.id(), session);
+    }
+
+    pub fn remember_connection(&mut self, connection_id: &str, backend: BackendKind) {
+        if persisted_connection_kind(connection_id) != Some(backend) {
+            return;
+        }
+        self.selected_connection_id = Some(connection_id.to_owned());
+        self.selected_backend = Some(backend);
+        self.selected_session = self.sessions_by_connection.get(connection_id).cloned();
+    }
+
+    pub fn remember_session_for_connection(
+        &mut self,
+        connection_id: &str,
+        session: BackendSessionId,
+    ) {
+        if persisted_connection_kind(connection_id) != Some(session.backend) {
+            return;
+        }
+        self.selected_connection_id = Some(connection_id.to_owned());
         self.selected_backend = Some(session.backend);
         self.selected_session = Some(session.clone());
-        self.sessions_by_backend.insert(session.backend, session);
+        self.sessions_by_backend
+            .insert(session.backend, session.clone());
+        self.sessions_by_connection
+            .insert(connection_id.to_owned(), session);
+    }
+
+    pub fn session_for_connection(&self, connection_id: &str) -> Option<&BackendSessionId> {
+        self.sessions_by_connection.get(connection_id)
     }
 
     pub fn remember_model(&mut self, backend: BackendKind, model_id: String) {
@@ -196,27 +305,69 @@ impl DesktopPreferences {
         self.plan_by_backend.get(&backend).copied().unwrap_or(false)
     }
 
+    #[allow(dead_code)]
     pub fn is_session_pinned(&self, backend: BackendKind, session_id: &str) -> bool {
-        self.pinned_sessions_by_backend
-            .get(&backend)
-            .is_some_and(|ids| ids.iter().any(|id| id == session_id))
+        self.is_session_pinned_for_connection(backend.id(), backend, session_id)
     }
 
+    pub fn is_session_pinned_for_connection(
+        &self,
+        connection_id: &str,
+        backend: BackendKind,
+        session_id: &str,
+    ) -> bool {
+        let Some(session_key) =
+            connection_session_preference_key(connection_id, backend, session_id)
+        else {
+            return false;
+        };
+        self.pinned_sessions_by_backend
+            .get(&backend)
+            .is_some_and(|ids| ids.iter().any(|id| id == &session_key))
+    }
+
+    #[allow(dead_code)]
     pub fn pinned_session_rank(&self, backend: BackendKind, session_id: &str) -> Option<usize> {
+        self.pinned_session_rank_for_connection(backend.id(), backend, session_id)
+    }
+
+    pub fn pinned_session_rank_for_connection(
+        &self,
+        connection_id: &str,
+        backend: BackendKind,
+        session_id: &str,
+    ) -> Option<usize> {
+        let session_key = connection_session_preference_key(connection_id, backend, session_id)?;
         self.pinned_sessions_by_backend
             .get(&backend)?
             .iter()
-            .position(|id| id == session_id)
+            .position(|id| id == &session_key)
     }
 
+    #[allow(dead_code)]
     pub fn set_session_pinned(&mut self, backend: BackendKind, session_id: String, pinned: bool) {
+        self.set_session_pinned_for_connection(backend.id(), backend, session_id, pinned);
+    }
+
+    pub fn set_session_pinned_for_connection(
+        &mut self,
+        connection_id: &str,
+        backend: BackendKind,
+        session_id: String,
+        pinned: bool,
+    ) {
         if session_id.trim().is_empty() {
             return;
         }
+        let Some(session_key) =
+            connection_session_preference_key(connection_id, backend, &session_id)
+        else {
+            return;
+        };
         let ids = self.pinned_sessions_by_backend.entry(backend).or_default();
-        ids.retain(|id| id != &session_id);
+        ids.retain(|id| id != &session_key);
         if pinned {
-            ids.insert(0, session_id);
+            ids.insert(0, session_key);
             ids.truncate(MAX_PINNED_SESSIONS_PER_BACKEND);
         }
         if ids.is_empty() {
@@ -245,23 +396,35 @@ impl DesktopPreferences {
             .map(|(project, _)| project)
     }
 
+    #[allow(dead_code)]
     pub fn project_for_session(
         &self,
         session: &BackendSessionId,
         working_dir: Option<&str>,
     ) -> Option<&DesktopProject> {
+        self.project_for_session_in_connection(session.backend.id(), session, working_dir)
+    }
+
+    pub fn project_for_session_in_connection(
+        &self,
+        connection_id: &str,
+        session: &BackendSessionId,
+        working_dir: Option<&str>,
+    ) -> Option<&DesktopProject> {
+        let session_key =
+            connection_session_preference_key(connection_id, session.backend, &session.raw)?;
         if session.backend == BackendKind::Fixture
             || self
                 .projectless_sessions_by_backend
                 .get(&session.backend)
-                .is_some_and(|ids| ids.iter().any(|id| id == &session.raw))
+                .is_some_and(|ids| ids.iter().any(|id| id == &session_key))
         {
             return None;
         }
         if let Some(project_id) = self
             .project_assignments_by_backend
             .get(&session.backend)
-            .and_then(|assignments| assignments.get(&session.raw))
+            .and_then(|assignments| assignments.get(&session_key))
         {
             if let Some(project) = self.project(project_id) {
                 return Some(project);
@@ -270,8 +433,24 @@ impl DesktopPreferences {
         working_dir.and_then(|path| self.project_for_path(path))
     }
 
+    #[allow(dead_code)]
     pub fn set_session_project(
         &mut self,
+        session: &BackendSessionId,
+        working_dir: Option<&str>,
+        project_id: Option<&str>,
+    ) -> bool {
+        self.set_session_project_in_connection(
+            session.backend.id(),
+            session,
+            working_dir,
+            project_id,
+        )
+    }
+
+    pub fn set_session_project_in_connection(
+        &mut self,
+        connection_id: &str,
         session: &BackendSessionId,
         working_dir: Option<&str>,
         project_id: Option<&str>,
@@ -279,6 +458,11 @@ impl DesktopPreferences {
         if session.backend == BackendKind::Fixture || session.raw.trim().is_empty() {
             return false;
         }
+        let Some(session_key) =
+            connection_session_preference_key(connection_id, session.backend, &session.raw)
+        else {
+            return false;
+        };
         if let Some(project_id) = project_id {
             if self.project(project_id).is_none() {
                 return false;
@@ -289,7 +473,7 @@ impl DesktopPreferences {
             .project_assignments_by_backend
             .get_mut(&session.backend)
         {
-            assignments.remove(&session.raw);
+            assignments.remove(&session_key);
             if assignments.is_empty() {
                 self.project_assignments_by_backend.remove(&session.backend);
             }
@@ -298,7 +482,7 @@ impl DesktopPreferences {
             .projectless_sessions_by_backend
             .get_mut(&session.backend)
         {
-            ids.retain(|id| id != &session.raw);
+            ids.retain(|id| id != &session_key);
             if ids.is_empty() {
                 self.projectless_sessions_by_backend
                     .remove(&session.backend);
@@ -315,7 +499,7 @@ impl DesktopPreferences {
                     .project_assignments_by_backend
                     .entry(session.backend)
                     .or_default();
-                assignments.insert(session.raw.clone(), project_id.to_owned());
+                assignments.insert(session_key, project_id.to_owned());
                 bound_project_assignments(assignments);
             }
             Some(_) => {}
@@ -324,7 +508,7 @@ impl DesktopPreferences {
                     .projectless_sessions_by_backend
                     .entry(session.backend)
                     .or_default();
-                ids.insert(0, session.raw.clone());
+                ids.insert(0, session_key);
                 dedupe_and_bound_session_ids(ids);
             }
         }
@@ -362,6 +546,25 @@ impl DesktopPreferences {
         self.project_assignments_by_backend
             .retain(|_, assignments| !assignments.is_empty());
     }
+
+    pub fn replace_composer_drafts(&mut self, mut drafts: Vec<PersistedComposerDraft>) {
+        sanitize_composer_drafts(&mut drafts);
+        self.composer_drafts = drafts;
+    }
+
+    pub fn sidebar_group_expanded(&self, group: &str) -> bool {
+        self.sidebar_group_expanded
+            .get(group)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    pub fn set_sidebar_group_expanded(&mut self, group: &str, expanded: bool) {
+        if SIDEBAR_GROUPS.contains(&group) {
+            self.sidebar_group_expanded
+                .insert(group.to_owned(), expanded);
+        }
+    }
 }
 
 fn sanitize_local_projects(projects: &mut Vec<DesktopProject>) {
@@ -388,6 +591,31 @@ fn sanitize_local_projects(projects: &mut Vec<DesktopProject>) {
         true
     });
     projects.truncate(MAX_LOCAL_PROJECTS);
+}
+
+fn persisted_connection_kind(value: &str) -> Option<BackendKind> {
+    let (kind_id, name) = value
+        .split_once(':')
+        .map_or((value, None), |(kind, name)| (kind, Some(name)));
+    if name.is_some_and(|name| name.trim().is_empty() || name.contains(':')) {
+        return None;
+    }
+    BackendKind::from_id(kind_id)
+}
+
+fn connection_session_preference_key(
+    connection_id: &str,
+    backend: BackendKind,
+    session_id: &str,
+) -> Option<String> {
+    if persisted_connection_kind(connection_id) != Some(backend) || session_id.trim().is_empty() {
+        return None;
+    }
+    Some(if connection_id == backend.id() {
+        session_id.to_owned()
+    } else {
+        format!("{connection_id}\0{session_id}")
+    })
 }
 
 fn sanitize_project_memberships(preferences: &mut DesktopPreferences) {
@@ -447,6 +675,64 @@ fn dedupe_and_bound_session_ids(ids: &mut Vec<String>) {
     ids.truncate(MAX_PROJECT_MEMBERSHIPS_PER_BACKEND);
 }
 
+fn sanitize_composer_drafts(drafts: &mut Vec<PersistedComposerDraft>) {
+    let mut seen = std::collections::HashSet::new();
+    drafts.retain_mut(|draft| {
+        draft.connection_id =
+            truncate_utf8(draft.connection_id.trim().to_owned(), MAX_DRAFT_FIELD_BYTES);
+        if draft.connection_id.is_empty() {
+            draft.connection_id = draft.backend.id().to_owned();
+        }
+        let mut connection_parts = draft.connection_id.split(':');
+        let connection_backend = connection_parts.next().unwrap_or_default();
+        let connection_name = connection_parts.next();
+        let connection_is_valid = connection_backend == draft.backend.id()
+            && connection_parts.next().is_none()
+            && connection_name.is_none_or(|name| !name.trim().is_empty());
+        draft.provider_session_id = truncate_utf8(
+            draft.provider_session_id.trim().to_owned(),
+            MAX_DRAFT_FIELD_BYTES,
+        );
+        draft.text = truncate_utf8(std::mem::take(&mut draft.text), MAX_DRAFT_TEXT_BYTES);
+        draft.attachments.retain_mut(|attachment| {
+            attachment.path =
+                truncate_utf8(attachment.path.trim().to_owned(), MAX_DRAFT_FIELD_BYTES);
+            attachment.name =
+                truncate_utf8(attachment.name.trim().to_owned(), MAX_DRAFT_FIELD_BYTES);
+            attachment.kind = attachment.kind.trim().to_ascii_lowercase();
+            !attachment.path.is_empty()
+                && !attachment.name.is_empty()
+                && matches!(
+                    attachment.kind.as_str(),
+                    "image" | "audio" | "skill" | "mention"
+                )
+        });
+        draft.attachments.truncate(MAX_DRAFT_ATTACHMENTS);
+        let meaningful = !draft.text.is_empty() || !draft.attachments.is_empty();
+        meaningful
+            && connection_is_valid
+            && !draft.provider_session_id.is_empty()
+            && draft.backend != BackendKind::Fixture
+            && seen.insert((
+                draft.connection_id.clone(),
+                draft.provider_session_id.clone(),
+            ))
+    });
+    drafts.truncate(MAX_COMPOSER_DRAFTS);
+}
+
+fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
+}
+
 fn reasoning_key(backend: BackendKind, model_id: &str) -> String {
     format!("{}:{model_id}", backend.id())
 }
@@ -496,6 +782,130 @@ mod tests {
             Some("session-9")
         );
         assert_eq!(state.sessions_by_backend.len(), 2);
+    }
+
+    #[test]
+    fn equal_raw_sessions_are_restored_per_named_connection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        let mut state = DesktopPreferences::default();
+        state.remember_session_for_connection(
+            "mitsuro-http:staging",
+            BackendSessionId::new(BackendKind::MitsuroHttp, "same-id"),
+        );
+        state.remember_session_for_connection(
+            "mitsuro-http:production",
+            BackendSessionId::new(BackendKind::MitsuroHttp, "same-id"),
+        );
+        state.set_session_pinned_for_connection(
+            "mitsuro-http:staging",
+            BackendKind::MitsuroHttp,
+            "same-id".into(),
+            true,
+        );
+        state.save(&path).expect("save");
+        let mut restored = DesktopPreferences::load(&path).expect("load");
+
+        restored.remember_connection("mitsuro-http:staging", BackendKind::MitsuroHttp);
+        assert_eq!(
+            restored.selected_connection_id.as_deref(),
+            Some("mitsuro-http:staging")
+        );
+        assert_eq!(restored.selected_session.as_ref().unwrap().raw, "same-id");
+        assert_eq!(restored.sessions_by_connection.len(), 2);
+        assert!(restored.is_session_pinned_for_connection(
+            "mitsuro-http:staging",
+            BackendKind::MitsuroHttp,
+            "same-id",
+        ));
+        assert!(!restored.is_session_pinned_for_connection(
+            "mitsuro-http:production",
+            BackendKind::MitsuroHttp,
+            "same-id",
+        ));
+    }
+
+    #[test]
+    fn composer_drafts_are_bounded_provider_qualified_and_private() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        let mut state = DesktopPreferences::default();
+        state.replace_composer_drafts(vec![PersistedComposerDraft {
+            backend: BackendKind::MitsuroHttp,
+            connection_id: "mitsuro-http".into(),
+            provider_session_id: "session-9".into(),
+            text: "unsent thought".into(),
+            attachments: vec![PersistedDraftAttachment {
+                path: "/tmp/reference.png".into(),
+                name: "reference.png".into(),
+                kind: "image".into(),
+            }],
+        }]);
+        state.save(&path).expect("save");
+        let restored = DesktopPreferences::load(&path).expect("load");
+        assert_eq!(restored.composer_drafts, state.composer_drafts);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_oversized_composer_drafts_are_sanitized() {
+        let mut state = DesktopPreferences::default();
+        state.replace_composer_drafts(vec![
+            PersistedComposerDraft {
+                backend: BackendKind::Fixture,
+                connection_id: "fixture".into(),
+                provider_session_id: "fixture".into(),
+                text: "discard".into(),
+                attachments: Vec::new(),
+            },
+            PersistedComposerDraft {
+                backend: BackendKind::MitsuroHttp,
+                connection_id: "codex-stdio".into(),
+                provider_session_id: "wrong-provider".into(),
+                text: "discard".into(),
+                attachments: Vec::new(),
+            },
+            PersistedComposerDraft {
+                backend: BackendKind::CodexStdio,
+                connection_id: "codex-stdio".into(),
+                provider_session_id: "thread-1".into(),
+                text: "é".repeat(MAX_DRAFT_TEXT_BYTES),
+                attachments: vec![PersistedDraftAttachment {
+                    path: "/tmp/file".into(),
+                    name: "file".into(),
+                    kind: "executable".into(),
+                }],
+            },
+        ]);
+        assert_eq!(state.composer_drafts.len(), 1);
+        assert!(state.composer_drafts[0].text.len() <= MAX_DRAFT_TEXT_BYTES);
+        assert!(state.composer_drafts[0].attachments.is_empty());
+        assert!(state.composer_drafts[0]
+            .text
+            .is_char_boundary(state.composer_drafts[0].text.len()));
+    }
+
+    #[test]
+    fn sidebar_disclosures_are_durable_and_restricted_to_known_groups() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.json");
+        let mut state = DesktopPreferences::default();
+        assert!(state.sidebar_group_expanded("connections"));
+        state.set_sidebar_group_expanded("connections", false);
+        state.set_sidebar_group_expanded("unknown", false);
+        state.save(&path).expect("save");
+
+        let restored = DesktopPreferences::load(&path).expect("load");
+        assert!(!restored.sidebar_group_expanded("connections"));
+        assert!(restored.sidebar_group_expanded("unknown"));
+        assert!(!restored.sidebar_group_expanded.contains_key("unknown"));
     }
 
     #[test]

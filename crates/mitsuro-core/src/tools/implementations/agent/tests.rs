@@ -1,11 +1,12 @@
-use super::build::build_execution_waves;
+use super::build::{build_execution_waves, build_isolation_batches};
 use super::{
     agent_progress_for_terminal_stage, build_parent_context_brief, build_single_agent_artifact,
-    build_single_agent_warnings, concise_target_label, delegated_persistence_error,
-    emit_single_agent_completion, has_explicit_empty_capabilities, normalize_structured_tasks,
-    notify_child_completion, open_delegated_run_store, persist_delegated_artifact,
-    persist_single_agent_artifact, resolve_explore_target, should_use_parallel_component_pool,
-    truncate_utf8, validate_background_wake_host,
+    build_single_agent_warnings, compose_child_objective, concise_target_label,
+    delegated_persistence_error, emit_single_agent_completion, has_explicit_empty_capabilities,
+    normalize_structured_tasks, notify_child_completion, open_delegated_run_store,
+    persist_delegated_artifact, persist_single_agent_artifact, resolve_explore_target,
+    should_use_parallel_component_pool, truncate_utf8, validate_background_wake_host,
+    AcceptanceCheckParams, AgentTool,
 };
 use crate::agent::subagent::{
     AgentExecutionProfile, AgentProgressStatus, AgentRuntimeManager, DelegatedEvidenceKind,
@@ -202,6 +203,20 @@ fn structured_task_graph_is_topologically_ordered_and_builds_union_ceiling() {
 }
 
 #[test]
+fn structured_task_graph_gets_a_stable_name_when_provider_omits_one() {
+    let mut params: super::Params = serde_json::from_value(serde_json::json!({
+        "tasks": [
+            {"id": "game-core", "instructions": "Build the game", "capabilities": ["write"]},
+            {"id": "pwa-shell", "name": "PWA shell", "instructions": "Build the shell", "capabilities": ["write"]}
+        ]
+    }))
+    .expect("structured params");
+
+    normalize_structured_tasks(&mut params).expect("valid task graph");
+    assert_eq!(super::derived_spawn_name(&params), "game-core + PWA shell");
+}
+
+#[test]
 fn structured_task_graph_rejects_cycles_before_workspace_materialization() {
     let mut params: super::Params = serde_json::from_value(serde_json::json!({
         "name": "cycle",
@@ -214,6 +229,28 @@ fn structured_task_graph_rejects_cycles_before_workspace_materialization() {
     .expect("structured params");
     let error = normalize_structured_tasks(&mut params).expect_err("cycle must fail");
     assert!(error.contains("dependency cycle"));
+}
+
+#[test]
+fn browser_acceptance_requires_execute_capability_before_any_child_starts() {
+    let mut invalid: super::Params = serde_json::from_value(serde_json::json!({
+        "tasks": [{
+            "id": "interface",
+            "instructions": "Implement keyboard and touch controls",
+            "capabilities": ["read", "write"],
+            "acceptance_checks": [{
+                "id": "interface-playable",
+                "criterion": "Controls are implemented",
+                "evidence_kind": "browser_runtime"
+            }]
+        }]
+    }))
+    .expect("structured params");
+
+    let error = normalize_structured_tasks(&mut invalid).expect_err("invalid browser authority");
+
+    assert!(error.contains("lacks execute capability"));
+    assert!(error.contains("execute-capable verifier"));
 }
 
 #[test]
@@ -243,6 +280,51 @@ fn structured_runtime_waves_keep_independent_roots_together() {
             .map(|wave| wave.iter().map(|task| task.id.as_str()).collect::<Vec<_>>())
             .collect::<Vec<_>>(),
         vec![vec!["ui", "api"], vec!["verify"], vec!["release"]]
+    );
+}
+
+#[test]
+fn dependent_parallel_writer_wave_gets_its_own_isolation_batch() {
+    let mut params: super::Params = serde_json::from_value(serde_json::json!({
+        "name": "tetris-waves",
+        "tasks": [
+            {"id": "scaffold", "instructions": "Scaffold", "capabilities": ["read", "write"]},
+            {"id": "engine", "instructions": "Engine", "capabilities": ["read", "write"], "depends_on": ["scaffold"]},
+            {"id": "interface", "instructions": "Interface", "capabilities": ["read", "write"], "depends_on": ["scaffold"]},
+            {"id": "verify", "instructions": "Verify", "capabilities": ["read", "execute"], "depends_on": ["engine", "interface"]}
+        ]
+    }))
+    .expect("structured params");
+    normalize_structured_tasks(&mut params).expect("normalize graph");
+    let runtime = params
+        .tasks
+        .as_ref()
+        .expect("tasks")
+        .iter()
+        .map(|task| {
+            crate::agent::subagent::SubAgentTask::new(&task.id, task.objective())
+                .with_delegation_policy(DelegationPolicy::for_subagent_child(
+                    PermissionMode::Autonomous,
+                    None,
+                    true,
+                    task.capabilities
+                        .iter()
+                        .any(|capability| capability == "write"),
+                    task.capabilities
+                        .iter()
+                        .any(|capability| capability == "execute"),
+                ))
+        })
+        .collect::<Vec<_>>();
+
+    let batches = build_isolation_batches(&runtime, params.tasks.as_deref(), "run-123");
+    assert_eq!(
+        batches,
+        vec![(
+            1,
+            "run-123-wave-0001".to_string(),
+            vec!["engine".to_string(), "interface".to_string()],
+        )]
     );
 }
 
@@ -694,18 +776,24 @@ fn child_completion_queue_failure_is_returned_before_live_notification() {
 
 #[test]
 fn single_agent_artifact_keeps_payload_shape() {
-    let result = sample_result(true, None);
+    let mut result = sample_result(true, None);
+    result.output = r#"Found the relevant code paths
+<delegated_handoff>{"status":"complete","summary":"done","acceptance_checks":[{"id":"paths","status":"passed","evidence":"src/lib.rs and src/main.rs"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+    result
+        .evidence
+        .record_success(DelegatedEvidenceKind::Observation);
     let policy = DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(8));
 
     let artifact = build_single_agent_artifact("run-123", &result, &policy);
 
-    assert_eq!(artifact.review_summary, "Found the relevant code paths");
+    assert!(artifact
+        .review_summary
+        .contains("Found the relevant code paths"));
     assert_eq!(artifact.final_stage, DelegatedRunStage::Complete);
     assert_eq!(artifact.payload["delegated_run_id"], "run-123");
-    assert_eq!(
-        artifact.payload["findings"],
-        "Found the relevant code paths"
-    );
+    assert!(artifact.payload["findings"]
+        .as_str()
+        .is_some_and(|findings| findings.contains("Found the relevant code paths")));
     assert_eq!(artifact.payload["files_examined_count"], 2);
     assert_eq!(artifact.payload["success"], true);
     assert_eq!(artifact.payload["outcome"], "success");
@@ -715,14 +803,120 @@ fn single_agent_artifact_keeps_payload_shape() {
     assert_eq!(artifact.payload["agent_count"], 1);
     assert_eq!(artifact.payload["usable_agents"], 1);
     assert_eq!(artifact.payload["failed_agents"], 0);
-    assert_eq!(
-        artifact.payload["agents"][0]["summary"],
-        "Found the relevant code paths"
-    );
+    assert!(artifact.payload["agents"][0]["summary"]
+        .as_str()
+        .is_some_and(|summary| summary.contains("Found the relevant code paths")));
     assert_eq!(
         artifact.payload["delegation_policy"]["surface"],
         "subagent_plan"
     );
+}
+
+#[test]
+fn single_agent_artifact_degrades_success_without_complete_objective() {
+    let result = sample_result(true, None);
+    let policy = DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(8));
+
+    let artifact = build_single_agent_artifact("run-no-handoff", &result, &policy);
+
+    assert_eq!(artifact.final_stage, DelegatedRunStage::Degraded);
+    assert_eq!(artifact.payload["success"], false);
+    assert_eq!(artifact.payload["outcome"], "partial");
+    assert_eq!(artifact.payload["degraded_agents"], 1);
+    assert_eq!(artifact.payload["failed_agents"], 0);
+}
+
+#[test]
+fn single_agent_artifact_completes_only_with_passed_handoff() {
+    let mut result = sample_result(true, None);
+    result.output = r#"Found the relevant code paths
+<delegated_handoff>{"status":"complete","summary":"done","acceptance_checks":[{"id":"tests","status":"passed","evidence":"focused tests passed"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+    result
+        .evidence
+        .record_success(DelegatedEvidenceKind::Mutation);
+    let policy = DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(8));
+
+    let artifact = build_single_agent_artifact("run-complete-handoff", &result, &policy);
+
+    assert_eq!(artifact.final_stage, DelegatedRunStage::Complete);
+    assert_eq!(artifact.payload["success"], true);
+    assert_eq!(artifact.payload["outcome"], "success");
+}
+
+#[test]
+fn single_agent_artifact_degrades_when_browser_contract_lacks_canonical_proof() {
+    let mut result = sample_result(true, None);
+    result.output = r#"Implemented the app.
+<delegated_handoff>{"status":"complete","summary":"tests and build passed","acceptance_checks":[{"id":"browser_runtime","status":"passed","evidence":"looked good"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+    result
+        .evidence
+        .record_success(DelegatedEvidenceKind::Mutation);
+    result.enforce_acceptance_contract(
+        r#"Build the app.
+<delegated_acceptance_contract>{"required":[{"id":"browser_runtime","criterion":"primary interaction works without console errors"}]}</delegated_acceptance_contract>"#,
+    );
+    let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(8));
+
+    let artifact = build_single_agent_artifact("run-false-browser", &result, &policy);
+
+    assert_eq!(artifact.final_stage, DelegatedRunStage::Degraded);
+    assert_eq!(artifact.payload["success"], false);
+    assert_eq!(artifact.payload["outcome"], "partial");
+}
+
+#[test]
+fn child_objective_injects_typed_acceptance_contract() {
+    let objective = compose_child_objective(
+        "Implement the game",
+        &[AcceptanceCheckParams {
+            id: "browser_runtime".to_string(),
+            criterion: "phone and desktop interaction has zero console errors".to_string(),
+            evidence_kind: Some("browser_runtime".to_string()),
+        }],
+    );
+
+    assert!(objective.contains("Implement the game"));
+    assert!(objective.contains("<delegated_acceptance_contract>"));
+    assert!(objective.contains("browser_runtime"));
+    assert!(objective.contains("phone and desktop"));
+}
+
+#[test]
+fn agent_schema_advertises_top_level_acceptance_checks() {
+    use crate::agent::AgentCancellation;
+    use crate::ai::client::{AiClient, AiClientConfig};
+    use crate::tools::registry::Tool;
+    use std::sync::Arc;
+
+    let tool = AgentTool::new(
+        Arc::new(AiClient::new(
+            AiClientConfig::for_grok("grok-4.6"),
+            "test".to_string(),
+        )),
+        AgentCancellation::new(),
+        AgentRuntimeManager::default(),
+    );
+    let schema = tool.parameters_schema();
+
+    assert!(schema["properties"]["acceptance_checks"].is_object());
+    assert_eq!(
+        schema["properties"]["acceptance_checks"]["items"]["required"],
+        serde_json::json!(["id", "criterion"])
+    );
+    assert_eq!(
+        schema["properties"]["acceptance_checks"]["items"]["properties"]["evidence_kind"]["enum"],
+        serde_json::json!([
+            "handoff",
+            "browser_runtime",
+            "browser_keyboard",
+            "browser_touch"
+        ])
+    );
+    assert!(schema["properties"]["tasks"]["items"]["properties"]["acceptance_checks"].is_object());
+    assert!(tool.description().contains("browser_check"));
+    assert!(!tool
+        .description()
+        .contains("dependent execute-capable browser verifier"));
 }
 
 #[test]
@@ -754,8 +948,9 @@ fn single_agent_artifact_accepts_compact_canonical_tool_evidence() {
 
     let artifact = build_single_agent_artifact("run-evidence", &result, &policy);
 
-    assert_eq!(artifact.final_stage, DelegatedRunStage::Complete);
-    assert_eq!(artifact.payload["success"], true);
+    assert_eq!(artifact.final_stage, DelegatedRunStage::Degraded);
+    assert_eq!(artifact.payload["success"], false);
+    assert_eq!(artifact.payload["outcome"], "partial");
     assert_eq!(artifact.payload["usable_agents"], 1);
     assert_eq!(artifact.payload["agents"][0]["evidence"]["executions"], 1);
 }

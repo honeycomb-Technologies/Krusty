@@ -1,4 +1,4 @@
-//! Mitsuro desktop dark color tokens derived from the reference visual language.
+//! Mitsuro desktop semantic tokens derived from the current reference visual language.
 //!
 //! Key surfaces (dark / electron-dark):
 //! - app / surface-under: `#0d0d0d` / near-black rails
@@ -7,6 +7,8 @@
 //! - text secondary: `#ffffffb3`
 //! - text tertiary: `#ffffff80`
 //! - border heavy: `#ffffff29`
+
+use std::time::Duration;
 
 use gpui::{rgb, rgba, Hsla};
 
@@ -21,9 +23,9 @@ pub fn hex_alpha(rgb_value: u32, alpha: f32) -> Hsla {
     rgba((rgb_value << 8) | a).into()
 }
 
-/// Codex-like dark palette used by the shell.
+/// Mitsuro dark palette used by every desktop surface.
 #[derive(Clone, Copy, Debug)]
-pub struct CodexColors {
+pub struct MitsuroColors {
     /// Deepest underlay (window fill).
     pub bg_under: Hsla,
     /// Main app / transcript background (near black). Alias of under for theme maps.
@@ -65,6 +67,14 @@ pub struct CodexColors {
     pub accent_soft: Hsla,
     /// Codex "Full access" / warning orange (bar composer chip).
     pub accent_orange: Hsla,
+    /// High-contrast keyboard focus outline; never reused as a selection fill.
+    pub focus_ring: Hsla,
+    /// Modal/popover scrim over the app surface.
+    pub overlay_scrim: Hsla,
+    /// Shadow color for the few genuinely elevated surfaces.
+    pub shadow: Hsla,
+    /// Destructive hover/selection tint.
+    pub destructive_soft: Hsla,
     pub status_ready: Hsla,
     pub status_connecting: Hsla,
     pub status_error: Hsla,
@@ -77,13 +87,13 @@ pub struct CodexColors {
     pub diff_meta: Hsla,
 }
 
-impl Default for CodexColors {
+impl Default for MitsuroColors {
     fn default() -> Self {
         Self::dark()
     }
 }
 
-impl CodexColors {
+impl MitsuroColors {
     pub fn dark() -> Self {
         Self {
             // #0d0d0d family — soft near-black surfaces (Codex density)
@@ -115,6 +125,10 @@ impl CodexColors {
             accent_soft: hex_alpha(0x339cff, 0.12),
             // orange-400-ish — Full access chip on bar composer
             accent_orange: hex(0xf5a524),
+            focus_ring: hex_alpha(0xffffff, 0.88),
+            overlay_scrim: hex_alpha(0x000000, 0.58),
+            shadow: hex_alpha(0x000000, 0.48),
+            destructive_soft: hex_alpha(0xfa423e, 0.14),
             status_ready: hex(0x04b84c),
             status_connecting: hex(0xf5a524),
             status_error: hex(0xfa423e),
@@ -127,69 +141,293 @@ impl CodexColors {
     }
 }
 
-/// Soft ambient wash for main surfaces — dark blue radial-ish feel via
-/// linear gradient (not OpenAI bloom trademark). Base underlay only; multi-blob
-/// atmosphere is layered in `ambient_atmosphere_layers`.
-pub fn ambient_main_bg() -> gpui::Background {
-    use gpui::{linear_color_stop, linear_gradient};
-    linear_gradient(
-        165.0,
-        linear_color_stop(hex(0x0c1016), 0.0),
-        linear_color_stop(hex(0x0d0d0d), 0.62),
-    )
+/// Compact 2/4/6/8/12/16/24/32 spacing rhythm used across shell primitives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MitsuroSpacing {
+    pub xxs: f32,
+    pub xs: f32,
+    pub sm: f32,
+    pub md: f32,
+    pub lg: f32,
+    pub xl: f32,
+    pub xxl: f32,
+    pub xxxl: f32,
 }
 
-/// Diagonal cool wash (upper-left → lower-right) for atmosphere stack.
-pub fn ambient_wash_cool() -> gpui::Background {
-    use gpui::{linear_color_stop, linear_gradient};
-    linear_gradient(
-        125.0,
-        linear_color_stop(hex_alpha(0x1a3a5c, 0.22), 0.0),
-        linear_color_stop(hex_alpha(0x0d0d0d, 0.0), 0.55),
-    )
+impl Default for MitsuroSpacing {
+    fn default() -> Self {
+        Self {
+            xxs: 2.0,
+            xs: 4.0,
+            sm: 6.0,
+            md: 8.0,
+            lg: 12.0,
+            xl: 16.0,
+            xxl: 24.0,
+            xxxl: 32.0,
+        }
+    }
 }
 
-/// Warm accent wash (lower-left) — soft amber, very low alpha.
-pub fn ambient_wash_warm() -> gpui::Background {
-    use gpui::{linear_color_stop, linear_gradient};
-    linear_gradient(
-        45.0,
-        linear_color_stop(hex_alpha(0x3a2818, 0.28), 0.0),
-        linear_color_stop(hex_alpha(0x0d0d0d, 0.0), 0.48),
-    )
+/// Text sizes and line-height ratios for each stable information role.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MitsuroTypography {
+    pub window_chrome: f32,
+    pub navigation: f32,
+    pub body: f32,
+    pub message: f32,
+    pub code: f32,
+    pub label: f32,
+    pub metadata: f32,
+    pub button: f32,
+    pub heading: f32,
+    pub title: f32,
+    pub compact_line_height: f32,
+    pub body_line_height: f32,
+    pub message_line_height: f32,
 }
 
-/// Teal/cyan wash (upper-right) — cool product depth, not trademark bloom.
-pub fn ambient_wash_teal() -> gpui::Background {
-    use gpui::{linear_color_stop, linear_gradient};
-    linear_gradient(
-        220.0,
-        linear_color_stop(hex_alpha(0x0e2a32, 0.26), 0.0),
-        linear_color_stop(hex_alpha(0x0d0d0d, 0.0), 0.52),
-    )
+impl Default for MitsuroTypography {
+    fn default() -> Self {
+        Self {
+            window_chrome: 13.0,
+            navigation: 14.0,
+            body: 15.0,
+            message: 16.0,
+            code: 14.0,
+            label: 12.0,
+            metadata: 11.0,
+            button: 14.0,
+            heading: 20.0,
+            title: 28.0,
+            compact_line_height: 1.25,
+            body_line_height: 1.45,
+            message_line_height: 1.55,
+        }
+    }
 }
 
-/// Deep center vignette to keep hero readable on multi-wash stage.
-pub fn ambient_wash_vignette() -> gpui::Background {
-    use gpui::{linear_color_stop, linear_gradient};
-    linear_gradient(
-        180.0,
-        linear_color_stop(hex_alpha(0x0d0d0d, 0.0), 0.0),
-        linear_color_stop(hex_alpha(0x050505, 0.45), 1.0),
-    )
+/// Shared shape, hit-target, icon, border, and opacity values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MitsuroShape {
+    pub radius_xs: f32,
+    pub radius_sm: f32,
+    pub radius_md: f32,
+    pub radius_lg: f32,
+    pub radius_xl: f32,
+    pub radius_pill: f32,
+    pub border_hairline: f32,
+    pub border_focus: f32,
+    pub icon_sm: f32,
+    pub icon_md: f32,
+    pub icon_lg: f32,
+    pub control_sm: f32,
+    pub control_md: f32,
+    pub control_lg: f32,
+    pub hit_target_min: f32,
+    pub disabled_opacity: f32,
+    pub muted_opacity: f32,
+    pub shadow_blur: f32,
 }
 
-/// Quieter elevated fill for empty-state hero cards.
-#[allow(dead_code)]
-pub fn ambient_glow_stop() -> Hsla {
-    hex_alpha(0x1a3a5c, 0.35)
+impl Default for MitsuroShape {
+    fn default() -> Self {
+        Self {
+            radius_xs: 4.0,
+            radius_sm: 6.0,
+            radius_md: 8.0,
+            radius_lg: 12.0,
+            radius_xl: 20.0,
+            radius_pill: 999.0,
+            border_hairline: 1.0,
+            border_focus: 2.0,
+            icon_sm: 14.0,
+            icon_md: 16.0,
+            icon_lg: 20.0,
+            control_sm: 28.0,
+            control_md: 34.0,
+            control_lg: 40.0,
+            hit_target_min: 34.0,
+            disabled_opacity: 0.42,
+            muted_opacity: 0.68,
+            shadow_blur: 20.0,
+        }
+    }
 }
 
-pub fn colors() -> CodexColors {
-    CodexColors::dark()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MitsuroEasing {
+    Standard,
+    Enter,
+    Exit,
+}
+
+/// Centralized restrained motion. Reduced motion resolves every duration to zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MitsuroMotion {
+    pub hover: Duration,
+    pub state: Duration,
+    pub panel: Duration,
+    pub tooltip_delay: Duration,
+    pub standard_easing: MitsuroEasing,
+    pub enter_easing: MitsuroEasing,
+    pub exit_easing: MitsuroEasing,
+    pub reduced: bool,
+}
+
+impl Default for MitsuroMotion {
+    fn default() -> Self {
+        Self {
+            hover: Duration::from_millis(90),
+            state: Duration::from_millis(140),
+            panel: Duration::from_millis(180),
+            tooltip_delay: Duration::from_millis(450),
+            standard_easing: MitsuroEasing::Standard,
+            enter_easing: MitsuroEasing::Enter,
+            exit_easing: MitsuroEasing::Exit,
+            reduced: false,
+        }
+    }
+}
+
+impl MitsuroMotion {
+    pub fn reduced() -> Self {
+        Self {
+            hover: Duration::ZERO,
+            state: Duration::ZERO,
+            panel: Duration::ZERO,
+            tooltip_delay: Duration::ZERO,
+            reduced: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Reference-grounded shell and control measurements.
+///
+/// Feature components should consume these values rather than introducing new
+/// top-level widths and heights. Component-local geometry still belongs beside
+/// the component when it is genuinely unique.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MitsuroMetrics {
+    pub root_rem_size: f32,
+    pub title_bar_height: f32,
+    pub toolbar_height: f32,
+    /// Coding workspace rail from the current Codex reference.
+    pub sidebar_width: f32,
+    /// ChatGPT connection browser is intentionally wider than the Codex rail.
+    pub chat_sidebar_width: f32,
+    /// Open Codex thread rail; composer inset yields the 736px live shell.
+    pub thread_content_max_width: f32,
+    /// ChatGPT conversation mode retains the wider reading rail.
+    pub chat_thread_content_max_width: f32,
+    pub composer_max_width: f32,
+    pub chat_home_composer_max_width: f32,
+    pub composer_radius: f32,
+    pub popover_radius: f32,
+    pub icon_button_size: f32,
+}
+
+impl Default for MitsuroMetrics {
+    fn default() -> Self {
+        Self {
+            // The installed Electron reference renders its 16px CSS root at
+            // roughly 1.2 framebuffer pixels on this desktop. GPUI otherwise
+            // presents 14px `text_sm` where the reference is about 17px.
+            root_rem_size: 19.2,
+            title_bar_height: 42.0,
+            toolbar_height: 56.0,
+            sidebar_width: 275.0,
+            chat_sidebar_width: 329.0,
+            thread_content_max_width: 768.0,
+            chat_thread_content_max_width: 864.0,
+            composer_max_width: 912.0,
+            chat_home_composer_max_width: 768.0,
+            composer_radius: 20.0,
+            popover_radius: 12.0,
+            icon_button_size: 34.0,
+        }
+    }
+}
+
+/// One semantic token bundle for the GPUI shell and shared primitives.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MitsuroThemeTokens {
+    pub colors: MitsuroColors,
+    pub metrics: MitsuroMetrics,
+    pub spacing: MitsuroSpacing,
+    pub typography: MitsuroTypography,
+    pub shape: MitsuroShape,
+    pub motion: MitsuroMotion,
+}
+
+pub fn tokens() -> MitsuroThemeTokens {
+    MitsuroThemeTokens::default()
+}
+
+pub fn colors() -> MitsuroColors {
+    tokens().colors
+}
+
+pub fn metrics() -> MitsuroMetrics {
+    tokens().metrics
+}
+
+pub fn spacing() -> MitsuroSpacing {
+    tokens().spacing
+}
+
+pub fn typography() -> MitsuroTypography {
+    tokens().typography
+}
+
+pub fn shape() -> MitsuroShape {
+    tokens().shape
+}
+
+pub fn motion() -> MitsuroMotion {
+    let reduced = std::env::var("MITSURO_REDUCED_MOTION")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+    if reduced {
+        MitsuroMotion::reduced()
+    } else {
+        tokens().motion
+    }
 }
 
 /// Fully transparent fill (inactive rail / ghost base).
 pub fn transparent() -> Hsla {
     hex_alpha(0x000000, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_scales_are_monotonic_and_reference_grounded() {
+        let tokens = tokens();
+        assert!(tokens.spacing.xxs < tokens.spacing.xs);
+        assert!(tokens.spacing.xs < tokens.spacing.md);
+        assert!(tokens.spacing.md < tokens.spacing.xl);
+        assert!(tokens.shape.control_sm < tokens.shape.control_md);
+        assert!(tokens.shape.control_md < tokens.shape.control_lg);
+        assert!(tokens.shape.hit_target_min >= tokens.shape.control_md);
+        assert_eq!(tokens.metrics.title_bar_height, 42.0);
+        assert_eq!(tokens.metrics.sidebar_width, 275.0);
+        assert_eq!(tokens.metrics.chat_sidebar_width, 329.0);
+        assert_eq!(tokens.metrics.thread_content_max_width, 768.0);
+        assert_eq!(tokens.metrics.chat_thread_content_max_width, 864.0);
+    }
+
+    #[test]
+    fn reduced_motion_zeroes_every_timed_transition() {
+        let motion = MitsuroMotion::reduced();
+        assert!(motion.reduced);
+        assert_eq!(motion.hover, Duration::ZERO);
+        assert_eq!(motion.state, Duration::ZERO);
+        assert_eq!(motion.panel, Duration::ZERO);
+        assert_eq!(motion.tooltip_delay, Duration::ZERO);
+    }
 }

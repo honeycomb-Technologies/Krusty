@@ -345,6 +345,15 @@ export function createStreamCallbacks(
 			updateLastAssistantMessage();
 		},
 
+		onToolCallPreparing: (id, _name, receivedBytes) => {
+			flushPendingDeltas();
+			const kilobytes = Math.max(1, Math.round(receivedBytes / 1024));
+			mapToolCalls(id, (toolCall) => ({
+				...toolCall,
+				description: `Preparing input · ${kilobytes} KB`,
+			}));
+		},
+
 		onToolCallComplete: (id, _name, args) => {
 			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => {
@@ -355,6 +364,7 @@ export function createStreamCallbacks(
 				);
 				return {
 					...toolCall,
+					description: undefined,
 					arguments: args,
 					delegated: delegatedKind
 						? mergeDelegatedArtifactState(
@@ -580,7 +590,7 @@ export function createStreamCallbacks(
 			sessionsStore.getState().loadSessions();
 		},
 
-		onFinish: (sessionId) => {
+		onFinish: (sessionId, _stopReason) => {
 			flushPendingDeltas();
 			const currentState = get();
 			const queued = currentState.queuedMessages;

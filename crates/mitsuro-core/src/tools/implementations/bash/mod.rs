@@ -21,8 +21,8 @@ use crate::tools::{parse_params, ToolContext, ToolResult};
 
 use execution::{execute_foreground, StreamContext};
 use shell::{
-    build_shell_command, configure_foreground_process_group, normalize_tracked_background_command,
-    strip_ansi,
+    build_shell_command, command_environment, configure_foreground_process_group,
+    contains_embedded_background_operator, normalize_tracked_background_command, strip_ansi,
 };
 
 pub(super) const MAX_OUTPUT_LINES: usize = 2000;
@@ -159,7 +159,7 @@ fn parse_port(value: &str) -> Option<u16> {
         .filter(|port| *port > 0)
 }
 
-fn background_endpoint_hints(command: &str) -> Vec<String> {
+pub(crate) fn background_endpoint_hints(command: &str) -> Vec<String> {
     let tokens = command.split_whitespace().collect::<Vec<_>>();
     let mut host = None;
     let mut port = None;
@@ -217,6 +217,51 @@ fn background_endpoint_hints(command: &str) -> Vec<String> {
 
 fn normalized_working_dir(path: &std::path::Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn sandboxed_shell_command(command: &str, ctx: &ToolContext) -> Result<String, String> {
+    let Some(root) = ctx.sandbox_root.as_deref() else {
+        return Ok(command.to_string());
+    };
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "Access denied: cannot resolve filesystem sandbox '{}': {error}",
+            root.display()
+        )
+    })?;
+    let working_dir = ctx.working_dir.canonicalize().map_err(|error| {
+        format!(
+            "Access denied: cannot resolve working directory '{}': {error}",
+            ctx.working_dir.display()
+        )
+    })?;
+    if !working_dir.starts_with(&root) {
+        return Err(
+            "Access denied: working directory is outside the configured filesystem access root"
+                .to_string(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let bubblewrap = std::path::Path::new("/usr/bin/bwrap");
+        if !bubblewrap.is_file() {
+            return Err(
+                "Strong delegated shell isolation is unavailable: /usr/bin/bwrap is missing"
+                    .to_string(),
+            );
+        }
+        let quote = |value: &str| shell_words::quote(value).into_owned();
+        Ok(format!(
+            "/usr/bin/bwrap --die-with-parent --new-session --ro-bind / / --tmpfs /tmp --bind {root} {root} --proc /proc --dev /dev --chdir {working_dir} -- /bin/bash -lc {command}",
+            root = quote(&root.display().to_string()),
+            working_dir = quote(&working_dir.display().to_string()),
+            command = quote(command),
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Ok(command.to_string())
 }
 
 fn launch_signature(command: &str, working_dir: &std::path::Path) -> (PathBuf, String) {
@@ -297,6 +342,33 @@ fn existing_background_result(
         None,
     )
     .with_changed(false)
+}
+
+async fn conflicting_background_endpoint(
+    registry: &ProcessRegistry,
+    user_id: Option<&str>,
+    command: &str,
+    working_dir: &std::path::Path,
+) -> Option<(ProcessInfo, String)> {
+    let requested = background_endpoint_hints(command);
+    if requested.is_empty() {
+        return None;
+    }
+    let processes = match user_id {
+        Some(user_id) => registry.list_for_user(user_id).await,
+        None => registry.list().await,
+    };
+    processes.into_iter().find_map(|process| {
+        if !process.is_active() || same_background_launch(&process, command, working_dir) {
+            return None;
+        }
+        let existing = background_endpoint_hints(&process.command);
+        requested
+            .iter()
+            .find(|endpoint| existing.contains(endpoint))
+            .cloned()
+            .map(|endpoint| (process, endpoint))
+    })
 }
 
 fn output_spool_path(ctx: &ToolContext) -> PathBuf {
@@ -433,6 +505,16 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
 
         let (clean_command, inferred_from_shell_suffix, removed_detachment_wrapper) =
             normalize_tracked_background_command(&effective_command);
+        if contains_embedded_background_operator(&clean_command) {
+            return ToolResult::error_with_code(
+                "untracked_shell_background",
+                "Embedded shell background jobs are not allowed because they escape the shared process registry. Run build/setup as foreground calls, then start the server in a separate bash call with run_in_background:true.",
+            );
+        }
+        let execution_command = match sandboxed_shell_command(&clean_command, ctx) {
+            Ok(command) => command,
+            Err(error) => return ToolResult::error_with_code("shell_sandbox_unavailable", error),
+        };
 
         if params.run_in_background.unwrap_or(false) || inferred_from_shell_suffix {
             let mut warnings = Vec::new();
@@ -451,20 +533,53 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
 
             if let Some(ref registry) = ctx.process_registry {
                 let endpoint_hints = background_endpoint_hints(&clean_command);
-                let session_id = ctx.session_id.clone();
-                let spawn_result = match ctx.user_id.as_deref() {
+                // Delegated task-scoped processes are cleaned by the child
+                // lease and must not emit a separate parent-session wake when
+                // that cleanup occurs.
+                let session_id = if ctx.process_owner_id.is_some() {
+                    None
+                } else {
+                    ctx.session_id.clone()
+                };
+                let command_environment = command_environment(ctx);
+                if let Some((process, endpoint)) = conflicting_background_endpoint(
+                    registry,
+                    ctx.effective_process_owner_id(),
+                    &execution_command,
+                    &ctx.working_dir,
+                )
+                .await
+                {
+                    return ToolResult::error_with_details(
+                        "background_endpoint_in_use",
+                        format!(
+                            "Tracked background process {} already owns {endpoint}",
+                            process.id
+                        ),
+                        Some(json!({
+                            "endpoint": endpoint,
+                            "process_id": process.id,
+                            "process_working_dir": process._working_dir,
+                            "process_session_id": process.session_id,
+                            "next_action": "Use the owning process only if it belongs to this exact project, otherwise choose an unused high loopback port. Do not validate this project against another session's server."
+                        })),
+                        None,
+                    );
+                }
+                let spawn_result = match ctx.effective_process_owner_id() {
                     Some(uid) => {
                         registry
-                            .spawn_or_reuse_matching_for_user(
+                            .spawn_or_reuse_matching_for_user_with_environment(
                                 uid,
-                                clean_command.clone(),
+                                execution_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
                                 session_id,
+                                command_environment,
                                 |process| {
                                     same_background_launch(
                                         process,
-                                        &clean_command,
+                                        &execution_command,
                                         &ctx.working_dir,
                                     )
                                 },
@@ -473,15 +588,16 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                     }
                     None => {
                         registry
-                            .spawn_or_reuse_matching(
-                                clean_command.clone(),
+                            .spawn_or_reuse_matching_with_environment(
+                                execution_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
                                 session_id,
+                                command_environment,
                                 |process| {
                                     same_background_launch(
                                         process,
-                                        &clean_command,
+                                        &execution_command,
                                         &ctx.working_dir,
                                     )
                                 },
@@ -496,7 +612,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                     Ok((process, false)) => {
                         return background_start_result(
                             registry,
-                            ctx.user_id.as_deref(),
+                            ctx.effective_process_owner_id(),
                             process.id,
                             endpoint_hints,
                             warnings,
@@ -533,7 +649,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
         )
         .await;
 
-        let mut cmd = build_shell_command(&effective_command, ctx);
+        let mut cmd = build_shell_command(&execution_command, ctx);
         configure_foreground_process_group(&mut cmd);
         cmd.kill_on_drop(true);
         cmd.stdin(Stdio::null());

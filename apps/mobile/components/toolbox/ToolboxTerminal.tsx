@@ -1,75 +1,72 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { Plus, RefreshCw, X, TerminalSquare } from 'lucide-react-native';
-import type { WebViewProps } from 'react-native-webview';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ComponentType, Ref } from 'react';
+import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { AlertCircle, Plus, RefreshCw, TerminalSquare, X } from 'lucide-react-native';
+import type { TerminalInputEvent, TerminalResizeEvent, TerminalViewProps, TerminalViewRef } from 'expo-libghostty';
+
 import * as Haptics from '../../platform/haptics';
+import * as Clipboard from '../../platform/clipboard';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { Terminal } from '../desktop/Terminal';
 import { buildTerminalWebSocketUrl } from '../terminalUrl';
-import { getTerminalHtml } from './terminalHtml';
-import { recordWebViewDiagnostic } from '../../diagnostics/mobileDiagnostics';
+import { TerminalQuickBar } from './TerminalQuickBar';
 
-let WebViewComponent: React.ComponentType<WebViewProps> | null = null;
+type NativeTerminalViewProps = TerminalViewProps & { ref?: Ref<TerminalViewRef> };
+
+let GhosttyTerminalView: ComponentType<NativeTerminalViewProps> | null = null;
 if (Platform.OS !== 'web') {
   try {
-    WebViewComponent = require('react-native-webview').default;
+    GhosttyTerminalView = require('expo-libghostty').TerminalView;
   } catch {
-    // WebView not available
+    // Expo Go cannot load custom native modules. Mitsuro builds bundle libghostty.
   }
 }
 
-interface ToolboxTerminalProps {
-  visible: boolean;
+interface ToolboxTerminalProps { visible: boolean }
+interface NativeTerminalTab {
+  id: string;
+  label: string;
+  connected: boolean;
+  error: string | null;
 }
+
+const MAX_TERMINAL_TABS = 4;
+const TAB_MOUNT_SETTLE_MS = 120;
+const MAX_RECONNECT_ATTEMPTS = 8;
+const RECONNECT_INITIAL_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 5_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 45_000;
+const OUTPUT_HIGH_WATERMARK_BYTES = 512 * 1024;
+
+function terminalFontSizeForWidth(width: number): number {
+  if (width <= 390) return 9;
+  if (width <= 520) return 11;
+  if (width <= 760) return 12;
+  return 14;
+}
+
+// Keep tab identity warm, but freeze native surfaces and PTYs while hidden.
+const terminalSession: { tabs: NativeTerminalTab[]; activeTab: string | null } = {
+  tabs: [],
+  activeTab: null,
+};
 
 export function ToolboxTerminal({ visible }: ToolboxTerminalProps) {
   if (Platform.OS === 'web') {
     return <Terminal visible={visible} style={{ flex: 1, height: undefined, borderTopWidth: 0 }} />;
   }
-
   return <NativeTerminal visible={visible} />;
 }
-
-interface NativeTerminalTab {
-  id: string;
-  label: string;
-  html: string;
-  revision?: number;
-  recoveryAttempts?: number;
-  recoveryBlocked?: boolean;
-  lastTerminationAt?: number;
-}
-
-const MAX_TERMINAL_TABS = 4;
-const WEBVIEW_MOUNT_SETTLE_MS = 250;
-const WEBVIEW_RECOVERY_COOLDOWN_MS = 1_500;
-const MAX_AUTOMATIC_RECOVERIES = 1;
-
-// Survive toolbox sheet unmount so reopening Terminal keeps existing sessions.
-const terminalSession: {
-  tabs: NativeTerminalTab[];
-  activeTab: string | null;
-} = {
-  tabs: [],
-  activeTab: null,
-};
 
 function NativeTerminal({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
   const { serverUrl, serverToken } = useConnection();
   const t = theme.colors;
-
   const [tabs, setTabs] = useState<NativeTerminalTab[]>(terminalSession.tabs);
   const [activeTab, setActiveTab] = useState<string | null>(terminalSession.activeTab);
   const [renderedTabId, setRenderedTabId] = useState<string | null>(null);
-  const tabsRef = useRef(tabs);
-  const visibleRef = useRef(visible);
-  const activeTabRef = useRef(activeTab);
-  const recoveryTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  tabsRef.current = tabs;
-  visibleRef.current = visible;
-  activeTabRef.current = activeTab;
 
   useEffect(() => {
     terminalSession.tabs = tabs;
@@ -79,197 +76,92 @@ function NativeTerminal({ visible }: { visible: boolean }) {
   const createTab = useCallback(() => {
     if (!serverUrl) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setTabs((prev) => {
-      if (prev.length >= MAX_TERMINAL_TABS) {
-        // Cap concurrent terminal processes. Reuse newest tab shell.
-        const active = prev[prev.length - 1];
-        if (active) setActiveTab(active.id);
-        return prev;
+    setTabs((current) => {
+      if (current.length >= MAX_TERMINAL_TABS) {
+        setActiveTab(current[current.length - 1]?.id ?? null);
+        return current;
       }
       const id = createTerminalId();
-      const html = getTerminalHtml(buildTerminalWebSocketUrl(serverUrl, serverToken), {
-        background: t.background,
-        foreground: t.foreground,
-        cursor: t.userMessage,
-      });
       setActiveTab(id);
-      return [...prev, { id, label: `Terminal ${prev.length + 1}`, html, revision: 0 }];
+      return [...current, { id, label: `Terminal ${current.length + 1}`, connected: false, error: null }];
     });
-  }, [serverToken, serverUrl, t.background, t.foreground, t.userMessage]);
+  }, [serverUrl]);
 
   const closeTab = useCallback((id: string) => {
-    setTabs(prev => {
-      const next = prev.filter(tab => tab.id !== id);
-      setActiveTab(current => current === id ? (next[0]?.id ?? null) : current);
+    setTabs((current) => {
+      const index = current.findIndex((tab) => tab.id === id);
+      const next = current.filter((tab) => tab.id !== id);
+      setActiveTab((selected) => selected === id
+        ? next[Math.max(0, index - 1)]?.id ?? next[0]?.id ?? null
+        : selected);
       return next;
     });
   }, []);
 
-  useEffect(() => {
-    if (visible && tabs.length === 0 && serverUrl) {
-      createTab();
-    }
-  }, [visible, createTab, serverUrl, tabs.length]);
+  const updateTab = useCallback((id: string, patch: Partial<Pick<NativeTerminalTab, 'connected' | 'error'>>) => {
+    setTabs((current) => current.map((tab) => tab.id === id ? { ...tab, ...patch } : tab));
+  }, []);
 
-  // Keep rapid tab/open taps in JS until the selection settles; constructing a
-  // WKWebView, loading xterm and opening a PTY must remain a bounded operation.
+  useEffect(() => {
+    if (visible && tabs.length === 0 && serverUrl) createTab();
+  }, [createTab, serverUrl, tabs.length, visible]);
+
   useEffect(() => {
     if (!visible || !activeTab) {
       setRenderedTabId(null);
       return;
     }
-    const timer = setTimeout(() => {
-      if (visibleRef.current) setRenderedTabId(activeTab);
-    }, WEBVIEW_MOUNT_SETTLE_MS);
+    const timer = setTimeout(() => setRenderedTabId(activeTab), TAB_MOUNT_SETTLE_MS);
     return () => clearTimeout(timer);
   }, [activeTab, visible]);
-
-  useEffect(() => {
-    if (visible) {
-      setTabs((current) => current.map((tab) =>
-        tab.recoveryBlocked || (tab.recoveryAttempts ?? 0) > 0
-          ? { ...tab, recoveryBlocked: false, recoveryAttempts: 0 }
-          : tab));
-      return;
-    }
-    for (const timer of recoveryTimersRef.current.values()) clearTimeout(timer);
-    recoveryTimersRef.current.clear();
-  }, [visible]);
-
-  useEffect(() => () => {
-    for (const timer of recoveryTimersRef.current.values()) clearTimeout(timer);
-    recoveryTimersRef.current.clear();
-  }, []);
-
-  const retryWebView = useCallback((tabId: string) => {
-    recordWebViewDiagnostic('terminal', 'reload');
-    const timer = recoveryTimersRef.current.get(tabId);
-    if (timer) clearTimeout(timer);
-    recoveryTimersRef.current.delete(tabId);
-    setTabs((current) => current.map((tab) =>
-      tab.id === tabId
-        ? {
-            ...tab,
-            revision: (tab.revision ?? 0) + 1,
-            recoveryAttempts: 0,
-            recoveryBlocked: false,
-          }
-        : tab));
-  }, []);
-
-  const handleWebViewTerminated = useCallback((tabId: string) => {
-    if (!visibleRef.current || activeTabRef.current !== tabId) return;
-    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
-    if (!tab) return;
-    const now = Date.now();
-    if (now - (tab.lastTerminationAt ?? 0) < 250) return;
-    const attempts = tab.recoveryAttempts ?? 0;
-    recordWebViewDiagnostic('terminal', 'terminate');
-    setTabs((current) => current.map((candidate) =>
-      candidate.id === tabId
-        ? {
-            ...candidate,
-            recoveryAttempts: attempts + 1,
-            recoveryBlocked: true,
-            lastTerminationAt: now,
-          }
-        : candidate));
-    if (attempts >= MAX_AUTOMATIC_RECOVERIES) return;
-
-    const existing = recoveryTimersRef.current.get(tabId);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      recoveryTimersRef.current.delete(tabId);
-      if (!visibleRef.current || activeTabRef.current !== tabId) return;
-      setTabs((current) => current.map((candidate) =>
-        candidate.id === tabId
-          ? {
-              ...candidate,
-              revision: (candidate.revision ?? 0) + 1,
-              recoveryBlocked: false,
-            }
-          : candidate));
-    }, WEBVIEW_RECOVERY_COOLDOWN_MS);
-    recoveryTimersRef.current.set(tabId, timer);
-  }, []);
 
   return (
     <View style={[styles.container, { backgroundColor: t.background }]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
-        {tabs.map(tab => (
-          <Pressable
-            key={tab.id}
-            onPress={() => setActiveTab(tab.id)}
-            style={[styles.tab, activeTab === tab.id && { backgroundColor: `${t.userMessage}18` }]}
-          >
-            <Text
-              style={[styles.tabLabel, { color: activeTab === tab.id ? t.foreground : t.mutedForeground }]}
-              numberOfLines={1}
-            >
-              {tab.label}
-            </Text>
-            <Pressable onPress={() => closeTab(tab.id)} hitSlop={8}>
-              <X size={12} color={t.mutedForeground} strokeWidth={2} />
-            </Pressable>
-          </Pressable>
-        ))}
-        <Pressable onPress={createTab} style={styles.addBtn}>
+        {tabs.map((tab) => {
+          const selected = activeTab === tab.id;
+          const statusColor = tab.connected ? t.success : tab.error ? t.error : t.warning;
+          return (
+            <View key={tab.id} style={[styles.tab, selected && { backgroundColor: `${t.userMessage}18` }]}>
+              <Pressable style={styles.tabPressable} onPress={() => setActiveTab(tab.id)}>
+                <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+                <Text style={[styles.tabLabel, { color: selected ? t.foreground : t.mutedForeground }]} numberOfLines={1}>
+                  {tab.label}
+                </Text>
+              </Pressable>
+              <Pressable onPress={() => closeTab(tab.id)} hitSlop={8}>
+                <X size={12} color={t.mutedForeground} strokeWidth={2} />
+              </Pressable>
+            </View>
+          );
+        })}
+        <Pressable onPress={createTab} style={styles.addBtn} disabled={!serverUrl}>
           <Plus size={16} color={t.mutedForeground} strokeWidth={2} />
         </Pressable>
       </View>
 
       <View style={styles.terminalArea}>
-        {WebViewComponent && visible
-          ? tabs.map((tab) => {
-              // Tab metadata survives closure. The WebView/websocket/PTY is a
-              // deliberate cold restore so hidden terminals consume no CPU.
-              if (tab.id !== renderedTabId) {
-                return null;
-              }
-              return (
-                <View
-                  key={`${tab.id}:${tab.revision ?? 0}`}
-                  pointerEvents={tab.id === activeTab ? 'auto' : 'none'}
-                  style={styles.webviewHost}
-                >
-                  {!tab.recoveryBlocked ? <WebViewComponent
-                    source={{ html: tab.html }}
-                    style={{ flex: 1, backgroundColor: t.background }}
-                    originWhitelist={['*']}
-                    javaScriptEnabled
-                    domStorageEnabled
-                    onContentProcessDidTerminate={() => handleWebViewTerminated(tab.id)}
-                    onRenderProcessGone={() => handleWebViewTerminated(tab.id)}
-                  /> : (
-                    <View style={styles.recoveryState}>
-                      <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Terminal paused</Text>
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Reload terminal"
-                        onPress={() => retryWebView(tab.id)}
-                        style={[styles.retryButton, { borderColor: t.border }]}
-                      >
-                        <RefreshCw size={15} color={t.foreground} strokeWidth={2} />
-                        <Text style={[styles.retryText, { color: t.foreground }]}>Reload</Text>
-                      </Pressable>
-                    </View>
-                  )}
-                </View>
-              );
-            })
+        {GhosttyTerminalView && visible && renderedTabId && serverUrl
+          ? tabs.filter((tab) => tab.id === renderedTabId).map((tab) => (
+              <NativeGhosttyPane
+                key={tab.id}
+                serverToken={serverToken}
+                serverUrl={serverUrl}
+                tab={tab}
+                themeColors={t}
+                onStatusChange={updateTab}
+              />
+            ))
           : null}
-
-        {!activeTab || !visible || !WebViewComponent ? (
+        {!activeTab || !visible || !GhosttyTerminalView || !serverUrl ? (
           <View style={styles.empty}>
             <TerminalSquare size={32} color={t.mutedForeground} strokeWidth={1.5} />
             <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-              {!WebViewComponent
-                ? 'WebView not available'
+              {!GhosttyTerminalView
+                ? 'Native Ghostty requires a Mitsuro development or release build.'
                 : !serverUrl
-                  ? 'Connect to a server to open a terminal.'
-                  : !visible
-                    ? ''
-                    : 'No terminal open'}
+                  ? 'Connect to Honey to open a terminal.'
+                  : visible ? 'No terminal open' : ''}
             </Text>
           </View>
         ) : null}
@@ -278,77 +170,238 @@ function NativeTerminal({ visible }: { visible: boolean }) {
   );
 }
 
+function NativeGhosttyPane({ serverToken, serverUrl, tab, themeColors, onStatusChange }: {
+  serverToken: string | null;
+  serverUrl: string;
+  tab: NativeTerminalTab;
+  themeColors: ReturnType<typeof useThemeContext>['theme']['colors'];
+  onStatusChange: (id: string, patch: Partial<Pick<NativeTerminalTab, 'connected' | 'error'>>) => void;
+}) {
+  const terminalRef = useRef<TerminalViewRef>(null);
+  const { width: windowWidth } = useWindowDimensions();
+  const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heartbeatTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const lastSizeRef = useRef({ cols: 80, rows: 24 });
+  const manualCloseRef = useRef(false);
+  const outputQueueRef = useRef<Array<{ data: string; base64: boolean }>>([]);
+  const outputQueueBytesRef = useRef(0);
+  const outputWriteActiveRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const drainOutput = useCallback(async () => {
+    if (outputWriteActiveRef.current) return;
+    outputWriteActiveRef.current = true;
+    try {
+      while (mountedRef.current && outputQueueRef.current.length > 0) {
+        const chunk = outputQueueRef.current.shift();
+        if (!chunk) break;
+        outputQueueBytesRef.current = Math.max(0, outputQueueBytesRef.current - chunk.data.length);
+        if (chunk.base64) await terminalRef.current?.write(chunk.data);
+        else await terminalRef.current?.writeText(chunk.data);
+      }
+    } catch {
+      onStatusChange(tab.id, { connected: false, error: 'Ghostty could not render terminal output.' });
+      socketRef.current?.close(1011, 'terminal renderer failed');
+    } finally {
+      outputWriteActiveRef.current = false;
+    }
+  }, [onStatusChange, tab.id]);
+
+  const enqueueOutput = useCallback((data: string, base64: boolean) => {
+    if (outputQueueBytesRef.current + data.length > OUTPUT_HIGH_WATERMARK_BYTES) {
+      outputQueueRef.current = [];
+      outputQueueBytesRef.current = 0;
+      onStatusChange(tab.id, {
+        connected: false,
+        error: 'Terminal output exceeded the safe buffer. Reconnect to continue.',
+      });
+      socketRef.current?.close(1008, 'terminal output buffer exceeded');
+      return;
+    }
+    outputQueueRef.current.push({ data, base64 });
+    outputQueueBytesRef.current += data.length;
+    void drainOutput();
+  }, [drainOutput, onStatusChange, tab.id]);
+
+  const clearTimers = useCallback(() => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    if (heartbeatTimeoutRef.current) clearTimeout(heartbeatTimeoutRef.current);
+    reconnectTimerRef.current = null;
+    heartbeatIntervalRef.current = null;
+    heartbeatTimeoutRef.current = null;
+  }, []);
+
+  const touchHeartbeat = useCallback((socket: WebSocket) => {
+    if (heartbeatTimeoutRef.current) clearTimeout(heartbeatTimeoutRef.current);
+    heartbeatTimeoutRef.current = setTimeout(() => {
+      if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) socket.close(4000, 'heartbeat_timeout');
+    }, HEARTBEAT_TIMEOUT_MS);
+  }, []);
+
+  const connect = useCallback(() => {
+    const current = socketRef.current;
+    if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;
+    clearTimers();
+    manualCloseRef.current = false;
+    onStatusChange(tab.id, { connected: false, error: null });
+    const socket = new WebSocket(buildTerminalWebSocketUrl(serverUrl, serverToken));
+    socketRef.current = socket;
+
+    socket.onopen = () => {
+      reconnectAttemptsRef.current = 0;
+      onStatusChange(tab.id, { connected: true, error: null });
+      socket.send(JSON.stringify({ type: 'hello', output_encoding: 'base64' }));
+      socket.send(JSON.stringify({ type: 'resize', ...lastSizeRef.current }));
+      touchHeartbeat(socket);
+      heartbeatIntervalRef.current = setInterval(() => {
+        if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+    };
+
+    socket.onmessage = (event) => {
+      touchHeartbeat(socket);
+      if (typeof event.data !== 'string') return;
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'output_base64' && typeof message.data === 'string') {
+          enqueueOutput(message.data, true);
+        } else if (message.type === 'output' && typeof message.data === 'string') {
+          enqueueOutput(message.data, false);
+        } else if (message.type === 'error' && typeof message.error === 'string') {
+          onStatusChange(tab.id, { connected: false, error: message.error });
+        }
+      } catch {
+        enqueueOutput(String(event.data), false);
+      }
+    };
+    socket.onerror = () => onStatusChange(tab.id, { connected: false, error: 'Terminal connection failed.' });
+    socket.onclose = () => {
+      if (socketRef.current === socket) socketRef.current = null;
+      clearTimers();
+      onStatusChange(tab.id, { connected: false });
+      if (manualCloseRef.current) return;
+      const attempt = reconnectAttemptsRef.current;
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        onStatusChange(tab.id, { connected: false, error: 'Reconnect limit reached.' });
+        return;
+      }
+      reconnectAttemptsRef.current = attempt + 1;
+      onStatusChange(tab.id, { connected: false, error: `Reconnecting (${attempt + 1}/${MAX_RECONNECT_ATTEMPTS})…` });
+      reconnectTimerRef.current = setTimeout(connect, Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
+    };
+  }, [clearTimers, enqueueOutput, onStatusChange, serverToken, serverUrl, tab.id, touchHeartbeat]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    connect();
+    return () => {
+      mountedRef.current = false;
+      manualCloseRef.current = true;
+      clearTimers();
+      outputQueueRef.current = [];
+      outputQueueBytesRef.current = 0;
+      socketRef.current?.close();
+      socketRef.current = null;
+      void terminalRef.current?.finish(0);
+    };
+  }, [clearTimers, connect]);
+
+  const handleInput = useCallback((event: { nativeEvent: TerminalInputEvent }) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'input_base64', data: event.nativeEvent.data }));
+    }
+  }, []);
+
+  const handleResize = useCallback((event: { nativeEvent: TerminalResizeEvent }) => {
+    const { cols, rows } = event.nativeEvent;
+    lastSizeRef.current = { cols, rows };
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }, []);
+
+  const sendQuickInput = useCallback((data: string) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'input', data }));
+    }
+  }, []);
+
+  const pasteClipboard = useCallback(async () => {
+    const text = await Clipboard.getStringAsync();
+    if (text) sendQuickInput(text);
+  }, [sendQuickInput]);
+
+  const NativeView = GhosttyTerminalView;
+  if (!NativeView) return null;
+  return (
+    <View style={styles.ghosttyHost}>
+      <NativeView
+        ref={terminalRef}
+        style={styles.ghosttyHost}
+        fontSize={terminalFontSizeForWidth(windowWidth)}
+        theme={{
+          background: themeColors.background,
+          foreground: themeColors.foreground,
+          cursorColor: themeColors.userMessage,
+          selectionBackground: `${themeColors.userMessage}55`,
+        }}
+        onInput={handleInput}
+        onResize={handleResize}
+      />
+      <TerminalQuickBar
+        disabled={!tab.connected}
+        onInput={sendQuickInput}
+        onPaste={pasteClipboard}
+      />
+      {!tab.connected ? (
+        <View style={[styles.overlay, { backgroundColor: `${themeColors.background}E8` }]}>
+          {tab.error && !tab.error.startsWith('Reconnecting') ? (
+            <>
+              <AlertCircle size={17} color={themeColors.error} strokeWidth={1.8} />
+              <Text style={[styles.overlayText, { color: themeColors.error }]}>{tab.error}</Text>
+              <Pressable onPress={() => { reconnectAttemptsRef.current = 0; connect(); }} style={[styles.retryButton, { borderColor: themeColors.border }]}>
+                <RefreshCw size={15} color={themeColors.foreground} strokeWidth={1.8} />
+                <Text style={[styles.retryText, { color: themeColors.foreground }]}>Reconnect</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <ActivityIndicator color={themeColors.userMessage} size="small" />
+              <Text style={[styles.overlayText, { color: themeColors.mutedForeground }]}>{tab.error ?? 'Connecting…'}</Text>
+            </>
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  tabBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  tab: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-  },
-  tabLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-    maxWidth: 100,
-  },
-  addBtn: {
-    padding: 4,
-  },
-  terminalArea: {
-    flex: 1,
-  },
-  webviewHost: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  recoveryState: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  retryButton: {
-    minHeight: 40,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  retryText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  hiddenSurface: {
-    opacity: 0,
-  },
-  empty: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 12,
-  },
-  emptyText: {
-    fontSize: 14,
-  },
+  container: { flex: 1 },
+  tabBar: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth },
+  tab: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6 },
+  tabPressable: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  statusDot: { width: 6, height: 6, borderRadius: 3 },
+  tabLabel: { fontSize: 12, fontWeight: '500', maxWidth: 100 },
+  addBtn: { padding: 4 },
+  terminalArea: { flex: 1 },
+  ghosttyHost: { flex: 1 },
+  empty: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12, padding: 24 },
+  emptyText: { fontSize: 14, textAlign: 'center' },
+  overlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 10, padding: 24 },
+  overlayText: { fontSize: 13, textAlign: 'center' },
+  retryButton: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth },
+  retryText: { fontSize: 13, fontWeight: '600' },
 });
 
 function createTerminalId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `term-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }

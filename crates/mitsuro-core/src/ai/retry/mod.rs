@@ -13,5 +13,5 @@ pub use backoff::{
 };
 pub(crate) use backoff::{
     is_retryable_interactive_stream_error, provider_http_error, safe_provider_code,
-    safe_provider_event_error, ProviderHttpError,
+    safe_provider_event_error, ProviderHttpError, ProviderWebSocketError,
 };

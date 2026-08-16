@@ -64,6 +64,8 @@ export interface DelegatedArtifactState {
   delegatedRunId?: string;
   stage?: DelegatedRunStage;
   groupState?: DelegationGroupState;
+  maxParallelism?: number;
+  effectiveParallelism?: number;
   thinking?: string;
   message?: string;
   investigationSummary?: string;

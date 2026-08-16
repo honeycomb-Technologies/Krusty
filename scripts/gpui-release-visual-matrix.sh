@@ -13,6 +13,9 @@ Environment overrides:
   MITSURO_SERVER_URL       Mitsuro HTTP endpoint (default: http://127.0.0.1:3000)
   MITSURO_VISUAL_BACKENDS  Comma-separated backend ids
   MITSURO_VISUAL_MODES     Comma-separated MITSURO_START_MODE values
+  MITSURO_VISUAL_SIZE      Optional exact floating viewport, for example 1260x1388
+  MITSURO_VISUAL_MONITOR   Optional Hyprland output for normalized captures
+  MITSURO_VISUAL_REQUIRE_COMPANION  Wait for the other real provider (0 or 1)
 EOF
 }
 
@@ -40,6 +43,18 @@ output_dir=$(realpath -- "$output_dir")
 server_url=${MITSURO_SERVER_URL:-http://127.0.0.1:3000}
 backend_csv=${MITSURO_VISUAL_BACKENDS:-codex-stdio,mitsuro-http}
 mode_csv=${MITSURO_VISUAL_MODES:-chat,codex,thread-open,work,atlas,terminal,files,computer,extensions,settings,pull-requests,sites,scheduled}
+visual_size=${MITSURO_VISUAL_SIZE:-}
+visual_monitor=${MITSURO_VISUAL_MONITOR:-}
+require_companion=${MITSURO_VISUAL_REQUIRE_COMPANION:-0}
+if [[ -n "$visual_size" && ! "$visual_size" =~ ^[0-9]+x[0-9]+$ ]]; then
+  printf 'MITSURO_VISUAL_SIZE must use WIDTHxHEIGHT, got: %s\n' "$visual_size" >&2
+  exit 2
+fi
+if [[ "$require_companion" != "0" && "$require_companion" != "1" ]]; then
+  printf 'MITSURO_VISUAL_REQUIRE_COMPANION must be 0 or 1, got: %s\n' \
+    "$require_companion" >&2
+  exit 2
+fi
 IFS=',' read -r -a backends <<<"$backend_csv"
 IFS=',' read -r -a modes <<<"$mode_csv"
 
@@ -112,6 +127,49 @@ for backend in "${backends[@]}"; do
       exit 1
     fi
 
+    # Tiling layout is ambient desktop state, not application behavior. Visual
+    # comparisons may request an exact floating viewport so repeated captures
+    # have identical geometry regardless of the current workspace split.
+    if [[ -n "$visual_size" ]]; then
+      window_address=$(jq -r '.address' <<<"$window_json")
+      visual_width=${visual_size%x*}
+      visual_height=${visual_size#*x}
+      if [[ -n "$visual_monitor" ]]; then
+        visual_workspace=$(hyprctl monitors -j 2>/dev/null \
+          | jq -r --arg monitor "$visual_monitor" \
+            '.[] | select(.name == $monitor) | .activeWorkspace.id' \
+          | head -n 1)
+        if [[ -z "$visual_workspace" || "$visual_workspace" == "null" ]]; then
+          printf 'Visual monitor is unavailable: %s\n' "$visual_monitor" >&2
+          exit 1
+        fi
+        hyprctl dispatch movetoworkspacesilent \
+          "$visual_workspace,address:$window_address" >/dev/null
+        sleep 0.1
+        window_json=$(window_for_pid "$active_pid")
+      fi
+      if [[ $(jq -r '.floating' <<<"$window_json") != "true" ]]; then
+        hyprctl dispatch togglefloating "address:$window_address" >/dev/null
+      fi
+      hyprctl dispatch focuswindow "address:$window_address" >/dev/null
+      hyprctl dispatch alterzorder "top,address:$window_address" >/dev/null
+      hyprctl dispatch resizewindowpixel \
+        "exact $visual_width $visual_height,address:$window_address" >/dev/null
+      hyprctl dispatch centerwindow 1 >/dev/null
+      sleep 0.25
+      window_json=$(window_for_pid "$active_pid")
+      if [[ -z "$window_json" ]]; then
+        printf 'Mapped GPUI window disappeared while normalizing viewport\n' >&2
+        exit 1
+      fi
+      normalized_size=$(jq -r '.size | "\(.[0])x\(.[1])"' <<<"$window_json")
+      if [[ "$normalized_size" != "$visual_size" ]]; then
+        printf 'Could not normalize viewport: requested=%s actual=%s\n' \
+          "$visual_size" "$normalized_size" >&2
+        exit 1
+      fi
+    fi
+
     connected_pattern="Connected backend=${backend} "
     for _ in $(seq 1 600); do
       if rg -q --fixed-strings "$connected_pattern" "$log_path"; then
@@ -128,6 +186,32 @@ for backend in "${backends[@]}"; do
       printf 'Desktop did not connect for backend=%s mode=%s\n' "$backend" "$mode" >&2
       sed -n '1,120p' "$log_path" >&2
       exit 1
+    fi
+
+    if [[ "$require_companion" == "1" ]]; then
+      if [[ "$backend" == "codex-stdio" ]]; then
+        companion_backend=mitsuro-http
+      else
+        companion_backend=codex-stdio
+      fi
+      companion_pattern="Companion connected backend=${companion_backend} "
+      for _ in $(seq 1 600); do
+        if rg -q --fixed-strings "$companion_pattern" "$log_path"; then
+          break
+        fi
+        if ! kill -0 "$active_pid" 2>/dev/null; then
+          printf 'Desktop exited before companion connected for backend=%s\n' \
+            "$backend" >&2
+          sed -n '1,160p' "$log_path" >&2
+          exit 1
+        fi
+        sleep 0.1
+      done
+      if ! rg -q --fixed-strings "$companion_pattern" "$log_path"; then
+        printf 'Companion did not connect for active backend=%s\n' "$backend" >&2
+        sed -n '1,160p' "$log_path" >&2
+        exit 1
+      fi
     fi
 
     if [[ "$mode" == "thread-open" ]]; then
@@ -151,6 +235,14 @@ for backend in "${backends[@]}"; do
 
     # Give post-connect catalog and selected-thread hydration one bounded paint cycle.
     sleep 1
+    if [[ -n "$visual_size" ]]; then
+      # Another desktop window can become active while backend hydration runs.
+      # Raise the target again so the compositor capture contains only the app
+      # inside the requested geometry.
+      hyprctl dispatch focuswindow "address:$window_address" >/dev/null
+      hyprctl dispatch alterzorder "top,address:$window_address" >/dev/null
+      sleep 0.1
+    fi
     window_json=$(window_for_pid "$active_pid")
     if [[ -z "$window_json" ]]; then
       printf 'Mapped GPUI window disappeared for backend=%s mode=%s\n' "$backend" "$mode" >&2
@@ -158,6 +250,11 @@ for backend in "${backends[@]}"; do
     fi
     window_at=$(jq -r '.at | "\(.[0]),\(.[1])"' <<<"$window_json")
     window_size=$(jq -r '.size | "\(.[0])x\(.[1])"' <<<"$window_json")
+    if [[ -n "$visual_size" && "$window_size" != "$visual_size" ]]; then
+      printf 'Viewport changed before capture: requested=%s actual=%s\n' \
+        "$visual_size" "$window_size" >&2
+      exit 1
+    fi
     grim -g "$window_at $window_size" "$image_path"
     if [[ ! -s "$image_path" ]]; then
       printf 'Visual capture is empty: %s\n' "$image_path" >&2

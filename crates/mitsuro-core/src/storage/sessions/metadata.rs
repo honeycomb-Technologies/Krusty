@@ -188,6 +188,30 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Promote or demote a session in active conversation lists.
+    pub fn update_session_pinned(&self, session_id: &str, pinned: bool) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET pinned_at = CASE WHEN ?1 THEN ?2 ELSE NULL END
+             WHERE id = ?3",
+            params![pinned, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Move a session into or out of the archive without deleting its history.
+    pub fn update_session_archived(&self, session_id: &str, archived: bool) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET archived_at = CASE WHEN ?1 THEN ?2 ELSE NULL END
+             WHERE id = ?3",
+            params![archived, now, session_id],
+        )?;
+        Ok(())
+    }
+
     /// Update session token count
     pub fn update_token_count(&self, session_id: &str, token_count: usize) -> Result<()> {
         self.db.conn().execute(

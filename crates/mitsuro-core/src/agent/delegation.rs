@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::agent::subagent::{
     AgentScheduler, BackpressureSignal, ScheduleRequest, SchedulerPermit, SchedulingClass,
 };
+use crate::ai::providers::ReasoningEffort;
 use crate::storage::{
     Database, DelegatedRunRole, DelegationCapacityClass, DelegationCapacityFeedback,
     DelegationCapacityPolicy, DelegationCapacityRequest, DelegationGroupRecord,
@@ -488,10 +489,34 @@ impl DelegationCoordinator {
             .complete_task_integration(delegation_task_id, succeeded, error_summary)
     }
 
+    pub fn fail_unstarted_tasks(
+        &self,
+        delegation_group_id: &str,
+        delegation_task_ids: &[String],
+        error_summary: &str,
+    ) -> Result<usize> {
+        self.store()?
+            .fail_unstarted_tasks(delegation_group_id, delegation_task_ids, error_summary)
+    }
+
+    pub fn refresh_isolated_task_baseline(
+        &self,
+        delegation_task_id: &str,
+        expected_workspace: &Path,
+        workspace_baseline: &str,
+    ) -> Result<bool> {
+        self.store()?.refresh_isolated_task_baseline(
+            delegation_task_id,
+            &expected_workspace.display().to_string(),
+            workspace_baseline,
+        )
+    }
+
     pub fn validate_task_runtime(
         &self,
         delegation_task_id: &str,
         runtime_policy: Option<&DelegationPolicy>,
+        runtime_reasoning_effort: Option<ReasoningEffort>,
         working_dir: &Path,
     ) -> Result<()> {
         let store = self.store()?;
@@ -521,12 +546,15 @@ impl DelegationCoordinator {
             "runtime permission mode differs from immutable delegation governance"
         );
         ensure!(
-            runtime_policy
-                .max_turns
-                .unwrap_or(group.contract.governance.delegated_turn_budget)
-                <= group.contract.governance.delegated_turn_budget,
-            "runtime turn budget exceeds immutable delegation governance"
+            runtime_reasoning_effort == group.contract.governance.reasoning_effort,
+            "runtime reasoning effort differs from immutable delegation governance"
         );
+        if let Some(group_budget) = group.contract.governance.delegated_turn_budget {
+            ensure!(
+                runtime_policy.max_turns.unwrap_or(group_budget) <= group_budget,
+                "runtime turn budget exceeds immutable delegation governance"
+            );
+        }
         match task.specification.writer_mode {
             crate::storage::DelegationWriterMode::Isolated => {
                 let root = task
@@ -1269,7 +1297,8 @@ mod tests {
                 failure_policy: DelegationFailurePolicy::Continue,
                 governance: DelegationGovernance {
                     permission_mode: PermissionMode::Autonomous,
-                    delegated_turn_budget: 8,
+                    reasoning_effort: None,
+                    delegated_turn_budget: Some(8),
                     max_parallelism: 2,
                     execution_tool_allowlist: None,
                     delegation_policy:
@@ -1707,7 +1736,7 @@ mod tests {
             Some(8),
         );
         coordinator
-            .validate_task_runtime("task-0", Some(&expected), std::path::Path::new("."))
+            .validate_task_runtime("task-0", Some(&expected), None, std::path::Path::new("."))
             .expect("exact policy");
 
         let broader = crate::tools::registry::DelegationPolicy::for_subagent_child(
@@ -1718,7 +1747,7 @@ mod tests {
             true,
         );
         coordinator
-            .validate_task_runtime("task-0", Some(&broader), std::path::Path::new("."))
+            .validate_task_runtime("task-0", Some(&broader), None, std::path::Path::new("."))
             .expect_err("broader runtime policy must fail closed");
     }
 

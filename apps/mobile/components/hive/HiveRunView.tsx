@@ -353,7 +353,6 @@ export function HiveRunView({
             }
             bottomPadding={composerReserveHeight}
             hideJumpToLatest={bottomControlsOpen}
-            showPlanTracker={false}
           />
 
           <ChatBar

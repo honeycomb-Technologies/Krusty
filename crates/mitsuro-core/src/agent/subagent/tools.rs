@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::ai::types::AiTool;
 use crate::tools::registry::{DelegationPolicy, Tool, ToolContext, ToolResult};
-use crate::tools::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
+use crate::tools::{BashTool, BrowserCheckTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 
 use super::build_context::{BuilderInterface, SharedBuildContext};
 
@@ -97,6 +97,7 @@ pub struct BuilderTools {
     write: WriteTool,
     edit: EditTool,
     bash: BashTool,
+    browser_check: BrowserCheckTool,
     context: Arc<SharedBuildContext>,
     builder_id: String,
 }
@@ -110,6 +111,7 @@ impl BuilderTools {
             write: WriteTool,
             edit: EditTool,
             bash: BashTool,
+            browser_check: BrowserCheckTool,
             context,
             builder_id,
         }
@@ -152,6 +154,12 @@ impl BuilderTools {
                 description: self.bash.description().to_string(),
                 input_schema: self.bash.parameters_schema(),
                 prompt: self.bash.prompt().map(|s| s.to_string()),
+            },
+            AiTool {
+                name: "browser_check".to_string(),
+                description: self.browser_check.description().to_string(),
+                input_schema: self.browser_check.parameters_schema(),
+                prompt: self.browser_check.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "register_interface".to_string(),
@@ -294,6 +302,7 @@ impl BuilderTools {
                 Some(result)
             }
             "bash" => Some(self.bash.execute(params, ctx).await),
+            "browser_check" => Some(self.browser_check.execute(params, ctx).await),
             "register_interface" => {
                 // Register an interface for other builders to see
                 let Some(file_path) = params.get("file_path").and_then(|v| v.as_str()) else {
@@ -379,6 +388,19 @@ mod tests {
     use super::*;
     use crate::tools::registry::PermissionMode;
     use std::collections::HashSet;
+
+    #[test]
+    fn builder_catalog_includes_governed_browser_acceptance() {
+        let tools = BuilderTools::new(
+            Arc::new(SharedBuildContext::new()),
+            "builder-test".to_string(),
+        );
+
+        assert!(tools
+            .get_ai_tools()
+            .iter()
+            .any(|tool| tool.name == "browser_check"));
+    }
 
     #[tokio::test]
     async fn builder_dispatch_blocks_supervised_write_without_approval_path() {

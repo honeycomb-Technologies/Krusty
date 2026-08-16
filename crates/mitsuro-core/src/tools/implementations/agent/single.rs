@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -203,7 +203,7 @@ struct SingleTaskDelegation {
     coordinator: DelegationCoordinator,
     group_id: String,
     task_id: String,
-    turn_budget: usize,
+    turn_budget: Option<usize>,
 }
 
 impl SingleTaskDelegation {
@@ -244,7 +244,7 @@ impl SingleTaskDelegation {
                 kind: "workspace".to_string(),
             });
         }
-        let turn_budget = delegation_policy.max_turns.unwrap_or(20);
+        let turn_budget = delegation_policy.max_turns;
         coordinator
             .create_group(&DelegationGroupStartInput {
                 delegation_group_id: delegated_run_id.to_string(),
@@ -260,6 +260,7 @@ impl SingleTaskDelegation {
                     failure_policy: DelegationFailurePolicy::Continue,
                     governance: DelegationGovernance {
                         permission_mode: ctx.permission_mode,
+                        reasoning_effort: ctx.delegated_reasoning_effort,
                         delegated_turn_budget: turn_budget,
                         max_parallelism: 1,
                         execution_tool_allowlist: delegation_policy
@@ -299,12 +300,14 @@ impl SingleTaskDelegation {
     }
 
     fn attach(&self, task: SubAgentTask) -> SubAgentTask {
-        // The immutable durable contract is the execution-time authority. In
-        // particular, an omitted request-level max still resolves to the same
-        // bounded default persisted on the group instead of silently becoming
-        // unlimited inside the child loop.
-        task.with_max_turns(self.turn_budget)
-            .with_delegation_task(self.group_id.clone(), self.task_id.clone())
+        // The immutable durable contract is the execution-time authority.
+        // Absence means unlimited rather than a hidden product default.
+        let task = if let Some(turn_budget) = self.turn_budget {
+            task.with_max_turns(turn_budget)
+        } else {
+            task
+        };
+        task.with_delegation_task(self.group_id.clone(), self.task_id.clone())
     }
 
     async fn acquire(
@@ -317,6 +320,7 @@ impl SingleTaskDelegation {
             .validate_task_runtime(
                 &self.task_id,
                 task.delegation_policy.as_ref(),
+                task.reasoning_effort,
                 &task.working_dir,
             )
             .map_err(|error| error.to_string())?;
@@ -490,6 +494,8 @@ fn bounded_task_artifact(result: &SubAgentResult) -> serde_json::Value {
         "agent_name": bounded_text(&result.agent_name, 256),
         "success": result.success,
         "termination": result.termination,
+        "objective_status": result.objective_status(),
+        "handoff": result.bounded_delegated_handoff(),
         "summary": bounded_text(&result.brief_summary(), 16 * 1024),
         "files_examined": result.files_examined.iter().take(32).map(|path| bounded_text(path, 512)).collect::<Vec<_>>(),
         "files_examined_count": result.files_examined.len(),
@@ -687,6 +693,28 @@ impl AgentTool {
                 }) => {
                     return existing_continuation_error(&resumed_from_run_id, &delegated_run_id);
                 }
+                Ok(DelegatedRunCreateOutcome::ExistingActiveWorkspaceWriter {
+                    delegated_run_id,
+                    workspace_path,
+                }) => {
+                    return ToolResult::error_with_recovery(
+                        "agent_active_workspace_writer",
+                        format!(
+                            "A write-capable Agent run is already active for workspace '{workspace_path}' (delegated run {delegated_run_id}). A second writer was not admitted."
+                        ),
+                        true,
+                        "Use Agent status or wait on the active delegated run. Interrupt it explicitly before starting a replacement writer.",
+                        vec![
+                            format!("Continue with delegated_run_id '{delegated_run_id}' instead of spawning a duplicate writer."),
+                            "Do not retry spawn with a new tool-call id while the active writer is live.".to_string(),
+                        ],
+                        Some(serde_json::json!({
+                            "admitted": false,
+                            "active_delegated_run_id": delegated_run_id,
+                            "workspace_path": workspace_path,
+                        })),
+                    );
+                }
                 Err(error) => {
                     return ToolResult::error_with_code(
                         "agent_persistence_error",
@@ -708,7 +736,8 @@ impl AgentTool {
         }
 
         // Build task prompt with resume context if available
-        let mut task_prompt = params.prompt.clone();
+        let mut task_prompt =
+            super::compose_child_objective(&params.prompt, &params.acceptance_checks);
         if !explicit_resume {
             if let Some(ref previous) = resume_candidate {
                 if let Some(seed) = build_resume_seed(previous, &scope_label) {
@@ -721,10 +750,21 @@ impl AgentTool {
         // detached restart cannot silently lose tail instructions.
         let durable_objective = task_prompt.clone();
         let model = self.resolve_model(ctx, &client);
-        let inherited_sandbox = ctx
-            .sandbox_root
-            .clone()
-            .unwrap_or_else(|| working_dir.clone());
+        // Delegated reads and writes are scoped to the exact selected project,
+        // even when a local parent session has broader filesystem authority.
+        let inherited_sandbox = project_dir.canonicalize().map_err(|error| {
+            ToolResult::error_with_code(
+                "invalid_project_workspace",
+                format!(
+                    "Could not resolve delegated launch workspace '{}': {error}",
+                    project_dir.display()
+                ),
+            )
+        });
+        let inherited_sandbox = match inherited_sandbox {
+            Ok(path) => path,
+            Err(result) => return result,
+        };
         let executor_envelope = if background {
             let executor_kind = if role == DelegatedRunRole::Build {
                 // Shared-writer side effects cannot be replayed safely after a
@@ -790,6 +830,7 @@ impl AgentTool {
             .with_sandbox_root(inherited_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -1176,6 +1217,7 @@ impl AgentTool {
                 return ToolResult::error_with_code("invalid_project_workspace", error);
             }
         };
+        let plan_sandbox = PathBuf::from(&workspace_scope.path);
         let target_scope = vec![
             workspace_scope,
             DelegatedRunScope {
@@ -1240,10 +1282,6 @@ impl AgentTool {
 
         let durable_objective = params.prompt.clone();
         let model = self.resolve_model(ctx, &client);
-        let plan_sandbox = ctx
-            .sandbox_root
-            .clone()
-            .unwrap_or_else(|| ctx.working_dir.clone());
         let executor_envelope = if background {
             match build_detached_executor_envelope(
                 ctx,
@@ -1295,13 +1333,10 @@ impl AgentTool {
         let mut task = SubAgentTask::new("planner-0", &params.prompt)
             .with_name("planner")
             .with_working_dir(ctx.working_dir.clone())
-            .with_sandbox_root(
-                ctx.sandbox_root
-                    .clone()
-                    .unwrap_or_else(|| ctx.working_dir.clone()),
-            )
+            .with_sandbox_root(plan_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -1664,6 +1699,7 @@ impl AgentTool {
                 return ToolResult::error_with_code("invalid_project_workspace", error);
             }
         };
+        let verify_sandbox = PathBuf::from(&workspace_scope.path);
         let target_scope = vec![
             workspace_scope,
             DelegatedRunScope {
@@ -1728,10 +1764,6 @@ impl AgentTool {
 
         let durable_objective = params.prompt.clone();
         let model = self.resolve_model(ctx, &client);
-        let verify_sandbox = ctx
-            .sandbox_root
-            .clone()
-            .unwrap_or_else(|| ctx.working_dir.clone());
         let executor_envelope = if background {
             match build_detached_executor_envelope(
                 ctx,
@@ -1783,13 +1815,10 @@ impl AgentTool {
         let mut task = SubAgentTask::new("verifier-0", &params.prompt)
             .with_name("verifier")
             .with_working_dir(ctx.working_dir.clone())
-            .with_sandbox_root(
-                ctx.sandbox_root
-                    .clone()
-                    .unwrap_or_else(|| ctx.working_dir.clone()),
-            )
+            .with_sandbox_root(verify_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -2259,6 +2288,33 @@ mod child_scope_tests {
         assert!(encoded.len() < 256 * 1024, "{} bytes", encoded.len());
     }
 
+    #[test]
+    fn durable_task_artifact_keeps_luna_shaped_acceptance_evidence() {
+        let result = SubAgentResult {
+            task_id: "alpha".to_string(),
+            agent_name: "alpha".to_string(),
+            delegated_run_id: Some("run-alpha".to_string()),
+            success: true,
+            output: r#"Generic summary without the marker.
+<delegated_handoff>{"status":"complete","summary":"proof complete","acceptance_checks":[{"id":"marker","status":"passed","evidence":"alpha-live-proof"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string(),
+            files_examined: vec!["proof/alpha.txt".to_string()],
+            duration_ms: 12,
+            turns_used: 1,
+            error: None,
+            termination: SubAgentTermination::Completed,
+            policy_violations: Vec::new(),
+            evidence: Default::default(),
+            background_processes: Vec::new(),
+        };
+
+        let artifact = bounded_task_artifact(&result);
+        assert_eq!(artifact["objective_status"], "complete");
+        assert_eq!(
+            artifact["handoff"]["acceptance_checks"][0]["evidence"],
+            "alpha-live-proof"
+        );
+    }
+
     #[tokio::test]
     async fn one_task_groups_preserve_role_governance_and_execution_mode() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2269,35 +2325,35 @@ mod child_scope_tests {
                 DelegatedRunRole::Explore,
                 DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(7)),
                 false,
-                7,
+                Some(7),
             ),
             (
                 "build",
                 DelegatedRunRole::Build,
                 DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7)),
                 false,
-                7,
+                Some(7),
             ),
             (
                 "plan",
                 DelegatedRunRole::Planner,
                 DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(7)),
                 true,
-                7,
+                Some(7),
             ),
             (
                 "verify",
                 DelegatedRunRole::Verifier,
                 DelegationPolicy::for_subagent_verify(PermissionMode::Autonomous, Some(7)),
                 true,
-                7,
+                Some(7),
             ),
             (
                 "default-budget",
                 DelegatedRunRole::Explore,
                 DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, None),
                 false,
-                20,
+                None,
             ),
         ];
 
@@ -2336,8 +2392,7 @@ mod child_scope_tests {
                     .with_delegation_policy(policy.clone()),
             );
             assert_eq!(
-                attached.max_turns_override,
-                Some(expected_turn_budget),
+                attached.max_turns_override, expected_turn_budget,
                 "runtime task must apply the exact persisted budget"
             );
             assert_eq!(group.contract.governance.max_parallelism, 1);

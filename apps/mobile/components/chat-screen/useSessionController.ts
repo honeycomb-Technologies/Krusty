@@ -7,16 +7,16 @@ import {
   resolveUsableModel,
 } from "@mitsuro/state";
 
-import type { useConnection } from "../../../hooks/useConnection";
-import type { useStores } from "../../../hooks/useStores";
-import * as SecureStore from "../../../platform/secure-store";
+import type { useConnection } from "../../hooks/useConnection";
+import type { useStores } from "../../hooks/useStores";
+import * as SecureStore from "../../platform/secure-store";
 import { normalizeProviderId } from "./helpers";
 import {
   deleteMigratedAsyncValue,
   IDENTITY_STORAGE_KEYS,
   readMigratedAsyncValue,
   writeCanonicalAsyncValue,
-} from "../../../platform/identity-storage";
+} from "../../platform/identity-storage";
 import { resolveModeLifecyclePolicy } from "./modeLifecyclePolicy";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;

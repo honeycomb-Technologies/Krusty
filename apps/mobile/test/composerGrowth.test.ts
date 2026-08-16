@@ -214,6 +214,13 @@ Deno.test("ChatBar has one composer height authority", async () => {
     !source.includes("setComposerExpanded"),
     "ChatBar must derive expanded state from the layout contract",
   );
+  assert(
+    source.includes("<KeyboardAvoidingView")
+      && source.includes('behavior="position"')
+      && !source.includes("setKeyboardHeight")
+      && !source.includes("keyboardHeight > 0"),
+    "native keyboard avoidance must move the composer without resizing transcript reserve",
+  );
 });
 
 Deno.test("empty draft estimates zero but resolves to one text row", () => {

@@ -843,7 +843,10 @@ impl AgenticOrchestrator {
         };
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
-        let mut options = options;
+        // Resolve provider/model reasoning and tool capabilities once at the
+        // run boundary. The same canonical effort then governs parent calls,
+        // delegated children, durable replay, and observability.
+        let mut options = options.canonicalized_for_runtime(ai_client.resolved_model());
         let mode_tool_surface = ModeAwareToolSurface::capture(
             refresh_code_tools_on_mode_change,
             &options,
@@ -1250,6 +1253,7 @@ impl AgenticOrchestrator {
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
+                    options.reasoning_effort,
                     "cancelled_during_setup",
                     None,
                     provider_call_started.elapsed(),
@@ -1296,6 +1300,7 @@ impl AgenticOrchestrator {
                             iteration,
                             ai_client.provider_id(),
                             &ai_client.config().model,
+                            options.reasoning_effort,
                             "setup_error",
                             None,
                             provider_call_started.elapsed(),
@@ -1414,6 +1419,7 @@ impl AgenticOrchestrator {
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
+                    options.reasoning_effort,
                     "cancelled_during_stream",
                     None,
                     provider_call_started.elapsed(),
@@ -1439,6 +1445,7 @@ impl AgenticOrchestrator {
                 iteration,
                 ai_client.provider_id(),
                 &ai_client.config().model,
+                options.reasoning_effort,
                 provider_call_outcome,
                 result.usage_available.then_some(result.usage.clone()),
                 provider_call_started.elapsed(),
@@ -1877,6 +1884,7 @@ impl AgenticOrchestrator {
                         Some(&provider_call_trace),
                         &mut input_inbox,
                         project_settings.subagent_max_turns,
+                        options.reasoning_effort,
                         &advertised_tool_names,
                         execution_tool_allowlist.as_ref(),
                         project_settings.disabled_tools.as_deref(),
@@ -2004,6 +2012,7 @@ impl AgenticOrchestrator {
                 Some(&provider_call_trace),
                 &mut input_inbox,
                 project_settings.subagent_max_turns,
+                options.reasoning_effort,
                 &advertised_tool_names,
                 execution_tool_allowlist.as_ref(),
                 project_settings.disabled_tools.as_deref(),
@@ -2011,6 +2020,7 @@ impl AgenticOrchestrator {
             )
             .await;
             work_mode = tool_batch.next_work_mode;
+            let yield_after_background_agent = tool_batch.yield_after_background_agent;
             // A tool batch can change either work mode (`set_work_mode`) or
             // plan lifecycle state (for example, completing the final task).
             // Refresh both dimensions before the next provider request.
@@ -2192,6 +2202,19 @@ impl AgenticOrchestrator {
             persist_context_state(&db_path, &session_id, &context_ledger);
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
+
+            if yield_after_background_agent {
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
+                });
+                return;
+            }
 
             if successful_task_completion_needs_goal_followthrough(
                 &db_path,

@@ -15,6 +15,7 @@ use mitsuro_desktop_backend::{
 };
 
 use crate::app::MitsuroApp;
+use crate::components::ui_button::{self, ButtonSize, ButtonState, ButtonTone};
 use crate::theme;
 
 const DIRECTORY_RENDER_LIMIT: usize = 200;
@@ -29,6 +30,7 @@ pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
     let editor_input = app.files_editor_input().clone();
     let browsing = session.search_query.is_empty();
     let mutations_available = app.files_mutations_available();
+    let provider = app.files_provider_label();
 
     div()
         .id("files-panel")
@@ -38,19 +40,17 @@ pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         .min_w_0()
         .h_full()
         .bg(colors.bg_main)
-        .child(files_title_bar(
-            session.backend_label.as_ref(),
-            session.cwd.as_ref(),
-        ))
+        .child(files_title_bar(provider, mutations_available))
         .child(path_bar(app, &path_input, cx))
         .child(search_bar(app, &search_input, cx))
-        .child(mutation_bar(
-            &name_input,
-            mutations_available,
-            session.selected_path.is_some(),
-            app.files_delete_pending(),
-            cx,
-        ))
+        .when(mutations_available, |this| {
+            this.child(mutation_bar(
+                &name_input,
+                session.selected_path.is_some(),
+                app.files_delete_pending(),
+                cx,
+            ))
+        })
         .child(
             div()
                 .id("files-body")
@@ -88,7 +88,7 @@ pub fn files_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoE
         ))
 }
 
-fn files_title_bar(backend: &str, cwd: &str) -> impl IntoElement {
+fn files_title_bar(provider: &str, writable: bool) -> impl IntoElement {
     let colors = theme::colors();
     div()
         .id("files-title")
@@ -96,8 +96,8 @@ fn files_title_bar(backend: &str, cwd: &str) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .px(px(16.0))
-        .py(px(12.0))
+        .px(px(20.0))
+        .h(px(64.0))
         .border_b_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
@@ -114,16 +114,22 @@ fn files_title_bar(backend: &str, cwd: &str) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text)
-                        .child("Files"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.text_tertiary)
-                        .child(format!("· {backend}")),
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.text)
+                                .child("Files"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_tertiary)
+                                .child(provider.to_owned()),
+                        ),
                 ),
         )
         .child(
@@ -136,7 +142,7 @@ fn files_title_bar(backend: &str, cwd: &str) -> impl IntoElement {
                 .border_1()
                 .border_color(colors.border)
                 .text_color(colors.text_secondary)
-                .child(cwd.to_string()),
+                .child(if writable { "Editable" } else { "Browse only" }),
         )
 }
 
@@ -166,27 +172,18 @@ fn path_bar(
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    div()
-                        .id("files-up")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(34.0))
-                        .w(px(34.0))
-                        .rounded(px(10.0))
-                        .bg(colors.bg_elevated)
-                        .border_1()
-                        .border_color(colors.border)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(colors.bg_hover))
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.files_go_up(window, cx);
-                        }))
-                        .child(
-                            Icon::new(IconName::ArrowUp)
-                                .with_size(px(14.0))
-                                .text_color(colors.text_secondary),
-                        ),
+                    ui_button::icon_button(
+                        "files-up",
+                        Icon::new(IconName::ArrowUp).with_size(px(14.0)),
+                        "Parent folder",
+                        ButtonTone::Subtle,
+                        ButtonSize::Medium,
+                        ButtonState::default(),
+                        cx,
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.files_go_up(window, cx);
+                    })),
                 )
                 .child(
                     div()
@@ -205,30 +202,17 @@ fn path_bar(
                         .child(Input::new(path_input).appearance(false).h(px(28.0))),
                 )
                 .child(
-                    div()
-                        .id("files-go")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .h(px(34.0))
-                        .px(px(14.0))
-                        .rounded(px(10.0))
-                        .bg(colors.accent_soft)
-                        .border_1()
-                        .border_color(colors.border)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(colors.bg_hover))
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.files_navigate_path_bar(window, cx);
-                        }))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.accent)
-                                .child("Go"),
-                        ),
+                    ui_button::button(
+                        "files-go",
+                        "Go",
+                        ButtonTone::Primary,
+                        ButtonSize::Medium,
+                        ButtonState::default(),
+                        cx,
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.files_navigate_path_bar(window, cx);
+                    })),
                 ),
         )
 }
@@ -240,6 +224,36 @@ fn files_breadcrumb(cwd: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
         .filter(|p| !p.is_empty())
         .map(|s| s.to_string())
         .collect();
+    let mut current = String::new();
+    let crumbs = parts.into_iter().enumerate().map(|(i, part)| {
+        current.push('/');
+        current.push_str(&part);
+        let target = current.clone();
+        div()
+            .id(("files-crumb", i as u64))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .child(div().text_xs().text_color(colors.text_tertiary).child("/"))
+            .child(
+                div()
+                    .id(("files-crumb-button", i as u64))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(6.0))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(colors.text_secondary)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.bg_hover))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.files_navigate_to(target.clone(), window, cx);
+                    }))
+                    .child(part),
+            )
+            .into_any_element()
+    });
     div()
         .id("files-breadcrumb")
         .flex()
@@ -264,32 +278,11 @@ fn files_breadcrumb(cwd: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                         .text_color(colors.text_tertiary),
                 ),
         )
-        .children(parts.into_iter().enumerate().map(|(i, part)| {
-            let label = part;
-            div()
-                .id(("files-crumb", i as u64))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .child(div().text_xs().text_color(colors.text_tertiary).child("/"))
-                .child(
-                    div()
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded(px(6.0))
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(colors.text_secondary)
-                        .child(label),
-                )
-                .into_any_element()
-        }))
+        .children(crumbs)
 }
 
 fn mutation_bar(
     name_input: &gpui::Entity<gpui_component::input::InputState>,
-    mutations_available: bool,
     has_selection: bool,
     delete_pending: bool,
     cx: &mut Context<MitsuroApp>,
@@ -325,7 +318,7 @@ fn mutation_bar(
         .child(file_action_button(
             "files-create-file",
             "New file",
-            mutations_available,
+            true,
             false,
             cx,
             |app, window, cx| app.files_create_file(window, cx),
@@ -333,7 +326,7 @@ fn mutation_bar(
         .child(file_action_button(
             "files-create-folder",
             "New folder",
-            mutations_available,
+            true,
             false,
             cx,
             |app, window, cx| app.files_create_directory(window, cx),
@@ -341,7 +334,7 @@ fn mutation_bar(
         .child(file_action_button(
             "files-save",
             "Save",
-            mutations_available && has_selection,
+            has_selection,
             false,
             cx,
             |app, window, cx| app.files_save_selected(window, cx),
@@ -349,7 +342,7 @@ fn mutation_bar(
         .child(file_action_button(
             "files-copy",
             "Duplicate",
-            mutations_available && has_selection,
+            has_selection,
             false,
             cx,
             |app, window, cx| app.files_duplicate_selected(window, cx),
@@ -361,19 +354,11 @@ fn mutation_bar(
             } else {
                 "Delete"
             },
-            mutations_available && has_selection,
+            has_selection,
             delete_pending,
             cx,
             |app, window, cx| app.files_delete_selected(window, cx),
         ))
-        .when(!mutations_available, |this| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(colors.text_tertiary)
-                    .child("Read-only on the active backend"),
-            )
-        })
 }
 
 fn file_action_button(
@@ -384,41 +369,22 @@ fn file_action_button(
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(32.0))
-        .px(px(10.0))
-        .rounded(px(9.0))
-        .bg(if destructive {
-            colors.bg_selected
+    ui_button::button(
+        id,
+        label,
+        if destructive {
+            ButtonTone::Destructive
         } else {
-            colors.bg_button_secondary
-        })
-        .border_1()
-        .border_color(colors.border)
-        .text_xs()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(if enabled {
-            if destructive {
-                colors.status_error
-            } else {
-                colors.text_secondary
-            }
-        } else {
-            colors.text_tertiary
-        })
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    on_click(app, window, cx);
-                }))
-        })
-        .child(label)
+            ButtonTone::Secondary
+        },
+        ButtonSize::Small,
+        ButtonState {
+            disabled: !enabled,
+            ..ButtonState::default()
+        },
+        cx,
+    )
+    .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
 }
 
 fn search_bar(
@@ -460,30 +426,17 @@ fn search_bar(
                 .child(Input::new(search_input).appearance(false).h(px(26.0))),
         )
         .child(
-            div()
-                .id("files-search-run")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(32.0))
-                .px(px(12.0))
-                .rounded(px(10.0))
-                .bg(colors.bg_button_secondary)
-                .border_1()
-                .border_color(colors.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(colors.bg_hover))
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.files_run_fuzzy(window, cx);
-                }))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text_secondary)
-                        .child("Search"),
-                ),
+            ui_button::button(
+                "files-search-run",
+                "Search",
+                ButtonTone::Secondary,
+                ButtonSize::Small,
+                ButtonState::default(),
+                cx,
+            )
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.files_run_fuzzy(window, cx);
+            })),
         )
 }
 
@@ -600,7 +553,6 @@ fn fuzzy_list(
                         name.as_str(),
                         subtitle.as_str(),
                         is_dir,
-                        r.score,
                         sel,
                         cx,
                         move |app, window, cx| {
@@ -668,7 +620,6 @@ fn entry_row_with_sub(
     name: &str,
     subtitle: &str,
     is_dir: bool,
-    score: u32,
     selected: bool,
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
@@ -721,12 +672,6 @@ fn entry_row_with_sub(
                         .text_sm()
                         .text_color(colors.text)
                         .child(name),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.text_tertiary)
-                        .child(format!("{score}")),
                 ),
         )
         .child(
@@ -765,10 +710,7 @@ fn preview_pane(
                     div()
                         .text_xs()
                         .text_color(colors.text_tertiary)
-                        .child(
-                            path.unwrap_or("Select a file to preview · fs/readFile")
-                                .to_string(),
-                        ),
+                        .child(path.unwrap_or("Select a file to preview").to_string()),
                 ),
         )
         .child(
@@ -784,7 +726,7 @@ fn preview_pane(
                     div()
                         .text_sm()
                         .text_color(colors.status_error)
-                        .child(format!("[error] {err}"))
+                        .child(err.to_owned())
                         .into_any_element()
                 } else if writable && path.is_some() {
                     div()
@@ -810,6 +752,7 @@ fn preview_pane(
                 } else {
                     div()
                         .text_sm()
+                        .font_family("monospace")
                         .text_color(colors.text)
                         .child(preview.to_string())
                         .into_any_element()
@@ -826,9 +769,9 @@ fn status_footer(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let detail = if browsing {
-        format!("list · {entry_count} entries · {cwd}")
+        format!("{entry_count} items")
     } else {
-        format!("fuzzy · {fuzzy_count} hits · root {cwd}")
+        format!("{fuzzy_count} search results")
     };
     div()
         .id("files-status")
@@ -851,7 +794,7 @@ fn status_footer(
             div().text_xs().text_color(colors.text_tertiary).child(
                 selected
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| "fs/readDirectory · fuzzyFileSearch".into()),
+                    .unwrap_or_else(|| cwd.to_owned()),
             ),
         )
 }

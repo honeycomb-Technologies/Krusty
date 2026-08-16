@@ -192,8 +192,10 @@ pub(super) fn build_single_agent_artifact(
     let usable = result.has_usable_evidence();
     let complete = result.success
         && result.termination == crate::agent::subagent::SubAgentTermination::Completed
-        && usable;
-    let degraded = result.termination.is_degraded_interruption() && usable;
+        && usable
+        && result.objective_status() == crate::agent::subagent::TaskObjectiveStatus::Complete;
+    let degraded =
+        usable && (result.termination.is_degraded_interruption() || result.is_degraded_success());
     let cancelled = result.termination == crate::agent::subagent::SubAgentTermination::Cancelled;
     let outcome_reason = result.outcome_reason();
     let mut agent = result.evidence_json();
@@ -499,6 +501,7 @@ pub(super) fn emit_single_agent_completion(
                 lines_added: 0,
                 lines_removed: 0,
                 completed_plan_task: None,
+                conversation_event: None,
             })
             .is_err()
         {
@@ -807,7 +810,7 @@ pub(super) fn build_investigation_summary(
     lines_removed: usize,
 ) -> String {
     let mut parts = vec![format!(
-        "Delegated build completed with {} successful builders across {} modified files.",
+        "Delegated build settled with {} successful builders across {} modified files.",
         successful_builders, modified_files
     )];
     parts.push(format!(

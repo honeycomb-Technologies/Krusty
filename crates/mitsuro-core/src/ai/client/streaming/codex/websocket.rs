@@ -28,7 +28,10 @@ enum CodexPayloadState {
         response_id: Option<String>,
         assistant_fingerprint: Option<String>,
     },
-    Error,
+    Error {
+        error: String,
+        retryable: bool,
+    },
 }
 
 fn codex_cache_stable_instructions(prompt_sections: &SystemPromptSections) -> String {
@@ -58,8 +61,10 @@ async fn process_codex_ws_payload(
         if matches!(event_type, "error" | "response.failed") || event_type.contains("error") {
             let detail = AiClient::codex_ws_error_message(&json)
                 .unwrap_or_else(|| "Codex websocket API error [metadata=unavailable]".to_string());
-            let _ = tx_err.send(StreamPart::Error { error: detail });
-            return CodexPayloadState::Error;
+            return CodexPayloadState::Error {
+                error: detail,
+                retryable: AiClient::codex_api_event_is_retryable(&json),
+            };
         }
         if matches!(event_type, "response.done" | "response.completed") {
             if let Err(e) = processor.process_sse_data(payload, parser).await {
@@ -71,7 +76,10 @@ async fn process_codex_ws_payload(
                         Some(&e.to_string()),
                     ),
                 });
-                return CodexPayloadState::Error;
+                return CodexPayloadState::Error {
+                    error: "Codex websocket parsing error".to_string(),
+                    retryable: false,
+                };
             }
             let response = json.get("response").unwrap_or(&json);
             return CodexPayloadState::Complete {
@@ -93,7 +101,10 @@ async fn process_codex_ws_payload(
                 Some(&e.to_string()),
             ),
         });
-        return CodexPayloadState::Error;
+        return CodexPayloadState::Error {
+            error: "Codex websocket parsing error".to_string(),
+            retryable: false,
+        };
     }
 
     CodexPayloadState::Continue
@@ -306,6 +317,8 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
 
     tokio::spawn(async move {
         let mut retried_full = !sent_delta;
+        let mut api_retries = 0_u32;
+        let mut saw_provider_output = false;
         let mut completed = false;
 
         loop {
@@ -342,6 +355,11 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
             match msg {
                 Ok(Message::Text(text)) => {
                     let payload = text.to_string();
+                    if let Ok(event) = serde_json::from_str::<Value>(&payload) {
+                        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+                        saw_provider_output |= event_type.starts_with("response.output_")
+                            || event_type.starts_with("response.function_call_");
+                    }
                     if sent_delta
                         && !retried_full
                         && codex_ws_error_code(&payload).as_deref()
@@ -390,11 +408,37 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                             });
                             break;
                         }
-                        CodexPayloadState::Error => break,
+                        CodexPayloadState::Error { error, retryable } => {
+                            if retryable && !saw_provider_output && api_retries < 3 {
+                                api_retries += 1;
+                                state.continuation = None;
+                                tokio::time::sleep(Duration::from_secs(1 << (api_retries - 1)))
+                                    .await;
+                                let retry_payload =
+                                    AiClient::codex_ws_create_payload(prepared.full_body.clone());
+                                if state
+                                    .connection
+                                    .as_mut()
+                                    .expect("Codex connection initialized")
+                                    .send(Message::Text(retry_payload.to_string()))
+                                    .await
+                                    .is_ok()
+                                {
+                                    continue;
+                                }
+                            }
+                            let _ = tx_err.send(StreamPart::Error { error });
+                            break;
+                        }
                     }
                 }
                 Ok(Message::Binary(bytes)) => {
                     let payload = String::from_utf8_lossy(&bytes);
+                    if let Ok(event) = serde_json::from_str::<Value>(payload.as_ref()) {
+                        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+                        saw_provider_output |= event_type.starts_with("response.output_")
+                            || event_type.starts_with("response.function_call_");
+                    }
                     match process_codex_ws_payload(
                         payload.as_ref(),
                         &parser,
@@ -420,7 +464,28 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                             });
                             break;
                         }
-                        CodexPayloadState::Error => break,
+                        CodexPayloadState::Error { error, retryable } => {
+                            if retryable && !saw_provider_output && api_retries < 3 {
+                                api_retries += 1;
+                                state.continuation = None;
+                                tokio::time::sleep(Duration::from_secs(1 << (api_retries - 1)))
+                                    .await;
+                                let retry_payload =
+                                    AiClient::codex_ws_create_payload(prepared.full_body.clone());
+                                if state
+                                    .connection
+                                    .as_mut()
+                                    .expect("Codex connection initialized")
+                                    .send(Message::Text(retry_payload.to_string()))
+                                    .await
+                                    .is_ok()
+                                {
+                                    continue;
+                                }
+                            }
+                            let _ = tx_err.send(StreamPart::Error { error });
+                            break;
+                        }
                     }
                 }
                 Ok(Message::Close(frame)) => {

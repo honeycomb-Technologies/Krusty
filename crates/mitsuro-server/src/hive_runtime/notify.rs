@@ -240,3 +240,42 @@ pub(super) fn notify_hive_completion(
         ApnsEventType::HiveUpdate,
     );
 }
+
+pub(super) fn notify_hive_partial(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let data = hive_session_notification_data("partial", session_id, Some("warning"), None);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Hive".into(),
+            body: format!("{session_label} finished with partial results"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("hive-{session_id}")),
+            category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
+            data: Some(data.clone()),
+        },
+        PushEventType::HiveUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: format!(
+                "{} — Partial",
+                hive_notification_title(None, &session_label)
+            ),
+            body: "Review the remaining work".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
+            data: Some(data),
+        },
+        ApnsEventType::HiveUpdate,
+    );
+}

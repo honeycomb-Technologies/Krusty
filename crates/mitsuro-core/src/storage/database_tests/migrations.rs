@@ -104,6 +104,23 @@ fn test_agent_state_columns_migration() {
 }
 
 #[test]
+fn test_session_list_metadata_migration() {
+    let (db, _temp) = create_test_db();
+    let columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(sessions)")
+        .expect("prepare sessions columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query sessions columns")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect sessions columns");
+
+    assert!(columns.contains(&"pinned_at".to_string()));
+    assert!(columns.contains(&"archived_at".to_string()));
+    assert_eq!(db.get_schema_version(), 62);
+}
+
+#[test]
 fn test_token_count_column_migration() {
     let (db, _temp) = create_test_db();
 
@@ -172,7 +189,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -208,7 +225,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -270,7 +287,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
     let claimed: String = db
         .conn()
         .query_row(
@@ -300,7 +317,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
 }
 
 #[test]
@@ -332,7 +349,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -355,7 +372,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
 }
 
 #[test]
@@ -385,7 +402,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -409,7 +426,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 61);
+    assert_eq!(db.get_schema_version(), 62);
 }
 
 #[test]

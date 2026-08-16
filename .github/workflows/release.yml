@@ -63,6 +63,10 @@ jobs:
         working-directory: apps/mobile
         run: npx expo export --platform web
 
+      - name: Stage pinned Atlas runtime (Unix)
+        if: matrix.os != 'windows-latest'
+        run: sh scripts/install-atlas-runtime.sh
+
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -97,6 +101,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/mitsuro-hive" "$package_dir/"
           cp "target/${{ matrix.target }}/release/krusty" "$package_dir/"
           cp "target/${{ matrix.target }}/release/krusty-mako" "$package_dir/"
+          cp target/atlas/agent-browser "$package_dir/"
           cp deploy/systemd/mitsuro-hive.service "$package_dir/systemd/"
           cp deploy/systemd/mitsuro-hive.socket "$package_dir/systemd/"
           cp deploy/systemd/mitsuro-serve.service "$package_dir/systemd/"

@@ -3,7 +3,8 @@ use std::path::Path;
 
 use super::super::types::{
     parse_explore_report, render_explore_report, summary_looks_non_substantive,
-    synthesize_explore_report, synthesize_explore_report_from_paths, SubAgentResult, SubAgentTask,
+    synthesize_explore_report, synthesize_explore_report_from_paths, DelegatedTaskHandoff,
+    SubAgentResult, SubAgentTask,
 };
 use super::governance::delegated_is_explore;
 
@@ -69,6 +70,7 @@ pub(super) fn normalize_explorer_result(
     if result.delegated_run_id.is_none() {
         result.delegated_run_id = task.delegated_run_id.clone();
     }
+    let preserved_handoff = result.delegated_handoff();
     if delegated_is_explore(task) {
         if let Some(report) = parse_explore_report(&result.output) {
             for path in report.paths_examined {
@@ -96,21 +98,36 @@ pub(super) fn normalize_explorer_result(
                     synthesize_explore_report_from_paths(&task.name, &result.files_examined)
                 {
                     let synthesized_paths = report.paths_examined.clone();
-                    result.output = render_explore_report(&report);
+                    result.output = explorer_report_with_handoff(
+                        render_explore_report(&report),
+                        preserved_handoff.as_ref(),
+                    );
                     result.files_examined = synthesized_paths;
                 }
             }
         } else if result.success {
-            if let Some(report) = synthesize_explore_report(&result.output, &result.files_examined)
+            let synthesis_summary = preserved_handoff
+                .as_ref()
+                .map(|handoff| handoff.summary.trim())
+                .filter(|summary| !summary.is_empty())
+                .unwrap_or(result.output.as_str());
+            if let Some(report) =
+                synthesize_explore_report(synthesis_summary, &result.files_examined)
             {
                 let synthesized_paths = report.paths_examined.clone();
-                result.output = render_explore_report(&report);
+                result.output = explorer_report_with_handoff(
+                    render_explore_report(&report),
+                    preserved_handoff.as_ref(),
+                );
                 result.files_examined = synthesized_paths;
             } else if let Some(report) =
                 synthesize_explore_report_from_paths(&task.name, &result.files_examined)
             {
                 let synthesized_paths = report.paths_examined.clone();
-                result.output = render_explore_report(&report);
+                result.output = explorer_report_with_handoff(
+                    render_explore_report(&report),
+                    preserved_handoff.as_ref(),
+                );
                 result.files_examined = synthesized_paths;
             } else {
                 result.success = false;
@@ -127,6 +144,17 @@ pub(super) fn normalize_explorer_result(
         result.error = Some("Delegated exploration completed without usable evidence".to_string());
     }
     result
+}
+
+fn explorer_report_with_handoff(report: String, handoff: Option<&DelegatedTaskHandoff>) -> String {
+    let Some(handoff) = handoff else {
+        return report;
+    };
+    let Ok(handoff) = serde_json::to_string(handoff) else {
+        return report;
+    };
+
+    format!("{report}\n<delegated_handoff>{handoff}</delegated_handoff>")
 }
 
 pub(super) fn relative_or_display(path: &str, working_dir: &Path) -> String {

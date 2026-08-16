@@ -105,6 +105,42 @@ impl ToolResult {
         Self::error_with_details(code, msg, None, None)
     }
 
+    /// Create a machine-actionable error. `retryable` describes repeating the
+    /// same operation, not whether the overall objective can recover through a
+    /// different action.
+    pub fn error_with_recovery(
+        code: &str,
+        msg: impl std::fmt::Display,
+        retryable: bool,
+        next_action: impl Into<String>,
+        prohibited_retries: Vec<String>,
+        safe_alternative: Option<Value>,
+    ) -> Self {
+        let mut error = serde_json::Map::new();
+        error.insert("code".to_string(), Value::String(code.to_string()));
+        error.insert("message".to_string(), Value::String(msg.to_string()));
+        error.insert("retryable".to_string(), Value::Bool(retryable));
+        error.insert("next_action".to_string(), Value::String(next_action.into()));
+        if !prohibited_retries.is_empty() {
+            error.insert(
+                "prohibited_retries".to_string(),
+                Value::Array(prohibited_retries.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(safe_alternative) = safe_alternative {
+            error.insert("safe_alternative".to_string(), safe_alternative);
+        }
+
+        Self {
+            output: serde_json::json!({
+                "ok": false,
+                "error": Value::Object(error),
+            })
+            .to_string(),
+            is_error: true,
+        }
+    }
+
     /// Create a structured error envelope with optional data/metadata.
     pub fn error_with_details(
         code: &str,

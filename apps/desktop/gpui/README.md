@@ -20,16 +20,45 @@ or fall back to fixture records: loading, empty, unsupported, and error are dist
 states. `MITSURO_SKIP_APPSERVER` now leaves an explicit backend-disabled error instead of
 quietly entering fixture mode.
 
-The selected transport, backend-qualified session, backend-scoped model, ordered
-backend-scoped pinned-session ids, and privacy-safe desktop preferences are persisted in
+The selected transport, connection-qualified session, backend-scoped model, ordered
+connection-qualified pinned-session ids, and privacy-safe desktop preferences are persisted in
 `~/.mitsuro/gpui-desktop-state.json` (override with `MITSURO_GPUI_STATE_PATH`). An
 explicit `MITSURO_BACKEND` always takes precedence. No server token or provider
 credential is written to this file.
 
-Settings → Connections can switch between the Mitsuro HTTP/SSE client and a managed
-Codex app-server stdio child without restarting GPUI. Switching disconnects the prior
-transport, ignores stale bootstrap results, and restores the last selected session for
-each backend. Connection errors remain errors; they do not silently enable fixtures.
+Additional real connections can be declared with `MITSURO_DESKTOP_CONNECTIONS` as a JSON array.
+Each entry requires a stable `name` and `kind`. A `mitsuro-http` entry also requires `url` and may
+name a `tokenEnv`; the token value is read only from that environment variable. A `codex-stdio`
+entry starts an independent managed app-server process and accepts neither URL nor token fields.
+For example:
+
+```json
+[
+  {
+    "name": "staging",
+    "kind": "mitsuro-http",
+    "displayName": "Mitsuro staging",
+    "url": "https://staging.example.test",
+    "tokenEnv": "MITSURO_STAGING_TOKEN"
+  },
+  {
+    "name": "review",
+    "kind": "codex-stdio",
+    "displayName": "Codex review"
+  }
+]
+```
+
+Every configured entry connects concurrently under its exact `ConnectionId`; malformed entries
+fail visibly and never fall back to fixtures or persist credentials.
+
+The sidebar keeps the Mitsuro HTTP/SSE client and managed Codex app-server stdio child
+connected at the same time. Switching the visible connection changes only the selected
+provider projection: it does not disconnect the other transport, and background turns
+continue routing into their connection-qualified session state. Each backend restores
+its own selected session, transcript cache, draft, attachments, queue, and live-turn
+projection. Connection errors remain isolated errors; they do not blank the other
+provider or silently enable fixtures.
 
 ## Current live surfaces
 

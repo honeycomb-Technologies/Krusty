@@ -151,6 +151,23 @@ fn apply_persisted_child_contract(
         .copied()
         .collect::<Vec<_>>();
 
+    if !primary_scopes.is_empty() && primary_scopes.iter().all(|scope| scope.kind == "task") {
+        return Err(ToolResult::error_with_recovery(
+            "agent_resume_task_graph_unsupported",
+            format!(
+                "Delegated run '{delegated_run_id}' is a completed task graph. Its reports are available through agent status and do not need a followup. Spawn a new task graph to perform additional work."
+            ),
+            false,
+            "Use agent status to read the existing terminal artifact. Spawn a new graph only when additional work is actually required.",
+            vec!["Do not resume or follow up merely to retrieve completed reports.".to_string()],
+            Some(serde_json::json!({
+                "delegated_run_id": delegated_run_id,
+                "read_action": "status",
+                "new_work_action": "spawn"
+            })),
+        ));
+    }
+
     match (primary_scopes.as_slice(), components.as_slice()) {
         ([], []) => {
             return Err(ToolResult::error_with_code(
@@ -502,6 +519,12 @@ impl AgentTool {
                 }
             }
             AgentAction::Wait => {
+                if self.runtime.has_completion_listener() {
+                    return ToolResult::error_with_code(
+                        "agent_wait_unavailable_in_hosted_runtime",
+                        "Hosted Chat/Code uses durable completion wake. Finish the foreground response normally; do not wait or poll.",
+                    );
+                }
                 let delegated_run_id = match required_run_id(&params) {
                     Ok(value) => value.to_string(),
                     Err(error) => return error,
@@ -515,9 +538,18 @@ impl AgentTool {
                         Err(error) => return error,
                     };
                     if is_terminal(run.stage) || started.elapsed() >= timeout {
+                        let terminal = is_terminal(run.stage);
+                        let next_action = if terminal {
+                            "Inspect the terminal evidence and integrate it into the parent outcome."
+                        } else if self.runtime.has_completion_listener() {
+                            "Finish the foreground response normally; do not poll. Durable completion will wake this session."
+                        } else {
+                            "Wait again only when explicitly synchronous monitoring is still required."
+                        };
                         return ToolResult::success_data(json!({
-                            "terminal": is_terminal(run.stage),
-                            "timed_out": !is_terminal(run.stage),
+                            "terminal": terminal,
+                            "timed_out": !terminal,
+                            "next_action": next_action,
                             "run": run,
                         }));
                     }
@@ -968,6 +1000,38 @@ mod tests {
         )
         .expect_err("legacy scope cannot prove its origin project");
         assert!(error.output.contains("agent_resume_workspace_invalid"));
+    }
+
+    #[test]
+    fn completed_task_graph_directs_readers_to_status_instead_of_legacy_resume_error() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let mut record = load_owned_run(&owner, "run-owned").expect("seed run");
+        record.target_scope.truncate(1);
+        record.target_scope.extend([
+            DelegatedRunScope {
+                label: "architecture".to_string(),
+                path: "Sources docs".to_string(),
+                kind: "task".to_string(),
+            },
+            DelegatedRunScope {
+                label: "security".to_string(),
+                path: "Sources Tools".to_string(),
+                kind: "task".to_string(),
+            },
+        ]);
+        let mut params = Params::default();
+
+        let error = apply_persisted_child_contract(
+            &mut params,
+            &record,
+            "run-owned",
+            owner.project_dir.as_deref(),
+        )
+        .expect_err("task graphs must not be collapsed into a single resumed child");
+
+        assert!(error.output.contains("agent_resume_task_graph_unsupported"));
+        assert!(error.output.contains("agent status"));
+        assert!(error.output.contains("Spawn a new task graph"));
     }
 
     #[test]

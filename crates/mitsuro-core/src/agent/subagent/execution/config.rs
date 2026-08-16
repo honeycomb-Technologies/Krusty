@@ -9,6 +9,12 @@ use super::super::build_context::SharedBuildContext;
 use super::super::tools::BuilderTools;
 use super::super::types::{AgentProgress, SubAgentTask};
 
+const DELEGATED_HANDOFF_CONTRACT: &str = r#"End with a short human summary followed by exactly one machine-readable handoff. The handoff must be the final block in your response:
+<delegated_handoff>{"status":"complete|degraded|blocked|failed","summary":"truthful outcome","acceptance_checks":[{"id":"check name","status":"passed|failed|not_applicable","evidence":"bounded evidence"}],"remaining_work":[],"blockers":[],"generated_artifacts":[{"path":"relative/output/path","purpose":"why a dependent task or final product needs it"}]}</delegated_handoff>
+Use complete only when the assigned objective and every required validation actually passed. Put unfinished work in remaining_work and use degraded or blocked rather than claiming success.
+Declare generated_artifacts only for bounded deliverables that must survive an isolated workspace, such as a distributable web bundle. Use paths relative to the workspace root. Never declare dependency trees, compiler/package caches, temporary files, target, node_modules, .cargo-home, or .mitsuro. Use an empty list when source changes alone are sufficient.
+"#;
+
 /// Configuration trait for agent behavior. This abstracts explorer vs builder differences.
 #[async_trait::async_trait]
 pub(crate) trait AgentConfig: Send + Sync {
@@ -133,7 +139,18 @@ impl BuilderConfig {
 #[async_trait::async_trait]
 impl AgentConfig for BuilderConfig {
     fn system_prompt(&self, _turn: usize) -> String {
-        builder_system_prompt(&self.task.working_dir)
+        let mut prompt = builder_system_prompt(&self.task.working_dir);
+        if self
+            .get_ai_tools()
+            .iter()
+            .any(|tool| tool.name == "browser_check")
+        {
+            prompt.push_str(
+                "\n## Governed Browser Acceptance\n\
+The browser_check tool is present and authorized for this delegated task. Use it directly for every browser_runtime, browser_keyboard, or browser_touch acceptance requirement. Do not substitute HTTP 200 checks, curl, screenshots, or an ungoverned browser installation.\n",
+            );
+        }
+        prompt
     }
 
     fn dynamic_context(&self) -> Option<String> {
@@ -231,11 +248,29 @@ follow the parent instructions exactly.\n\n\
 2. Do NOT spawn further sub-agents or call the agent tool.\n\
 3. Stay within the parent's objective and any stated scope.\n\
 4. Use tools for evidence. Prefer dedicated read/search tools over bash when possible.\n\
-5. Stop when the objective is answered; return a concise report to the parent.\n\
-6. Honor capability limits: if write tools are unavailable, do not attempt edits.\n\n\
-## Report\n\
-End with a short structured summary: what you did, key paths, outcome, and blockers.\n",
+5. Once the assigned objective and required checks pass, return the handoff immediately; do not expand into downstream integration or extra polish.\n\
+6. Honor capability limits: if write tools are unavailable, do not attempt edits.\n",
         );
+
+        prompt.push_str("\n## Report\n");
+        prompt.push_str(DELEGATED_HANDOFF_CONTRACT);
+
+        if self.policy.read_only_only {
+            prompt.push_str(
+                "\n7. This child has no workspace-write authority. Shell execution is for inspection and requested validation only; do not run export, generate, install, clean, format, fix, sync, or similar project targets that intentionally modify workspace files. Request a write-capable child if such work is required.\n",
+            );
+        }
+
+        if self
+            .ai_tools
+            .iter()
+            .any(|tool| tool.name == "browser_check")
+        {
+            prompt.push_str(
+                "\n## Governed Browser Acceptance\n\
+The browser_check tool is authorized for this delegated task. Use it directly for any browser_runtime, browser_keyboard, or browser_touch acceptance requirement. If it is not visible on the initial compact tool surface, retrieve it through tool_search by its exact name. Do not substitute HTTP 200 checks, curl, screenshots, or an ungoverned browser installation.\n",
+            );
+        }
 
         if !self.project_context.is_empty() {
             prompt.push('\n');
@@ -304,6 +339,7 @@ Complete only the task the parent assigned. You are not a fixed specialty — fo
 6. Do NOT claim completion if edits failed or required checks are broken.
 7. Follow repository instructions (AGENTS.md / project conventions) and any [CONVENTIONS] from the parent.
 8. If a file lock wait exceeds 30 seconds, skip that file and note it in your report.
+9. Once the assigned objective and required checks pass, return the handoff immediately; do not expand into downstream integration or extra polish.
 
 ## Process
 1. Locate relevant files (glob/grep/read)
@@ -312,15 +348,17 @@ Complete only the task the parent assigned. You are not a fixed specialty — fo
 4. Return a concise report to the parent
 
 ## Report
-End with: files changed, outcome, validation, blockers.
+{}
 "#,
-        working_dir.display()
+        working_dir.display(),
+        DELEGATED_HANDOFF_CONTRACT
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::register_all_tools;
     use crate::tools::registry::PermissionMode;
     use std::collections::HashSet;
 
@@ -339,9 +377,76 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["read"]);
-        assert!(!names
+        assert!(!names.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "bash" | "browser_check" | "write" | "edit" | "apply_patch"
+            )
+        }));
+    }
+
+    #[test]
+    fn execute_capable_builder_gets_governed_browser_tool_and_prompt() {
+        let scope = HashSet::from([
+            "bash".to_string(),
+            "browser_check".to_string(),
+            "read".to_string(),
+            "write".to_string(),
+        ]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(10))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("browser-verifier", "verify the live page")
+            .with_delegation_policy(policy);
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        let names = config
+            .get_ai_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "browser_check"));
+        assert!(config
+            .system_prompt(1)
+            .contains("browser_check tool is present and authorized"));
+        assert!(config
+            .system_prompt(1)
+            .contains("Do not substitute HTTP 200 checks"));
+    }
+
+    #[tokio::test]
+    async fn read_execute_child_prompt_forbids_workspace_mutating_project_targets() {
+        let policy = DelegationPolicy::for_subagent_verify(PermissionMode::Autonomous, Some(7));
+        let config =
+            SingleChildConfig::new(Arc::new(ToolRegistry::new()), policy, String::new()).await;
+
+        let prompt = config.system_prompt(1);
+        assert!(prompt.contains("no workspace-write authority"));
+        assert!(prompt.contains("do not run export, generate, install, clean"));
+        assert!(prompt.contains("Request a write-capable child"));
+        assert!(prompt.contains("return the handoff immediately"));
+    }
+
+    #[tokio::test]
+    async fn execute_child_prompt_names_governed_browser_discovery_path() {
+        let registry = Arc::new(ToolRegistry::new());
+        register_all_tools(&registry).await;
+        let policy = DelegationPolicy::for_subagent_child(
+            PermissionMode::Autonomous,
+            Some(7),
+            true,
+            false,
+            true,
+        );
+        let config = SingleChildConfig::new(registry, policy, String::new()).await;
+
+        assert!(config
+            .get_ai_tools()
             .iter()
-            .any(|name| { matches!(name.as_str(), "bash" | "write" | "edit" | "apply_patch") }));
+            .any(|tool| tool.name == "browser_check"));
+        let prompt = config.system_prompt(1);
+        assert!(prompt.contains("browser_check tool is authorized"));
+        assert!(prompt.contains("tool_search by its exact name"));
+        assert!(prompt.contains("Do not substitute HTTP 200 checks"));
     }
 
     #[test]
@@ -379,6 +484,8 @@ mod tests {
         let updated_context = config.dynamic_context();
 
         assert_eq!(config.system_prompt(2), original_prompt);
+        assert!(original_prompt.contains("<delegated_handoff>"));
+        assert!(original_prompt.contains("return the handoff immediately"));
         assert_ne!(updated_context, original_context);
         assert!(updated_context
             .as_deref()

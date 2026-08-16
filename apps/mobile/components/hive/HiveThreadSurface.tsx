@@ -46,7 +46,6 @@ export function HiveThreadSurface({
           showComposer ? composerReserveHeight : externalBottomPadding
         }
         hideJumpToLatest={bottomControlsOpen}
-        showPlanTracker={false}
         scrollToMessageId={scrollToMessageId}
         onScrollTargetHandled={onScrollTargetHandled}
       />

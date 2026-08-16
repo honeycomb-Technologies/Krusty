@@ -3413,7 +3413,7 @@ pub async fn run() -> Result<()> {
         enum NextEvent {
             Terminal(Option<std::io::Result<Event>>),
             Loop(Option<LoopEvent>),
-            Delegated(Option<DelegatedProgressEvent>),
+            Delegated(Option<Box<DelegatedProgressEvent>>),
             Auth(Option<crate::tui_support::utils::OAuthStatusUpdate>),
             Setup(Option<SetupServiceUpdate>),
             Compaction(Option<Result<(), String>>),
@@ -3464,7 +3464,7 @@ pub async fn run() -> Result<()> {
                     } else {
                         delegated_progress.next().await.map(|(_, event)| event)
                     }
-                } => NextEvent::Delegated(event),
+                } => NextEvent::Delegated(event.map(Box::new)),
                 event = async {
                     match auth_events.as_mut() {
                         Some(receiver) => receiver.recv().await,
@@ -3520,7 +3520,7 @@ pub async fn run() -> Result<()> {
                 Redraw::Full
             }
             NextEvent::Delegated(Some(event)) => {
-                app.handle_delegated_progress(event);
+                app.handle_delegated_progress(*event);
                 Redraw::Full
             }
             NextEvent::Delegated(None) => Redraw::None,

@@ -396,6 +396,41 @@ fn test_update_session_title() {
 }
 
 #[test]
+fn test_pin_archive_and_restore_session() {
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let session_id = manager
+        .create_session("Organize me", None, Some("/tmp"))
+        .expect("create session");
+
+    manager
+        .update_session_pinned(&session_id, true)
+        .expect("pin session");
+    manager
+        .update_session_archived(&session_id, true)
+        .expect("archive session");
+    let archived = manager
+        .get_session(&session_id)
+        .expect("read session")
+        .expect("session exists");
+    assert!(archived.pinned_at.is_some());
+    assert!(archived.archived_at.is_some());
+
+    manager
+        .update_session_archived(&session_id, false)
+        .expect("restore session");
+    manager
+        .update_session_pinned(&session_id, false)
+        .expect("unpin session");
+    let restored = manager
+        .get_session(&session_id)
+        .expect("read restored session")
+        .expect("session exists");
+    assert!(restored.pinned_at.is_none());
+    assert!(restored.archived_at.is_none());
+}
+
+#[test]
 fn test_update_session_working_dir() {
     // Test updating session working directory
     let (db, _temp) = create_test_db();

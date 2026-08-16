@@ -5,6 +5,8 @@
 export interface SessionResponse {
 	id: string;
 	title: string;
+	/** Latest durable execution state. Present on session-list responses. */
+	agent_state?: string | null;
 	token_count?: number | null;
 	working_dir: string | null;
 	project_dir: string | null;
@@ -20,6 +22,8 @@ export interface SessionResponse {
 	model_catalog_revision?: string | null;
 	target_branch?: string | null;
 	permission_mode: PermissionMode;
+	pinned_at?: string | null;
+	archived_at?: string | null;
 }
 
 export interface SessionWithMessagesResponse {
@@ -135,12 +139,18 @@ export interface DelegationTaskStateResponse {
 	delegation_task_id: string;
 	task_key: string;
 	role: "explore" | "build" | "planner" | "verifier";
+	objective?: string;
+	provider?: string | null;
+	model?: string | null;
+	working_dir?: string | null;
 	state: DelegationTaskState;
 	attempt_count: number;
 	integration_state?: "pending" | "ready" | "failed" | null;
 	depends_on?: string[];
 	write_intent?: string[];
+	created_at?: string;
 	updated_at: string;
+	completed_at?: string | null;
 }
 
 export interface DelegationGroupStateResponse {
@@ -148,9 +158,13 @@ export interface DelegationGroupStateResponse {
 	parent_tool_call_id?: string | null;
 	state: DelegationGroupState;
 	execution_mode: "foreground" | "detached";
+	max_parallelism?: number;
+	effective_parallelism?: number;
 	parent_continuation_state: "not_requested" | "pending" | "queued" | "promoted";
 	tasks: DelegationTaskStateResponse[];
+	created_at?: string;
 	updated_at: string;
+	completed_at?: string | null;
 }
 
 export type KnownDelegationEventType =
@@ -159,6 +173,8 @@ export type KnownDelegationEventType =
 	| "group_state_changed"
 	| "task_claimed"
 	| "task_running"
+	| "task_activity"
+	| "task_conversation"
 	| "task_state_changed"
 	| "parent_continuation_queued"
 	| "parent_continuation_promoted";
@@ -675,6 +691,8 @@ export interface DelegatedArtifactState {
 	stage?: DelegatedRunStage;
 	/** Exact durable group state; `stage` remains the compatibility projection. */
 	groupState?: DelegationGroupState;
+	maxParallelism?: number;
+	effectiveParallelism?: number;
 	thinking?: string;
 	message?: string;
 	investigationSummary?: string;
@@ -1385,6 +1403,7 @@ export type StreamEvent =
 	| { type: "thinking_delta"; thinking: string }
 	| { type: "thinking_complete"; thinking: string; signature: string }
 	| { type: "tool_call_start"; id: string; name: string }
+	| { type: "tool_call_preparing"; id: string; name: string; received_bytes: number }
 	| {
 			type: "tool_call_complete";
 			id: string;
@@ -1476,6 +1495,7 @@ export interface StreamCallbacks {
 	onTextDelta: (delta: string) => void;
 	onThinkingDelta: (thinking: string) => void;
 	onToolCallStart: (id: string, name: string) => void;
+	onToolCallPreparing?: (id: string, name: string, receivedBytes: number) => void;
 	onToolCallComplete: (
 		id: string,
 		name: string,
@@ -1515,7 +1535,7 @@ export interface StreamCallbacks {
 	onContextCompactionStarted?: (event: ContextCompactionStartedEvent) => void;
 	onSessionPinched?: (event: SessionContinuationEvent) => void;
 	onTitleUpdate: (title: string) => void;
-	onFinish: (sessionId: string) => void;
+	onFinish: (sessionId: string, stopReason?: string) => void;
 	onError: (error: string) => void;
 	// Hive autonomous agent callbacks
 	onUserMessage?: (
@@ -1762,6 +1782,91 @@ export interface TreeEntry {
 // ============================================================================
 // Preview / MCP / Skills Types
 // ============================================================================
+
+export type BrowserSessionKind = "interactive" | "agent";
+export type BrowserSessionStatus =
+	| "starting"
+	| "ready"
+	| "running"
+	| "stopped"
+	| "error";
+
+export interface BrowserCapability {
+	available: boolean;
+	runtime: "agent-browser";
+	version: string;
+	executable?: string | null;
+	live_stream: boolean;
+	semantic_actions: boolean;
+	agent_chat: boolean;
+	reason?: string | null;
+}
+
+export interface BrowserSession {
+	id: string;
+	title: string;
+	kind: BrowserSessionKind;
+	status: BrowserSessionStatus;
+	url?: string | null;
+	/** Raw CDP is intentionally never exposed by Honey. */
+	cdp_url?: null;
+	debug_port?: null;
+	stream_url?: string | null;
+	viewers: number;
+	controllers: number;
+	last_error?: string | null;
+	created_at: string;
+	updated_at: string;
+	viewport_mode: "mobile" | "desktop";
+}
+
+export interface BrowserSessionListResponse {
+	sessions: BrowserSession[];
+	capability: BrowserCapability;
+}
+
+export interface CreateBrowserSessionRequest {
+	title?: string;
+	kind?: BrowserSessionKind;
+	url?: string;
+	launch_local?: boolean;
+}
+
+export type BrowserAction =
+	| { type: "navigate"; url: string }
+	| { type: "snapshot"; interactive?: boolean; compact?: boolean; depth?: number }
+	| { type: "click"; target: string }
+	| { type: "fill" | "type"; target: string; value: string }
+	| { type: "press"; key: string }
+	| { type: "hover"; target: string }
+	| { type: "select"; target: string; values: string[] }
+	| { type: "scroll"; direction: "up" | "down" | "left" | "right"; amount?: number }
+	| { type: "back" | "forward" | "reload" }
+	| { type: "wait"; ms: number }
+	| {
+			type: "get";
+			property: "text" | "html" | "value" | "title" | "url" | "count";
+			target?: string;
+	  }
+	| { type: "attribute"; target: string; name: string }
+	| { type: "viewport"; mode: "mobile" | "desktop" };
+
+export interface BrowserActionResponse {
+	ok: boolean;
+	results: unknown;
+}
+
+export interface BrowserAgentRequest {
+	task: string;
+	model?: string;
+	max_steps?: number;
+}
+
+export interface BrowserAgentResponse {
+	ok: boolean;
+	result?: string | null;
+	error?: string | null;
+}
 
 export interface PreviewSettings {
 	enabled: boolean;

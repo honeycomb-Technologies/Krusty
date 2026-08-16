@@ -139,7 +139,7 @@ mod tests {
             "write",
         ];
         let surface = surface(&catalog);
-        let grok = client(ProviderId::Grok, "grok-4.5");
+        let grok = client(ProviderId::Grok, "grok-4.6");
         let mut options = CallOptions {
             tools: Some(vec![tool("read"), tool("set_work_mode")]),
             codex_parallel_tool_calls: true,

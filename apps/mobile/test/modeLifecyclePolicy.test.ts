@@ -1,4 +1,4 @@
-import { resolveModeLifecyclePolicy } from "../app/(tabs)/chat-screen/modeLifecyclePolicy";
+import { resolveModeLifecyclePolicy } from "../components/chat-screen/modeLifecyclePolicy";
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;

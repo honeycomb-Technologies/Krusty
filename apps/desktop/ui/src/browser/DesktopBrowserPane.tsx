@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -25,6 +25,164 @@ import { useThemeContext } from '@mobile/hooks/useTheme';
 
 type StageMode = 'session' | 'preview';
 
+type AtlasFrame = {
+  type: 'frame';
+  seq: number;
+  data: string;
+  metadata?: { deviceWidth?: number; deviceHeight?: number };
+};
+
+function AtlasStreamSurface({
+  serverUrl,
+  serverToken,
+  streamPath,
+}: {
+  serverUrl: string;
+  serverToken: string | null;
+  streamPath: string;
+}) {
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const frameRef = useRef<AtlasFrame | null>(null);
+  const [status, setStatus] = useState<'connecting' | 'live' | 'error'>('connecting');
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const base = serverUrl.replace(/^http/i, 'ws').replace(/\/+$/, '');
+    const separator = streamPath.includes('?') ? '&' : '?';
+    const token = serverToken?.trim()
+      ? `&token=${encodeURIComponent(serverToken.trim())}`
+      : '';
+    const socket = new WebSocket(
+      `${base}${streamPath}${separator}capability=controller${token}`,
+    );
+    socketRef.current = socket;
+    socket.onopen = () => {
+      setStatus('live');
+      socket.send(JSON.stringify({ type: 'config', pacing: 'ack', maxFps: 30 }));
+    };
+    socket.onerror = () => setStatus('error');
+    socket.onclose = () => setStatus((current) => (current === 'error' ? current : 'connecting'));
+    socket.onmessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const message = JSON.parse(event.data) as AtlasFrame;
+        if (message.type !== 'frame' || !message.data) return;
+        frameRef.current = message;
+        if (imageRef.current) imageRef.current.src = `data:image/jpeg;base64,${message.data}`;
+      } catch {
+        // Status, tabs, URL, and console messages are intentionally ignored here.
+      }
+    };
+    return () => {
+      socketRef.current = null;
+      socket.close();
+    };
+  }, [serverToken, serverUrl, streamPath]);
+
+  const send = useCallback((payload: Record<string, unknown>) => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify(payload));
+    }
+  }, []);
+
+  const mousePosition = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const metadata = frameRef.current?.metadata;
+    const width = metadata?.deviceWidth ?? bounds.width;
+    const height = metadata?.deviceHeight ?? bounds.height;
+    return {
+      x: ((event.clientX - bounds.left) / bounds.width) * width,
+      y: ((event.clientY - bounds.top) / bounds.height) * height,
+    };
+  }, []);
+
+  if (Platform.OS !== 'web') {
+    return (
+      <View style={styles.empty}>
+        <Text style={styles.streamStatus}>Atlas live stream is available in the desktop/web surface.</Text>
+      </View>
+    );
+  }
+
+  return (
+    // This div is the remote Chromium input surface; it never receives raw CDP access.
+    <div
+      role="application"
+      aria-label="Atlas controlled browser"
+      tabIndex={0}
+      onPointerMove={(event) => {
+        const point = mousePosition(event);
+        send({ type: 'input_mouse', eventType: 'mouseMoved', ...point, button: 'none' });
+      }}
+      onPointerDown={(event) => {
+        event.currentTarget.focus();
+        const point = mousePosition(event);
+        const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left';
+        send({ type: 'input_mouse', eventType: 'mousePressed', ...point, button, clickCount: 1 });
+      }}
+      onPointerUp={(event) => {
+        const point = mousePosition(event);
+        const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left';
+        send({ type: 'input_mouse', eventType: 'mouseReleased', ...point, button, clickCount: 1 });
+      }}
+      onWheel={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        send({
+          type: 'input_mouse',
+          eventType: 'mouseWheel',
+          x: event.clientX - bounds.left,
+          y: event.clientY - bounds.top,
+          deltaX: event.deltaX,
+          deltaY: event.deltaY,
+        });
+      }}
+      onKeyDown={(event) => {
+        event.preventDefault();
+        send({
+          type: 'input_keyboard',
+          eventType: 'keyDown',
+          key: event.key,
+          code: event.code,
+          text: event.key.length === 1 ? event.key : undefined,
+          modifiers:
+            Number(event.altKey) | (Number(event.ctrlKey) << 1) | (Number(event.metaKey) << 2) | (Number(event.shiftKey) << 3),
+        });
+      }}
+      onKeyUp={(event) => {
+        event.preventDefault();
+        send({ type: 'input_keyboard', eventType: 'keyUp', key: event.key, code: event.code });
+      }}
+      onContextMenu={(event) => event.preventDefault()}
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        overflow: 'hidden',
+        outline: 'none',
+        background: '#0b1119',
+        touchAction: 'none',
+      }}
+    >
+      <img
+        ref={imageRef}
+        alt="Atlas browser viewport"
+        draggable={false}
+        onLoad={() => {
+          const frame = frameRef.current;
+          if (frame) send({ type: 'ack', seq: frame.seq });
+        }}
+        style={{ width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none', userSelect: 'none' }}
+      />
+      {status !== 'live' ? (
+        <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: '#9aa7b5', fontSize: 12 }}>
+          {status === 'error' ? 'Atlas stream unavailable' : 'Connecting to Atlas…'}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function shortId(id: string) {
   return id.slice(0, 8);
 }
@@ -43,7 +201,7 @@ function statusColor(status: BrowserSession['status'], accent: string, muted: st
 
 export function DesktopBrowserPane({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
-  const { client, serverUrl } = useConnection();
+  const { client, serverUrl, serverToken } = useConnection();
   const t = theme.colors;
 
   const [sessions, setSessions] = useState<BrowserSession[]>([]);
@@ -175,16 +333,7 @@ export function DesktopBrowserPane({ visible }: { visible: boolean }) {
 
   if (!visible) return null;
 
-  const stageUrl =
-    stageMode === 'preview'
-      ? previewUrl
-      : selected?.url && /^https?:\/\//i.test(selected.url)
-        ? selected.url
-        : selected?.cdp_url
-          ? null
-          : address && /^https?:\/\//i.test(address)
-            ? address
-            : null;
+  const stageUrl = stageMode === 'preview' ? previewUrl : null;
 
   return (
     <View style={[styles.root, { backgroundColor: t.background, borderColor: t.border }]}>
@@ -326,8 +475,13 @@ export function DesktopBrowserPane({ visible }: { visible: boolean }) {
           ) : null}
 
           <View style={styles.stage}>
-            {stageUrl && Platform.OS === 'web' ? (
-              // @ts-expect-error iframe is web-only
+            {stageMode === 'session' && selected?.stream_url && serverUrl ? (
+              <AtlasStreamSurface
+                serverUrl={serverUrl}
+                serverToken={serverToken}
+                streamPath={selected.stream_url}
+              />
+            ) : stageUrl && Platform.OS === 'web' ? (
               <iframe
                 src={stageUrl}
                 title={selected?.title ?? 'Browser'}
@@ -338,8 +492,8 @@ export function DesktopBrowserPane({ visible }: { visible: boolean }) {
               <View style={styles.empty}>
                 <Globe2 size={22} color={t.mutedForeground} />
                 <Text style={{ color: t.mutedForeground, fontSize: 12, textAlign: 'center', maxWidth: 320, lineHeight: 17 }}>
-                  {selected?.cdp_url
-                    ? 'CDP live · browser-use ready · shared via Mitsuro server'
+                  {selected
+                    ? 'Atlas is running, but its live stream is unavailable.'
                     : 'Create a session or open a local preview'}
                 </Text>
               </View>
@@ -529,6 +683,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 24,
     gap: 8,
+  },
+  streamStatus: {
+    color: '#9aa7b5',
+    fontSize: 12,
+    textAlign: 'center',
   },
   agentBar: {
     minHeight: 44,

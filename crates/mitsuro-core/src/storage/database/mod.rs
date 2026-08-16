@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 61;
+const SCHEMA_VERSION: i32 = 62;
 
 /// Shared database handle for connection reuse
 ///

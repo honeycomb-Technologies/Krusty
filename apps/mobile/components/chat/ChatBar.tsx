@@ -15,12 +15,12 @@ import {
   Platform,
   Text,
   Keyboard,
-  LayoutAnimation,
+  KeyboardAvoidingView,
   Image,
   Alert,
   useWindowDimensions,
 } from 'react-native';
-import { BlurView } from '../../platform/blur';
+import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
 import { Maximize2, X } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
@@ -47,6 +47,7 @@ import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
 import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import { shouldAnimateComposerPulse } from './composerPulsePolicy';
 import {
   COMPOSER_MAX_HEIGHT as SHARED_COMPOSER_MAX_HEIGHT,
   INPUT_LINE_HEIGHT as SHARED_INPUT_LINE_HEIGHT,
@@ -514,12 +515,10 @@ function ChatBarComponent(props: ChatBarProps) {
   const [inputFocused, setInputFocused] = useState(false);
   const modelPopoverScale = useSharedValue(0);
   const modelPopoverOpacity = useSharedValue(0);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const transcriptRef = useRef('');
   const textRef = useRef(text);
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
-  const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
   /** Actual laid-out text-field width (preferred over estimate width). */
   const [measuredInputWidth, setMeasuredInputWidth] = useState(0);
@@ -612,7 +611,7 @@ function ChatBarComponent(props: ChatBarProps) {
   }, []);
 
   const bottomOverlayOpen =
-    accordionVisible ||
+    accordionOpen ||
     modelPickerOpen ||
     attachPickerOpen ||
     expandedEditorOpen;
@@ -632,6 +631,10 @@ function ChatBarComponent(props: ChatBarProps) {
     }
 
     if (!accordionVisible) return;
+    // Recreating a group of CSS backdrop-filter nodes eventually corrupts the
+    // mobile-web compositor. Retain the already-bounded controls after first
+    // use; their closed animation disables interaction and paints opacity 0.
+    if (Platform.OS === 'web') return;
     const timer = setTimeout(() => setAccordionVisible(false), 420);
     return () => clearTimeout(timer);
   }, [accordionOpen, accordionVisible]);
@@ -677,15 +680,10 @@ function ChatBarComponent(props: ChatBarProps) {
   }, [disabled, inputFocused, isRecording]);
 
   const t = theme.colors;
-  const isDark = theme.scheme === 'dark';
   const isHive = sessionType === 'hive';
   const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
-  const bgOverlay = t.surfaceOverlay;
-  const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
-  const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
-  const composerBlur = Math.max(theme.colors.glassBlur ?? 20, isDesktop ? 48 : 40);
   const providerFilters = useMemo<ProviderFilter[]>(() => {
     const seen = new Set<string>();
     const filters: ProviderFilter[] = [];
@@ -751,12 +749,12 @@ function ChatBarComponent(props: ChatBarProps) {
         <ProviderLogo
           providerId={provider.id}
           label={provider.label}
-          color="#fff"
+          color={t.foreground}
           size={24}
         />
       ),
     })),
-    [visualProviderFilters],
+    [t.foreground, visualProviderFilters],
   );
   const filteredModels = useMemo(
     () => selectedProviderFilter
@@ -783,36 +781,16 @@ function ChatBarComponent(props: ChatBarProps) {
   );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
-  // ── Keyboard tracking with LayoutAnimation ──
+  // Close transient controls when the keyboard leaves without driving keyboard
+  // geometry through React state. KeyboardAvoidingView owns the native lift.
   useEffect(() => {
-    const showSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      (e) => {
-        LayoutAnimation.configureNext(
-          LayoutAnimation.create(
-            e.duration || 250,
-            LayoutAnimation.Types.keyboard,
-            LayoutAnimation.Properties.opacity,
-          ),
-        );
-        setKeyboardHeight(e.endCoordinates.height);
-      },
-    );
     const hideSub = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      (e) => {
-        LayoutAnimation.configureNext(
-          LayoutAnimation.create(
-            e.duration || 250,
-            LayoutAnimation.Types.keyboard,
-            LayoutAnimation.Properties.opacity,
-          ),
-        );
-        setKeyboardHeight(0);
+      () => {
         if (accordionOpenRef.current) setAccordionOpen(false);
       },
     );
-    return () => { showSub.remove(); hideSub.remove(); };
+    return () => hideSub.remove();
   }, []);
 
   // ── Speech recognition ──
@@ -1045,18 +1023,19 @@ function ChatBarComponent(props: ChatBarProps) {
   }, [accordionOpen]);
 
   const canSend = !disabled && (isStreaming || text.trim().length > 0 || attachments.length > 0);
-  const beamActive =
-    isStreaming ||
-    inputFocused ||
-    expandedEditorOpen ||
-    text.trim().length > 0 ||
-    attachments.length > 0;
-  const kActive = accordionOpen || accordionVisible;
+  const beamActive = shouldAnimateComposerPulse({
+    isStreaming,
+    inputFocused,
+    expandedEditorOpen,
+    hasDraft: text.trim().length > 0,
+    hasAttachments: attachments.length > 0,
+  });
+  const kActive = accordionOpen;
   const kColor = kActive ? t.thinking : t.mutedForeground;
-  const kBorder = kActive ? t.thinking + '40' : borderColor;
+  const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
 
-  // Bottom offset: keyboard height, or a safe-area gap when keyboard is closed.
-  // Desktop gets extra padding so the bar sits above the window edge cleanly.
+  // The composer keeps one stable closed-screen inset. KeyboardAvoidingView
+  // moves this mounted surface natively without changing transcript padding.
   const closedGap = isDesktop
     ? CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP
     : CLOSED_COMPOSER_BOTTOM_GAP;
@@ -1065,10 +1044,7 @@ function ChatBarComponent(props: ChatBarProps) {
     : Platform.OS === 'web'
       ? Math.max(closedGap, insets.bottom)
       : Math.max(10, Math.min(insets.bottom, closedGap));
-  // On iOS/Android, endCoordinates.height is distance from window bottom to keyboard top.
-  // Use that directly so the absolute composer sits flush above the keyboard.
-  // Avoid subtracting safe-area here or the bar can land in the keyboard.
-  const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
+  const bottomOffset = closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
   // only when the catalog has not loaded or the model is unknown.
@@ -1188,22 +1164,13 @@ function ChatBarComponent(props: ChatBarProps) {
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
-  useEffect(() => {
-    const measuredRootHeight = measuredRootHeightRef.current;
-    if (!measuredRootHeight || !onHeightChange) return;
-    // Reserve the full mounted height, including keyboard lift. Transcript
-    // content must clear both the composer chrome and the open keyboard.
-    const reservedHeight = Math.max(PILL, Math.ceil(measuredRootHeight));
-    if (reportedComposerHeightRef.current === reservedHeight) return;
-    reportedComposerHeightRef.current = reservedHeight;
-    onHeightChange(reservedHeight);
-  }, [keyboardHeight, onHeightChange]);
-
   return (
-    <View
-      pointerEvents="box-none"
+    <KeyboardAvoidingView
+      behavior="position"
+      enabled={!isDesktop && Platform.OS !== 'web'}
       style={[
         styles.root,
+        styles.pointerBoxNone,
         {
           paddingBottom: bottomOffset,
           // Parent desktop column already caps width; fill that band only.
@@ -1221,11 +1188,11 @@ function ChatBarComponent(props: ChatBarProps) {
       ]}
       onLayout={(event) => {
         const { height, width } = event.nativeEvent.layout;
-        measuredRootHeightRef.current = height;
         const nextWidth = Math.round(width);
         setMeasuredRootWidth((prev) => (prev === nextWidth ? prev : nextWidth));
         if (!onHeightChange) return;
-        // Include keyboard paddingBottom so chat content is never covered.
+        // This is composer chrome only. Keyboard lift stays visual and never
+        // resizes the transcript or feeds its auto-follow geometry.
         const reservedHeight = Math.max(PILL, Math.ceil(height));
         if (reportedComposerHeightRef.current === reservedHeight) return;
         reportedComposerHeightRef.current = reservedHeight;
@@ -1264,9 +1231,9 @@ function ChatBarComponent(props: ChatBarProps) {
                   >
                     <Image source={{ uri: previewUri }} style={styles.attachImg} />
                     <View
-                      pointerEvents="none"
                       style={[
                         styles.attachHoverOverlay,
+                        styles.ignorePointerEvents,
                         {
                           borderColor: t.userMessage,
                           backgroundColor: `${t.userMessage}22`,
@@ -1310,8 +1277,10 @@ function ChatBarComponent(props: ChatBarProps) {
             },
           ]}
         >
-          <BlurView intensity={composerBlur} tint={blurTint} style={StyleSheet.absoluteFill} />
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
+          <AdaptiveMaterial
+            borderRadius={RADIUS}
+            tone="regular"
+          />
           <View style={styles.barInner}>
             {!isRecording ? (
               <Pressable
@@ -1388,18 +1357,25 @@ function ChatBarComponent(props: ChatBarProps) {
         {showComposerChrome ? (
           <View style={styles.kCol}>
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                accordionOpen ? 'Close agent controls' : 'Open agent controls'
+              }
+              accessibilityState={{ expanded: accordionOpen }}
               onPress={toggleAccordion}
               style={[
                 styles.kWrap,
                 {
                   borderColor: kBorder,
                   borderRadius: RADIUS,
-                  backgroundColor: kActive ? t.thinking + '14' : undefined,
+                  backgroundColor: t.glass.backgroundElevated,
                 },
               ]}
             >
-              <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
-              <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
+              <AdaptiveMaterial
+                borderRadius={RADIUS}
+                tone="elevated"
+              />
               <View style={styles.kInner}>
                 <MitsuroMark size={26} color={kColor} strokeWidth={62} />
               </View>
@@ -1412,9 +1388,9 @@ function ChatBarComponent(props: ChatBarProps) {
           56px Agent column (WebKit clips overflow from that narrow column). */}
       {showComposerChrome && accordionVisible ? (
         <View
-          pointerEvents="box-none"
           style={[
             styles.controlsLayer,
+            styles.pointerBoxNone,
             {
               bottom: controlsLayerBottom,
               width: controlsLayerWidth,
@@ -1470,14 +1446,11 @@ function ChatBarComponent(props: ChatBarProps) {
           overlayBottom={overlayBottom}
           modelPopoverStyle={modelPopoverStyle}
           borderColor={t.glass.border}
-          composerBlur={composerBlur}
-          pillTint={pillTint}
           foreground={t.foreground}
           mutedForeground={t.mutedForeground}
           thinking={t.thinking}
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
-          surfaceOverlayElevated={t.surfaceOverlayElevated}
           filteredModels={filteredModels}
           model={model}
           onSelectModel={handleModelSelectFromPicker}
@@ -1526,7 +1499,7 @@ function ChatBarComponent(props: ChatBarProps) {
         border={t.border}
         keyboardAppearance={theme.scheme}
       />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -1539,6 +1512,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: ROOT_HORIZONTAL_PADDING,
     paddingTop: 6,
   },
+  pointerBoxNone: { pointerEvents: 'box-none' },
+  ignorePointerEvents: { pointerEvents: 'none' },
   attachRow: { flexDirection: 'row', gap: 8, marginBottom: 8, paddingLeft: 4 },
   attachThumb: { width: 52, height: 52, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', justifyContent: 'center', alignItems: 'center' },
   attachPreviewButton: { width: '100%', height: '100%' },
@@ -1557,6 +1532,7 @@ const styles = StyleSheet.create({
   },
   lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP, minHeight: PILL },
   bar: {
+    isolation: 'isolate',
     flex: 1,
     height: PILL,
     maxHeight: COMPOSER_MAX_HEIGHT,
@@ -1564,11 +1540,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     // Subtle depth so the composer reads as a FAB dock, not a grey slab.
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.22,
-    shadowRadius: 18,
-    elevation: 8,
+    boxShadow: '0 8px 18px rgba(0,0,0,0.22)',
   },
   barInner: {
     flexDirection: 'row',
@@ -1622,20 +1594,20 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   kWrap: {
+    isolation: 'isolate',
     width: PILL,
     height: PILL,
     // Rounded square — matches accordion FAB pills (not a circle).
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.2,
-    shadowRadius: 14,
-    elevation: 8,
+    boxShadow: '0 6px 14px rgba(0,0,0,0.20)',
   },
-  kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-
+  kInner: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   providerInitials: {
     fontSize: 11,
     fontWeight: '800',

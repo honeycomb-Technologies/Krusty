@@ -3,6 +3,7 @@ use std::time::Instant;
 use tracing::info;
 
 use crate::ai::client::AiClient;
+use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::{AiTool, ModelMessage, Usage};
 use crate::ai::usage::{
     parse_anthropic_usage, parse_google_usage, parse_openai_chat_usage,
@@ -19,7 +20,7 @@ pub(super) async fn call_subagent_api(
     messages: &[ModelMessage],
     tools: &[AiTool],
     max_tokens: usize,
-    thinking_enabled: bool,
+    reasoning_effort: Option<ReasoningEffort>,
     session_id: &str,
     prompt_cache_key: Option<&str>,
 ) -> Result<Value, SubAgentApiError> {
@@ -31,13 +32,13 @@ pub(super) async fn call_subagent_api(
     let start = Instant::now();
 
     let result = client
-        .call_with_tools(
+        .call_with_tools_at_reasoning(
             model,
             system,
             messages,
             tools,
             max_tokens,
-            thinking_enabled,
+            reasoning_effort,
             Some(session_id),
             prompt_cache_key,
         )

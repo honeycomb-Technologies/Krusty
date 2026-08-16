@@ -10,6 +10,19 @@ const MAX_AGENT_FINDINGS_HEAD_CHARS: usize = 1_900;
 const MAX_AGENT_FINDINGS_TAIL_CHARS: usize = 900;
 const MAX_AGENT_DETAIL_CHARS: usize = 600;
 const MAX_AGENT_PATH_CHARS: usize = 300;
+const MAX_AGENT_REPORTS: usize = 12;
+const MAX_AGENT_REPORT_NAME_CHARS: usize = 96;
+const MAX_AGENT_REPORT_META_CHARS: usize = 64;
+const MAX_AGENT_REPORT_CONFIDENCE_CHARS: usize = 24;
+const MAX_AGENT_REPORT_ERROR_CHARS: usize = 160;
+const MAX_AGENT_REPORT_SUMMARY_HEAD_CHARS: usize = 600;
+const MAX_AGENT_REPORT_SUMMARY_TAIL_CHARS: usize = 150;
+const MAX_AGENT_REPORT_FINDINGS: usize = 3;
+const MAX_AGENT_REPORT_FINDING_CHARS: usize = 160;
+const MAX_AGENT_REPORT_ACCEPTANCE_CHECKS: usize = 4;
+const MAX_AGENT_REPORT_CHECK_ID_CHARS: usize = 96;
+const MAX_AGENT_REPORT_CHECK_STATUS_CHARS: usize = 32;
+const MAX_AGENT_REPORT_CHECK_EVIDENCE_CHARS: usize = 400;
 
 pub(super) fn summarize_tool_result(
     tool_name: &str,
@@ -182,6 +195,7 @@ fn summarize_agent_payload(payload: &Value) -> Value {
         .get("paths_examined_count")
         .or_else(|| payload.get("files_examined_count"))
         .and_then(Value::as_u64);
+    let agent_reports = summarize_agent_reports(payload);
 
     json!({
         "status": payload.get("status").and_then(Value::as_str),
@@ -245,8 +259,102 @@ fn summarize_agent_payload(payload: &Value) -> Value {
             .get("coverage_gap_notice")
             .and_then(Value::as_str)
             .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+        // Terminal task-graph artifacts are the parent Agent's actual handoff.
+        // Retaining only aggregate counts forces the parent to repeat work or
+        // misuse followup/resume to recover evidence that is already durable.
+        "agent_reports": agent_reports,
         "background_processes": background_processes,
     })
+}
+
+fn summarize_agent_reports(payload: &Value) -> Vec<Value> {
+    payload
+        .get("agents")
+        .or_else(|| payload.get("reports"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_AGENT_REPORTS)
+        .map(|report| {
+            let key_findings = report
+                .get("key_findings")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    truncate_array_strings(
+                        items,
+                        MAX_AGENT_REPORT_FINDINGS,
+                        MAX_AGENT_REPORT_FINDING_CHARS,
+                    )
+                })
+                .unwrap_or_default();
+            let acceptance_checks = report
+                .get("handoff")
+                .and_then(|handoff| handoff.get("acceptance_checks"))
+                .or_else(|| report.get("acceptance_checks"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(MAX_AGENT_REPORT_ACCEPTANCE_CHECKS)
+                .map(|check| {
+                    json!({
+                        "id": check
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_CHECK_ID_CHARS)),
+                        "status": check
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_CHECK_STATUS_CHARS)),
+                        "evidence": check
+                            .get("evidence")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_CHECK_EVIDENCE_CHARS)),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "agent": report
+                    .get("agent")
+                    .or_else(|| report.get("agent_name"))
+                    .or_else(|| report.get("name"))
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_NAME_CHARS)),
+                "success": report.get("success").and_then(Value::as_bool),
+                "degraded_success": report.get("degraded_success").and_then(Value::as_bool),
+                "objective_status": report
+                    .get("objective_status")
+                    .or_else(|| report.get("handoff").and_then(|handoff| handoff.get("status")))
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_META_CHARS)),
+                "termination": report
+                    .get("termination")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_META_CHARS)),
+                "outcome_reason": report
+                    .get("outcome_reason")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_META_CHARS)),
+                "confidence": report
+                    .get("confidence")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_CONFIDENCE_CHARS)),
+                "summary": report
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8_head_tail(
+                        value,
+                        MAX_AGENT_REPORT_SUMMARY_HEAD_CHARS,
+                        MAX_AGENT_REPORT_SUMMARY_TAIL_CHARS,
+                    )),
+                "key_findings": key_findings,
+                "acceptance_checks": acceptance_checks,
+                "error": report
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_utf8(value, MAX_AGENT_REPORT_ERROR_CHARS)),
+            })
+        })
+        .collect()
 }
 
 fn summarize_delegated_run(run: &Value) -> Value {

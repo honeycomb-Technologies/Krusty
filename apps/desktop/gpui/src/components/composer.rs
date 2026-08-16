@@ -9,37 +9,75 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _,
+    div, point, px, BoxShadow, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::app::{ComposerAttachmentKind, MitsuroApp};
 use crate::theme;
 
+/// Electron's composer elevation: a quiet near-field lift plus a broad ambient shadow.
+fn composer_surface_shadow() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow {
+            color: theme::hex_alpha(0x000000, 0.04),
+            offset: point(px(0.0), px(3.0)),
+            blur_radius: px(7.5),
+            spread_radius: px(0.0),
+        },
+        BoxShadow {
+            color: theme::hex_alpha(0x000000, 0.05),
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(20.0),
+            spread_radius: px(0.0),
+        },
+    ]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComposerDensity {
+    Regular,
+    Compact,
+}
+
+/// Mirrors the reference footer's container-query behavior after persistent
+/// navigation has been removed from the available window width.
+fn composer_density(main_column_width: f32) -> ComposerDensity {
+    if main_column_width <= 640.0 {
+        ComposerDensity::Compact
+    } else {
+        ComposerDensity::Regular
+    }
+}
+
 pub fn composer(
     app: &MitsuroApp,
     input: &Entity<InputState>,
+    main_column_width: f32,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
+    let density = composer_density(main_column_width);
     let chat_mode = app.active_mode() == crate::app::ProductMode::Chat;
     let calm = app.is_calm_stage();
     // Chat empty home: slim single-row composer (no promo / project stack).
     if chat_mode && (calm || app.is_empty_conversation()) {
-        return chat_slim_composer(app, input, cx).into_any_element();
+        return chat_slim_composer(app, input, density, cx).into_any_element();
     }
     // Chat open thread: still slim-ish, but full-width max 720 with Instant + send.
     if chat_mode {
-        return chat_thread_composer(app, input, cx).into_any_element();
+        return chat_thread_composer(app, input, density, cx).into_any_element();
     }
-    codex_composer(app, input, cx).into_any_element()
+    codex_composer(app, input, density, cx).into_any_element()
 }
 
 /// Codex / agent composer: promo stack on calm home, full chrome when thread open.
 fn codex_composer(
     app: &MitsuroApp,
     input: &Entity<InputState>,
+    density: ComposerDensity,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -59,7 +97,7 @@ fn codex_composer(
     div()
         .id("composer-wrap")
         .w_full()
-        .max_w(px(720.0))
+        .max_w(px(theme::metrics().composer_max_width))
         .px(if calm { px(24.0) } else { px(16.0) })
         .pb(if calm { px(24.0) } else { px(16.0) })
         .pt(px(4.0))
@@ -75,7 +113,7 @@ fn codex_composer(
             div()
                 .flex()
                 .flex_col()
-                .rounded(px(16.0))
+                .rounded(px(theme::metrics().composer_radius))
                 .bg(if calm {
                     theme::hex_alpha(0x1a1a1a, 0.78)
                 } else {
@@ -87,22 +125,11 @@ fn codex_composer(
                 } else {
                     colors.border
                 })
+                .shadow(composer_surface_shadow())
                 .px(px(14.0))
                 .pt(px(12.0))
                 .pb(px(10.0))
                 .gap(px(10.0))
-                .when(app.composer_add_menu_open(), |this| {
-                    this.child(composer_add_menu(app, cx))
-                })
-                .when(app.composer_access_menu_open(), |this| {
-                    this.child(composer_access_menu(app, cx))
-                })
-                .when(app.composer_model_menu_open(), |this| {
-                    this.child(composer_model_menu(app, cx))
-                })
-                .when(app.composer_reasoning_menu_open(), |this| {
-                    this.child(composer_reasoning_menu(app, cx))
-                })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
                 })
@@ -123,6 +150,7 @@ fn codex_composer(
                 // Bottom toolbar: current model | send/stop.
                 .child(
                     div()
+                        .relative()
                         .flex()
                         .flex_row()
                         .items_center()
@@ -152,22 +180,23 @@ fn codex_composer(
                             ))
                         })
                         .when(app.show_composer_workspace_control(), |this| {
-                            this.child(workspace_chip(app, cx))
+                            this.child(workspace_chip(app, density, cx))
                         })
                         .when(app.show_composer_access_control(), |this| {
-                            this.child(access_chip(app, cx))
+                            this.child(access_chip(app, density, cx))
                         })
                         .when(app.work_mode_available(), |this| {
-                            this.child(work_mode_chip(app.work_mode_label(), cx))
+                            this.child(work_mode_chip(app.work_mode_label(), density, cx))
                         })
-                        .child(model_chip(&model, cx))
+                        .child(model_chip(&model, density, cx))
                         .when_some(reasoning, |this, label| {
-                            this.child(reasoning_chip(&label, cx))
+                            this.child(reasoning_chip(&label, density, cx))
                         })
                         .when(app.fast_mode_available(), |this| {
                             this.child(fast_chip(
                                 &app.fast_mode_label(),
                                 app.fast_mode_enabled(),
+                                density,
                                 cx,
                             ))
                         })
@@ -195,6 +224,18 @@ fn codex_composer(
                             .into_any_element()
                         } else {
                             disabled_send("composer-send-disabled").into_any_element()
+                        })
+                        .when(app.composer_add_menu_open(), |this| {
+                            this.child(composer_add_menu(app, cx))
+                        })
+                        .when(app.composer_access_menu_open(), |this| {
+                            this.child(composer_access_menu(app, cx))
+                        })
+                        .when(app.composer_model_menu_open(), |this| {
+                            this.child(composer_model_menu(app, density, cx))
+                        })
+                        .when(app.composer_reasoning_menu_open(), |this| {
+                            this.child(composer_reasoning_menu(app, cx))
                         }),
                 ),
         )
@@ -204,6 +245,7 @@ fn codex_composer(
 fn chat_slim_composer(
     app: &MitsuroApp,
     input: &Entity<InputState>,
+    density: ComposerDensity,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -220,7 +262,7 @@ fn chat_slim_composer(
     div()
         .id("composer-wrap-chat")
         .w_full()
-        .max_w(px(640.0))
+        .max_w(px(theme::metrics().chat_home_composer_max_width))
         .px(px(24.0))
         .pb(px(28.0))
         .pt(px(8.0))
@@ -233,14 +275,9 @@ fn chat_slim_composer(
         .when(!app.composer_attachments().is_empty(), |this| {
             this.child(attachment_chips(app, cx))
         })
-        .when(app.composer_add_menu_open(), |this| {
-            this.child(composer_add_menu(app, cx))
-        })
-        .when(app.composer_reasoning_menu_open(), |this| {
-            this.child(composer_reasoning_menu(app, cx))
-        })
         .child(
             div()
+                .relative()
                 .w_full()
                 .flex()
                 .flex_row()
@@ -252,6 +289,7 @@ fn chat_slim_composer(
                 .bg(theme::hex_alpha(0x1a1a1a, 0.85))
                 .border_1()
                 .border_color(colors.border_subtle)
+                .shadow(composer_surface_shadow())
                 .when(app.can_open_composer_add_menu(), |this| {
                     this.child(round_action(
                         "chat-add-input",
@@ -271,17 +309,18 @@ fn chat_slim_composer(
                         .child(Input::new(input).appearance(false).h(px(30.0))),
                 )
                 .when_some(reasoning, |this, label| {
-                    this.child(reasoning_chip(&label, cx))
+                    this.child(reasoning_chip(&label, density, cx))
                 })
                 .when(app.fast_mode_available(), |this| {
                     this.child(fast_chip(
                         &app.fast_mode_label(),
                         app.fast_mode_enabled(),
+                        density,
                         cx,
                     ))
                 })
                 .when(app.work_mode_available(), |this| {
-                    this.child(work_mode_chip(app.work_mode_label(), cx))
+                    this.child(work_mode_chip(app.work_mode_label(), density, cx))
                 })
                 .when(app.can_attach_audio(), |this| {
                     this.child(round_path_action(
@@ -321,6 +360,12 @@ fn chat_slim_composer(
                     .into_any_element()
                 } else {
                     disabled_send("chat-send-disabled").into_any_element()
+                })
+                .when(app.composer_add_menu_open(), |this| {
+                    this.child(composer_add_menu(app, cx))
+                })
+                .when(app.composer_reasoning_menu_open(), |this| {
+                    this.child(composer_reasoning_menu(app, cx))
                 }),
         )
 }
@@ -329,6 +374,7 @@ fn chat_slim_composer(
 fn chat_thread_composer(
     app: &MitsuroApp,
     input: &Entity<InputState>,
+    density: ComposerDensity,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
@@ -345,7 +391,7 @@ fn chat_thread_composer(
     div()
         .id("composer-wrap-chat-thread")
         .w_full()
-        .max_w(px(720.0))
+        .max_w(px(theme::metrics().composer_max_width))
         .px(px(16.0))
         .pb(px(16.0))
         .pt(px(4.0))
@@ -359,20 +405,15 @@ fn chat_thread_composer(
             div()
                 .flex()
                 .flex_col()
-                .rounded(px(16.0))
+                .rounded(px(theme::metrics().composer_radius))
                 .bg(colors.bg_elevated)
                 .border_1()
                 .border_color(colors.border)
+                .shadow(composer_surface_shadow())
                 .px(px(12.0))
                 .pt(px(10.0))
                 .pb(px(8.0))
                 .gap(px(8.0))
-                .when(app.composer_add_menu_open(), |this| {
-                    this.child(composer_add_menu(app, cx))
-                })
-                .when(app.composer_reasoning_menu_open(), |this| {
-                    this.child(composer_reasoning_menu(app, cx))
-                })
                 .when(!app.composer_attachments().is_empty(), |this| {
                     this.child(attachment_chips(app, cx))
                 })
@@ -387,6 +428,7 @@ fn chat_thread_composer(
                 )
                 .child(
                     div()
+                        .relative()
                         .flex()
                         .flex_row()
                         .items_center()
@@ -416,17 +458,18 @@ fn chat_thread_composer(
                             ))
                         })
                         .when_some(reasoning, |this, label| {
-                            this.child(reasoning_chip(&label, cx))
+                            this.child(reasoning_chip(&label, density, cx))
                         })
                         .when(app.fast_mode_available(), |this| {
                             this.child(fast_chip(
                                 &app.fast_mode_label(),
                                 app.fast_mode_enabled(),
+                                density,
                                 cx,
                             ))
                         })
                         .when(app.work_mode_available(), |this| {
-                            this.child(work_mode_chip(app.work_mode_label(), cx))
+                            this.child(work_mode_chip(app.work_mode_label(), density, cx))
                         })
                         .child(div().flex_1())
                         .child(if streaming {
@@ -452,6 +495,12 @@ fn chat_thread_composer(
                             .into_any_element()
                         } else {
                             disabled_send("chat-thread-send-disabled").into_any_element()
+                        })
+                        .when(app.composer_add_menu_open(), |this| {
+                            this.child(composer_add_menu(app, cx))
+                        })
+                        .when(app.composer_reasoning_menu_open(), |this| {
+                            this.child(composer_reasoning_menu(app, cx))
                         }),
                 ),
         )
@@ -609,13 +658,17 @@ fn composer_add_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
         .collect::<Vec<_>>();
     div()
         .id("composer-add-menu")
-        .w_full()
+        .absolute()
+        .left(px(0.0))
+        .bottom(px(42.0))
+        .w(px(320.0))
         .max_h(px(280.0))
         .overflow_y_scroll()
         .rounded(px(11.0))
         .border_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
+        .shadow(composer_surface_shadow())
         .p(px(6.0))
         .flex()
         .flex_col()
@@ -695,6 +748,7 @@ fn composer_add_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                                         div()
                                             .text_xs()
                                             .text_color(colors.text_tertiary)
+                                            .line_clamp(1)
                                             .overflow_hidden()
                                             .child(detail),
                                     )
@@ -766,6 +820,7 @@ fn streaming_actions(
     div()
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
         .gap(px(6.0))
         .when(follow_up_available && !draft_empty, |this| {
@@ -829,21 +884,33 @@ fn usage_card(_cx: &mut Context<MitsuroApp>) -> impl IntoElement {
         )
 }
 
-fn workspace_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn workspace_chip(
+    app: &MitsuroApp,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let label = app.composer_workspace_label();
+    let tooltip = format!("Project: {label}");
     let enabled = app.can_select_composer_workspace();
     div()
         .id("workspace-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
-        .min_w_0()
-        .max_w(px(154.0))
         .gap(px(5.0))
-        .px(px(8.0))
         .py(px(4.0))
         .rounded(px(8.0))
+        .when(density == ComposerDensity::Regular, |this| {
+            this.min_w_0().max_w(px(154.0)).px(px(8.0))
+        })
+        .when(density == ComposerDensity::Compact, |this| {
+            this.w(px(28.0))
+                .max_w(px(28.0))
+                .justify_center()
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        })
         .text_color(if enabled {
             colors.text_tertiary
         } else {
@@ -855,28 +922,42 @@ fn workspace_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
                 .on_click(cx.listener(|app, _, _, cx| app.select_composer_workspace(cx)))
         })
         .child(Icon::empty().path("icons/folder.svg").with_size(px(12.0)))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_xs()
-                .child(label),
-        )
+        .when(density == ComposerDensity::Regular, |this| {
+            this.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .child(label),
+            )
+        })
 }
 
-fn access_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn access_chip(
+    app: &MitsuroApp,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let enabled = !app.turn_in_progress();
+    let label = app.composer_access_label();
+    let tooltip = format!("Access: {label}");
     div()
         .id("access-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
         .gap(px(4.0))
-        .px(px(8.0))
         .py(px(4.0))
         .rounded(px(8.0))
+        .when(density == ComposerDensity::Regular, |this| this.px(px(8.0)))
+        .when(density == ComposerDensity::Compact, |this| {
+            this.w(px(28.0))
+                .justify_center()
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        })
         .text_color(if enabled {
             colors.text_tertiary
         } else {
@@ -888,8 +969,10 @@ fn access_chip(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEleme
                 .on_click(cx.listener(|app, _, _, cx| app.toggle_composer_access_menu(cx)))
         })
         .child(Icon::empty().path("icons/shield.svg").with_size(px(12.0)))
-        .child(div().text_xs().child(app.composer_access_label()))
-        .child(Icon::new(IconName::ChevronDown).with_size(px(11.0)))
+        .when(density == ComposerDensity::Regular, |this| {
+            this.child(div().text_xs().child(label))
+                .child(Icon::new(IconName::ChevronDown).with_size(px(11.0)))
+        })
 }
 
 fn composer_access_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -897,11 +980,15 @@ fn composer_access_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
     let choices = app.composer_access_choices();
     div()
         .id("composer-access-menu")
-        .w_full()
+        .absolute()
+        .left(px(72.0))
+        .bottom(px(42.0))
+        .w(px(320.0))
         .rounded(px(11.0))
         .border_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
+        .shadow(composer_surface_shadow())
         .p(px(6.0))
         .flex()
         .flex_col()
@@ -969,7 +1056,11 @@ fn composer_access_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
         )
 }
 
-fn composer_model_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn composer_model_menu(
+    app: &MitsuroApp,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let search = app.composer_model_search_input().clone();
     let query = search.read(cx).value().to_string();
@@ -992,12 +1083,20 @@ fn composer_model_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
 
     div()
         .id("composer-model-menu")
-        .w_full()
+        .absolute()
+        .right(if density == ComposerDensity::Compact {
+            px(0.0)
+        } else {
+            px(180.0)
+        })
+        .bottom(px(42.0))
+        .w(px(360.0))
         .max_h(px(360.0))
         .rounded(px(11.0))
         .border_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
+        .shadow(composer_surface_shadow())
         .p(px(6.0))
         .flex()
         .flex_col()
@@ -1092,6 +1191,7 @@ fn composer_model_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                                             div()
                                                 .text_xs()
                                                 .text_color(colors.text_tertiary)
+                                                .line_clamp(1)
                                                 .overflow_hidden()
                                                 .child(description),
                                         )
@@ -1120,11 +1220,15 @@ fn composer_reasoning_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> im
     let choices = app.composer_reasoning_choices();
     div()
         .id("composer-reasoning-menu")
-        .w_full()
+        .absolute()
+        .right(px(80.0))
+        .bottom(px(42.0))
+        .w(px(300.0))
         .rounded(px(11.0))
         .border_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
+        .shadow(composer_surface_shadow())
         .p(px(6.0))
         .flex()
         .flex_col()
@@ -1196,19 +1300,36 @@ fn composer_reasoning_menu(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> im
         )
 }
 
-fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn model_chip(
+    label: &str,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
+    let tooltip = format!("Model: {label}");
     div()
         .id("model-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
+        .min_w_0()
         .items_center()
         .gap(px(4.0))
-        .px(px(8.0))
+        .max_w(if density == ComposerDensity::Compact {
+            px(104.0)
+        } else {
+            px(180.0)
+        })
+        .px(if density == ComposerDensity::Compact {
+            px(6.0)
+        } else {
+            px(8.0)
+        })
         .py(px(4.0))
         .rounded(px(8.0))
         .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .hover(|style| style.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, window, cx| {
             app.toggle_composer_model_menu(window, cx);
@@ -1216,30 +1337,46 @@ fn model_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
         .child(div().text_xs().text_color(colors.text_tertiary).child("✧"))
         .child(
             div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_xs()
                 .text_color(colors.text_tertiary)
                 .child(label),
         )
-        .child(
-            Icon::new(IconName::ChevronDown)
-                .with_size(px(11.0))
-                .text_color(colors.text_tertiary),
-        )
+        .when(density == ComposerDensity::Regular, |this| {
+            this.child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(px(11.0))
+                    .text_color(colors.text_tertiary),
+            )
+        })
 }
 
-fn reasoning_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn reasoning_chip(
+    label: &str,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
+    let tooltip = format!("Reasoning: {label}");
     div()
         .id("reasoning-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
         .gap(px(4.0))
-        .px(px(8.0))
+        .px(if density == ComposerDensity::Compact {
+            px(6.0)
+        } else {
+            px(8.0)
+        })
         .py(px(4.0))
         .rounded(px(8.0))
         .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .hover(|style| style.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, _, cx| {
             app.toggle_composer_reasoning_menu(cx);
@@ -1250,26 +1387,40 @@ fn reasoning_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                 .text_color(colors.text_tertiary)
                 .child(label),
         )
-        .child(
-            Icon::new(IconName::ChevronDown)
-                .with_size(px(11.0))
-                .text_color(colors.text_tertiary),
-        )
+        .when(density == ComposerDensity::Regular, |this| {
+            this.child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(px(11.0))
+                    .text_color(colors.text_tertiary),
+            )
+        })
 }
 
-fn fast_chip(label: &str, enabled: bool, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn fast_chip(
+    label: &str,
+    enabled: bool,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
+    let tooltip = label.clone();
     div()
         .id("fast-mode-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
         .gap(px(4.0))
-        .px(px(8.0))
+        .when(density == ComposerDensity::Compact, |this| {
+            this.w(px(28.0)).px(px(0.0))
+        })
+        .when(density == ComposerDensity::Regular, |this| this.px(px(8.0)))
         .py(px(4.0))
         .rounded(px(8.0))
         .cursor_pointer()
+        .justify_center()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .when(enabled, |this| this.bg(colors.bg_hover))
         .hover(|style| style.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, _, cx| app.toggle_fast_mode(cx)))
@@ -1281,23 +1432,38 @@ fn fast_chip(label: &str, enabled: bool, cx: &mut Context<MitsuroApp>) -> impl I
                 } else {
                     colors.text_tertiary
                 })
-                .child(label),
+                .child(if density == ComposerDensity::Compact {
+                    "⚡".to_owned()
+                } else {
+                    label
+                }),
         )
 }
 
-fn work_mode_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
+fn work_mode_chip(
+    label: &str,
+    density: ComposerDensity,
+    cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
     let colors = theme::colors();
     let label = label.to_string();
+    let tooltip = format!("Mode: {label}");
     div()
         .id("work-mode-chip")
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .items_center()
         .gap(px(4.0))
-        .px(px(8.0))
+        .when(density == ComposerDensity::Compact, |this| {
+            this.w(px(28.0)).px(px(0.0))
+        })
+        .when(density == ComposerDensity::Regular, |this| this.px(px(8.0)))
         .py(px(4.0))
         .rounded(px(8.0))
         .cursor_pointer()
+        .justify_center()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .hover(|style| style.bg(colors.bg_hover))
         .on_click(cx.listener(|app, _, _, cx| app.toggle_work_mode(cx)))
         .child(
@@ -1306,12 +1472,14 @@ fn work_mode_chip(label: &str, cx: &mut Context<MitsuroApp>) -> impl IntoElement
                 .with_size(px(11.0))
                 .text_color(colors.text_tertiary),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_tertiary)
-                .child(label),
-        )
+        .when(density == ComposerDensity::Regular, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.text_tertiary)
+                    .child(label),
+            )
+        })
 }
 
 fn round_action(
@@ -1326,6 +1494,7 @@ fn round_action(
     div()
         .id(id)
         .w(px(32.0))
+        .flex_shrink_0()
         .h(px(32.0))
         .rounded_full()
         .flex()
@@ -1363,6 +1532,7 @@ fn round_path_action(
     div()
         .id(id)
         .w(px(32.0))
+        .flex_shrink_0()
         .h(px(32.0))
         .rounded_full()
         .flex()
@@ -1389,6 +1559,7 @@ fn realtime_voice_action(
     div()
         .id(id)
         .w(px(32.0))
+        .flex_shrink_0()
         .h(px(32.0))
         .rounded_full()
         .flex()
@@ -1425,6 +1596,7 @@ fn disabled_send(id: &'static str) -> impl IntoElement {
     div()
         .id(id)
         .w(px(32.0))
+        .flex_shrink_0()
         .h(px(32.0))
         .rounded_full()
         .flex()
@@ -1438,4 +1610,23 @@ fn disabled_send(id: &'static str) -> impl IntoElement {
                 .with_size(px(15.0))
                 .text_color(colors.text_tertiary),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{composer_density, ComposerDensity};
+
+    #[test]
+    fn composer_density_compacts_at_reference_container_boundary() {
+        assert_eq!(composer_density(640.0), ComposerDensity::Compact);
+        assert_eq!(composer_density(641.0), ComposerDensity::Regular);
+    }
+
+    #[test]
+    fn composer_density_covers_known_window_matrix() {
+        // 800px Codex window minus its persistent 275px sidebar.
+        assert_eq!(composer_density(525.0), ComposerDensity::Compact);
+        // 1000px Codex window minus its persistent sidebar.
+        assert_eq!(composer_density(725.0), ComposerDensity::Regular);
+    }
 }

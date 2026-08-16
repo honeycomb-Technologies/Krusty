@@ -118,10 +118,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
     <View style={styles.root}>
       <View style={StyleSheet.absoluteFill}>{children}</View>
       {overlayVisible ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.overlayLayer, overlayStyle]}
-        >
+        <Animated.View style={[styles.overlayLayer, overlayStyle]}>
           {Platform.OS === 'web' ? (
             <LottieView
               source={require('../../assets/animations/splash.json')}
@@ -157,6 +154,7 @@ const styles = StyleSheet.create({
   },
   overlayLayer: {
     ...StyleSheet.absoluteFillObject,
+    pointerEvents: 'none',
     zIndex: 10,
     backgroundColor: SPLASH_BACKGROUND,
   },

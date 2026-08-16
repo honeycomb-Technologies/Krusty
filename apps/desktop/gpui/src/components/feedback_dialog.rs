@@ -9,6 +9,7 @@ use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::app::{FeedbackCategory, MitsuroApp};
+use crate::components::ui_button::{self, ButtonSize, ButtonState, ButtonTone};
 use crate::theme;
 
 pub fn feedback_dialog(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -32,21 +33,21 @@ pub fn feedback_dialog(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
         .flex()
         .items_center()
         .justify_center()
-        .bg(theme::hex_alpha(0x000000, 0.66))
+        .bg(colors.overlay_scrim)
         .child(
             div()
                 .id("feedback-dialog")
                 .w(px(520.0))
                 .max_w_full()
-                .mx(px(24.0))
-                .rounded(px(16.0))
+                .mx(px(theme::spacing().xxl))
+                .rounded(px(theme::shape().radius_lg))
                 .border_1()
                 .border_color(colors.border_heavy)
                 .bg(colors.bg_elevated)
-                .p(px(20.0))
+                .p(px(theme::spacing().xl))
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
+                .gap(px(theme::spacing().xl))
                 .child(
                     div()
                         .flex()
@@ -54,7 +55,7 @@ pub fn feedback_dialog(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                         .gap(px(4.0))
                         .child(
                             div()
-                                .text_lg()
+                                .text_size(px(theme::typography().heading))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
                                 .child("Send feedback"),
@@ -73,19 +74,29 @@ pub fn feedback_dialog(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.0))
+                        .gap(px(theme::spacing().md))
                         .child(field_label("Category", "Required"))
-                        .child(div().flex().flex_row().flex_wrap().gap(px(7.0)).children(
-                            FeedbackCategory::ALL.into_iter().map(|category| {
-                                category_button(category, selected == Some(category), uploading, cx)
-                            }),
-                        )),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(theme::spacing().sm))
+                                .children(FeedbackCategory::ALL.into_iter().map(|category| {
+                                    category_button(
+                                        category,
+                                        selected == Some(category),
+                                        uploading,
+                                        cx,
+                                    )
+                                })),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.0))
+                        .gap(px(theme::spacing().md))
                         .child(field_label("Details", "Required"))
                         .child(
                             div()
@@ -164,52 +175,38 @@ pub fn feedback_dialog(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl I
                         .flex()
                         .flex_row()
                         .justify_end()
-                        .gap(px(8.0))
+                        .gap(px(theme::spacing().md))
                         .pt(px(2.0))
                         .child(
-                            div()
-                                .id("feedback-cancel")
-                                .h(px(34.0))
-                                .px(px(14.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(colors.border)
-                                .bg(colors.bg_button_secondary)
-                                .flex()
-                                .items_center()
-                                .text_sm()
-                                .text_color(colors.text)
-                                .when(!uploading, |this| {
-                                    this.cursor_pointer()
-                                        .hover(|style| style.bg(colors.bg_hover))
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.close_feedback_dialog(cx);
-                                        }))
-                                })
-                                .when(uploading, |this| this.opacity(0.5))
-                                .child("Cancel"),
+                            ui_button::button(
+                                "feedback-cancel",
+                                "Cancel",
+                                ButtonTone::Secondary,
+                                ButtonSize::Medium,
+                                ButtonState {
+                                    disabled: uploading,
+                                    ..ButtonState::default()
+                                },
+                                cx,
+                            )
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.close_feedback_dialog(cx);
+                            })),
                         )
                         .child(
-                            div()
-                                .id("feedback-submit")
-                                .h(px(34.0))
-                                .px(px(15.0))
-                                .rounded(px(8.0))
-                                .bg(colors.accent)
-                                .flex()
-                                .items_center()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.fg_button_primary)
-                                .when(submit_enabled, |this| {
-                                    this.cursor_pointer()
-                                        .hover(|style| style.opacity(0.9))
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.submit_feedback(cx);
-                                        }))
-                                })
-                                .when(!submit_enabled, |this| this.opacity(0.45))
-                                .child(if uploading { "Uploading…" } else { "Submit" }),
+                            ui_button::button(
+                                "feedback-submit",
+                                "Submit",
+                                ButtonTone::Primary,
+                                ButtonSize::Medium,
+                                ButtonState {
+                                    disabled: !submit_enabled,
+                                    loading: uploading,
+                                    ..ButtonState::default()
+                                },
+                                cx,
+                            )
+                            .on_click(cx.listener(|app, _, _, cx| app.submit_feedback(cx))),
                         ),
                 ),
         )
@@ -243,43 +240,20 @@ fn category_button(
     disabled: bool,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .id(category.wire_value())
-        .h(px(30.0))
-        .px(px(11.0))
-        .rounded(px(999.0))
-        .border_1()
-        .border_color(if selected {
-            colors.accent
-        } else {
-            colors.border
-        })
-        .bg(if selected {
-            colors.accent_soft
-        } else {
-            theme::hex_alpha(0xffffff, 0.02)
-        })
-        .flex()
-        .items_center()
-        .text_xs()
-        .font_weight(if selected {
-            gpui::FontWeight::SEMIBOLD
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            colors.text
-        } else {
-            colors.text_secondary
-        })
-        .when(!disabled, |this| {
-            this.cursor_pointer()
-                .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.select_feedback_category(category, cx);
-                }))
-        })
-        .when(disabled, |this| this.opacity(0.6))
-        .child(category.label())
+    ui_button::button(
+        category.wire_value(),
+        category.label(),
+        ButtonTone::Subtle,
+        ButtonSize::Small,
+        ButtonState {
+            selected,
+            disabled,
+            loading: false,
+        },
+        cx,
+    )
+    .rounded(px(theme::shape().radius_pill))
+    .on_click(cx.listener(move |app, _, _, cx| {
+        app.select_feedback_category(category, cx);
+    }))
 }

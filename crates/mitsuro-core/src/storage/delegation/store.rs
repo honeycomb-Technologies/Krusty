@@ -6,19 +6,130 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
+use crate::agent::subagent::AgentConversationEvent;
 use crate::storage::Database;
 
 use super::model::{
     DelegationCapacityClass, DelegationCapacityFeedback, DelegationCapacityPolicy,
     DelegationCapacityRequest, DelegationCompletionPolicy, DelegationEventRecord,
-    DelegationEventType, DelegationFailurePolicy, DelegationGroupContract, DelegationGroupRecord,
-    DelegationGroupStartInput, DelegationGroupState, DelegationParentContinuationState,
-    DelegationSynthesisLease, DelegationTaskLease, DelegationTaskRecord, DelegationTaskSpec,
-    DelegationTaskState,
+    DelegationEventType, DelegationExecutionMode, DelegationFailurePolicy, DelegationGroupContract,
+    DelegationGroupRecord, DelegationGroupStartInput, DelegationGroupState,
+    DelegationParentContinuationState, DelegationSynthesisLease, DelegationTaskActivity,
+    DelegationTaskLease, DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState,
 };
 
 const MAX_ATTEMPT_ARTIFACT_BYTES: usize = 256 * 1024;
 const REPLAY_OWNER_LEASE_TTL_MS: i64 = 30_000;
+
+/// Fence a foreground graph in the same transaction that records its caller's
+/// terminal cancellation. A generic delegated-run timeout must not leave the
+/// canonical group schedulable after its foreground owner has disappeared.
+pub(crate) fn cancel_foreground_group_on_caller_abort(
+    tx: &Transaction<'_>,
+    delegation_group_id: &str,
+    now: &str,
+) -> Result<bool> {
+    let Some((state_text, contract_json)) = tx
+        .query_row(
+            "SELECT state, contract_json FROM delegation_groups WHERE delegation_group_id = ?1",
+            params![delegation_group_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    else {
+        // Compatibility rows and older single-agent paths may not own a
+        // canonical group. Their delegated-run cancellation remains valid.
+        return Ok(false);
+    };
+    let current = DelegationGroupState::parse(&state_text)
+        .context("invalid stored delegation group state")?;
+    if current.is_terminal() {
+        return Ok(false);
+    }
+    let contract: DelegationGroupContract = serde_json::from_str(&contract_json)?;
+    if contract.execution_mode != DelegationExecutionMode::Foreground {
+        return Ok(false);
+    }
+
+    let task_ids = {
+        let mut statement = tx.prepare(
+            "SELECT delegation_task_id FROM delegation_tasks
+              WHERE delegation_group_id = ?1
+                AND state NOT IN ('complete', 'degraded', 'failed', 'cancelled')",
+        )?;
+        let task_ids = statement
+            .query_map(params![delegation_group_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        task_ids
+    };
+    for task_id in task_ids {
+        let changed = tx.execute(
+            "UPDATE delegation_tasks
+                SET state = 'cancelled',
+                    error_summary = COALESCE(error_summary, 'foreground caller stopped before terminal persistence'),
+                    lease_owner_id = NULL, lease_expires_at_ms = NULL,
+                    updated_at = ?2, completed_at = COALESCE(completed_at, ?2)
+              WHERE delegation_task_id = ?1
+                AND state NOT IN ('complete', 'degraded', 'failed', 'cancelled')",
+            params![task_id, now],
+        )?;
+        tx.execute(
+            "UPDATE delegation_attempts
+                SET state = 'cancelled',
+                    error_summary = COALESCE(error_summary, 'foreground caller stopped before terminal persistence'),
+                    last_heartbeat_at = ?2, completed_at = COALESCE(completed_at, ?2)
+              WHERE delegation_task_id = ?1 AND state = 'running'",
+            params![task_id, now],
+        )?;
+        tx.execute(
+            "DELETE FROM delegation_capacity_waiters WHERE delegation_task_id = ?1",
+            params![task_id],
+        )?;
+        tx.execute(
+            "DELETE FROM delegation_capacity_leases WHERE delegation_task_id = ?1",
+            params![task_id],
+        )?;
+        if changed == 1 {
+            append_event(
+                tx,
+                delegation_group_id,
+                Some(&task_id),
+                DelegationEventType::TaskStateChanged,
+                &serde_json::json!({
+                    "state": DelegationTaskState::Cancelled,
+                    "reason": "foreground_caller_aborted",
+                }),
+                now,
+            )?;
+        }
+    }
+
+    let changed = tx.execute(
+        "UPDATE delegation_groups
+            SET state = 'cancelled', updated_at = ?2,
+                synthesis_owner_id = NULL, synthesis_lease_expires_at_ms = NULL,
+                replay_owner_id = NULL, replay_lease_expires_at_ms = NULL,
+                completed_at = COALESCE(completed_at, ?2)
+          WHERE delegation_group_id = ?1
+            AND state NOT IN ('complete', 'degraded', 'failed', 'cancelled')",
+        params![delegation_group_id, now],
+    )?;
+    if changed == 1 {
+        append_event(
+            tx,
+            delegation_group_id,
+            None,
+            DelegationEventType::GroupStateChanged,
+            &serde_json::json!({
+                "from": current,
+                "to": DelegationGroupState::Cancelled,
+                "reason": "foreground_caller_aborted",
+            }),
+            now,
+        )?;
+    }
+    Ok(changed == 1)
+}
 
 #[derive(Debug, Clone)]
 pub struct DelegationTaskLeaseRenewal {
@@ -1276,6 +1387,102 @@ impl DelegationStore {
         )
     }
 
+    /// Fail a batch that could not be materialized before scheduler admission.
+    ///
+    /// Pre-admission failures have no task lease to complete, but they must
+    /// still become durable terminal facts. Otherwise later dependency waves
+    /// can wait forever on queued rows after the in-memory executor has already
+    /// abandoned them.
+    pub fn fail_unstarted_tasks(
+        &self,
+        delegation_group_id: &str,
+        delegation_task_ids: &[String],
+        error_summary: &str,
+    ) -> Result<usize> {
+        ensure!(
+            !delegation_task_ids.is_empty(),
+            "pre-admission failure requires at least one task"
+        );
+        ensure!(
+            !error_summary.trim().is_empty(),
+            "pre-admission failure requires an error summary"
+        );
+        let unique = delegation_task_ids.iter().collect::<BTreeSet<_>>();
+        ensure!(
+            unique.len() == delegation_task_ids.len(),
+            "pre-admission failure repeats a task id"
+        );
+        let now = Utc::now().to_rfc3339();
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let group_state = tx
+            .query_row(
+                "SELECT state FROM delegation_groups WHERE delegation_group_id = ?1",
+                params![delegation_group_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .with_context(|| format!("unknown delegation group '{delegation_group_id}'"))?;
+        let group_state = DelegationGroupState::parse(&group_state)
+            .context("invalid stored delegation group state")?;
+        ensure!(
+            matches!(
+                group_state,
+                DelegationGroupState::Queued | DelegationGroupState::Running
+            ),
+            "pre-admission tasks cannot fail after group settlement"
+        );
+
+        for task_id in delegation_task_ids {
+            let (task_group_id, task_state): (String, String) = tx
+                .query_row(
+                    "SELECT delegation_group_id, state FROM delegation_tasks WHERE delegation_task_id = ?1",
+                    params![task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .with_context(|| format!("unknown delegation task '{task_id}'"))?;
+            ensure!(
+                task_group_id == delegation_group_id,
+                "pre-admission task belongs to another delegation group"
+            );
+            ensure!(
+                matches!(task_state.as_str(), "created" | "queued"),
+                "pre-admission task '{task_id}' is already admitted or terminal"
+            );
+        }
+
+        let result_json = serde_json::to_string(&serde_json::json!({
+            "integration_state": "failed",
+            "failure_kind": "pre_admission_materialization",
+        }))?;
+        for task_id in delegation_task_ids {
+            let changed = tx.execute(
+                "UPDATE delegation_tasks
+                    SET state = 'failed', result_json = ?2, error_summary = ?3,
+                        lease_owner_id = NULL, lease_expires_at_ms = NULL,
+                        updated_at = ?4, completed_at = COALESCE(completed_at, ?4)
+                  WHERE delegation_task_id = ?1 AND state IN ('created', 'queued')",
+                params![task_id, result_json, error_summary, now],
+            )?;
+            ensure!(changed == 1, "pre-admission task changed concurrently");
+            append_event(
+                &tx,
+                delegation_group_id,
+                Some(task_id),
+                DelegationEventType::TaskStateChanged,
+                &serde_json::json!({
+                    "state": DelegationTaskState::Failed,
+                    "reason": "pre_admission_materialization_failed",
+                }),
+                &now,
+            )?;
+        }
+        cancel_tasks_blocked_by_failed_dependencies(&tx, delegation_group_id, &now)?;
+        tx.commit()?;
+        self.reconcile_group(delegation_group_id)?;
+        Ok(delegation_task_ids.len())
+    }
+
     /// Publish the authoritative outcome of an isolated patch. A successful
     /// child loop with a pending integration result is not dependency-ready
     /// and cannot satisfy group completion until this phase is durable.
@@ -1725,6 +1932,78 @@ impl DelegationStore {
         Ok(Some(group))
     }
 
+    /// Append one bounded, display-safe child activity event. Group/task
+    /// ownership is checked transactionally so callers cannot attach activity
+    /// to an unrelated delegation graph.
+    pub fn record_task_activity(
+        &self,
+        delegation_group_id: &str,
+        delegation_task_id: &str,
+        activity: &DelegationTaskActivity,
+    ) -> Result<()> {
+        activity.validate()?;
+        let now = Utc::now().to_rfc3339();
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let belongs_to_group = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM delegation_tasks
+                 WHERE delegation_task_id = ?1 AND delegation_group_id = ?2
+            )",
+            params![delegation_task_id, delegation_group_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        ensure!(
+            belongs_to_group,
+            "delegation task activity lost its group authority"
+        );
+        append_event(
+            &tx,
+            delegation_group_id,
+            Some(delegation_task_id),
+            DelegationEventType::TaskActivity,
+            &serde_json::to_value(activity)?,
+            &now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Append one bounded child-conversation update. This uses the same
+    /// group/task authority check as lifecycle activity while keeping the
+    /// transcript as semantic chat events rather than raw provider traffic.
+    pub fn record_task_conversation(
+        &self,
+        delegation_group_id: &str,
+        delegation_task_id: &str,
+        event: &AgentConversationEvent,
+    ) -> Result<()> {
+        event.validate()?;
+        let now = Utc::now().to_rfc3339();
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let belongs_to_group = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM delegation_tasks
+                 WHERE delegation_task_id = ?1 AND delegation_group_id = ?2
+            )",
+            params![delegation_task_id, delegation_group_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        ensure!(
+            belongs_to_group,
+            "child conversation lost its delegation authority"
+        );
+        append_event(
+            &tx,
+            delegation_group_id,
+            Some(delegation_task_id),
+            DelegationEventType::TaskConversation,
+            &serde_json::to_value(event)?,
+            &now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_session_events_after(
         &self,
         parent_session_id: &str,
@@ -1873,6 +2152,39 @@ impl DelegationStore {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(authorized == 1)
+    }
+
+    /// Close every unpromoted detached-child wake owned by a cancelled parent
+    /// session. The idempotency receipt is intentionally retained: a racing
+    /// child finalizer must not be able to recreate steering after cancel.
+    pub fn suppress_parent_continuations_for_session(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM messages
+              WHERE session_id = ?1
+                AND role IN (
+                    SELECT 'pending_user:' || parent_continuation_id
+                      FROM delegation_groups
+                     WHERE parent_session_id = ?1
+                       AND parent_continuation_id IS NOT NULL
+                       AND parent_continuation_state IN ('pending', 'queued')
+                )",
+            params![parent_session_id],
+        )?;
+        let changed = tx.execute(
+            "UPDATE delegation_groups
+                SET parent_continuation_state = 'not_requested', updated_at = ?2
+              WHERE parent_session_id = ?1
+                AND parent_continuation_id IS NOT NULL
+                AND parent_continuation_state IN ('pending', 'queued')",
+            params![parent_session_id, now],
+        )?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn mark_parent_continuation_queued(
@@ -2268,6 +2580,86 @@ impl DelegationStore {
             .optional()
             .map_err(Into::into)
     }
+
+    /// Replace the captured baseline for an isolated task immediately before
+    /// its dependency wave starts. The deterministic workspace path is part of
+    /// the admitted contract and cannot change; only a task that has not been
+    /// leased may adopt a newer authoritative snapshot.
+    pub fn refresh_isolated_task_baseline(
+        &self,
+        delegation_task_id: &str,
+        expected_workspace: &str,
+        workspace_baseline: &str,
+    ) -> Result<bool> {
+        ensure!(
+            !workspace_baseline.trim().is_empty(),
+            "isolated workspace baseline is required"
+        );
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let Some((specification_json, state, lease_owner_id)) = tx
+            .query_row(
+                "SELECT specification_json, state, lease_owner_id
+                   FROM delegation_tasks
+                  WHERE delegation_task_id = ?1",
+                params![delegation_task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let state =
+            DelegationTaskState::parse(&state).context("invalid stored delegation task state")?;
+        ensure!(
+            matches!(
+                state,
+                DelegationTaskState::Created | DelegationTaskState::Queued
+            ),
+            "isolated task baseline can only refresh before task admission"
+        );
+        ensure!(
+            lease_owner_id.is_none(),
+            "isolated task baseline cannot refresh while a lease exists"
+        );
+        let mut specification: DelegationTaskSpec = serde_json::from_str(&specification_json)?;
+        ensure!(
+            specification.writer_mode == super::model::DelegationWriterMode::Isolated,
+            "shared writer cannot adopt an isolated workspace baseline"
+        );
+        ensure!(
+            specification.attempt_workspace.as_deref() == Some(expected_workspace),
+            "isolated workspace path differs from the admitted task contract"
+        );
+        if specification.workspace_baseline.as_deref() == Some(workspace_baseline) {
+            return Ok(true);
+        }
+        specification.workspace_baseline = Some(workspace_baseline.to_string());
+        specification.validate()?;
+        let updated = tx.execute(
+            "UPDATE delegation_tasks
+                SET specification_json = ?2, updated_at = ?3
+              WHERE delegation_task_id = ?1
+                AND state IN ('created', 'queued')
+                AND lease_owner_id IS NULL",
+            params![
+                delegation_task_id,
+                serde_json::to_string(&specification)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        ensure!(
+            updated == 1,
+            "isolated task changed during baseline refresh"
+        );
+        tx.commit()?;
+        Ok(true)
+    }
 }
 
 fn validate_task_graph(tasks: &[DelegationTaskSpec]) -> Result<()> {
@@ -2608,9 +3000,10 @@ fn cancel_tasks_blocked_by_failed_dependencies(
     delegation_group_id: &str,
     now: &str,
 ) -> Result<()> {
-    let blocked = {
-        let mut statement = tx.prepare(
-            "SELECT DISTINCT candidate.delegation_task_id
+    loop {
+        let blocked = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT candidate.delegation_task_id
                FROM delegation_tasks AS candidate,
                     json_each(candidate.specification_json, '$.depends_on') AS required
                JOIN delegation_tasks AS dependency
@@ -2623,15 +3016,18 @@ fn cancel_tasks_blocked_by_failed_dependencies(
                     OR json_extract(dependency.result_json, '$.integration_state') = 'failed'
                 )
               ORDER BY candidate.ordinal ASC",
-        )?;
-        let task_ids = statement
-            .query_map(params![delegation_group_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        task_ids
-    };
-    for task_id in blocked {
-        let changed = tx.execute(
-            "UPDATE delegation_tasks
+            )?;
+            let task_ids = statement
+                .query_map(params![delegation_group_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            task_ids
+        };
+        if blocked.is_empty() {
+            return Ok(());
+        }
+        for task_id in blocked {
+            let changed = tx.execute(
+                "UPDATE delegation_tasks
                 SET state = 'cancelled', updated_at = ?2,
                     completed_at = COALESCE(completed_at, ?2),
                     error_summary = COALESCE(
@@ -2640,23 +3036,23 @@ fn cancel_tasks_blocked_by_failed_dependencies(
                     )
               WHERE delegation_task_id = ?1
                 AND state IN ('created', 'queued', 'retrying')",
-            params![task_id, now],
-        )?;
-        if changed == 1 {
-            append_event(
-                tx,
-                delegation_group_id,
-                Some(&task_id),
-                DelegationEventType::TaskStateChanged,
-                &serde_json::json!({
-                    "state": DelegationTaskState::Cancelled,
-                    "reason": "dependency_unusable",
-                }),
-                now,
+                params![task_id, now],
             )?;
+            if changed == 1 {
+                append_event(
+                    tx,
+                    delegation_group_id,
+                    Some(&task_id),
+                    DelegationEventType::TaskStateChanged,
+                    &serde_json::json!({
+                        "state": DelegationTaskState::Cancelled,
+                        "reason": "dependency_unusable",
+                    }),
+                    now,
+                )?;
+            }
         }
     }
-    Ok(())
 }
 
 fn append_event(

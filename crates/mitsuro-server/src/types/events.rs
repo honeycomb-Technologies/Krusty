@@ -128,6 +128,12 @@ pub enum AgenticEvent {
     ThinkingComplete { thinking: String, signature: String },
     /// AI is starting a tool call
     ToolCallStart { id: String, name: String },
+    /// AI is still streaming a large tool input. Arguments remain redacted.
+    ToolCallPreparing {
+        id: String,
+        name: String,
+        received_bytes: usize,
+    },
     /// Tool call complete with arguments
     ToolCallComplete {
         id: String,
@@ -466,6 +472,15 @@ impl From<mitsuro_core::agent::LoopEvent> for AgenticEvent {
                 signature,
             },
             LoopEvent::ToolCallStart { id, name } => Self::ToolCallStart { id, name },
+            LoopEvent::ToolCallPreparing {
+                id,
+                name,
+                received_bytes,
+            } => Self::ToolCallPreparing {
+                id,
+                name,
+                received_bytes,
+            },
             LoopEvent::ToolCallComplete {
                 id,
                 name,

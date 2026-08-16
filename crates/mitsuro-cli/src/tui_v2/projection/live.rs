@@ -48,6 +48,9 @@ impl ConversationProjection {
             LoopEvent::ToolCallStart { id, name } => {
                 self.upsert_tool(&id, &name, ToolStatus::Receiving, false);
             }
+            LoopEvent::ToolCallPreparing { id, name, .. } => {
+                self.upsert_tool(&id, &name, ToolStatus::Receiving, false);
+            }
             LoopEvent::ToolCallComplete {
                 id,
                 name,

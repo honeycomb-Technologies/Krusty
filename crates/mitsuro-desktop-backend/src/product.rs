@@ -157,18 +157,37 @@ pub(crate) fn conversation_messages_from_turn_values(
 pub struct SessionConversation {
     pub session: SessionSummary,
     pub messages: Vec<ConversationMessage>,
-    /// Canonical durable delegation state loaded alongside the transcript.
-    /// Empty for backends that do not expose the Mitsuro coordinator contract.
-    pub delegation: SessionDelegationProjection,
-    /// Authoritative settings returned by Codex `thread/resume`. Snapshot-only
-    /// backends and active-writer read fallbacks cannot claim these values.
-    pub codex_settings: Option<CodexSessionSettings>,
+    /// Provider-only state remains behind one typed extension boundary rather
+    /// than leaking mutually impossible optional fields into shared UI data.
+    pub provider_data: SessionProviderData,
     /// Truthful durable-history boundary for this hydrated transcript. Codex
     /// retains its opaque older-turn cursor; full snapshots are already complete.
     pub history: SessionHistoryState,
     /// How this client obtained the transcript. Only `Subscribed` owns a Codex
     /// app-server subscription that must later be released.
     pub open_mode: SessionOpenMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionProviderData {
+    Codex {
+        /// Authoritative settings returned by `thread/resume`. Snapshot-only
+        /// reads and active-writer fallbacks cannot claim these values.
+        settings: Option<CodexSessionSettings>,
+    },
+    Mitsuro {
+        /// Canonical durable coordinator projection loaded with the transcript.
+        delegation: SessionDelegationProjection,
+    },
+}
+
+impl SessionProviderData {
+    pub fn into_parts(self) -> (SessionDelegationProjection, Option<CodexSessionSettings>) {
+        match self {
+            Self::Codex { settings } => (SessionDelegationProjection::default(), settings),
+            Self::Mitsuro { delegation } => (delegation, None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1651,17 +1670,16 @@ impl ProductBackend for DesktopBackend {
             .into_iter()
             .map(conversation_message_from_transcript)
             .collect();
-        let delegation = match self {
-            DesktopBackend::Mitsuro(backend) => {
-                backend.session_delegation_projection(&id.raw).await?
-            }
-            _ => SessionDelegationProjection::default(),
+        let provider_data = match self {
+            DesktopBackend::Mitsuro(backend) => SessionProviderData::Mitsuro {
+                delegation: backend.session_delegation_projection(&id.raw).await?,
+            },
+            DesktopBackend::Codex(_) => SessionProviderData::Codex { settings: None },
         };
         Ok(SessionConversation {
             session,
             messages,
-            delegation,
-            codex_settings: None,
+            provider_data,
             history: SessionHistoryState::complete(),
             open_mode: SessionOpenMode::Snapshot,
         })
@@ -1752,13 +1770,16 @@ impl ProductBackend for DesktopBackend {
         Ok(SessionConversation {
             session,
             messages,
-            delegation: SessionDelegationProjection::default(),
-            codex_settings: Some(CodexSessionSettings {
-                model: response.model,
-                reasoning_effort: response.reasoning_effort,
-                service_tier: response.service_tier,
-                permission_profile: response.active_permission_profile.map(|profile| profile.id),
-            }),
+            provider_data: SessionProviderData::Codex {
+                settings: Some(CodexSessionSettings {
+                    model: response.model,
+                    reasoning_effort: response.reasoning_effort,
+                    service_tier: response.service_tier,
+                    permission_profile: response
+                        .active_permission_profile
+                        .map(|profile| profile.id),
+                }),
+            },
             history,
             open_mode: SessionOpenMode::Subscribed,
         })
@@ -2679,13 +2700,15 @@ mod tests {
         );
         assert_eq!(conversation.open_mode, SessionOpenMode::Subscribed);
         assert_eq!(
-            conversation.codex_settings,
-            Some(CodexSessionSettings {
-                model: Some("gpt-5.6-sol".to_owned()),
-                reasoning_effort: Some("high".to_owned()),
-                service_tier: Some("priority".to_owned()),
-                permission_profile: Some(":workspace".to_owned()),
-            })
+            conversation.provider_data,
+            SessionProviderData::Codex {
+                settings: Some(CodexSessionSettings {
+                    model: Some("gpt-5.6-sol".to_owned()),
+                    reasoning_effort: Some("high".to_owned()),
+                    service_tier: Some("priority".to_owned()),
+                    permission_profile: Some(":workspace".to_owned()),
+                })
+            }
         );
 
         let older = backend
@@ -2770,7 +2793,10 @@ mod tests {
             conversation.open_mode,
             SessionOpenMode::ReadOnlyActiveWriter
         );
-        assert_eq!(conversation.codex_settings, None);
+        assert_eq!(
+            conversation.provider_data,
+            SessionProviderData::Codex { settings: None }
+        );
         assert_eq!(conversation.history, SessionHistoryState::complete());
         server.await.unwrap();
     }

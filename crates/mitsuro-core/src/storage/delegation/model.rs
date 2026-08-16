@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use crate::ai::models::ModelKey;
+use crate::ai::providers::ReasoningEffort;
 use crate::storage::{DelegatedRunRole, DelegatedRunScope};
 use crate::tools::registry::{DelegationPolicy, PermissionMode};
 
@@ -169,7 +170,15 @@ impl DelegationExecutorEnvelopeV1 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegationGovernance {
     pub permission_mode: PermissionMode,
-    pub delegated_turn_budget: usize,
+    /// Exact parent-selected reasoning level for every child provider call.
+    /// Optional for compatibility with durable groups created before this
+    /// contract field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Explicit parent/session ceiling. `None` is genuinely unlimited; loop
+    /// convergence remains the responsibility of the semantic progress guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_turn_budget: Option<usize>,
     pub max_parallelism: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_tool_allowlist: Option<BTreeSet<String>>,
@@ -194,7 +203,9 @@ impl DelegationGroupContract {
         );
         ensure!(task_count <= 128, "delegation group exceeds the task limit");
         ensure!(
-            self.governance.delegated_turn_budget > 0,
+            self.governance
+                .delegated_turn_budget
+                .is_none_or(|budget| budget > 0),
             "delegated turn budget must be greater than zero"
         );
         ensure!(
@@ -661,6 +672,8 @@ pub enum DelegationEventType {
     GroupStateChanged,
     TaskClaimed,
     TaskRunning,
+    TaskActivity,
+    TaskConversation,
     TaskStateChanged,
     ParentContinuationQueued,
     ParentContinuationPromoted,
@@ -675,6 +688,8 @@ impl DelegationEventType {
             Self::GroupStateChanged => "group_state_changed",
             Self::TaskClaimed => "task_claimed",
             Self::TaskRunning => "task_running",
+            Self::TaskActivity => "task_activity",
+            Self::TaskConversation => "task_conversation",
             Self::TaskStateChanged => "task_state_changed",
             Self::ParentContinuationQueued => "parent_continuation_queued",
             Self::ParentContinuationPromoted => "parent_continuation_promoted",
@@ -689,11 +704,61 @@ impl DelegationEventType {
             "group_state_changed" => Self::GroupStateChanged,
             "task_claimed" => Self::TaskClaimed,
             "task_running" => Self::TaskRunning,
+            "task_activity" => Self::TaskActivity,
+            "task_conversation" => Self::TaskConversation,
             "task_state_changed" => Self::TaskStateChanged,
             "parent_continuation_queued" => Self::ParentContinuationQueued,
             "parent_continuation_promoted" => Self::ParentContinuationPromoted,
             _ => Self::Other(value.to_owned()),
         }
+    }
+}
+
+/// Bounded, display-safe activity projected from a delegated child's canonical
+/// progress boundary. This is a UI activity feed, not a copied child transcript:
+/// raw prompts, reasoning, tool arguments, and tool output never enter it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationTaskActivity {
+    pub agent_name: String,
+    pub status: String,
+    pub tool_count: usize,
+    pub tokens: usize,
+    pub current_action: Option<String>,
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub completed_plan_task: Option<String>,
+}
+
+impl DelegationTaskActivity {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.agent_name.trim().is_empty() && self.agent_name.len() <= 512,
+            "delegation task activity agent name is invalid"
+        );
+        ensure!(
+            !self.status.trim().is_empty() && self.status.len() <= 32,
+            "delegation task activity status is invalid"
+        );
+        for (value, label, limit) in [
+            (self.current_action.as_deref(), "current action", 512usize),
+            (
+                self.completion_summary.as_deref(),
+                "completion summary",
+                2 * 1024,
+            ),
+            (
+                self.completed_plan_task.as_deref(),
+                "completed plan task",
+                512,
+            ),
+        ] {
+            ensure!(
+                value.is_none_or(|value| value.len() <= limit),
+                "delegation task activity {label} exceeds its size limit"
+            );
+        }
+        Ok(())
     }
 }
 

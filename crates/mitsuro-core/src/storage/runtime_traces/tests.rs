@@ -150,7 +150,7 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
     const CACHE_KEY_SECRET: &str = "never-persist-cache-key-source";
 
     let client = AiClient::new(
-        AiClientConfig::for_grok("grok-4.5"),
+        AiClientConfig::for_grok("grok-4.6"),
         CREDENTIAL_SECRET.to_string(),
     );
     let messages = vec![
@@ -193,7 +193,7 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
     assert_eq!(trace.payload["turn"], 7);
     let diagnostics = &trace.payload["diagnostics"];
     assert_eq!(diagnostics["model_key"]["provider"], "grok");
-    assert_eq!(diagnostics["model_key"]["model_id"], "grok-4.5");
+    assert_eq!(diagnostics["model_key"]["model_id"], "grok-4.6");
     assert!(diagnostics["catalog_source"].is_string());
     assert_eq!(diagnostics["effective_request"]["tool_count"], 1);
     assert_eq!(

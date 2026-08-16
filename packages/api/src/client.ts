@@ -1,78 +1,86 @@
 import type {
-	SessionResponse,
-	SessionWithMessagesResponse,
-	SessionStateResponse,
-	WorkflowCommand,
-	WorkflowMutation,
-	WorkflowSnapshot,
-	SessionPresenceResponse,
-	ModelsResponse,
-	GitStatusResponse,
+	AgentMemory,
+	ApnsRegisterResponse,
+	ApnsStatusResponse,
+	BrowserAction,
+	BrowserActionResponse,
+	BrowserAgentRequest,
+	BrowserAgentResponse,
+	BrowserSession,
+	BrowserSessionListResponse,
+	CreateBrowserSessionRequest,
+	ChatRequest,
+	DelegatedProgressEvent,
+	DelegationEventResponse,
+	GitBranchesResponse,
 	GitChangesResponse,
 	GitFileDiffResponse,
-	GitBranchesResponse,
+	GitStatusResponse,
 	GitWorktreesResponse,
-	ProviderStatus,
-	OAuthStartResponse,
-	OAuthStatusResponse,
-	OAuthExchangeResponse,
-	ServerAccessResponse,
-	ChatRequest,
-	ToolResultRequest,
-	StreamCallbacks,
-	StreamEvent,
-	UsageMetrics,
-	DelegatedProgressEvent,
-	SessionType,
-	TreeEntry,
-	WorkspaceMode,
-	PreviewSettings,
-	PreviewSettingsPatch,
-	PortListResponse,
-	McpServerResponse,
-	McpToolResponse,
-	SkillInfo,
-	AgentMemory,
-	Report,
-	ReportSummary,
-	MemoryType,
-	MemorySnapshotResponse,
-	PromoteReportToMemoryResponse,
 	HiveAttentionResponse,
+	HiveBootstrapResponse,
+	HiveChannelsResponse,
+	HiveCrewDocumentKind,
+	HiveCrewResponse,
+	HiveCurrentResponse,
 	HiveDispatchOptions,
 	HiveDispatchResponse,
-	HiveMainResponse,
 	HiveGlobalSchedule,
+	HiveHomeDocumentKind,
+	HiveHomeResponse,
+	HiveMainResponse,
+	HiveRecoverDaemonResponse,
+	HiveRunPriority,
 	HiveSchedule,
 	HiveScheduleMutationResponse,
 	HiveScheduleWriteRequest,
-	HiveBootstrapResponse,
-	HiveCrewDocumentKind,
-	HiveCrewResponse,
-	HiveChannelsResponse,
-	HiveCurrentResponse,
-	HiveHomeDocumentKind,
-	HiveHomeResponse,
-	HiveRecoverDaemonResponse,
-	HiveRunPriority,
-	HiveSessionSummary,
-	PermissionMode,
 	HiveSessionStatus,
+	HiveSessionSummary,
+	McpServerResponse,
+	McpToolResponse,
+	MemorySnapshotResponse,
+	MemoryType,
+	MobileDiagnosticUploadBatch,
+	MobileDiagnosticUploadResponse,
 	ModelKey,
-	ApnsRegisterResponse,
-	ApnsStatusResponse,
-		SimpleOkResponse,
-		SteerRequest,
-		SteerResponse,
-		MobileDiagnosticUploadBatch,
-		MobileDiagnosticUploadResponse,
-	} from "./types";
+	ModelsResponse,
+	OAuthExchangeResponse,
+	OAuthStartResponse,
+	OAuthStatusResponse,
+	PermissionMode,
+	PortListResponse,
+	PreviewSettings,
+	PreviewSettingsPatch,
+	PromoteReportToMemoryResponse,
+	ProviderStatus,
+	Report,
+	ReportSummary,
+	ServerAccessResponse,
+	SessionPresenceResponse,
+	SessionResponse,
+	SessionStateResponse,
+	SessionType,
+	SessionWithMessagesResponse,
+	SimpleOkResponse,
+	SkillInfo,
+	SteerRequest,
+	SteerResponse,
+	StreamCallbacks,
+	StreamEvent,
+	ToolResultRequest,
+	TreeEntry,
+	UsageMetrics,
+	WorkflowCommand,
+	WorkflowMutation,
+	WorkflowSnapshot,
+	WorkspaceMode,
+} from "./types";
 import {
 	encodeLegacyRequestIdentity,
 	isLegacyRouteFallbackStatus,
 	legacyHiveApiPath,
 	normalizeLegacyResponseIdentity,
-} from './legacy-wire';
+} from "./legacy-wire";
 
 type UsageStreamEvent = Extract<StreamEvent, { type: "usage" }>;
 
@@ -183,13 +191,10 @@ export interface MitsuroClientConfig {
 	hiveTransport?: HiveTransportMode;
 }
 
-export type HiveTransportMode = 'auto' | 'canonical' | 'legacy';
+export type HiveTransportMode = "auto" | "canonical" | "legacy";
 
 export type MitsuroRequestDiagnosticOutcome =
-	| "start"
-	| "complete"
-	| "cancel"
-	| "error";
+	"start" | "complete" | "cancel" | "error";
 
 export interface MitsuroRequestDiagnostic {
 	name: string;
@@ -214,8 +219,13 @@ export class MitsuroClient {
 	private token: string | undefined;
 	private fetchFn: typeof fetch;
 	private requestObserver: MitsuroClientConfig["requestObserver"];
-	private resolvedHiveTransport: Exclude<HiveTransportMode, 'auto'> | null;
-	private hiveTransportProbe: Promise<Exclude<HiveTransportMode, 'auto'>> | null = null;
+	private resolvedHiveTransport: Exclude<HiveTransportMode, "auto"> | null;
+	private hiveTransportProbe: Promise<
+		Exclude<HiveTransportMode, "auto">
+	> | null = null;
+	private delegationEventListeners = new Set<
+		(event: DelegationEventResponse) => void
+	>();
 
 	constructor(config: MitsuroClientConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -223,9 +233,21 @@ export class MitsuroClient {
 		this.fetchFn = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
 		this.requestObserver = config.requestObserver;
 		this.resolvedHiveTransport =
-			config.hiveTransport === 'legacy' || config.hiveTransport === 'canonical'
+			config.hiveTransport === "legacy" || config.hiveTransport === "canonical"
 				? config.hiveTransport
 				: null;
+	}
+
+	/**
+	 * Observe durable child lifecycle/conversation events already carried by an
+	 * attached chat stream. Consumers own their initial HTTP hydration and only
+	 * subscribe while the child surface is mounted.
+	 */
+	subscribeDelegationEvents(
+		listener: (event: DelegationEventResponse) => void,
+	): () => void {
+		this.delegationEventListeners.add(listener);
+		return () => this.delegationEventListeners.delete(listener);
 	}
 
 	private headers(): Record<string, string> {
@@ -291,12 +313,7 @@ export class MitsuroClient {
 			);
 			return result;
 		} catch (error) {
-			this.observeRequest(
-				diagnosticName,
-				"error",
-				startedAt,
-				"decode.error",
-			);
+			this.observeRequest(diagnosticName, "error", startedAt, "decode.error");
 			throw error;
 		}
 	}
@@ -309,18 +326,19 @@ export class MitsuroClient {
 		if (!legacyPath) {
 			return this.fetchFn(`${this.baseUrl}/api${path}`, options);
 		}
-		if (this.resolvedHiveTransport === 'legacy') {
+		if (this.resolvedHiveTransport === "legacy") {
 			return this.fetchFn(`${this.baseUrl}/api${legacyPath}`, options);
 		}
-		if (this.resolvedHiveTransport === 'canonical') {
+		if (this.resolvedHiveTransport === "canonical") {
 			return this.fetchFn(`${this.baseUrl}/api${path}`, options);
 		}
 
-		const method = (options.method ?? 'GET').toUpperCase();
-		const canRetryWithoutReplayingMutation = method === 'GET' || method === 'HEAD';
+		const method = (options.method ?? "GET").toUpperCase();
+		const canRetryWithoutReplayingMutation =
+			method === "GET" || method === "HEAD";
 		if (!canRetryWithoutReplayingMutation) {
 			const transport = await this.detectHiveTransport(options.signal);
-			const selectedPath = transport === 'legacy' ? legacyPath : path;
+			const selectedPath = transport === "legacy" ? legacyPath : path;
 			return this.fetchFn(`${this.baseUrl}/api${selectedPath}`, options);
 		}
 
@@ -329,7 +347,7 @@ export class MitsuroClient {
 			options,
 		);
 		if (!isLegacyRouteFallbackStatus(canonicalResponse.status)) {
-			this.resolvedHiveTransport = 'canonical';
+			this.resolvedHiveTransport = "canonical";
 			return canonicalResponse;
 		}
 		const legacyResponse = await this.fetchFn(
@@ -337,7 +355,7 @@ export class MitsuroClient {
 			options,
 		);
 		if (!isLegacyRouteFallbackStatus(legacyResponse.status)) {
-			this.resolvedHiveTransport = 'legacy';
+			this.resolvedHiveTransport = "legacy";
 			return legacyResponse;
 		}
 		return canonicalResponse;
@@ -345,53 +363,55 @@ export class MitsuroClient {
 
 	private detectHiveTransport(
 		signal?: AbortSignal | null,
-	): Promise<Exclude<HiveTransportMode, 'auto'>> {
+	): Promise<Exclude<HiveTransportMode, "auto">> {
 		if (this.resolvedHiveTransport) {
 			return Promise.resolve(this.resolvedHiveTransport);
 		}
 		if (this.hiveTransportProbe) return this.hiveTransportProbe;
 
-		const probe = (async (): Promise<'canonical' | 'legacy'> => {
+		const probe = (async (): Promise<"canonical" | "legacy"> => {
 			const headers = this.headers();
 			const canonicalCapability = await this.fetchFn(
 				`${this.baseUrl}/api/hive/capabilities`,
-				{ method: 'GET', headers, signal },
+				{ method: "GET", headers, signal },
 			);
 			if (!isLegacyRouteFallbackStatus(canonicalCapability.status)) {
-				return 'canonical';
+				return "canonical";
 			}
 			const legacyCapability = await this.fetchFn(
 				`${this.baseUrl}/api/mako/capabilities`,
-				{ method: 'GET', headers, signal },
+				{ method: "GET", headers, signal },
 			);
 			if (!isLegacyRouteFallbackStatus(legacyCapability.status)) {
-				return 'legacy';
+				return "legacy";
 			}
 
 			// Pre-bridge servers do not expose a capability route. Fall back to
 			// read-only session lists rather than the state-creating `/main` route.
 			const canonicalSessions = await this.fetchFn(
 				`${this.baseUrl}/api/hive/sessions`,
-				{ method: 'GET', headers, signal },
+				{ method: "GET", headers, signal },
 			);
 			if (!isLegacyRouteFallbackStatus(canonicalSessions.status)) {
-				return 'canonical';
+				return "canonical";
 			}
 			const legacySessions = await this.fetchFn(
 				`${this.baseUrl}/api/mako/sessions`,
-				{ method: 'GET', headers, signal },
+				{ method: "GET", headers, signal },
 			);
 			return isLegacyRouteFallbackStatus(legacySessions.status)
-				? 'canonical'
-				: 'legacy';
+				? "canonical"
+				: "legacy";
 		})();
 		this.hiveTransportProbe = probe;
-		return probe.then((transport) => {
-			this.resolvedHiveTransport = transport;
-			return transport;
-		}).finally(() => {
-			if (this.hiveTransportProbe === probe) this.hiveTransportProbe = null;
-		});
+		return probe
+			.then((transport) => {
+				this.resolvedHiveTransport = transport;
+				return transport;
+			})
+			.finally(() => {
+				if (this.hiveTransportProbe === probe) this.hiveTransportProbe = null;
+			});
 	}
 
 	private async encodeRequestIdentityForServer<
@@ -401,11 +421,9 @@ export class MitsuroClient {
 		sessionType: SessionType | undefined,
 		signal?: AbortSignal,
 	): Promise<T> {
-		if (sessionType !== 'hive') return body;
+		if (sessionType !== "hive") return body;
 		const transport = await this.detectHiveTransport(signal);
-		return transport === 'legacy'
-			? encodeLegacyRequestIdentity(body)
-			: body;
+		return transport === "legacy" ? encodeLegacyRequestIdentity(body) : body;
 	}
 
 	private observeRequest(
@@ -418,9 +436,10 @@ export class MitsuroClient {
 			this.requestObserver?.({
 				name,
 				outcome,
-				durationMs: startedAt === undefined
-					? undefined
-					: Math.max(0, monotonicNow() - startedAt),
+				durationMs:
+					startedAt === undefined
+						? undefined
+						: Math.max(0, monotonicNow() - startedAt),
 				code,
 			});
 		} catch {
@@ -563,8 +582,13 @@ export class MitsuroClient {
 	}
 
 	// Sessions
-	async getSessions(): Promise<SessionResponse[]> {
-		return this.request("/sessions");
+	async getSessions(options?: { includeArchived?: boolean }): Promise<SessionResponse[]> {
+		const params = new URLSearchParams();
+		if (options?.includeArchived) {
+			params.set("include_archived", "true");
+		}
+		const query = params.toString();
+		return this.request(`/sessions${query ? `?${query}` : ""}`);
 	}
 
 	async getSession(id: string): Promise<SessionWithMessagesResponse> {
@@ -606,6 +630,8 @@ export class MitsuroClient {
 			target_branch: string | null;
 			targetBranch: string | null;
 			permission_mode: PermissionMode;
+			pinned: boolean;
+			archived: boolean;
 		}>,
 	): Promise<SessionResponse> {
 		return this.request(`/sessions/${id}`, {
@@ -623,6 +649,7 @@ export class MitsuroClient {
 		options?: {
 			includeDelegatedHistory?: boolean;
 			delegationAfterCursor?: number;
+			signal?: AbortSignal;
 		},
 	): Promise<SessionStateResponse> {
 		const params = new URLSearchParams();
@@ -637,7 +664,9 @@ export class MitsuroClient {
 		}
 		const encoded = params.toString();
 		const query = encoded ? `?${encoded}` : "";
-		return this.request(`/sessions/${id}/state${query}`);
+		return this.request(`/sessions/${id}/state${query}`, {
+			signal: options?.signal,
+		});
 	}
 
 	async getWorkflow(id: string): Promise<WorkflowSnapshot | null> {
@@ -809,6 +838,60 @@ export class MitsuroClient {
 	}
 
 	// Preview / Ports
+	async listBrowserSessions(): Promise<BrowserSessionListResponse> {
+		return this.request("/browser");
+	}
+
+	async createBrowserSession(
+		request: CreateBrowserSessionRequest,
+	): Promise<BrowserSession> {
+		return this.request("/browser", {
+			method: "POST",
+			body: JSON.stringify(request),
+		});
+	}
+
+	async getBrowserSession(id: string): Promise<BrowserSession> {
+		return this.request(`/browser/${encodeURIComponent(id)}`);
+	}
+
+	async stopBrowserSession(id: string): Promise<BrowserSession> {
+		return this.request(`/browser/${encodeURIComponent(id)}/stop`, {
+			method: "POST",
+		});
+	}
+
+	async heartbeatBrowserSession(
+		id: string,
+		capability: "viewer" | "controller" = "viewer",
+		clientId?: string,
+	): Promise<BrowserSession> {
+		return this.request(`/browser/${encodeURIComponent(id)}/heartbeat`, {
+			method: "POST",
+			body: JSON.stringify({ capability, client_id: clientId }),
+		});
+	}
+
+	async runBrowserActions(
+		id: string,
+		actions: BrowserAction[],
+	): Promise<BrowserActionResponse> {
+		return this.request(`/browser/${encodeURIComponent(id)}/actions`, {
+			method: "POST",
+			body: JSON.stringify({ actions }),
+		});
+	}
+
+	async runBrowserAgent(
+		id: string,
+		request: BrowserAgentRequest,
+	): Promise<BrowserAgentResponse> {
+		return this.request(`/browser/${encodeURIComponent(id)}/agent`, {
+			method: "POST",
+			body: JSON.stringify(request),
+		});
+	}
+
 	async getPorts(): Promise<PortListResponse> {
 		return this.request("/ports");
 	}
@@ -1161,7 +1244,9 @@ export class MitsuroClient {
 			headers["Idempotency-Key"] = options.idempotencyKey;
 		}
 		return this.request(
-			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
+				scheduleId,
+			)}/pause`,
 			{ method: "POST", headers },
 		);
 	}
@@ -1179,7 +1264,9 @@ export class MitsuroClient {
 			headers["Idempotency-Key"] = options.idempotencyKey;
 		}
 		return this.request(
-			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
+			`/hive/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
+				scheduleId,
+			)}/resume`,
 			{ method: "POST", headers },
 		);
 	}
@@ -1400,7 +1487,9 @@ export class MitsuroClient {
 				signal?.aborted ? "request.abort" : "network.error",
 			);
 			if (signal?.aborted) return;
-			callbacks.onError(error instanceof Error ? error.message : "Stream error");
+			callbacks.onError(
+				error instanceof Error ? error.message : "Stream error",
+			);
 			return;
 		}
 
@@ -1428,9 +1517,9 @@ export class MitsuroClient {
 		let errorReported = false;
 		const trackedCallbacks: StreamCallbacks = {
 			...callbacks,
-			onFinish: (sessionId) => {
+			onFinish: (sessionId, stopReason) => {
 				terminalEventSeen = true;
-				callbacks.onFinish(sessionId);
+				callbacks.onFinish(sessionId, stopReason);
 			},
 			onError: (error) => {
 				terminalEventSeen = true;
@@ -1466,7 +1555,9 @@ export class MitsuroClient {
 		const activityCheck = setInterval(() => {
 			if (Date.now() - lastActivity > STREAM_ACTIVITY_TIMEOUT) {
 				trackedCallbacks.onError(
-					`Stream timeout — no activity for ${Math.round(STREAM_ACTIVITY_TIMEOUT / 1000)}s`,
+					`Stream timeout — no activity for ${Math.round(
+						STREAM_ACTIVITY_TIMEOUT / 1000,
+					)}s`,
 				);
 				reader.cancel();
 				clearInterval(activityCheck);
@@ -1560,6 +1651,13 @@ export class MitsuroClient {
 			case "tool_call_start":
 				callbacks.onToolCallStart(event.id, event.name);
 				break;
+			case "tool_call_preparing":
+				callbacks.onToolCallPreparing?.(
+					event.id,
+					event.name,
+					event.received_bytes,
+				);
+				break;
 			case "tool_call_complete":
 				callbacks.onToolCallComplete(event.id, event.name, event.arguments);
 				break;
@@ -1573,6 +1671,13 @@ export class MitsuroClient {
 				callbacks.onDelegatedProgress?.(event as DelegatedProgressEvent);
 				break;
 			case "delegation_event":
+				for (const listener of this.delegationEventListeners) {
+					try {
+						listener(event.event);
+					} catch {
+						// A presentation subscriber must never interrupt the chat stream.
+					}
+				}
 				callbacks.onDelegationEvent?.(event.event);
 				break;
 			case "tool_approval_required":
@@ -1635,7 +1740,7 @@ export class MitsuroClient {
 				callbacks.onTitleUpdate(event.title);
 				break;
 			case "finish":
-				callbacks.onFinish(event.session_id);
+				callbacks.onFinish(event.session_id, event.stop_reason);
 				break;
 			case "error":
 				callbacks.onError(event.error);

@@ -9,7 +9,8 @@ default-run = "mitsuro-gpui-desktop"
 [features]
 default = ["browser-external", "mcp-app-runtime"]
 # Link wry (WebKitGTK on Linux). Probes GPUI HasWindowHandle; optional child embed
-# via MITSURO_ATLAS_EMBED=1 (X11 only). Surface is mock unless embed succeeds.
+# via MITSURO_ATLAS_EMBED=1 (X11 only). The default Wayland-safe offscreen
+# WebKit renderer remains available through `mcp-app-runtime`.
 browser-native = ["dep:wry"]
 # System-browser bridge (xdg-open) + Chromium --app sibling. No DISPLAY needed to compile.
 browser-external = []

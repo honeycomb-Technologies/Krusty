@@ -11,6 +11,7 @@ import type { SessionType } from "@mitsuro/api";
 import { useThemeContext } from "../../hooks/useTheme";
 import * as Haptics from "../../platform/haptics";
 import { HiveIcon } from "../brand";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 
 const MODES: Array<{
   id: SessionType;
@@ -33,6 +34,7 @@ interface MobileAppHeaderProps {
   onOpenThreads: () => void;
   onOpenToolbox: () => void;
   onTitlePress?: () => void;
+  onHeightChange?: (height: number) => void;
 }
 
 export function MobileAppHeader({
@@ -42,6 +44,7 @@ export function MobileAppHeader({
   onOpenThreads,
   onOpenToolbox,
   onTitlePress,
+  onHeightChange,
 }: MobileAppHeaderProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -52,7 +55,12 @@ export function MobileAppHeader({
   };
 
   return (
-    <View style={styles.root}>
+    <View
+      style={styles.root}
+      onLayout={(event) =>
+        onHeightChange?.(Math.ceil(event.nativeEvent.layout.height))
+      }
+    >
       <View style={[styles.header, visibleTitle ? styles.headerWithTitle : null]}>
         <Pressable
           accessibilityRole="button"
@@ -65,10 +73,10 @@ export function MobileAppHeader({
             styles.headerButton,
             {
               borderColor: t.glass.border,
-              backgroundColor: t.glass.background,
             },
           ]}
         >
+          <AdaptiveMaterial borderRadius={12} tone="regular" />
           <MessagesSquare
             size={19}
             color={t.mutedForeground}
@@ -82,11 +90,11 @@ export function MobileAppHeader({
             style={[
               styles.modeIsland,
               {
-                backgroundColor: t.glass.background,
                 borderColor: t.glass.border,
               },
             ]}
           >
+            <AdaptiveMaterial borderRadius={12} tone="regular" />
             {MODES.map((item) => {
               const active = item.id === mode;
               const Icon = item.icon;
@@ -133,10 +141,10 @@ export function MobileAppHeader({
                 styles.titleTag,
                 {
                   borderColor: t.glass.border,
-                  backgroundColor: t.glass.background,
                 },
               ]}
             >
+              <AdaptiveMaterial borderRadius={10} tone="elevated" />
               <Text
                 numberOfLines={1}
                 style={[styles.titleText, { color: t.foreground }]}
@@ -158,10 +166,10 @@ export function MobileAppHeader({
             styles.headerButton,
             {
               borderColor: t.glass.border,
-              backgroundColor: t.glass.background,
             },
           ]}
         >
+          <AdaptiveMaterial borderRadius={12} tone="regular" />
           <Toolbox
             size={19}
             color={t.mutedForeground}
@@ -198,6 +206,7 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -206,6 +215,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     padding: 3,
     gap: 2,
   },
@@ -237,6 +247,7 @@ const styles = StyleSheet.create({
     minHeight: 32,
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     paddingHorizontal: 14,
     paddingVertical: 7,
     justifyContent: "center",

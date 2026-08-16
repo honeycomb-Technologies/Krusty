@@ -3,11 +3,15 @@ use super::execution::execute_foreground;
 use super::execution::{join_reader_with_timeout, BoundedOutputBuffer};
 #[cfg(unix)]
 use super::shell::{build_shell_command, configure_foreground_process_group};
-use super::shell::{normalize_tracked_background_command, strip_shell_background_suffix};
-use super::{
-    background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path, BashTool,
+use super::shell::{
+    contains_embedded_background_operator, normalize_tracked_background_command,
+    strip_shell_background_suffix,
 };
-use crate::process::ProcessRegistry;
+use super::{
+    background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path,
+    sandboxed_shell_command, BashTool,
+};
+use crate::process::{CommandEnvironmentPolicy, ProcessRegistry};
 use crate::tools::registry::Tool;
 use crate::tools::{ToolContext, ToolResult};
 use serde_json::json;
@@ -92,6 +96,19 @@ impl Drop for TestProcessCleanup {
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(')')
+            .and_then(|(_, suffix)| suffix.split_whitespace().next())
+            == Some("Z")
+        {
+            // The process has exited; this container's PID 1 may reap the
+            // orphaned zombie later, but it cannot execute any more work.
+            return false;
+        }
+    }
+
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
@@ -135,9 +152,15 @@ fn foreground_process_tree_command(
     pid_file_name: &str,
 ) -> tokio::process::Command {
     let script_name = "foreground-process-tree.sh";
+    #[cfg(target_os = "linux")]
+    let child_command = "setsid sleep 60 &";
+    #[cfg(not(target_os = "linux"))]
+    let child_command = "sleep 60 &";
     std::fs::write(
         working_dir.join(script_name),
-        "#!/bin/sh\nsleep 60 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > \"$1\"\nwait \"$child\"\n",
+        format!(
+            "#!/bin/sh\n{child_command}\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > \"$1\"\nwait \"$child\"\n"
+        ),
     )
     .expect("write process-tree script");
 
@@ -152,6 +175,64 @@ fn foreground_process_tree_command(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_shell_uses_the_sanitized_environment_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let isolated_home = temp.path().join("isolated-home");
+    let mut ctx = ToolContext {
+        working_dir: temp.path().to_path_buf(),
+        command_environment_policy: CommandEnvironmentPolicy::Sanitized,
+        ..Default::default()
+    };
+    ctx.command_environment
+        .insert("HOME".to_string(), isolated_home.display().to_string());
+    ctx.command_environment.insert(
+        "MITSURO_TEST_SECRET".to_string(),
+        "must-not-escape".to_string(),
+    );
+
+    let output = build_shell_command(
+        "printf '%s|%s' \"${MITSURO_TEST_SECRET-unset}\" \"$HOME\"",
+        &ctx,
+    )
+    .output()
+    .await
+    .expect("run foreground command");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 output"),
+        format!("unset|{}", isolated_home.display())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_project_shell_uses_scoped_writable_npm_cache() {
+    let project = tempfile::tempdir().expect("project");
+    let ctx = ToolContext {
+        working_dir: project.path().to_path_buf(),
+        project_dir: Some(project.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let output = build_shell_command(
+        "printf '%s|%s' \"$npm_config_cache\" \"$NPM_CONFIG_CACHE\"",
+        &ctx,
+    )
+    .output()
+    .await
+    .expect("run project command");
+
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).expect("utf8 output");
+    let (lower, upper) = output.split_once('|').expect("cache pair");
+    assert_eq!(lower, upper);
+    assert!(std::path::Path::new(lower).is_dir());
+    assert!(!lower.starts_with(project.path().to_string_lossy().as_ref()));
 }
 
 #[test]
@@ -176,6 +257,23 @@ fn strip_shell_background_suffix_rejects_escaped_ampersand() {
 fn strip_shell_background_suffix_rejects_double_ampersand() {
     let parsed = strip_shell_background_suffix("echo hi &&");
     assert!(parsed.is_none());
+}
+
+#[test]
+fn embedded_background_detection_distinguishes_jobs_from_redirects_and_logic() {
+    assert!(contains_embedded_background_operator(
+        "npm run build && (npm run preview > .preview.log 2>&1 & echo $!)"
+    ));
+    assert!(contains_embedded_background_operator("server & echo ready"));
+    assert!(!contains_embedded_background_operator(
+        "npm run build && printf ok 2>&1"
+    ));
+    assert!(!contains_embedded_background_operator(
+        "printf '&' && echo ok"
+    ));
+    assert!(!contains_embedded_background_operator(
+        "command &> output.log"
+    ));
 }
 
 #[test]
@@ -336,6 +434,49 @@ async fn foreground_bash_reports_real_file_state_deltas() {
         .await;
     assert_eq!(changed_value(&first_overwrite), Some(true));
     assert_eq!(changed_value(&repeated_overwrite), None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
+    let parent = tempfile::tempdir().expect("temp parent");
+    let working_dir = parent.path().join("assigned");
+    let outside = parent.path().join("outside.txt");
+    std::fs::create_dir(&working_dir).expect("assigned workspace");
+    let working_dir = working_dir.canonicalize().expect("canonical workspace");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        ..Default::default()
+    };
+
+    let wrapped =
+        sandboxed_shell_command("printf safe > inside.txt", &ctx).expect("bubblewrap command");
+    assert!(wrapped.starts_with("/usr/bin/bwrap "));
+
+    let escaped = BashTool
+        .execute(
+            json!({"command": format!("printf escaped > {}", outside.display())}),
+            &ctx,
+        )
+        .await;
+    assert!(escaped.is_error, "{}", escaped.output);
+    assert!(!outside.exists());
+
+    let inside = BashTool
+        .execute(
+            json!({"command": format!(
+                "test -d {0} && printf safe > {0}/inside.txt",
+                working_dir.display()
+            )}),
+            &ctx,
+        )
+        .await;
+    assert!(!inside.is_error, "{}", inside.output);
+    assert_eq!(
+        std::fs::read_to_string(working_dir.join("inside.txt")).expect("inside output"),
+        "safe"
+    );
 }
 
 #[cfg(unix)]
@@ -643,6 +784,111 @@ async fn exact_non_endpoint_background_launch_is_reused_and_not_recredited() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn delegated_background_launch_uses_process_owner_without_changing_tenant_owner() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let mut ctx = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id("tenant-a".to_string())
+        .with_process_owner_id("tenant-a:hive:task-a".to_string());
+    ctx.session_id = Some("parent-session".to_string());
+
+    let result = BashTool
+        .execute(
+            json!({"command": "sleep 30", "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.output);
+    let envelope: serde_json::Value = serde_json::from_str(&result.output).expect("tool JSON");
+    let process_id = envelope["data"]["process_id"].as_str().expect("process id");
+
+    assert!(registry.list_for_user("tenant-a").await.is_empty());
+    let process = registry
+        .get_for_user("tenant-a:hive:task-a", process_id)
+        .await
+        .expect("task-scoped process");
+    assert_eq!(process.session_id, None);
+    registry
+        .kill_for_user("tenant-a:hive:task-a", process_id)
+        .await
+        .expect("cleanup process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sanitized_background_launch_hides_sensitive_values_and_does_not_reuse_inherited_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let isolated_home = working_dir.join("isolated-home");
+    std::fs::create_dir_all(&isolated_home).expect("isolated home");
+    let registry = Arc::new(ProcessRegistry::new());
+    let owner = "environment-policy-owner";
+    let command = "printf '%s|%s\\n' \"${MITSURO_TEST_SECRET-unset}\" \"$HOME\"; sleep 30";
+    let command_environment = std::collections::BTreeMap::from([
+        ("HOME".to_string(), isolated_home.display().to_string()),
+        (
+            "MITSURO_TEST_SECRET".to_string(),
+            "must-not-escape".to_string(),
+        ),
+    ]);
+
+    let mut sanitized =
+        ToolContext::with_process_registry(working_dir.clone(), Arc::clone(&registry))
+            .with_user_id(owner.to_string());
+    sanitized.command_environment = command_environment.clone();
+    sanitized.command_environment_policy = CommandEnvironmentPolicy::Sanitized;
+    let sanitized_result = BashTool
+        .execute(
+            json!({"command": command, "run_in_background": true}),
+            &sanitized,
+        )
+        .await;
+    assert!(!sanitized_result.is_error, "{}", sanitized_result.output);
+    let sanitized_envelope: serde_json::Value =
+        serde_json::from_str(&sanitized_result.output).expect("sanitized tool JSON");
+    let sanitized_id = sanitized_envelope["data"]["process_id"]
+        .as_str()
+        .expect("sanitized process id")
+        .to_string();
+    let (output, _) = registry
+        .output_for_user(owner, &sanitized_id)
+        .await
+        .expect("sanitized output");
+    assert_eq!(output.trim(), format!("unset|{}", isolated_home.display()));
+
+    let mut inherited = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id(owner.to_string());
+    inherited.command_environment = command_environment;
+    let inherited_result = BashTool
+        .execute(
+            json!({"command": command, "run_in_background": true}),
+            &inherited,
+        )
+        .await;
+    assert!(!inherited_result.is_error, "{}", inherited_result.output);
+    let inherited_envelope: serde_json::Value =
+        serde_json::from_str(&inherited_result.output).expect("inherited tool JSON");
+    let inherited_id = inherited_envelope["data"]["process_id"]
+        .as_str()
+        .expect("inherited process id")
+        .to_string();
+
+    assert_ne!(sanitized_id, inherited_id);
+    assert_eq!(registry.list_for_user(owner).await.len(), 2);
+
+    registry
+        .kill_for_user(owner, &sanitized_id)
+        .await
+        .expect("kill sanitized process");
+    registry
+        .kill_for_user(owner, &inherited_id)
+        .await
+        .expect("kill inherited process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn detached_shell_wrapper_is_canonicalized_and_reused() {
     let temp = tempfile::tempdir().expect("tempdir");
     let working_dir = temp.path().canonicalize().expect("canonical tempdir");
@@ -765,6 +1011,52 @@ async fn concurrent_equivalent_background_launches_spawn_exactly_once() {
         .kill_for_user("concurrent-owner", process_ids[0])
         .await
         .expect("kill concurrent test process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn different_background_server_cannot_reuse_an_owned_endpoint() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let ctx = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id("endpoint-owner".to_string());
+
+    let first = BashTool
+        .execute(
+            json!({
+                "command": "sleep 30 # --host 127.0.0.1 --port 45943",
+                "run_in_background": true
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.output);
+
+    let second = BashTool
+        .execute(
+            json!({
+                "command": "sleep 29 # --host 127.0.0.1 --port 45943",
+                "run_in_background": true
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(second.is_error, "{}", second.output);
+    let envelope: serde_json::Value = serde_json::from_str(&second.output).expect("tool JSON");
+    assert_eq!(envelope["error"]["code"], "background_endpoint_in_use");
+
+    let first_envelope: serde_json::Value =
+        serde_json::from_str(&first.output).expect("first tool JSON");
+    registry
+        .kill_for_user(
+            "endpoint-owner",
+            first_envelope["data"]["process_id"]
+                .as_str()
+                .expect("process id"),
+        )
+        .await
+        .expect("kill first server");
 }
 
 #[cfg(unix)]

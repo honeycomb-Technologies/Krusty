@@ -4,7 +4,6 @@ mod activity_rail;
 mod app_header;
 mod approval_bar;
 mod browser_panel;
-mod codex_button;
 mod composer;
 mod computer_panel;
 mod extensions_panel;
@@ -21,6 +20,7 @@ mod settings_panel;
 mod sidebar;
 mod sites_panel;
 mod terminal_panel;
+mod ui_button;
 mod work_panel;
 // status_bar removed: full-width IDE strip under rail is not Codex chat density.
 // Connection chip + status text live in main column title bar.

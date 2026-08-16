@@ -44,6 +44,6 @@ cd apps/desktop/ui && MITSURO_SMOKE_DIR=/Users/Jacob/Documents/Mitsuro bun run s
 
 ## Notes
 
-- Ghostty is first-class terminal on desktop; embedded xterm is fallback only
+- Ghostty is first-class on desktop, with Ghostty WASM as the embedded terminal
 - Utility panes stay closed by default
 - No ornamental status strip / marketing empty states

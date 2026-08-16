@@ -7,7 +7,7 @@ use tracing::info;
 
 use super::super::config::CallOptions;
 use super::super::core::AiClient;
-use crate::ai::retry::safe_provider_event_error;
+use crate::ai::retry::{safe_provider_event_error, ProviderWebSocketError};
 
 mod request;
 mod response;
@@ -39,35 +39,44 @@ impl AiClient {
                 ],
             )
             .map_err(|error| {
-                anyhow::Error::msg(safe_provider_event_error(
-                    "Sub-agent Codex websocket request build failed",
-                    None,
-                    Some("invalid_request_error"),
-                    Some(&error.to_string()),
-                ))
+                ProviderWebSocketError::new(
+                    safe_provider_event_error(
+                        "Sub-agent Codex websocket request build failed",
+                        None,
+                        Some("invalid_request_error"),
+                        Some(&error.to_string()),
+                    ),
+                    false,
+                )
             })?;
 
         info!("Connecting sub-agent Codex websocket");
-        let (mut ws_stream, _) = connect_async(request).await.map_err(|e| {
-            anyhow::Error::msg(safe_provider_event_error(
-                "Sub-agent Codex websocket connection failed",
-                None,
-                Some("server_error"),
-                Some(&e.to_string()),
-            ))
+        let (mut ws_stream, _) = connect_async(request).await.map_err(|error| {
+            ProviderWebSocketError::new(
+                safe_provider_event_error(
+                    "Sub-agent Codex websocket connection failed",
+                    None,
+                    Some("server_error"),
+                    Some(&error.to_string()),
+                ),
+                true,
+            )
         })?;
 
         let create_payload = Self::codex_ws_create_payload(body);
         ws_stream
             .send(Message::Text(create_payload.to_string()))
             .await
-            .map_err(|e| {
-                anyhow::Error::msg(safe_provider_event_error(
-                    "Sub-agent Codex websocket request send failed",
-                    None,
-                    Some("server_error"),
-                    Some(&e.to_string()),
-                ))
+            .map_err(|error| {
+                ProviderWebSocketError::new(
+                    safe_provider_event_error(
+                        "Sub-agent Codex websocket request send failed",
+                        None,
+                        Some("server_error"),
+                        Some(&error.to_string()),
+                    ),
+                    true,
+                )
             })?;
 
         let collected_response = self

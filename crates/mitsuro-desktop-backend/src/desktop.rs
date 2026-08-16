@@ -54,6 +54,22 @@ pub enum BackendKind {
     Fixture,
 }
 
+/// Privacy-safe origin of a desktop backend connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendProvenance {
+    SpawnedProcess { command: String },
+    HttpEndpoint { url: String },
+}
+
+impl BackendProvenance {
+    pub fn summary(&self) -> &str {
+        match self {
+            Self::SpawnedProcess { command } => command,
+            Self::HttpEndpoint { url } => url,
+        }
+    }
+}
+
 impl BackendKind {
     pub fn id(self) -> &'static str {
         match self {
@@ -76,9 +92,35 @@ impl BackendKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerWorkModeContract {
+    CollaborationPresets,
+    PlanBuild,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerAccessModeContract {
+    PermissionProfiles,
+    Governed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerSpeedModeContract {
+    ServiceTier,
+    StandardFast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
     pub sessions: bool,
+    pub thread_create: bool,
+    pub thread_open: bool,
+    pub thread_resume: bool,
+    pub thread_rename: bool,
+    pub thread_delete: bool,
+    pub thread_archive: bool,
+    pub thread_unarchive: bool,
     pub streaming_chat: bool,
+    pub lifecycle_events: bool,
     pub image_attachments: bool,
     pub audio_attachments: bool,
     pub realtime_voice: bool,
@@ -86,6 +128,9 @@ pub struct BackendCapabilities {
     pub mention_inputs: bool,
     pub workspace_selection: bool,
     pub access_modes: bool,
+    pub composer_work_modes: ComposerWorkModeContract,
+    pub composer_access_modes: ComposerAccessModeContract,
+    pub composer_speed_modes: ComposerSpeedModeContract,
     pub steering: bool,
     pub manual_compaction: bool,
     pub review: bool,
@@ -98,6 +143,7 @@ pub struct BackendCapabilities {
     pub command_exec: bool,
     pub thread_shell_commands: bool,
     pub background_terminals: bool,
+    pub tracked_processes: bool,
     pub tracked_process_kill: bool,
     pub extensions: bool,
     pub plugin_mutations: bool,
@@ -122,6 +168,9 @@ pub struct BackendCapabilities {
     pub thread_settings: bool,
     pub thread_metadata: bool,
     pub item_pagination: bool,
+    pub account_read: bool,
+    pub account_auth: bool,
+    pub account_usage: bool,
     pub account_workspace_messages: bool,
     pub account_reset_credits: bool,
     pub account_credit_nudge: bool,
@@ -131,7 +180,6 @@ pub struct BackendCapabilities {
     pub schedules: bool,
     pub schedule_mutations: bool,
     pub sites: bool,
-    pub archive: bool,
     pub fork: bool,
     pub side_conversations: bool,
     pub conversation_search: bool,
@@ -139,11 +187,28 @@ pub struct BackendCapabilities {
     pub edit_latest_message: bool,
 }
 
+pub const DESKTOP_CAPABILITY_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityNegotiation {
+    pub schema_version: u32,
+    pub provider_version: Option<String>,
+    pub advertised: BackendCapabilities,
+}
+
 impl BackendCapabilities {
     pub const fn codex() -> Self {
         Self {
             sessions: true,
+            thread_create: true,
+            thread_open: true,
+            thread_resume: true,
+            thread_rename: true,
+            thread_delete: true,
+            thread_archive: true,
+            thread_unarchive: true,
             streaming_chat: true,
+            lifecycle_events: true,
             image_attachments: true,
             audio_attachments: true,
             realtime_voice: true,
@@ -151,6 +216,9 @@ impl BackendCapabilities {
             mention_inputs: true,
             workspace_selection: true,
             access_modes: true,
+            composer_work_modes: ComposerWorkModeContract::CollaborationPresets,
+            composer_access_modes: ComposerAccessModeContract::PermissionProfiles,
+            composer_speed_modes: ComposerSpeedModeContract::ServiceTier,
             steering: true,
             manual_compaction: true,
             review: true,
@@ -163,6 +231,7 @@ impl BackendCapabilities {
             command_exec: true,
             thread_shell_commands: true,
             background_terminals: true,
+            tracked_processes: false,
             tracked_process_kill: false,
             extensions: true,
             plugin_mutations: true,
@@ -187,6 +256,9 @@ impl BackendCapabilities {
             thread_settings: true,
             thread_metadata: true,
             item_pagination: true,
+            account_read: true,
+            account_auth: true,
+            account_usage: true,
             account_workspace_messages: true,
             account_reset_credits: true,
             account_credit_nudge: true,
@@ -196,7 +268,6 @@ impl BackendCapabilities {
             schedules: false,
             schedule_mutations: false,
             sites: false,
-            archive: true,
             fork: true,
             side_conversations: true,
             conversation_search: true,
@@ -208,7 +279,15 @@ impl BackendCapabilities {
     pub const fn mitsuro() -> Self {
         Self {
             sessions: true,
+            thread_create: true,
+            thread_open: true,
+            thread_resume: false,
+            thread_rename: true,
+            thread_delete: true,
+            thread_archive: false,
+            thread_unarchive: false,
             streaming_chat: true,
+            lifecycle_events: false,
             image_attachments: true,
             audio_attachments: false,
             realtime_voice: false,
@@ -216,6 +295,9 @@ impl BackendCapabilities {
             mention_inputs: false,
             workspace_selection: true,
             access_modes: true,
+            composer_work_modes: ComposerWorkModeContract::PlanBuild,
+            composer_access_modes: ComposerAccessModeContract::Governed,
+            composer_speed_modes: ComposerSpeedModeContract::StandardFast,
             steering: true,
             manual_compaction: false,
             review: false,
@@ -231,6 +313,7 @@ impl BackendCapabilities {
             command_exec: false,
             thread_shell_commands: false,
             background_terminals: false,
+            tracked_processes: true,
             tracked_process_kill: true,
             extensions: true,
             plugin_mutations: false,
@@ -255,6 +338,9 @@ impl BackendCapabilities {
             thread_settings: false,
             thread_metadata: false,
             item_pagination: false,
+            account_read: false,
+            account_auth: false,
+            account_usage: false,
             account_workspace_messages: false,
             account_reset_credits: false,
             account_credit_nudge: false,
@@ -264,7 +350,6 @@ impl BackendCapabilities {
             schedules: true,
             schedule_mutations: true,
             sites: false,
-            archive: false,
             fork: false,
             side_conversations: false,
             conversation_search: true,
@@ -349,6 +434,16 @@ impl DesktopBackend {
         Ok(Self::Mitsuro(Arc::new(MitsuroServerBackend::from_env()?)))
     }
 
+    pub fn mitsuro_from_url(
+        base_url: impl Into<String>,
+        bearer_token: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self::Mitsuro(Arc::new(MitsuroServerBackend::from_url(
+            base_url,
+            bearer_token,
+        )?)))
+    }
+
     pub fn kind(&self) -> BackendKind {
         match self {
             Self::Codex(_) => BackendKind::CodexStdio,
@@ -360,6 +455,31 @@ impl DesktopBackend {
         match self {
             Self::Codex(_) => BackendCapabilities::codex(),
             Self::Mitsuro(_) => BackendCapabilities::mitsuro(),
+        }
+    }
+
+    pub fn capability_negotiation(&self) -> CapabilityNegotiation {
+        let provider_version = match self {
+            Self::Codex(backend) => backend
+                .initialize_response()
+                .map(|response| response.user_agent),
+            Self::Mitsuro(backend) => backend.server_version(),
+        };
+        CapabilityNegotiation {
+            schema_version: DESKTOP_CAPABILITY_SCHEMA_VERSION,
+            provider_version,
+            advertised: self.capabilities(),
+        }
+    }
+
+    pub fn provenance(&self) -> BackendProvenance {
+        match self {
+            Self::Codex(backend) => BackendProvenance::SpawnedProcess {
+                command: backend.process_command(),
+            },
+            Self::Mitsuro(backend) => BackendProvenance::HttpEndpoint {
+                url: backend.client().base_url().to_owned(),
+            },
         }
     }
 
@@ -384,6 +504,15 @@ impl DesktopBackend {
             // Successful Mitsuro health establishes that local access or the
             // configured bearer token is accepted.
             Self::Mitsuro(_) => true,
+        }
+    }
+
+    /// Shut down only this provider transport. The desktop connection registry
+    /// decides whether and when to create a new generation afterward.
+    pub async fn disconnect(&self) -> Result<()> {
+        match self {
+            Self::Codex(backend) => backend.disconnect().await,
+            Self::Mitsuro(backend) => backend.disconnect().await,
         }
     }
 
@@ -1548,7 +1677,16 @@ mod tests {
 
     #[test]
     fn capabilities_do_not_claim_unsupported_cross_backend_features() {
-        assert!(!BackendCapabilities::mitsuro().archive);
+        assert!(!BackendCapabilities::mitsuro().thread_archive);
+        assert!(!BackendCapabilities::mitsuro().thread_unarchive);
+        assert!(!BackendCapabilities::mitsuro().thread_resume);
+        assert!(BackendCapabilities::mitsuro().thread_create);
+        assert!(BackendCapabilities::mitsuro().thread_open);
+        assert!(BackendCapabilities::mitsuro().thread_rename);
+        assert!(BackendCapabilities::mitsuro().thread_delete);
+        assert!(BackendCapabilities::codex().thread_archive);
+        assert!(BackendCapabilities::codex().thread_unarchive);
+        assert!(BackendCapabilities::codex().thread_resume);
         assert!(!BackendCapabilities::codex().hive);
         assert!(BackendCapabilities::mitsuro().hive_mutations);
         assert!(!BackendCapabilities::codex().hive_mutations);
@@ -1556,12 +1694,16 @@ mod tests {
         assert!(BackendCapabilities::mitsuro().schedule_mutations);
         assert!(!BackendCapabilities::codex().schedule_mutations);
         assert!(!BackendCapabilities::mitsuro().processes);
+        assert!(BackendCapabilities::mitsuro().tracked_processes);
+        assert!(!BackendCapabilities::codex().tracked_processes);
         assert!(BackendCapabilities::codex().command_exec);
         assert!(!BackendCapabilities::mitsuro().command_exec);
         assert!(BackendCapabilities::codex().thread_shell_commands);
         assert!(!BackendCapabilities::mitsuro().thread_shell_commands);
         assert!(BackendCapabilities::mitsuro().streaming_chat);
         assert!(BackendCapabilities::codex().streaming_chat);
+        assert!(BackendCapabilities::codex().lifecycle_events);
+        assert!(!BackendCapabilities::mitsuro().lifecycle_events);
         assert!(BackendCapabilities::mitsuro().image_attachments);
         assert!(BackendCapabilities::codex().image_attachments);
         assert!(BackendCapabilities::mitsuro().steering);
@@ -1640,6 +1782,42 @@ mod tests {
         assert!(!BackendCapabilities::mitsuro().edit_latest_message);
         assert!(BackendCapabilities::codex().side_conversations);
         assert!(!BackendCapabilities::mitsuro().side_conversations);
+        assert!(BackendCapabilities::codex().account_read);
+        assert!(BackendCapabilities::codex().account_auth);
+        assert!(BackendCapabilities::codex().account_usage);
+        assert!(!BackendCapabilities::mitsuro().account_read);
+        assert!(!BackendCapabilities::mitsuro().account_auth);
+        assert!(!BackendCapabilities::mitsuro().account_usage);
+        assert_eq!(
+            BackendCapabilities::codex().composer_work_modes,
+            ComposerWorkModeContract::CollaborationPresets
+        );
+        assert_eq!(
+            BackendCapabilities::mitsuro().composer_work_modes,
+            ComposerWorkModeContract::PlanBuild
+        );
+        assert_eq!(
+            BackendCapabilities::codex().composer_access_modes,
+            ComposerAccessModeContract::PermissionProfiles
+        );
+        assert_eq!(
+            BackendCapabilities::mitsuro().composer_access_modes,
+            ComposerAccessModeContract::Governed
+        );
+    }
+
+    #[test]
+    fn capability_negotiation_is_versioned_for_every_backend() {
+        let codex = DesktopBackend::Codex(Arc::new(CodexAppServerBackend::with_defaults()));
+        let mitsuro = DesktopBackend::Mitsuro(Arc::new(MitsuroServerBackend::new()));
+        for backend in [&codex, &mitsuro] {
+            let negotiation = backend.capability_negotiation();
+            assert_eq!(
+                negotiation.schema_version,
+                DESKTOP_CAPABILITY_SCHEMA_VERSION
+            );
+            assert_eq!(negotiation.advertised, backend.capabilities());
+        }
     }
 
     #[tokio::test]

@@ -109,6 +109,24 @@ impl AiClient {
     }
 
     async fn send_simple_codex_body(&self, model: &str, body: Value) -> Result<SimpleCallResult> {
+        let mut retry = 0_u32;
+        loop {
+            match self.send_simple_codex_body_once(model, body.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(error) if error.to_string().contains("code=server_error") && retry < 3 => {
+                    retry += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(1 << (retry - 1))).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn send_simple_codex_body_once(
+        &self,
+        model: &str,
+        body: Value,
+    ) -> Result<SimpleCallResult> {
         use futures::StreamExt;
 
         debug!("ChatGPT Codex simple call to model: {}", model);

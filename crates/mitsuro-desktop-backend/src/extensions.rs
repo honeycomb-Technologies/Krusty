@@ -1587,9 +1587,9 @@ mod tests {
             resp.installed_count()
         );
         let cats: Vec<_> = resp.all_plugins().iter().map(|p| p.category()).collect();
-        assert!(cats.iter().any(|c| *c == "featured"));
-        assert!(cats.iter().any(|c| *c == "productivity"));
-        assert!(cats.iter().any(|c| *c == "creativity"));
+        assert!(cats.contains(&"featured"));
+        assert!(cats.contains(&"productivity"));
+        assert!(cats.contains(&"creativity"));
         // Overflow head names match bar copy.
         let featured: Vec<_> = resp
             .all_plugins()
@@ -1615,11 +1615,11 @@ mod tests {
             .iter()
             .map(|p| p.display_name())
             .collect();
-        assert!(names.iter().any(|n| *n == "Outlook Email"));
-        assert!(names.iter().any(|n| *n == "Google Calendar"));
-        assert!(names.iter().any(|n| *n == "Asana"));
-        assert!(names.iter().any(|n| *n == "Descript"));
-        assert!(names.iter().any(|n| *n == "Adobe (formerly Photoshop)"));
+        assert!(names.contains(&"Outlook Email"));
+        assert!(names.contains(&"Google Calendar"));
+        assert!(names.contains(&"Asana"));
+        assert!(names.contains(&"Descript"));
+        assert!(names.contains(&"Adobe (formerly Photoshop)"));
         let installed = fixture_demo_plugins_installed();
         assert_eq!(installed.plugin_count(), resp.installed_count());
         assert!(installed.all_plugins().iter().all(|p| p.installed));

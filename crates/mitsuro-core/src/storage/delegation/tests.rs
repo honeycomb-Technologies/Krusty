@@ -6,8 +6,9 @@ use tempfile::TempDir;
 
 use super::model::MAX_DELEGATION_TASK_OBJECTIVE_BYTES;
 use super::*;
+use crate::agent::subagent::{AgentConversationEvent, AgentConversationToolCall};
 use crate::ai::models::{ApiFormat, ModelKey};
-use crate::ai::providers::ProviderId;
+use crate::ai::providers::{ProviderId, ReasoningEffort};
 use crate::storage::{Database, DelegatedRunRole, DelegatedRunScope};
 use crate::tools::registry::PermissionMode;
 
@@ -35,7 +36,8 @@ fn input() -> DelegationGroupStartInput {
             failure_policy: DelegationFailurePolicy::Continue,
             governance: DelegationGovernance {
                 permission_mode: PermissionMode::Supervised,
-                delegated_turn_budget: 12,
+                reasoning_effort: None,
+                delegated_turn_budget: Some(12),
                 max_parallelism: 2,
                 execution_tool_allowlist: Some(BTreeSet::from(["read".to_string()])),
                 delegation_policy: crate::tools::registry::DelegationPolicy::for_subagent_explore(
@@ -90,6 +92,41 @@ fn input_for(group_id: &str) -> DelegationGroupStartInput {
         task.delegation_task_id = format!("{group_id}-task-{index}");
     }
     input
+}
+
+#[test]
+fn delegated_turn_budget_is_optional_and_old_integer_contracts_remain_readable() {
+    let mut encoded = serde_json::to_value(input().contract).expect("serialize contract");
+    assert_eq!(encoded["governance"]["delegated_turn_budget"], 12);
+
+    encoded["governance"]["reasoning_effort"] =
+        serde_json::to_value(ReasoningEffort::Medium).unwrap();
+    let typed: DelegationGroupContract =
+        serde_json::from_value(encoded.clone()).expect("typed reasoning contract remains readable");
+    assert_eq!(
+        typed.governance.reasoning_effort,
+        Some(ReasoningEffort::Medium)
+    );
+
+    let old_contract: DelegationGroupContract =
+        serde_json::from_value(encoded.clone()).expect("old integer contract remains readable");
+    assert_eq!(old_contract.governance.delegated_turn_budget, Some(12));
+
+    encoded["governance"]
+        .as_object_mut()
+        .expect("governance object")
+        .remove("delegated_turn_budget");
+    encoded["governance"]
+        .as_object_mut()
+        .expect("governance object")
+        .remove("reasoning_effort");
+    let unlimited: DelegationGroupContract =
+        serde_json::from_value(encoded).expect("missing budget means no turn ceiling");
+    assert_eq!(unlimited.governance.delegated_turn_budget, None);
+    assert_eq!(unlimited.governance.reasoning_effort, None);
+    unlimited
+        .validate(2)
+        .expect("unlimited governance remains valid");
 }
 
 #[test]
@@ -293,6 +330,62 @@ fn detached_parent_continuation_has_one_durable_owner() {
 }
 
 #[test]
+fn session_cancel_suppresses_detached_wakes_and_discards_pending_steering() {
+    let (store, temp_dir) = create_store();
+    store.create_group(&input()).expect("create group");
+    store.queue_group("group-1").expect("queue group");
+    store
+        .transition_group("group-1", DelegationGroupState::Failed)
+        .expect("fail queued group");
+    let database = Database::new(&temp_dir.path().join("delegation.db")).expect("open database");
+    crate::storage::SessionManager::new(database)
+        .queue_pending_steering_once(
+            "session-1",
+            "child-wake-group-1",
+            r#"[{"type":"text","text":"child finished"}]"#,
+        )
+        .expect("queue pending wake");
+    assert!(store
+        .mark_parent_continuation_queued("group-1", "child-wake-group-1")
+        .expect("mark queued"));
+
+    assert_eq!(
+        store
+            .suppress_parent_continuations_for_session("session-1")
+            .expect("suppress wakes"),
+        1
+    );
+    assert_eq!(
+        store
+            .suppress_parent_continuations_for_session("session-1")
+            .expect("repeat suppression"),
+        0,
+        "session cancellation must remain idempotent"
+    );
+    let group = store.get_group("group-1").expect("read").expect("group");
+    assert_eq!(
+        group.parent_continuation_state,
+        DelegationParentContinuationState::NotRequested
+    );
+    let database = Database::new(&temp_dir.path().join("delegation.db")).expect("reopen database");
+    let manager = crate::storage::SessionManager::new(database);
+    assert!(manager
+        .load_pending_steering("session-1", "child-wake-group-1")
+        .expect("load pending wake")
+        .is_none());
+    assert!(
+        !manager
+            .queue_pending_steering_once(
+                "session-1",
+                "child-wake-group-1",
+                r#"[{"type":"text","text":"late child"}]"#,
+            )
+            .expect("late wake remains fenced"),
+        "the retained idempotency receipt must fence a racing finalizer"
+    );
+}
+
+#[test]
 fn session_events_replay_from_a_monotonic_cursor_without_content_payloads() {
     let (store, _temp_dir) = create_store();
     store.create_group(&input()).expect("create group");
@@ -317,6 +410,102 @@ fn session_events_replay_from_a_monotonic_cursor_without_content_payloads() {
         .expect("replay tail");
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].event_id, events[2].event_id);
+}
+
+#[test]
+fn task_activity_is_bounded_typed_and_group_authorized() {
+    let (store, _temp_dir) = create_store();
+    store.create_group(&input()).expect("create group");
+    let activity = DelegationTaskActivity {
+        agent_name: "Storage Agent".to_string(),
+        status: "running".to_string(),
+        tool_count: 3,
+        tokens: 1_024,
+        current_action: Some("Reviewing durable event replay".to_string()),
+        completion_summary: None,
+        lines_added: 12,
+        lines_removed: 4,
+        completed_plan_task: None,
+    };
+
+    store
+        .record_task_activity("group-1", "task-storage", &activity)
+        .expect("record task activity");
+    let events = store
+        .list_session_events_after("session-1", 0, 100)
+        .expect("list task activity");
+    let event = events
+        .iter()
+        .find(|event| event.event_type == DelegationEventType::TaskActivity)
+        .expect("task activity event");
+    assert_eq!(event.delegation_task_id.as_deref(), Some("task-storage"));
+    assert_eq!(
+        serde_json::from_value::<DelegationTaskActivity>(event.payload.clone())
+            .expect("typed activity payload"),
+        activity
+    );
+
+    let foreign = input_for("group-2");
+    store.create_group(&foreign).expect("create foreign group");
+    let error = store
+        .record_task_activity("group-1", "group-2-task-0", &activity)
+        .expect_err("foreign task must be rejected");
+    assert!(error.to_string().contains("lost its group authority"));
+
+    let mut oversized = activity;
+    oversized.current_action = Some("x".repeat(513));
+    let error = store
+        .record_task_activity("group-1", "task-storage", &oversized)
+        .expect_err("oversized activity must be rejected");
+    assert!(error.to_string().contains("exceeds its size limit"));
+}
+
+#[test]
+fn task_conversation_replays_semantic_chat_boundaries() {
+    let (store, _temp_dir) = create_store();
+    store.create_group(&input()).expect("create group");
+    let assistant = AgentConversationEvent::AssistantTurn {
+        message_id: "task-storage:turn:1".to_string(),
+        turn: 1,
+        content: "I am checking the durable store.".to_string(),
+        tool_calls: vec![AgentConversationToolCall {
+            id: "read-1".to_string(),
+            name: "read".to_string(),
+            arguments: serde_json::json!({"file_path": "src/storage.rs"}),
+        }],
+    };
+    let result = AgentConversationEvent::ToolResult {
+        message_id: "task-storage:turn:1".to_string(),
+        tool_call_id: "read-1".to_string(),
+        name: "read".to_string(),
+        output: "bounded result".to_string(),
+        is_error: false,
+    };
+    store
+        .record_task_conversation("group-1", "task-storage", &assistant)
+        .expect("record assistant turn");
+    store
+        .record_task_conversation("group-1", "task-storage", &result)
+        .expect("record tool result");
+
+    let replayed = store
+        .list_session_events_after("session-1", 0, 100)
+        .expect("replay conversation")
+        .into_iter()
+        .filter(|event| event.event_type == DelegationEventType::TaskConversation)
+        .map(|event| {
+            serde_json::from_value::<AgentConversationEvent>(event.payload)
+                .expect("typed conversation event")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replayed, vec![assistant, result]);
+
+    let foreign = input_for("group-2");
+    store.create_group(&foreign).expect("create foreign group");
+    let error = store
+        .record_task_conversation("group-1", "group-2-task-0", &replayed[0])
+        .expect_err("foreign conversation must be rejected");
+    assert!(error.to_string().contains("lost its delegation authority"));
 }
 
 #[test]
@@ -420,6 +609,145 @@ fn isolated_dependency_waits_for_durable_integration_barrier() {
         .claim_task("task-ui", "owner-second", 10_000)
         .expect("claim integrated dependent")
         .is_some());
+}
+
+#[test]
+fn isolated_baseline_refresh_is_fenced_before_task_admission() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks.truncate(1);
+    graph.contract.governance.max_parallelism = 1;
+    graph.tasks[0].writer_mode = DelegationWriterMode::Isolated;
+    graph.tasks[0].attempt_workspace = Some("/tmp/group-1-wave-0001/task-0000".to_string());
+    graph.tasks[0].workspace_baseline = Some("old-baseline".to_string());
+    store.create_group(&graph).expect("create isolated graph");
+    store.queue_group("group-1").expect("queue isolated graph");
+
+    assert!(store
+        .refresh_isolated_task_baseline(
+            "task-storage",
+            "/tmp/group-1-wave-0001/task-0000",
+            "dependency-aware-baseline",
+        )
+        .expect("refresh queued baseline"));
+    assert_eq!(
+        store
+            .get_task("task-storage")
+            .expect("read task")
+            .expect("task")
+            .specification
+            .workspace_baseline
+            .as_deref(),
+        Some("dependency-aware-baseline")
+    );
+
+    store
+        .claim_task("task-storage", "owner", 10_000)
+        .expect("claim isolated task")
+        .expect("lease");
+    let error = store
+        .refresh_isolated_task_baseline(
+            "task-storage",
+            "/tmp/group-1-wave-0001/task-0000",
+            "too-late",
+        )
+        .expect_err("leased task must fence baseline refresh");
+    assert!(error.to_string().contains("before task admission"));
+}
+
+#[test]
+fn pre_admission_wave_failure_settles_tasks_and_all_transitive_dependents() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks[1].depends_on = vec!["storage".to_string()];
+    let mut final_task = graph.tasks[1].clone();
+    final_task.delegation_task_id = "task-final".to_string();
+    final_task.task_key = "final".to_string();
+    final_task.depends_on = vec!["ui".to_string()];
+    graph.tasks.push(final_task);
+    store.create_group(&graph).expect("create dependency graph");
+    store
+        .queue_group("group-1")
+        .expect("queue dependency graph");
+
+    assert_eq!(
+        store
+            .fail_unstarted_tasks(
+                "group-1",
+                &["task-storage".to_string()],
+                "dependency snapshot could not be materialized",
+            )
+            .expect("persist pre-admission failure"),
+        1
+    );
+    assert_eq!(
+        store
+            .get_task("task-storage")
+            .expect("read failed task")
+            .expect("failed task")
+            .state,
+        DelegationTaskState::Failed
+    );
+    for task_id in ["task-ui", "task-final"] {
+        assert_eq!(
+            store
+                .get_task(task_id)
+                .expect("read dependent")
+                .expect("dependent")
+                .state,
+            DelegationTaskState::Cancelled,
+            "all dependency depths must settle in one transaction"
+        );
+    }
+    assert_eq!(
+        store
+            .get_group("group-1")
+            .expect("read group")
+            .expect("group")
+            .state,
+        DelegationGroupState::Failed
+    );
+}
+
+#[test]
+fn degraded_dependency_does_not_cancel_downstream_task() {
+    let (store, _temp_dir) = create_store();
+    let mut graph = input();
+    graph.tasks[1].depends_on = vec!["storage".to_string()];
+    store.create_group(&graph).expect("create dependency graph");
+    store
+        .queue_group("group-1")
+        .expect("queue dependency graph");
+    store
+        .claim_task("task-storage", "owner-first", 10_000)
+        .expect("claim prerequisite")
+        .expect("prerequisite lease");
+    assert!(store
+        .complete_task(
+            "task-storage",
+            "owner-first",
+            DelegationTaskState::Degraded,
+            Some(&serde_json::json!({
+                "integration_state": "ready",
+                "termination": "provider_timeout"
+            })),
+            Some("API call timed out after 180s on turn 3"),
+        )
+        .expect("degrade prerequisite"));
+
+    let claimed = store
+        .claim_tasks("group-1", "owner-second", 2, 10_000)
+        .expect("claim dependents after degraded prerequisite");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "degraded usable prerequisite should unblock dependents"
+    );
+    let dependent = store
+        .get_task("task-ui")
+        .expect("read dependent")
+        .expect("dependent task");
+    assert_ne!(dependent.state, DelegationTaskState::Cancelled);
 }
 
 #[test]

@@ -85,6 +85,14 @@ export const styles = StyleSheet.create({
   },
   container: { flex: 1 },
   flex: { flex: 1 },
+  mobileTopBarOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 40,
+    pointerEvents: "box-none",
+  },
   /** Desktop: chat column + toolbox column side by side. */
   desktopSplit: {
     flex: 1,

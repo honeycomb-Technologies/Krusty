@@ -47,12 +47,6 @@ config.resolver.extraNodeModules = {
   '@mitsuro/api': path.resolve(monorepoRoot, 'packages/api/src'),
   '@mitsuro/state': path.resolve(monorepoRoot, 'packages/state/src'),
   '@mitsuro/ui': path.resolve(monorepoRoot, 'packages/ui/src'),
-  ...(realMobileNodeModules
-    ? {
-        xterm: path.resolve(realMobileNodeModules, 'xterm'),
-        '@xterm/addon-fit': path.resolve(realMobileNodeModules, '@xterm/addon-fit'),
-      }
-    : {}),
 };
 
 function resolveExistingFile(basePath) {
@@ -100,20 +94,6 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (moduleName === '@mobile' || moduleName.startsWith('@mobile/')) {
     const subpath = moduleName === '@mobile' ? 'index' : moduleName.slice('@mobile/'.length);
     const filePath = resolveMobileFile(subpath);
-    if (filePath) {
-      return { type: 'sourceFile', filePath };
-    }
-  }
-
-  if (
-    realMobileNodeModules &&
-    (moduleName === 'xterm' ||
-      moduleName.startsWith('xterm/') ||
-      moduleName === '@xterm/addon-fit' ||
-      moduleName.startsWith('@xterm/addon-fit/'))
-  ) {
-    const mapped = path.join(realMobileNodeModules, moduleName);
-    const filePath = resolveExistingFile(mapped);
     if (filePath) {
       return { type: 'sourceFile', filePath };
     }

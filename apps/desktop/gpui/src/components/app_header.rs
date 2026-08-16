@@ -2,20 +2,19 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _,
+    deferred, div, point, px, BoxShadow, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
-use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable as _, TitleBar};
 
 use crate::app::{AppMenu, MitsuroApp, ProductMode};
+use crate::components::ui_button::{self, ButtonSize, ButtonState, ButtonTone};
 use crate::theme;
-
-const HEADER_HEIGHT: f32 = 34.0;
 
 pub fn app_header(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
     let colors = theme::colors();
     TitleBar::new()
+        .h(px(theme::metrics().title_bar_height))
         .bg(colors.bg_under)
         .border_color(colors.border_subtle)
         .child(
@@ -24,7 +23,7 @@ pub fn app_header(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
                 .flex_row()
                 .items_center()
                 .h_full()
-                .gap(px(2.0))
+                .gap(px(theme::spacing().xxs))
                 .child(header_icon_button(
                     "app-header-sidebar",
                     if app.thread_sidebar_visible() {
@@ -82,22 +81,35 @@ pub fn app_menu_overlay(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl 
         .border_1()
         .border_color(colors.border_heavy)
         .bg(colors.bg_elevated)
+        .shadow(vec![BoxShadow {
+            color: colors.shadow,
+            offset: point(px(0.0), px(theme::spacing().xs)),
+            blur_radius: px(theme::shape().shadow_blur),
+            spread_radius: px(0.0),
+        }])
         .flex()
         .flex_col()
         .gap(px(2.0))
         .children(menu_items(menu, app, cx));
 
-    div()
-        .id("app-menu-backdrop")
-        .absolute()
-        // Leave the title bar interactive so an open menu can switch directly
-        // to another File/Edit/View/Help menu in one click.
-        .top(px(HEADER_HEIGHT))
-        .bottom_0()
-        .left_0()
-        .right_0()
-        .on_click(cx.listener(|app, _, _, cx| app.close_app_menu(cx)))
-        .child(popup)
+    deferred(
+        div()
+            .id("app-menu-backdrop")
+            .occlude()
+            .absolute()
+            // Leave the title bar interactive so an open menu can switch directly
+            // to another File/Edit/View/Help menu in one click.
+            .top(px(theme::metrics().title_bar_height))
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .on_click(cx.listener(|app, _, _, cx| {
+                app.close_app_menu(cx);
+                cx.stop_propagation();
+            }))
+            .child(popup),
+    )
+    .with_priority(100)
 }
 
 fn menu_items(
@@ -210,26 +222,19 @@ fn header_icon_button(
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .id(id)
-        .size(px(28.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
-        })
-        .when(!enabled, |this| this.opacity(0.35))
-        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-        .child(
-            Icon::new(icon)
-                .with_size(px(13.0))
-                .text_color(colors.text_tertiary),
-        )
+    ui_button::icon_button(
+        id,
+        Icon::new(icon).with_size(px(theme::shape().icon_sm)),
+        tooltip,
+        ButtonTone::Ghost,
+        ButtonSize::Medium,
+        ButtonState {
+            disabled: !enabled,
+            ..ButtonState::default()
+        },
+        cx,
+    )
+    .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
 }
 
 fn header_menu_button(
@@ -238,34 +243,24 @@ fn header_menu_button(
     app: &MitsuroApp,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
-    let colors = theme::colors();
     let selected = app.app_menu() == Some(menu);
-    div()
-        .id(match menu {
+    ui_button::button(
+        match menu {
             AppMenu::File => "app-menu-file",
             AppMenu::Edit => "app-menu-edit",
             AppMenu::View => "app-menu-view",
             AppMenu::Help => "app-menu-help",
-        })
-        .h(px(26.0))
-        .px(px(7.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .bg(if selected {
-            colors.bg_selected
-        } else {
-            theme::transparent()
-        })
-        .hover(|style| style.bg(colors.bg_hover))
-        .on_click(cx.listener(move |app, _, _, cx| app.toggle_app_menu(menu, cx)))
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_tertiary)
-                .child(label),
-        )
+        },
+        label,
+        ButtonTone::Ghost,
+        ButtonSize::Small,
+        ButtonState {
+            selected,
+            ..ButtonState::default()
+        },
+        cx,
+    )
+    .on_click(cx.listener(move |app, _, _, cx| app.toggle_app_menu(menu, cx)))
 }
 
 fn menu_item(
@@ -289,7 +284,11 @@ fn menu_item(
         .when(enabled, |this| {
             this.cursor_pointer()
                 .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    on_click(app, window, cx);
+                    app.close_app_menu(cx);
+                    cx.stop_propagation();
+                }))
         })
         .when(!enabled, |this| this.opacity(0.38))
         .child(

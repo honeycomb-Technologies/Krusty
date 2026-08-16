@@ -34,6 +34,7 @@ import * as Haptics from "../../platform/haptics";
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  sessionId?: string | null;
   isLast: boolean;
   isStreaming: boolean;
   isThinking?: boolean;
@@ -52,6 +53,7 @@ interface MessageBubbleProps {
 
 export const MessageBubble = memo(function MessageBubble({
   message,
+  sessionId,
   isLast,
   isStreaming,
   isThinking,
@@ -137,6 +139,7 @@ export const MessageBubble = memo(function MessageBubble({
       <ToolCallCard
         key={toolCall.id}
         toolCall={toolCall}
+        sessionId={sessionId}
         isStreaming={
           toolIsStreaming || (isDelegatedTool(toolCall) && isLast && isStreaming)
         }

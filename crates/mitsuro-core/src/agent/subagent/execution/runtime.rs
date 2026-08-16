@@ -18,9 +18,11 @@ use crate::tools::ToolResult;
 
 use super::super::lifecycle::AgentMailboxFinish;
 use super::super::types::{
-    parse_explore_report, summary_looks_non_substantive, synthesize_explore_report, AgentProgress,
-    AgentProgressStatus, DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact,
-    SubAgentResult, SubAgentTask, SubAgentTermination,
+    missing_required_browser_acceptance_proofs, parse_delegated_handoff, parse_explore_report,
+    summary_looks_non_substantive, synthesize_explore_report, AgentConversationEvent,
+    AgentConversationToolCall, AgentProgress, AgentProgressStatus, DelegatedEvidenceKind,
+    DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult, SubAgentTask,
+    SubAgentTermination, TaskObjectiveStatus,
 };
 use super::api::{call_subagent_api, parse_response, parse_response_usage};
 use super::config::AgentConfig;
@@ -50,6 +52,57 @@ enum MaxTokensLandingDecision {
     NotApplicable,
     RetryConciseLanding,
     TerminalIncomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedSummaryToolDecision {
+    NotApplicable,
+    AllowGapClosingCycle,
+    ForceSummary,
+}
+
+fn forced_summary_tool_decision(
+    summary_requested: bool,
+    gap_closing_cycle_used: bool,
+    all_read_only_tools: bool,
+) -> ForcedSummaryToolDecision {
+    if !summary_requested || !all_read_only_tools {
+        ForcedSummaryToolDecision::NotApplicable
+    } else if !gap_closing_cycle_used {
+        ForcedSummaryToolDecision::AllowGapClosingCycle
+    } else {
+        ForcedSummaryToolDecision::ForceSummary
+    }
+}
+
+fn child_conversation_display_text(output: &str) -> String {
+    let mut visible = output.trim_end();
+    if visible.ends_with("</delegated_handoff>") {
+        if let Some(start) = visible.rfind("<delegated_handoff>") {
+            visible = visible[..start].trim_end();
+        }
+    }
+    if visible.ends_with("</explore_report>") {
+        if let Some(start) = visible.rfind("<explore_report>") {
+            visible = visible[..start].trim_end();
+        }
+    }
+    if !visible.trim().is_empty() {
+        return visible.to_string();
+    }
+    parse_delegated_handoff(output)
+        .map(|handoff| handoff.summary.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn terminal_progress_status(result: &SubAgentResult) -> AgentProgressStatus {
+    match result.objective_status() {
+        TaskObjectiveStatus::Complete => AgentProgressStatus::Complete,
+        TaskObjectiveStatus::Degraded | TaskObjectiveStatus::Blocked => {
+            AgentProgressStatus::Degraded
+        }
+        TaskObjectiveStatus::Failed => AgentProgressStatus::Failed,
+    }
 }
 
 fn response_requires_tool_execution(
@@ -117,7 +170,8 @@ fn evidence_completion_decision(
     }
 }
 
-fn enforce_canonical_evidence(mut result: SubAgentResult) -> SubAgentResult {
+fn enforce_canonical_evidence(mut result: SubAgentResult, task: &SubAgentTask) -> SubAgentResult {
+    result.enforce_acceptance_contract(&task.prompt);
     if result.success && !result.evidence.has_canonical_evidence() {
         result.success = false;
         result.termination = SubAgentTermination::Failed;
@@ -164,8 +218,9 @@ fn tool_surface_for_turn(
     loop_guard_landing: bool,
     max_tokens_landing: bool,
     turn_budget_landing: bool,
+    handoff_repair: bool,
 ) -> &[AiTool] {
-    if loop_guard_landing || max_tokens_landing || turn_budget_landing {
+    if loop_guard_landing || max_tokens_landing || turn_budget_landing || handoff_repair {
         &[]
     } else {
         tools
@@ -293,8 +348,10 @@ fn delegated_prompt_cache_scope(
     hash_cache_scope_component(&mut hasher, "model", model.as_bytes());
     hash_cache_scope_component(
         &mut hasher,
-        "thinking",
-        if task.thinking_enabled { b"on" } else { b"off" },
+        "reasoning_effort",
+        serde_json::to_string(&task.reasoning_effort)
+            .unwrap_or_else(|_| "null".to_string())
+            .as_bytes(),
     );
     hash_cache_scope_component(&mut hasher, "system", system_prompt.as_bytes());
     hash_cache_scope_component(&mut hasher, "tools", &canonical_tools);
@@ -307,6 +364,7 @@ fn delegated_process_artifact(
     input: &serde_json::Value,
     result: &ToolResult,
     working_dir: &std::path::Path,
+    process_owner_id: Option<&str>,
 ) -> Option<DelegatedProcessArtifact> {
     if tool_name != "bash" || result.is_error {
         return None;
@@ -342,6 +400,7 @@ fn delegated_process_artifact(
 
     Some(DelegatedProcessArtifact {
         process_id: process_id.to_string(),
+        owner_id: process_owner_id.unwrap_or_default().to_string(),
         status,
         command,
         working_dir: working_dir.display().to_string(),
@@ -420,6 +479,49 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     config: &C,
     progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
+    let mut result =
+        execute_agent_loop_inner(client, task, model, cancellation, config, progress_tx).await;
+
+    release_delegated_task_processes(task, &mut result).await;
+    result
+}
+
+async fn release_delegated_task_processes(task: &SubAgentTask, result: &mut SubAgentResult) {
+    let process_owner_id = task.delegated_process_owner_id();
+    if let Some(registry) = task.process_registry.as_ref() {
+        let owner_id = process_owner_id;
+        let failures = registry.kill_all_for_user(&owner_id).await;
+        for process in &mut result.background_processes {
+            let artifact_owner = if process.owner_id.is_empty() {
+                owner_id.as_str()
+            } else {
+                process.owner_id.as_str()
+            };
+            process.status = registry
+                .get_for_user(artifact_owner, &process.process_id)
+                .await
+                .map(|info| info.display_status().to_string())
+                .unwrap_or_else(|| "missing".to_string());
+        }
+        for (process_id, error) in failures {
+            tracing::warn!(
+                task_id = %task.id,
+                %process_id,
+                %error,
+                "Failed to release delegated task background process"
+            );
+        }
+    }
+}
+
+async fn execute_agent_loop_inner<C: AgentConfig>(
+    client: &AiClient,
+    task: &SubAgentTask,
+    model: &str,
+    cancellation: CancellationToken,
+    config: &C,
+    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
+) -> SubAgentResult {
     let provenance = RunProvenance::Delegated;
     info!(
         surface = provenance.as_str(),
@@ -430,6 +532,10 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     );
     let start = Instant::now();
     let task_id = task.id.clone();
+    let progress_task_id = task
+        .delegation_task_id
+        .clone()
+        .unwrap_or_else(|| task_id.clone());
     let task_name = task.display_name();
     let plan_task_id = task.plan_task_id.clone();
     let transport_session_id = task
@@ -458,10 +564,13 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut unique_files_examined: HashSet<String> = HashSet::new();
     let mut stale_readonly_cycles = 0usize;
     let mut forced_summary_requested = false;
+    let mut forced_summary_gap_closing_cycle_used = false;
     let mut last_cycle_positive_evidence = false;
     let mut tool_truth_corrections = 0usize;
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
+    let mut structured_handoff_repair_requested = false;
+    let mut structured_handoff_repair_pending = false;
     let mut background_processes = Vec::new();
     let mut evidence = DelegatedEvidenceSummary::default();
     let mut canonical_evidence_correction_requested = false;
@@ -471,7 +580,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut loop_guard = LoopGuard::new();
     let mut loop_guard_landing: Option<String> = None;
     let mut overflow_compact_retry_attempted = false;
+    let mut timeout_retry_attempted = false;
     let mut last_dynamic_context: Option<String> = None;
+    let mut browser_acceptance_correction_requested = false;
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -483,7 +594,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             let is_complete = status == AgentProgressStatus::Complete;
             let mut progress = AgentProgress {
                 delegated_run_id: task.delegated_run_id.clone(),
-                task_id: task_id.clone(),
+                task_id: progress_task_id.clone(),
                 name: task_name.clone(),
                 identity: task.identity.clone(),
                 status,
@@ -497,6 +608,29 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     None
                 },
                 ..Default::default()
+            };
+            config.update_progress(&mut progress);
+            let _ = tx.send(progress);
+        }
+    };
+
+    let send_conversation = |event: AgentConversationEvent,
+                             action: &str,
+                             tool_count: usize,
+                             tokens: usize,
+                             config: &C| {
+        if let Some(ref tx) = progress_tx {
+            let mut progress = AgentProgress {
+                delegated_run_id: task.delegated_run_id.clone(),
+                task_id: progress_task_id.clone(),
+                name: task_name.clone(),
+                identity: task.identity.clone(),
+                status: AgentProgressStatus::Running,
+                tool_count,
+                tokens,
+                current_action: Some(action.to_string()),
+                conversation_event: Some(event),
+                ..AgentProgress::default()
             };
             config.update_progress(&mut progress);
             let _ = tx.send(progress);
@@ -596,7 +730,10 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             append_parent_messages(&mut messages, parent_messages);
         }
 
-        if loop_guard_landing.is_none() && !max_tokens_landing_pending {
+        if loop_guard_landing.is_none()
+            && !max_tokens_landing_pending
+            && !structured_handoff_repair_pending
+        {
             if let Some(max_turns) = max_turns_budget {
                 if turns >= max_turns {
                     if completed_report_at_turn_budget(
@@ -606,24 +743,27 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         &files_examined,
                     ) {
                         preserve_terminal_mailbox!();
-                        let result = enforce_canonical_evidence(normalize_explorer_result(
-                            SubAgentResult {
-                                task_id: task_id.clone(),
-                                agent_name: task_name.clone(),
-                                delegated_run_id: task.delegated_run_id.clone(),
-                                success: true,
-                                output: final_output,
-                                files_examined: files_examined.clone(),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                turns_used: turns,
-                                error: None,
-                                termination: SubAgentTermination::Completed,
-                                policy_violations: policy_violations.clone(),
-                                evidence: evidence.clone(),
-                                background_processes: background_processes.clone(),
-                            },
+                        let result = enforce_canonical_evidence(
+                            normalize_explorer_result(
+                                SubAgentResult {
+                                    task_id: task_id.clone(),
+                                    agent_name: task_name.clone(),
+                                    delegated_run_id: task.delegated_run_id.clone(),
+                                    success: true,
+                                    output: final_output,
+                                    files_examined: files_examined.clone(),
+                                    duration_ms: start.elapsed().as_millis() as u64,
+                                    turns_used: turns,
+                                    error: None,
+                                    termination: SubAgentTermination::Completed,
+                                    policy_violations: policy_violations.clone(),
+                                    evidence: evidence.clone(),
+                                    background_processes: background_processes.clone(),
+                                },
+                                task,
+                            ),
                             task,
-                        ));
+                        );
                         info!(
                             task_id = %result.task_id,
                             turns,
@@ -724,6 +864,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             loop_guard_landing.is_some(),
             max_tokens_landing_pending,
             turn_budget_landing_pending,
+            structured_handoff_repair_pending,
         );
         let prompt_cache_scope = delegated_prompt_cache_scope(
             task,
@@ -755,7 +896,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &messages,
             tools_for_turn,
             config.max_tokens(),
-            task.thinking_enabled,
+            task.reasoning_effort,
             &transport_session_id,
             prompt_cache_scope.as_deref(),
         );
@@ -777,6 +918,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     "delegated_agent_turn",
                     client.provider_id(),
                     model,
+                    task.reasoning_effort,
                     task.delegated_run_id.as_deref(),
                     &task_id,
                     turns,
@@ -922,6 +1064,25 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         background_processes: background_processes.clone(),
                     };
                 }
+                if claim_single_timeout_retry(&mut timeout_retry_attempted) {
+                    turns = turns.saturating_sub(1);
+                    warn!(
+                        task_id = %task_id,
+                        turn = turns,
+                        timeout_secs = config.api_call_timeout().as_secs(),
+                        files_examined = files_examined.len(),
+                        "Sub-agent API call timed out; retrying once"
+                    );
+                    send_progress(
+                        AgentProgressStatus::Running,
+                        "timed out; retrying",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    continue;
+                }
                 warn!(
                     task_id = %task_id,
                     turn = turns,
@@ -978,6 +1139,30 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
         if !text_parts.is_empty() {
             final_output = text_parts.join("\n");
+        }
+
+        let conversation_message_id = format!("{task_id}:turn:{turns}");
+        let conversation_content = child_conversation_display_text(&text_parts.join("\n"));
+        if !text_parts.is_empty() || !tool_calls.is_empty() {
+            send_conversation(
+                AgentConversationEvent::AssistantTurn {
+                    message_id: conversation_message_id.clone(),
+                    turn: turns,
+                    content: conversation_content,
+                    tool_calls: tool_calls
+                        .iter()
+                        .map(|call| AgentConversationToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.input.clone(),
+                        })
+                        .collect(),
+                },
+                &thinking_action,
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
         }
 
         // A semantic guard gets exactly one tool-free landing call. Never
@@ -1134,6 +1319,10 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     background_processes: background_processes.clone(),
                 };
             }
+        }
+
+        if structured_handoff_repair_pending {
+            structured_handoff_repair_pending = false;
         }
 
         if turn_budget_landing_pending {
@@ -1308,7 +1497,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     messages.push(ModelMessage {
                         role: Role::User,
                         content: vec![Content::Text {
-                            text: "Your previous response did not include the required <explore_report> JSON block. Using only the evidence you already gathered, reply now with exactly one valid <explore_report> block and no extra prose. Include all supporting paths in `paths_examined` and any concrete reads in `files_examined`. Do not call more tools unless a single critical read is required.".to_string(),
+                            text: "Your previous response did not include the required <explore_report> JSON block. Using only the evidence you already gathered, reply now with exactly one valid <explore_report> block followed by exactly one valid <delegated_handoff> block as the final content. Include all supporting paths in `paths_examined`, concrete reads in `files_examined`, and a truthful objective status. Do not call more tools unless a single critical read is required.".to_string(),
                         }],
                     });
                     send_progress(
@@ -1321,6 +1510,62 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     );
                     continue;
                 }
+            }
+
+            if parse_delegated_handoff(&final_output).is_none()
+                && !structured_handoff_repair_requested
+            {
+                structured_handoff_repair_requested = true;
+                structured_handoff_repair_pending = true;
+                let repair_instruction = if config.use_explorer_heuristics()
+                    && delegated_is_explore(task)
+                {
+                    "Your previous response omitted or malformed the required <delegated_handoff> JSON block. Using only canonical evidence already gathered, re-emit exactly one valid <explore_report> block followed by exactly one valid <delegated_handoff> block as the final content. No tools are available; do not claim checks that did not run."
+                } else {
+                    "Your previous response omitted or malformed the required <delegated_handoff> JSON block. Using only canonical evidence already gathered, reply with a concise human summary followed by exactly one valid <delegated_handoff> block as the final content. No tools are available; do not claim checks that did not run."
+                };
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: repair_instruction.to_string(),
+                    }],
+                });
+                send_progress(
+                    AgentProgressStatus::Running,
+                    "repairing delegated handoff",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                continue;
+            }
+
+            let missing_browser_proofs =
+                missing_required_browser_acceptance_proofs(&task.prompt, &evidence);
+            if !missing_browser_proofs.is_empty()
+                && ai_tools.iter().any(|tool| tool.name == "browser_check")
+                && !browser_acceptance_correction_requested
+            {
+                browser_acceptance_correction_requested = true;
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: format!(
+                            "Your handoff is missing required canonical browser evidence: {}. The governed browser_check tool is present and authorized in your current tool list. Use it now against the tracked loopback preview; start or repair that preview with bash first if needed. Do not report browser_check as unavailable. A build, curl, or HTTP 200 is not a substitute. If the check fails, fix an in-scope product issue and retry once before returning a truthful handoff.",
+                            missing_browser_proofs.join(", ")
+                        ),
+                    }],
+                });
+                send_progress(
+                    AgentProgressStatus::Running,
+                    "requiring governed browser acceptance",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                continue;
             }
 
             let raw_result = SubAgentResult {
@@ -1343,7 +1588,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             } else {
                 raw_result
             };
-            let result = enforce_canonical_evidence(result);
+            let result = enforce_canonical_evidence(result, task);
             seal_terminal_or_continue!(&text_parts);
             info!(
                 task_id = %result.task_id,
@@ -1353,11 +1598,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 "Agent completed"
             );
             send_progress(
-                if result.success {
-                    AgentProgressStatus::Complete
-                } else {
-                    AgentProgressStatus::Failed
-                },
+                terminal_progress_status(&result),
                 if result.success {
                     "complete"
                 } else {
@@ -1378,38 +1619,45 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 .iter()
                 .all(|call| matches!(call.name.as_str(), "read" | "glob" | "grep" | "list"));
 
+        let forced_summary_decision = forced_summary_tool_decision(
+            forced_summary_requested,
+            forced_summary_gap_closing_cycle_used,
+            all_read_only_tools,
+        );
+        if forced_summary_decision == ForcedSummaryToolDecision::AllowGapClosingCycle {
+            forced_summary_gap_closing_cycle_used = true;
+        }
+
         if config.use_explorer_heuristics()
             && is_explore_delegation
-            && forced_summary_requested
-            && all_read_only_tools
+            && forced_summary_decision == ForcedSummaryToolDecision::ForceSummary
         {
             let synthesized =
                 synthesized_explorer_output(&task.name, &final_output, &files_examined);
-            let result = enforce_canonical_evidence(normalize_explorer_result(
-                SubAgentResult {
-                    task_id: task_id.clone(),
-                    agent_name: task_name.clone(),
-                    delegated_run_id: task.delegated_run_id.clone(),
-                    success: true,
-                    output: synthesized,
-                    files_examined: files_examined.clone(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    turns_used: turns,
-                    error: None,
-                    termination: SubAgentTermination::Completed,
-                    policy_violations: policy_violations.clone(),
-                    evidence: evidence.clone(),
-                    background_processes: background_processes.clone(),
-                },
+            let result = enforce_canonical_evidence(
+                normalize_explorer_result(
+                    SubAgentResult {
+                        task_id: task_id.clone(),
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: true,
+                        output: synthesized,
+                        files_examined: files_examined.clone(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: None,
+                        termination: SubAgentTermination::Completed,
+                        policy_violations: policy_violations.clone(),
+                        evidence: evidence.clone(),
+                        background_processes: background_processes.clone(),
+                    },
+                    task,
+                ),
                 task,
-            ));
+            );
             seal_terminal_or_continue!(&text_parts);
             send_progress(
-                if result.success {
-                    AgentProgressStatus::Complete
-                } else {
-                    AgentProgressStatus::Failed
-                },
+                terminal_progress_status(&result),
                 if result.success {
                     "forced summary"
                 } else {
@@ -1458,19 +1706,33 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 {
                     let violation = format!("{}: {}", tc.name, reason);
                     policy_violations.push(violation.clone());
+                    let display_output = build_history_tool_result(
+                        &tc.name,
+                        &crate::tools::registry::ToolResult::error_with_details(
+                            "delegated_policy_block",
+                            reason,
+                            None,
+                            Some(policy.audit_json()),
+                        )
+                        .output,
+                        true,
+                    );
+                    send_conversation(
+                        AgentConversationEvent::ToolResult {
+                            message_id: conversation_message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: display_output.to_string(),
+                            is_error: true,
+                        },
+                        &last_action,
+                        total_tool_calls,
+                        estimated_tokens,
+                        config,
+                    );
                     tool_results.push(Content::ToolResult {
                         tool_use_id: tc.id.clone(),
-                        output: build_history_tool_result(
-                            &tc.name,
-                            &crate::tools::registry::ToolResult::error_with_details(
-                                "delegated_policy_block",
-                                reason,
-                                None,
-                                Some(policy.audit_json()),
-                            )
-                            .output,
-                            true,
-                        ),
+                        output: display_output,
                         is_error: Some(true),
                     });
 
@@ -1541,9 +1803,13 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
             let (output, is_error) = match result {
                 Some(r) => {
-                    if let Some(process) =
-                        delegated_process_artifact(&tc.name, &tc.input, &r, &task.working_dir)
-                    {
+                    if let Some(process) = delegated_process_artifact(
+                        &tc.name,
+                        &tc.input,
+                        &r,
+                        &task.working_dir,
+                        ctx.effective_process_owner_id(),
+                    ) {
                         record_delegated_process(&mut background_processes, process);
                     }
                     (r.output, r.is_error)
@@ -1554,6 +1820,39 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             if !is_error {
                 if let Some(kind) = delegated_evidence_kind(&tc.name, &tc.input) {
                     evidence.record_success(kind);
+                }
+                let (effective_name, effective_input) = effective_tool_call(&tc.name, &tc.input);
+                if effective_name == "browser_check" {
+                    evidence.record_acceptance_proof("browser_runtime");
+                    let actions = effective_input
+                        .get("actions")
+                        .and_then(serde_json::Value::as_array);
+                    if actions.is_some_and(|actions| {
+                        actions.iter().any(|action| {
+                            action.get("action").and_then(serde_json::Value::as_str) == Some("key")
+                        })
+                    }) {
+                        evidence.record_acceptance_proof("browser_keyboard");
+                    }
+                    let has_mobile_viewport = effective_input
+                        .get("viewports")
+                        .and_then(serde_json::Value::as_array)
+                        .is_none_or(|viewports| {
+                            viewports.iter().any(|viewport| {
+                                viewport.get("mobile").and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                            })
+                        });
+                    if has_mobile_viewport
+                        && actions.is_some_and(|actions| {
+                            actions.iter().any(|action| {
+                                action.get("action").and_then(serde_json::Value::as_str)
+                                    == Some("click")
+                            })
+                        })
+                    {
+                        evidence.record_acceptance_proof("browser_touch");
+                    }
                 }
             }
 
@@ -1578,9 +1877,23 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 }
             }
 
+            let display_output = build_history_tool_result(&tc.name, &output, is_error);
+            send_conversation(
+                AgentConversationEvent::ToolResult {
+                    message_id: conversation_message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    output: display_output.to_string(),
+                    is_error,
+                },
+                &last_action,
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
             tool_results.push(Content::ToolResult {
                 tool_use_id: tc.id.clone(),
-                output: build_history_tool_result(&tc.name, &output, is_error),
+                output: display_output,
                 is_error: Some(is_error),
             });
         }
@@ -1616,6 +1929,28 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             role: Role::User,
             content: tool_results,
         });
+        if config.use_explorer_heuristics()
+            && is_explore_delegation
+            && forced_summary_decision == ForcedSummaryToolDecision::AllowGapClosingCycle
+        {
+            structured_handoff_repair_pending = true;
+            messages.push(ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: "The one bounded critical-gap tool cycle is complete. No more tools are available. Using the evidence now gathered, return the concise final report and the exact required structured handoff with every acceptance-check id. Do not describe another intended tool call."
+                        .to_string(),
+                }],
+            });
+            send_progress(
+                AgentProgressStatus::Running,
+                "closing critical gap and synthesizing",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+            continue;
+        }
         if let Some(instruction) = progress_telemetry
             .as_ref()
             .and_then(|telemetry| telemetry.replan_instruction())
@@ -1640,27 +1975,26 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 format!("{}\n\n{}", final_output.trim(), completion)
             };
             seal_terminal_or_continue!(&[] as &[String]);
-            let result = enforce_canonical_evidence(SubAgentResult {
-                task_id: task_id.clone(),
-                agent_name: task_name.clone(),
-                delegated_run_id: task.delegated_run_id.clone(),
-                success: true,
-                output,
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: None,
-                termination: SubAgentTermination::Completed,
-                policy_violations,
-                evidence: evidence.clone(),
-                background_processes: background_processes.clone(),
-            });
-            send_progress(
-                if result.success {
-                    AgentProgressStatus::Complete
-                } else {
-                    AgentProgressStatus::Failed
+            let result = enforce_canonical_evidence(
+                SubAgentResult {
+                    task_id: task_id.clone(),
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: true,
+                    output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: None,
+                    termination: SubAgentTermination::Completed,
+                    policy_violations,
+                    evidence: evidence.clone(),
+                    background_processes: background_processes.clone(),
                 },
+                task,
+            );
+            send_progress(
+                terminal_progress_status(&result),
                 if result.success {
                     "validated"
                 } else {
@@ -1734,31 +2068,30 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
                 let synthesized =
                     synthesized_explorer_output(&task.name, &final_output, &files_examined);
-                let result = enforce_canonical_evidence(normalize_explorer_result(
-                    SubAgentResult {
-                        task_id: task_id.clone(),
-                        agent_name: task_name.clone(),
-                        delegated_run_id: task.delegated_run_id.clone(),
-                        success: true,
-                        output: synthesized,
-                        files_examined: files_examined.clone(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        turns_used: turns,
-                        error: None,
-                        termination: SubAgentTermination::Completed,
-                        policy_violations: policy_violations.clone(),
-                        evidence: evidence.clone(),
-                        background_processes: background_processes.clone(),
-                    },
+                let result = enforce_canonical_evidence(
+                    normalize_explorer_result(
+                        SubAgentResult {
+                            task_id: task_id.clone(),
+                            agent_name: task_name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
+                            success: true,
+                            output: synthesized,
+                            files_examined: files_examined.clone(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            turns_used: turns,
+                            error: None,
+                            termination: SubAgentTermination::Completed,
+                            policy_violations: policy_violations.clone(),
+                            evidence: evidence.clone(),
+                            background_processes: background_processes.clone(),
+                        },
+                        task,
+                    ),
                     task,
-                ));
+                );
                 seal_terminal_or_continue!(&[] as &[String]);
                 send_progress(
-                    if result.success {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    },
+                    terminal_progress_status(&result),
                     if result.success {
                         "converged"
                     } else {
@@ -1793,11 +2126,69 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     }
 }
 
+fn claim_single_timeout_retry(retry_attempted: &mut bool) -> bool {
+    if *retry_attempted {
+        return false;
+    }
+    *retry_attempted = true;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::providers::ReasoningEffort;
     use crate::tools::registry::{DelegationPolicy, PermissionMode};
     use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn child_conversation_hides_internal_handoff_after_human_summary() {
+        let output = concat!(
+            "Reviewed both files; the implementation is consistent.\n\n",
+            "<delegated_handoff>{\"status\":\"complete\",\"summary\":\"done\",",
+            "\"acceptance_checks\":[],\"remaining_work\":[],\"blockers\":[]}",
+            "</delegated_handoff>"
+        );
+
+        assert_eq!(
+            child_conversation_display_text(output),
+            "Reviewed both files; the implementation is consistent."
+        );
+    }
+
+    #[test]
+    fn child_conversation_uses_handoff_summary_when_no_human_text_exists() {
+        let output = concat!(
+            "<delegated_handoff>{\"status\":\"complete\",",
+            "\"summary\":\"The requested audit is complete.\",",
+            "\"acceptance_checks\":[],\"remaining_work\":[],\"blockers\":[]}",
+            "</delegated_handoff>"
+        );
+
+        assert_eq!(
+            child_conversation_display_text(output),
+            "The requested audit is complete."
+        );
+    }
+
+    #[test]
+    fn child_conversation_hides_explore_report_and_handoff_envelopes() {
+        let output = concat!(
+            "Found the relevant ownership boundary.\n",
+            "<explore_report>{\"objective_status\":\"complete\",",
+            "\"summary\":\"found\",\"paths_examined\":[],\"files_examined\":[]}",
+            "</explore_report>",
+            "<delegated_handoff>{\"status\":\"complete\",\"summary\":\"done\",",
+            "\"acceptance_checks\":[],\"remaining_work\":[],\"blockers\":[]}",
+            "</delegated_handoff>"
+        );
+
+        assert_eq!(
+            child_conversation_display_text(output),
+            "Found the relevant ownership boundary."
+        );
+    }
 
     fn cache_scope_task(id: &str, prompt: &str, parent: &str) -> SubAgentTask {
         SubAgentTask::new(id, prompt)
@@ -1819,6 +2210,83 @@ mod tests {
             }),
             prompt: None,
         }]
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delegated_terminal_cleanup_stops_only_the_exact_task_process_owner() {
+        let registry = Arc::new(crate::process::ProcessRegistry::new());
+        let directory = tempfile::tempdir().expect("tempdir");
+        let task = SubAgentTask::new("ui-proof", "validate preview")
+            .with_working_dir(directory.path().to_path_buf())
+            .with_delegated_run_id("group-a")
+            .with_process_context(
+                Some(Arc::clone(&registry)),
+                Some("tenant-a".to_string()),
+                Some("session-a".to_string()),
+            );
+        let task_owner = task.delegated_process_owner_id();
+        let task_process = registry
+            .spawn_for_user(
+                &task_owner,
+                "sleep 30".to_string(),
+                directory.path().to_path_buf(),
+                None,
+                None,
+            )
+            .await
+            .expect("task process");
+        let parent_process = registry
+            .spawn_for_user(
+                "tenant-a",
+                "sleep 30".to_string(),
+                directory.path().to_path_buf(),
+                None,
+                Some("session-a".to_string()),
+            )
+            .await
+            .expect("parent process");
+        let mut result = SubAgentResult {
+            task_id: task.id.clone(),
+            agent_name: task.name.clone(),
+            delegated_run_id: task.delegated_run_id.clone(),
+            success: true,
+            output: "validated".to_string(),
+            files_examined: Vec::new(),
+            duration_ms: 1,
+            turns_used: 1,
+            error: None,
+            termination: SubAgentTermination::Completed,
+            policy_violations: Vec::new(),
+            evidence: DelegatedEvidenceSummary::default(),
+            background_processes: vec![DelegatedProcessArtifact {
+                process_id: task_process.clone(),
+                owner_id: task_owner.clone(),
+                status: "running".to_string(),
+                command: "sleep 30".to_string(),
+                working_dir: directory.path().display().to_string(),
+                endpoint_hints: Vec::new(),
+                reused_existing: false,
+            }],
+        };
+
+        release_delegated_task_processes(&task, &mut result).await;
+
+        assert_eq!(result.background_processes[0].status, "killed");
+        assert!(!registry
+            .get_for_user(&task_owner, &task_process)
+            .await
+            .expect("task process entry")
+            .is_active());
+        assert!(registry
+            .get_for_user("tenant-a", &parent_process)
+            .await
+            .expect("parent process entry")
+            .is_active());
+        registry
+            .kill_for_user("tenant-a", &parent_process)
+            .await
+            .expect("parent cleanup");
     }
 
     #[test]
@@ -1850,13 +2318,45 @@ mod tests {
     }
 
     #[test]
+    fn forced_explorer_summary_allows_one_critical_gap_read_cycle() {
+        assert_eq!(
+            forced_summary_tool_decision(true, false, true),
+            ForcedSummaryToolDecision::AllowGapClosingCycle
+        );
+        assert_eq!(
+            forced_summary_tool_decision(true, true, true),
+            ForcedSummaryToolDecision::ForceSummary
+        );
+        assert_eq!(
+            forced_summary_tool_decision(false, false, true),
+            ForcedSummaryToolDecision::NotApplicable
+        );
+        assert_eq!(
+            forced_summary_tool_decision(true, false, false),
+            ForcedSummaryToolDecision::NotApplicable
+        );
+    }
+
+    #[test]
+    fn delegated_provider_timeout_gets_exactly_one_retry() {
+        let mut attempted = false;
+        assert!(claim_single_timeout_retry(&mut attempted));
+        assert!(attempted);
+        assert!(!claim_single_timeout_retry(&mut attempted));
+    }
+
+    #[test]
     fn every_bounded_landing_removes_the_tool_surface() {
         let tools = cache_scope_tools();
 
-        assert_eq!(tool_surface_for_turn(&tools, false, false, false).len(), 1);
-        assert!(tool_surface_for_turn(&tools, true, false, false).is_empty());
-        assert!(tool_surface_for_turn(&tools, false, true, false).is_empty());
-        assert!(tool_surface_for_turn(&tools, false, false, true).is_empty());
+        assert_eq!(
+            tool_surface_for_turn(&tools, false, false, false, false).len(),
+            1
+        );
+        assert!(tool_surface_for_turn(&tools, true, false, false, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, true, false, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, false, true, false).is_empty());
+        assert!(tool_surface_for_turn(&tools, false, false, false, true).is_empty());
     }
 
     #[test]
@@ -2058,7 +2558,11 @@ mod tests {
     #[test]
     fn delegated_cache_scope_is_shared_by_compatible_siblings() {
         let first = cache_scope_task("builder-a", "implement metrics", "parent-a");
-        let second = cache_scope_task("builder-b", "implement rendering", "parent-a");
+        let second = cache_scope_task(
+            "builder-b",
+            "implement rendering\n\n[DIRECT DEPENDENCY EVIDENCE]\nvolatile handoff tail",
+            "parent-a",
+        );
         let tools = cache_scope_tools();
 
         let first_scope = delegated_prompt_cache_scope(
@@ -2078,6 +2582,32 @@ mod tests {
 
         assert_eq!(first_scope, second_scope);
         assert_eq!(first_scope.unwrap().len(), 64);
+    }
+
+    #[test]
+    fn delegated_cache_scope_separates_reasoning_effort() {
+        let medium = cache_scope_task("builder-a", "implement metrics", "parent-a")
+            .with_reasoning_effort(Some(ReasoningEffort::Medium));
+        let xhigh = cache_scope_task("builder-b", "implement metrics", "parent-a")
+            .with_reasoning_effort(Some(ReasoningEffort::XHigh));
+        let tools = cache_scope_tools();
+
+        assert_ne!(
+            delegated_prompt_cache_scope(
+                &medium,
+                "openai",
+                "gpt-5.6-sol",
+                "stable builder prompt",
+                &tools,
+            ),
+            delegated_prompt_cache_scope(
+                &xhigh,
+                "openai",
+                "gpt-5.6-sol",
+                "stable builder prompt",
+                &tools,
+            )
+        );
     }
 
     #[test]

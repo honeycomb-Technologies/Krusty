@@ -15,7 +15,7 @@ use crate::app::{
     hive_goal_status, hive_session_toggle_action, HiveDispatchEditorState, HiveWorkInputs,
     MitsuroApp, SurfaceDataState,
 };
-use crate::components::codex_button;
+use crate::components::ui_button;
 use crate::demo::{DemoGoal, DemoGoalStatus, DemoPlanItem};
 use crate::theme;
 
@@ -53,10 +53,14 @@ pub fn work_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoEl
             goals.len(),
             active,
             state,
+            snapshot.as_ref(),
             mutations_available,
-            app.status_line().as_ref(),
             cx,
         ))
+        .when_some(
+            live_hive.then_some(snapshot.as_ref()).flatten(),
+            |this, snapshot| this.child(work_status_strip(snapshot, cx)),
+        )
         .child(
             div()
                 .flex()
@@ -102,13 +106,17 @@ fn work_title_bar(
     count: usize,
     active: usize,
     state: SurfaceDataState,
+    snapshot: Option<&ProductHiveSnapshot>,
     mutations_available: bool,
-    status: &str,
     cx: &mut Context<MitsuroApp>,
 ) -> impl IntoElement {
     let colors = theme::colors();
-    let subtitle = match state {
-        SurfaceDataState::Live => format!("{count} Hive run(s) · {active} running · live"),
+    let subtitle = match (state, snapshot) {
+        (SurfaceDataState::Live, Some(snapshot)) => format!(
+            "{} runs · {} running · {}",
+            snapshot.status.total_count, snapshot.status.running_count, snapshot.status.home_status
+        ),
+        (SurfaceDataState::Live, None) => format!("{count} runs · {active} running"),
         _ => format!("{count} goal(s) · {active} active · {}", state.label()),
     };
     div()
@@ -117,8 +125,8 @@ fn work_title_bar(
         .flex_row()
         .items_center()
         .justify_between()
-        .px(px(16.0))
-        .py(px(12.0))
+        .px(px(20.0))
+        .h(px(64.0))
         .border_b_1()
         .border_color(colors.border)
         .bg(colors.bg_sidebar)
@@ -131,18 +139,13 @@ fn work_title_bar(
                 .items_center()
                 .gap(px(10.0))
                 .child(
-                    Icon::new(IconName::LayoutDashboard)
-                        .with_size(px(16.0))
-                        .text_color(colors.text),
-                )
-                .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
                         .child(
                             div()
-                                .text_sm()
+                                .text_base()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
                                 .child("Work"),
@@ -161,28 +164,38 @@ fn work_title_bar(
                 .flex_row()
                 .flex_shrink_0()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(8.0))
+                .when(state == SurfaceDataState::Live, |this| {
+                    this.child(
+                        ui_button::icon_button(
+                            "work-header-refresh",
+                            Icon::new(IconName::Redo2).with_size(px(theme::shape().icon_sm)),
+                            "Refresh Hive runs",
+                            ui_button::ButtonTone::Ghost,
+                            ui_button::ButtonSize::Medium,
+                            ui_button::ButtonState::default(),
+                            cx,
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| app.refresh_hive_now(cx))),
+                    )
+                })
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.text_tertiary)
-                        .max_w(px(180.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(status.to_string()),
-                )
-                .child(
-                    codex_button::primary_with_icon(
+                    ui_button::button(
                         "work-header-create",
                         if state == SurfaceDataState::Fixture {
                             "New fixture goal"
                         } else {
                             "New Hive run"
                         },
-                        Icon::new(IconName::Plus).with_size(px(12.0)),
+                        ui_button::ButtonTone::Primary,
+                        ui_button::ButtonSize::Medium,
+                        ui_button::ButtonState {
+                            disabled: state != SurfaceDataState::Fixture && !mutations_available,
+                            ..ui_button::ButtonState::default()
+                        },
                         cx,
                     )
-                    .rounded(px(8.0))
+                    .icon(Icon::new(IconName::Plus).with_size(px(12.0)))
                     .when(state == SurfaceDataState::Fixture, |this| {
                         this.on_click(
                             cx.listener(|app, _, window, cx| app.start_new_goal(window, cx)),
@@ -192,12 +205,99 @@ fn work_title_bar(
                         this.on_click(cx.listener(|app, _, window, cx| {
                             app.open_hive_dispatch_editor(window, cx);
                         }))
-                    })
-                    .when(
-                        state != SurfaceDataState::Fixture && !mutations_available,
-                        |this| this.opacity(0.45),
-                    ),
+                    }),
                 ),
+        )
+}
+
+fn work_status_strip(
+    snapshot: &ProductHiveSnapshot,
+    _cx: &mut Context<MitsuroApp>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let status = &snapshot.status;
+    let waiting = status.sleeping_count + status.scheduled_count + status.paused_count;
+    let next_wake = status
+        .next_wake_at
+        .as_deref()
+        .unwrap_or("No wake scheduled");
+
+    div()
+        .id("work-live-status")
+        .min_h(px(48.0))
+        .px(px(20.0))
+        .py(px(8.0))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(24.0))
+        .border_b_1()
+        .border_color(colors.border_subtle)
+        .child(work_status_metric(
+            "Running",
+            status.running_count,
+            colors.status_ready,
+        ))
+        .child(work_status_metric(
+            "Waiting",
+            waiting,
+            colors.text_secondary,
+        ))
+        .child(work_status_metric(
+            "Failed",
+            status.failed_count,
+            colors.status_error,
+        ))
+        .child(work_status_metric(
+            "Approvals",
+            status.pending_approvals_count,
+            colors.accent_orange,
+        ))
+        .child(div().flex_1())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child("Next wake"),
+                )
+                .child(
+                    div()
+                        .max_w(px(260.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(colors.text_secondary)
+                        .child(next_wake.to_owned()),
+                ),
+        )
+}
+
+fn work_status_metric(label: &str, value: usize, color: gpui::Hsla) -> impl IntoElement {
+    let colors = theme::colors();
+    div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(value.to_string()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_tertiary)
+                .child(label.to_owned()),
         )
 }
 
@@ -264,30 +364,34 @@ fn work_empty_state(
                 )
                 .when(state == SurfaceDataState::Live, |this| {
                     this.child(
-                        codex_button::primary_with_icon(
+                        ui_button::button(
                             "work-empty-create",
                             "New Hive run",
-                            Icon::new(IconName::Plus).with_size(px(14.0)),
+                            ui_button::ButtonTone::Primary,
+                            ui_button::ButtonSize::Large,
+                            ui_button::ButtonState {
+                                disabled: !mutations_available,
+                                ..ui_button::ButtonState::default()
+                            },
                             cx,
                         )
-                        .rounded(px(10.0))
-                        .when(mutations_available, |button| {
-                            button.on_click(cx.listener(|app, _, window, cx| {
-                                app.open_hive_dispatch_editor(window, cx);
-                            }))
-                        })
-                        .when(!mutations_available, |button| button.opacity(0.45)),
+                        .icon(Icon::new(IconName::Plus).with_size(px(theme::shape().icon_sm)))
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.open_hive_dispatch_editor(window, cx);
+                        })),
                     )
                 })
                 .when(state == SurfaceDataState::Fixture, |this| {
                     this.child(
-                        codex_button::primary_with_icon(
+                        ui_button::button(
                             "work-empty-fixture-create",
                             "Create fixture goal",
-                            Icon::new(IconName::Plus).with_size(px(14.0)),
+                            ui_button::ButtonTone::Primary,
+                            ui_button::ButtonSize::Large,
+                            ui_button::ButtonState::default(),
                             cx,
                         )
-                        .rounded(px(10.0))
+                        .icon(Icon::new(IconName::Plus).with_size(px(theme::shape().icon_sm)))
                         .on_click(cx.listener(|app, _, window, cx| app.start_new_goal(window, cx))),
                     )
                 }),
@@ -306,7 +410,7 @@ fn goal_list(
         .id("work-goal-list")
         .flex()
         .flex_col()
-        .w(px(300.0))
+        .w(px(320.0))
         .h_full()
         .bg(colors.bg_sidebar)
         .border_r_1()
@@ -317,10 +421,10 @@ fn goal_list(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .px(px(12.0))
-                .py(px(10.0))
+                .h(px(42.0))
+                .px(px(16.0))
                 .border_b_1()
-                .border_color(colors.border)
+                .border_color(colors.border_subtle)
                 .child(
                     div()
                         .text_xs()
@@ -332,33 +436,23 @@ fn goal_list(
                             "Goals"
                         }),
                 )
-                .child(
+                .child(if state == SurfaceDataState::Fixture {
                     div()
-                        .id("work-refresh")
+                        .id("work-create-fixture")
                         .text_xs()
                         .text_color(colors.text_tertiary)
-                        .when(state == SurfaceDataState::Live, |this| {
-                            this.cursor_pointer()
-                                .hover(|style| style.text_color(colors.text))
-                                .on_click(cx.listener(|app, _, _, cx| app.refresh_hive_now(cx)))
-                        })
-                        .when(state == SurfaceDataState::Fixture, |this| {
-                            this.cursor_pointer()
-                                .hover(|style| style.text_color(colors.text))
-                                .on_click(
-                                    cx.listener(|app, _, window, cx| {
-                                        app.start_new_goal(window, cx)
-                                    }),
-                                )
-                        })
-                        .child(if state == SurfaceDataState::Live {
-                            "Refresh"
-                        } else if state == SurfaceDataState::Fixture {
-                            "Create"
-                        } else {
-                            "Unavailable"
-                        }),
-                ),
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(colors.text))
+                        .on_click(cx.listener(|app, _, window, cx| app.start_new_goal(window, cx)))
+                        .child("Create")
+                        .into_any_element()
+                } else {
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_tertiary)
+                        .child(format!("{} runs", goals.len()))
+                        .into_any_element()
+                }),
         )
         .child(
             div()
@@ -368,8 +462,7 @@ fn goal_list(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .py(px(6.0))
-                .gap(px(2.0))
+                .py(px(4.0))
                 .children(goals.iter().enumerate().map(|(index, goal)| {
                     let id = goal.id.clone();
                     let selected = selected == Some(goal.id.as_str());
@@ -399,23 +492,33 @@ fn goal_list(
                             )
                         },
                     );
+                    let metadata = live_run.map_or_else(
+                        || format!("{status_label} · {done}/{total} plan"),
+                        |run| {
+                            let mut parts = vec![
+                                status_label.clone(),
+                                format!("{} priority", priority_label(run.priority)),
+                            ];
+                            if total > 0 {
+                                parts.push(format!("{done}/{total} tasks"));
+                            }
+                            if let Some(crew) = run.crew_slug.as_deref() {
+                                parts.push(format!("crew {crew}"));
+                            }
+                            parts.join(" · ")
+                        },
+                    );
                     div()
                         .id(("work-goal-row", index as u64))
                         .mx(px(8.0))
-                        .px(px(12.0))
-                        .py(px(12.0))
-                        .rounded(px(10.0))
+                        .px(px(10.0))
+                        .py(px(10.0))
+                        .rounded(px(8.0))
                         .cursor_pointer()
                         .bg(if selected {
                             colors.bg_selected
                         } else {
-                            colors.bg_sidebar
-                        })
-                        .border_1()
-                        .border_color(if selected {
-                            colors.border_heavy
-                        } else {
-                            colors.border
+                            theme::transparent()
                         })
                         .hover(|style| style.bg(colors.bg_hover))
                         .on_click(cx.listener(move |app, _, _, cx| {
@@ -425,7 +528,7 @@ fn goal_list(
                             div()
                                 .flex()
                                 .flex_row()
-                                .items_start()
+                                .items_center()
                                 .gap(px(8.0))
                                 .child(status_dot(goal.status))
                                 .child(
@@ -435,26 +538,26 @@ fn goal_list(
                                         .text_sm()
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(colors.text)
+                                        .line_clamp(2)
+                                        .overflow_hidden()
                                         .child(objective),
                                 ),
                         )
                         .child(
                             div()
-                                .mt(px(8.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(status_chip(&status_label, goal.status))
-                                .child(div().text_xs().text_color(colors.text_tertiary).child(
-                                    if state == SurfaceDataState::Live {
-                                        format!("{done}/{total} tasks")
-                                    } else {
-                                        format!("{done}/{total} plan")
-                                    },
-                                )),
+                                .mt(px(5.0))
+                                .ml(px(16.0))
+                                .text_xs()
+                                .text_color(if goal.status == DemoGoalStatus::Blocked {
+                                    colors.status_error
+                                } else {
+                                    colors.text_tertiary
+                                })
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(metadata),
                         )
-                        .child(progress_bar(done, total))
+                        .when(total > 0, |this| this.child(progress_bar(done, total)))
                 })),
         )
 }
@@ -560,10 +663,13 @@ fn live_goal_detail(
         .flex_col()
         .flex_1()
         .min_h_0()
+        .w_full()
+        .max_w(px(1240.0))
+        .mx_auto()
         .overflow_y_scroll()
-        .px(px(28.0))
-        .py(px(20.0))
-        .gap(px(16.0))
+        .px(px(32.0))
+        .py(px(24.0))
+        .gap(px(20.0))
         .child(
             div()
                 .flex()
@@ -592,7 +698,7 @@ fn live_goal_detail(
                         )
                         .child(
                             div()
-                                .text_lg()
+                                .text_size(px(22.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
                                 .child(detail.title.clone()),
@@ -684,7 +790,8 @@ fn live_goal_detail(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .border_y_1()
+                .border_color(colors.border_subtle)
                 .children(
                     detail
                         .tasks
@@ -711,10 +818,10 @@ fn live_goal_detail(
                         .flex_1()
                         .h(px(72.0))
                         .px(px(10.0))
-                        .rounded(px(8.0))
-                        .bg(colors.bg_sidebar)
+                        .rounded(px(12.0))
+                        .bg(colors.bg_elevated)
                         .border_1()
-                        .border_color(colors.border)
+                        .border_color(colors.border_subtle)
                         .child(Input::new(&inputs.message).appearance(false).h(px(68.0))),
                 )
                 .child(
@@ -945,12 +1052,10 @@ fn live_task_row(index: u64, task: ProductHiveTask) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(8.0))
-        .bg(colors.bg_sidebar)
-        .border_1()
-        .border_color(colors.border)
+        .px(px(4.0))
+        .py(px(12.0))
+        .border_b_1()
+        .border_color(colors.border_subtle)
         .child(
             div()
                 .flex()
@@ -1356,16 +1461,19 @@ fn fixture_goal_detail(
                 ),
         )
         .child(
-            codex_button::primary_with_icon(
+            ui_button::button(
                 "work-clear-goal",
                 "Clear fixture goal",
-                Icon::new(IconName::Delete).with_size(px(12.0)),
+                ui_button::ButtonTone::Destructive,
+                ui_button::ButtonSize::Medium,
+                ui_button::ButtonState {
+                    disabled: state != SurfaceDataState::Fixture,
+                    ..ui_button::ButtonState::default()
+                },
                 cx,
             )
-            .rounded(px(8.0))
-            .when(state == SurfaceDataState::Fixture, |button| {
-                button.on_click(cx.listener(|app, _, _, cx| app.clear_selected_goal(cx)))
-            }),
+            .icon(Icon::new(IconName::Delete).with_size(px(theme::shape().icon_sm)))
+            .on_click(cx.listener(|app, _, _, cx| app.clear_selected_goal(cx))),
         )
 }
 
@@ -1461,7 +1569,6 @@ fn section_header(title: &str, detail: &str) -> impl IntoElement {
 fn status_dot(status: DemoGoalStatus) -> impl IntoElement {
     let colors = theme::colors();
     div()
-        .mt(px(4.0))
         .w(px(8.0))
         .h(px(8.0))
         .rounded_full()
@@ -1482,7 +1589,7 @@ fn status_chip(label: &str, status: DemoGoalStatus) -> impl IntoElement {
         .child(label.replace('_', " "))
 }
 
-fn status_color(status: DemoGoalStatus, colors: theme::CodexColors) -> gpui::Hsla {
+fn status_color(status: DemoGoalStatus, colors: theme::MitsuroColors) -> gpui::Hsla {
     match status {
         DemoGoalStatus::Active => colors.status_ready,
         DemoGoalStatus::Paused => colors.status_connecting,

@@ -321,9 +321,9 @@ export function createSessionStore(
   function attachLiveStreamLifecycle(callbacks: StreamCallbacks): StreamCallbacks {
     return {
       ...callbacks,
-      onFinish: (sessionId) => {
+      onFinish: (sessionId, stopReason) => {
         localStreamLive = false;
-        callbacks.onFinish?.(sessionId);
+        callbacks.onFinish?.(sessionId, stopReason);
       },
       onError: (error) => {
         localStreamLive = false;

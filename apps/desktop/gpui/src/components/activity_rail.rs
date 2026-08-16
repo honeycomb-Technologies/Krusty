@@ -12,7 +12,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::app::{MitsuroApp, ProductMode};
-use crate::theme::{self, CodexColors};
+use crate::theme::{self, MitsuroColors};
 
 /// Rail width — thin product column; blends into underlay on calm stage.
 const RAIL_W: f32 = 48.0;
@@ -164,7 +164,7 @@ fn rail_button(
     tooltip: &'static str,
     selected: bool,
     calm: bool,
-    colors: &CodexColors,
+    colors: &MitsuroColors,
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {

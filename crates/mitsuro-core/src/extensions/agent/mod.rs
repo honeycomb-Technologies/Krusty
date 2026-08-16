@@ -1210,6 +1210,7 @@ fn loop_event_name(event: &LoopEvent) -> &'static str {
         LoopEvent::ThinkingDelta { .. } => "thinking_delta",
         LoopEvent::ThinkingComplete { .. } => "thinking_complete",
         LoopEvent::ToolCallStart { .. } => "tool_call_start",
+        LoopEvent::ToolCallPreparing { .. } => "tool_call_preparing",
         LoopEvent::ToolCallComplete { .. } => "tool_call_complete",
         LoopEvent::ToolExecuting { .. } => "tool_executing",
         LoopEvent::ToolOutputDelta { .. } => "tool_output_delta",

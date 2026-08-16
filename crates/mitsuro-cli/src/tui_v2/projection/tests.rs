@@ -203,7 +203,7 @@ fn tool_events_do_not_split_a_streaming_word_across_agent_parts() {
     // Reassembly must produce the full stream without a permanent dangling token part.
     assert_eq!(agent_text.join(""), "Checking Hive/Mako next.");
     assert!(
-        !agent_text.iter().any(|text| *text == "Checking Hive/M"),
+        !agent_text.contains(&"Checking Hive/M"),
         "incomplete stream token should not remain as its own final AgentText part: {agent_text:?}"
     );
 }
@@ -639,7 +639,8 @@ fn delegation_group(
             failure_policy: DelegationFailurePolicy::Continue,
             governance: DelegationGovernance {
                 permission_mode: PermissionMode::Supervised,
-                delegated_turn_budget: 12,
+                reasoning_effort: None,
+                delegated_turn_budget: Some(12),
                 max_parallelism: 1,
                 execution_tool_allowlist: None,
                 delegation_policy: DelegationPolicy::for_subagent_build(

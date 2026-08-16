@@ -7,9 +7,9 @@ import {
   View,
 } from 'react-native';
 import Animated from 'react-native-reanimated';
-import { BlurView } from '../../platform/blur';
 import * as Haptics from '../../platform/haptics';
 import type { ModelInfo } from '@mitsuro/api';
+import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
 
 const PILL = 56;
 const RADIUS = 18;
@@ -32,14 +32,11 @@ export interface ChatBarModelPopoverProps {
   overlayBottom: number;
   modelPopoverStyle: ComponentProps<typeof Animated.View>['style'];
   borderColor: string;
-  composerBlur: number;
-  pillTint: 'systemMaterialDark' | 'systemMaterialLight';
   foreground: string;
   mutedForeground: string;
   thinking: string;
   backgroundElevated: string;
   backgroundPressed: string;
-  surfaceOverlayElevated: string;
   filteredModels: ModelInfo[];
   model: string | null;
   onSelectModel: (modelId: string) => void;
@@ -54,14 +51,11 @@ function ChatBarModelPopoverComponent({
   overlayBottom,
   modelPopoverStyle,
   borderColor,
-  composerBlur,
-  pillTint,
   foreground,
   mutedForeground,
   thinking,
   backgroundElevated,
   backgroundPressed,
-  surfaceOverlayElevated,
   filteredModels,
   model,
   onSelectModel,
@@ -101,19 +95,9 @@ function ChatBarModelPopoverComponent({
           { borderColor },
         ]}
       >
-        <BlurView
-          intensity={composerBlur}
-          tint={pillTint}
-          style={StyleSheet.absoluteFill}
-        />
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            {
-              backgroundColor: surfaceOverlayElevated,
-              borderRadius: RADIUS,
-            },
-          ]}
+        <AdaptiveMaterial
+          borderRadius={RADIUS}
+          tone="elevated"
         />
         <FlatList
           data={filteredModels}
@@ -175,11 +159,7 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.28,
-    shadowRadius: 20,
-    elevation: 12,
+    boxShadow: '0 10px 20px rgba(0,0,0,0.28)',
   },
   modelList: {
     flex: 1,

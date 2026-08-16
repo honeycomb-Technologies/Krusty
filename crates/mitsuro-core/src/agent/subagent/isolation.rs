@@ -9,7 +9,7 @@ use fs2::FileExt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
@@ -20,8 +20,23 @@ use super::{SubAgentResult, SubAgentTermination};
 pub(crate) struct IsolatedBuildWorkspace {
     pub task_id: String,
     pub root: PathBuf,
+    pub project_dir: PathBuf,
     pub working_dir: PathBuf,
     pub baseline_commit: String,
+}
+
+impl IsolatedBuildWorkspace {
+    pub(crate) fn command_environment(&self) -> std::collections::BTreeMap<String, String> {
+        [
+            ("CARGO_HOME", self.root.join(".cargo-home")),
+            ("TMPDIR", self.root.join(".mitsuro/tmp")),
+            ("XDG_CACHE_HOME", self.root.join(".mitsuro/cache")),
+            ("npm_config_cache", self.root.join(".mitsuro/npm")),
+        ]
+        .into_iter()
+        .map(|(key, path)| (key.to_string(), path.display().to_string()))
+        .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -41,6 +56,22 @@ enum IsolationBackend {
 
 const SNAPSHOT_BASELINE_PREFIX: &str = "snapshot:";
 const SNAPSHOT_REPOSITORY_NAME: &str = ".snapshot.git";
+const GENERATED_INTEGRATION_EXCLUDES: &[&str] =
+    &["target", ".cargo-home", "node_modules", ".mitsuro"];
+// Parallel builders commonly run the same compiler against one captured
+// baseline. These outputs are useful for local validation but are not source
+// authority and will conflict even when the builders' declared source scopes
+// are disjoint. Unlike the cache/runtime paths above, a final verifier may
+// explicitly publish a distributable directory through generated_artifacts.
+const RESTAGEABLE_BUILD_OUTPUT_DIRS: &[&str] = &["dist"];
+const RESTAGEABLE_BUILD_OUTPUT_GLOBS: &[&str] = &["*.tsbuildinfo"];
+const DELEGATED_ENVIRONMENT_DIRS: &[&str] = &[
+    ".cargo-home",
+    ".mitsuro/tmp",
+    ".mitsuro/cache",
+    ".mitsuro/npm",
+];
+const WRITABLE_NODE_MODULES_ENTRIES: &[&str] = &[".cache", ".vite", ".vite-temp"];
 
 /// Cross-process ownership for the narrow interval between preparing a Hive
 /// batch's worktrees and persisting its immutable delegation group. The lock
@@ -189,6 +220,12 @@ impl BuildIsolationSet {
         group_id: &str,
         task_ids: &[String],
     ) -> Result<Option<Self>> {
+        let project_dir = project_dir
+            .canonicalize()
+            .context("canonicalize delegated project workspace")?;
+        let working_dir = working_dir
+            .canonicalize()
+            .context("canonicalize delegated working directory")?;
         let discovered_repo = command_output(Command::new("git").args([
             "-C",
             &project_dir.display().to_string(),
@@ -206,27 +243,24 @@ impl BuildIsolationSet {
                     "HEAD",
                 ]))
                 .is_ok();
-                (
-                    repo,
-                    if has_head {
-                        IsolationBackend::GitWorktree
-                    } else {
-                        IsolationBackend::SnapshotRepository
-                    },
-                )
+                if has_head && !path_is_ignored_by_repository(&repo, &project_dir)? {
+                    (repo, IsolationBackend::GitWorktree)
+                } else {
+                    (project_dir.clone(), IsolationBackend::SnapshotRepository)
+                }
             }
-            Err(error) if error.to_string().contains("not a git repository") => (
-                project_dir
-                    .canonicalize()
-                    .context("canonicalize non-Git project workspace")?,
-                IsolationBackend::SnapshotRepository,
-            ),
+            Err(error) if error.to_string().contains("not a git repository") => {
+                (project_dir.clone(), IsolationBackend::SnapshotRepository)
+            }
             Err(error) => return Err(error).context("resolve parallel build repository"),
         };
         ensure!(
             working_dir.starts_with(&repo),
             "working directory is outside repository root"
         );
+        let relative_project_dir = project_dir
+            .strip_prefix(&repo)
+            .context("resolve delegated project directory inside repository")?;
         let relative_working_dir = working_dir
             .strip_prefix(&repo)
             .context("resolve delegated working directory inside repository")?;
@@ -303,8 +337,15 @@ impl BuildIsolationSet {
                 } else {
                     baseline_commit
                 };
+                for relative in DELEGATED_ENVIRONMENT_DIRS {
+                    fs::create_dir_all(root.join(relative)).with_context(|| {
+                        format!("create delegated environment directory {relative}")
+                    })?;
+                }
+                link_authoritative_node_modules(&repo, &project_dir, &working_dir, &root)?;
                 Ok(IsolatedBuildWorkspace {
                     task_id: task_id.clone(),
+                    project_dir: root.join(relative_project_dir),
                     working_dir: root.join(relative_working_dir),
                     root: root.clone(),
                     baseline_commit,
@@ -368,6 +409,13 @@ impl BuildIsolationSet {
                     .canonicalize()
                     .context("canonicalize snapshot project workspace")?,
             };
+            let canonical_project = project_dir
+                .canonicalize()
+                .context("canonicalize restored project workspace")?;
+            let relative_project_dir = canonical_project
+                .strip_prefix(&repo)
+                .context("resolve restored project directory inside repository")?
+                .to_path_buf();
             let base_dir = isolation_root()?.join(&group_id);
             let marker = integration_marker_for(&repo, &group_id, backend)?;
             let already_integrated = integration_marker_is_valid(&marker, &group_id)?;
@@ -454,7 +502,8 @@ impl BuildIsolationSet {
                 .context("durable isolation baseline is not a repository commit")?;
                 restored.push(IsolatedBuildWorkspace {
                     task_id,
-                    working_dir: root.clone(),
+                    project_dir: root.join(&relative_project_dir),
+                    working_dir: root.join(&relative_project_dir),
                     root,
                     baseline_commit,
                 });
@@ -509,6 +558,17 @@ impl BuildIsolationSet {
 
     pub(crate) fn workspaces(&self) -> &[IsolatedBuildWorkspace] {
         &self.workspaces
+    }
+
+    pub(crate) fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub(crate) fn task_ids(&self) -> Vec<String> {
+        self.workspaces
+            .iter()
+            .map(|workspace| workspace.task_id.clone())
+            .collect()
     }
 
     /// Apply child patches to the authoritative workspace in task order.
@@ -592,10 +652,10 @@ impl BuildIsolationSet {
     ) -> Vec<SubAgentResult> {
         if let Err(error) = self.integrate_batch(results, owner_fence, build_context) {
             for workspace in &self.workspaces {
-                if let Some(result) = results
-                    .iter_mut()
-                    .find(|result| result.task_id == workspace.task_id && result.success)
-                {
+                if let Some(result) = results.iter_mut().find(|result| {
+                    result.task_id == workspace.task_id
+                        && result.is_eligible_for_isolated_integration()
+                }) {
                     result.success = false;
                     result.termination = SubAgentTermination::Failed;
                     result.error = Some(format!(
@@ -607,10 +667,9 @@ impl BuildIsolationSet {
             return results.to_vec();
         }
         for workspace in &self.workspaces {
-            let Some(result) = results
-                .iter_mut()
-                .find(|result| result.task_id == workspace.task_id && result.success)
-            else {
+            let Some(result) = results.iter_mut().find(|result| {
+                result.task_id == workspace.task_id && result.is_eligible_for_isolated_integration()
+            }) else {
                 continue;
             };
             rewrite_result_paths(result, &workspace.root, &self.repo_root);
@@ -679,18 +738,25 @@ impl BuildIsolationSet {
         let mut combined = Vec::new();
         let mut integrated_changes = Vec::new();
         for workspace in &self.workspaces {
-            let should_integrate = results
-                .iter()
-                .any(|result| result.task_id == workspace.task_id && result.success);
-            if !should_integrate {
+            let Some(result) = results.iter().find(|result| {
+                result.task_id == workspace.task_id && result.is_eligible_for_isolated_integration()
+            }) else {
                 continue;
-            }
-            command_output(Command::new("git").args([
+            };
+            let mut stage = Command::new("git");
+            stage.args(["-C", &workspace.root.display().to_string(), "add", "-A"]);
+            command_output(&mut stage)?;
+            let mut unstage_generated = Command::new("git");
+            unstage_generated.args([
                 "-C",
                 &workspace.root.display().to_string(),
-                "add",
-                "-A",
-            ]))?;
+                "reset",
+                "-q",
+                "--",
+            ]);
+            add_integration_excluded_pathspecs(&mut unstage_generated);
+            command_output(&mut unstage_generated)?;
+            stage_declared_generated_artifacts(workspace, result)?;
             let baseline_commit = raw_baseline_commit(&workspace.baseline_commit)?;
             let patch = command_output(Command::new("git").args([
                 "-C",
@@ -701,6 +767,12 @@ impl BuildIsolationSet {
                 baseline_commit,
             ]))?
             .stdout;
+            ensure!(
+                !patch.is_empty() || result.evidence.mutations == 0,
+                "isolated task {} reported {} mutation(s), but its integration patch was empty",
+                workspace.task_id,
+                result.evidence.mutations
+            );
             if build_context.is_some() {
                 let numstat = command_output(Command::new("git").args([
                     "-C",
@@ -734,44 +806,21 @@ impl BuildIsolationSet {
             owner_fence().context("detached build recovery lost its durable publication fence")?;
         }
         if !combined.is_empty() {
-            let mut check = Command::new("git");
-            check.args([
-                "-C",
-                &self.repo_root.display().to_string(),
-                "apply",
-                "--check",
-                "--whitespace=nowarn",
-                "-",
-            ]);
+            let mut check = self.integration_apply_command();
+            check.args(["apply", "--check", "--whitespace=nowarn", "-"]);
             if command_with_stdin(&mut check, &combined).is_ok() {
-                command_with_stdin(
-                    Command::new("git").args([
-                        "-C",
-                        &self.repo_root.display().to_string(),
-                        "apply",
-                        "--whitespace=nowarn",
-                        "-",
-                    ]),
-                    &combined,
-                )?;
+                let mut apply = self.integration_apply_command();
+                apply.args(["apply", "--whitespace=nowarn", "-"]);
+                command_with_stdin(&mut apply, &combined)?;
             } else {
                 // A crash may occur after the atomic apply but before the
                 // marker is fsynced. Reverse-check proves that exact combined
                 // patch is already present; anything else is ambiguous and
                 // fails closed with every worktree retained.
-                command_with_stdin(
-                    Command::new("git").args([
-                        "-C",
-                        &self.repo_root.display().to_string(),
-                        "apply",
-                        "--reverse",
-                        "--check",
-                        "--whitespace=nowarn",
-                        "-",
-                    ]),
-                    &combined,
-                )
-                .context("combined patch is neither safely applicable nor already applied")?;
+                let mut reverse_check = self.integration_apply_command();
+                reverse_check.args(["apply", "--reverse", "--check", "--whitespace=nowarn", "-"]);
+                command_with_stdin(&mut reverse_check, &combined)
+                    .context("combined patch is neither safely applicable nor already applied")?;
             }
         }
         persist_integration_marker(&marker, &self.group_id)?;
@@ -783,6 +832,95 @@ impl BuildIsolationSet {
         }
         Ok(())
     }
+
+    fn integration_apply_command(&self) -> Command {
+        let mut command = Command::new("git");
+        match self.backend {
+            IsolationBackend::GitWorktree => {
+                command.arg("-C").arg(&self.repo_root);
+            }
+            IsolationBackend::SnapshotRepository => {
+                command
+                    .arg("-C")
+                    .arg(&self.repo_root)
+                    .arg("--git-dir")
+                    .arg(self.base_dir.join(SNAPSHOT_REPOSITORY_NAME))
+                    .arg("--work-tree")
+                    .arg(&self.repo_root);
+            }
+        }
+        command
+    }
+}
+
+fn stage_declared_generated_artifacts(
+    workspace: &IsolatedBuildWorkspace,
+    result: &SubAgentResult,
+) -> Result<()> {
+    let Some(handoff) = result.delegated_handoff() else {
+        return Ok(());
+    };
+    ensure!(
+        handoff.generated_artifacts.len() <= 16,
+        "delegated handoff declares more than 16 generated artifacts"
+    );
+    for artifact in handoff.generated_artifacts {
+        let relative = Path::new(artifact.path.trim());
+        ensure!(
+            !artifact.path.trim().is_empty()
+                && !relative.is_absolute()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_))),
+            "declared generated artifact must be a normalized relative path: {}",
+            artifact.path
+        );
+        ensure!(
+            !relative.components().any(|component| {
+                let Component::Normal(name) = component else {
+                    return true;
+                };
+                name == ".git"
+                    || GENERATED_INTEGRATION_EXCLUDES
+                        .iter()
+                        .any(|excluded| name == std::ffi::OsStr::new(excluded))
+            }),
+            "declared generated artifact is a prohibited cache or runtime path: {}",
+            artifact.path
+        );
+        let source = workspace.root.join(relative);
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("inspect declared generated artifact {}", artifact.path))?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "declared generated artifact may not be a symlink: {}",
+            artifact.path
+        );
+
+        let mut add = Command::new("git");
+        add.arg("-C")
+            .arg(&workspace.root)
+            .args(["add", "-f", "--"])
+            .arg(relative);
+        command_output(&mut add)
+            .with_context(|| format!("stage declared generated artifact {}", artifact.path))?;
+
+        let mut indexed = Command::new("git");
+        indexed
+            .arg("-C")
+            .arg(&workspace.root)
+            .args(["ls-files", "-s", "-z", "--"])
+            .arg(relative);
+        let indexed = command_output(&mut indexed)?.stdout;
+        ensure!(
+            !indexed
+                .split(|byte| *byte == 0)
+                .any(|entry| { entry.starts_with(b"120000 ") || entry.starts_with(b"160000 ") }),
+            "declared generated artifact contains a symlink or nested repository: {}",
+            artifact.path
+        );
+    }
+    Ok(())
 }
 
 struct IntegrationChange {
@@ -868,12 +1006,47 @@ fn create_snapshot_repository(authoritative: &Path, base_dir: &Path) -> Result<S
         &snapshot_repository.display().to_string(),
     ]))?;
 
+    // Install generated-tree policy before `git add` so ignored and unignored
+    // dependency/runtime files are never hashed into the temporary object
+    // database. Removing them from the index after staging is still retained
+    // below as a fail-closed defense, but should normally be a no-op.
+    let generated_excludes = GENERATED_INTEGRATION_EXCLUDES
+        .iter()
+        // A slashless directory pattern applies at every depth, matching the
+        // integration pathspec policy below. This prevents nested package or
+        // Rust workspaces from hashing generated trees into snapshots.
+        .map(|path| format!("{path}/\n"))
+        .collect::<String>();
+    fs::write(snapshot_repository.join("info/exclude"), generated_excludes)
+        .context("install generated state exclusions for authoritative snapshot")?;
+
     let mut add = Command::new("git");
     add.current_dir(authoritative)
         .env("GIT_DIR", &snapshot_repository)
         .env("GIT_WORK_TREE", authoritative)
         .args(["add", "-A", "--", "."]);
+    // A snapshot is source authority, not a copy of disposable build state.
+    // Enforce the same cache/runtime exclusions used during integration even
+    // when a model forgot to create a project-local .gitignore. Apart from
+    // avoiding needless I/O, this prevents package-manager symlinks (notably
+    // node_modules/.bin) from invalidating an otherwise safe source snapshot.
     command_output(&mut add).context("capture authoritative snapshot index")?;
+
+    // Do not name generated paths in the add pathspec. Git rejects an
+    // explicitly named ignored path even when a later exclusion pathspec
+    // would remove it, which made a normal scaffold .gitignore turn an
+    // otherwise valid dependency wave into a pre-admission failure. Add the
+    // authoritative tree normally (honouring its ignore rules), then remove
+    // any unignored generated state from the temporary index.
+    let mut unstage_generated = Command::new("git");
+    unstage_generated
+        .current_dir(authoritative)
+        .env("GIT_DIR", &snapshot_repository)
+        .env("GIT_WORK_TREE", authoritative)
+        .args(["rm", "-r", "--cached", "--ignore-unmatch", "--"]);
+    add_generated_pathspecs(&mut unstage_generated);
+    command_output(&mut unstage_generated)
+        .context("exclude generated state from authoritative snapshot index")?;
 
     let mut listed = Command::new("git");
     listed
@@ -937,6 +1110,115 @@ fn prepare_snapshot_worktree(snapshot_repository: &Path, root: &Path, commit: &s
     Ok(())
 }
 
+fn add_generated_pathspecs(command: &mut Command) {
+    for excluded in GENERATED_INTEGRATION_EXCLUDES {
+        command
+            .arg(excluded)
+            .arg(format!(":(glob)**/{excluded}"))
+            .arg(format!(":(glob)**/{excluded}/**"));
+    }
+}
+
+fn add_integration_excluded_pathspecs(command: &mut Command) {
+    add_generated_pathspecs(command);
+    for excluded in RESTAGEABLE_BUILD_OUTPUT_DIRS {
+        command
+            .arg(excluded)
+            .arg(format!(":(glob)**/{excluded}"))
+            .arg(format!(":(glob)**/{excluded}/**"));
+    }
+    for pattern in RESTAGEABLE_BUILD_OUTPUT_GLOBS {
+        command.arg(format!(":(glob)**/{pattern}"));
+    }
+}
+
+#[cfg(unix)]
+fn link_authoritative_node_modules(
+    repo: &Path,
+    project_dir: &Path,
+    working_dir: &Path,
+    isolated_root: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let mut candidates = std::collections::BTreeSet::new();
+    for start in [project_dir, working_dir] {
+        let mut current = Some(start);
+        while let Some(directory) = current {
+            if !directory.starts_with(repo) {
+                break;
+            }
+            candidates.insert(directory.to_path_buf());
+            if directory == repo {
+                break;
+            }
+            current = directory.parent();
+        }
+    }
+
+    for directory in candidates {
+        let source = directory.join("node_modules");
+        let Ok(metadata) = fs::symlink_metadata(&source) else {
+            continue;
+        };
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "authoritative dependency root is not a regular directory: {}",
+            source.display()
+        );
+        let relative = directory
+            .strip_prefix(repo)
+            .context("resolve authoritative dependency root")?;
+        let destination = isolated_root.join(relative).join("node_modules");
+        if destination.exists() {
+            continue;
+        }
+        ensure!(
+            fs::symlink_metadata(&destination).is_err(),
+            "isolated dependency path is an invalid dangling entry: {}",
+            destination.display()
+        );
+        fs::create_dir(&destination).with_context(|| {
+            format!(
+                "create isolated dependency facade {}",
+                destination.display()
+            )
+        })?;
+        let mut entries = fs::read_dir(&source)
+            .with_context(|| format!("read authoritative dependencies {}", source.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            if WRITABLE_NODE_MODULES_ENTRIES
+                .iter()
+                .any(|writable| name == std::ffi::OsStr::new(writable))
+            {
+                continue;
+            }
+            let target = entry.path();
+            let link = destination.join(&name);
+            symlink(&target, &link).with_context(|| {
+                format!(
+                    "link authoritative dependency {} into isolated facade",
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_authoritative_node_modules(
+    _repo: &Path,
+    _project_dir: &Path,
+    _working_dir: &Path,
+    _isolated_root: &Path,
+) -> Result<()> {
+    Ok(())
+}
+
 fn raw_baseline_commit(baseline: &str) -> Result<&str> {
     let baseline = baseline
         .strip_prefix(SNAPSHOT_BASELINE_PREFIX)
@@ -974,6 +1256,33 @@ fn copy_snapshot_entry(source: &Path, destination: &Path) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn path_is_ignored_by_repository(repo: &Path, project_dir: &Path) -> Result<bool> {
+    if project_dir == repo {
+        return Ok(false);
+    }
+    let relative = project_dir
+        .strip_prefix(repo)
+        .context("resolve project path for Git ignore policy")?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["check-ignore", "-q", "--"])
+        .arg(relative)
+        .output()
+        .context("inspect enclosing repository ignore policy")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git check-ignore failed for {}: {detail}",
+                project_dir.display()
+            )
+        }
+    }
 }
 
 fn validate_group_id(group_id: &str) -> Result<()> {
@@ -1212,6 +1521,290 @@ mod tests {
         result
     }
 
+    fn degraded_mutation_result(task_id: &str) -> SubAgentResult {
+        let mut result = result(task_id);
+        result.success = false;
+        result.termination = SubAgentTermination::ProviderTimeout;
+        result.error = Some("provider timed out after producing a partial patch".to_string());
+        result.evidence.record_attempt();
+        result
+            .evidence
+            .record_success(super::super::DelegatedEvidenceKind::Mutation);
+        result
+    }
+
+    fn commit_base(repo: &Path) {
+        run(repo, &["add", "-A"]);
+        run(
+            repo,
+            &[
+                "-c",
+                "user.name=Mitsuro Test",
+                "-c",
+                "user.email=test@mitsuro.local",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn ignored_nested_project_uses_project_rooted_snapshot_and_integrates() {
+        let temp = tempfile::TempDir::new().expect("temp repository");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "/artifacts/\n").expect("ignore artifacts");
+        fs::write(repo.join("README.md"), "parent repository\n").expect("parent readme");
+        commit_base(repo);
+
+        let project = repo.join("artifacts/game");
+        fs::create_dir_all(&project).expect("ignored project directory");
+        fs::write(project.join("README.md"), "game project\n").expect("project readme");
+        fs::write(project.join(".gitignore"), "node_modules\n").expect("project dependency ignore");
+        let group_id = format!("group-{}", uuid::Uuid::new_v4());
+        let isolation = BuildIsolationSet::prepare(
+            project.clone(),
+            project.clone(),
+            group_id,
+            vec!["scaffold".to_string()],
+        )
+        .await
+        .expect("prepare ignored project isolation")
+        .expect("snapshot isolation");
+
+        let workspace = &isolation.workspaces()[0];
+        assert!(workspace
+            .baseline_commit
+            .starts_with(SNAPSHOT_BASELINE_PREFIX));
+        assert_eq!(workspace.project_dir, workspace.root);
+        assert_eq!(workspace.working_dir, workspace.root);
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("README.md")).unwrap(),
+            "game project\n"
+        );
+        assert!(
+            !workspace.root.join("../README.md").exists(),
+            "snapshot must be rooted at the selected project, not its enclosing repository"
+        );
+        fs::write(workspace.root.join("package.json"), "{}\n").expect("scaffold output");
+        let mut task_result = result("scaffold");
+        task_result.evidence.record_attempt();
+        task_result
+            .evidence
+            .record_success(super::super::DelegatedEvidenceKind::Mutation);
+
+        let integrated = isolation.integrate(vec![task_result]).await;
+        assert!(integrated[0].success, "{integrated:?}");
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(
+            !repo.join("package.json").exists(),
+            "nested project output must not escape into the enclosing repository root"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_excludes_generated_dependency_and_runtime_trees() {
+        let temp = tempfile::TempDir::new().expect("temp repository");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "/artifacts/\n").expect("ignore artifacts");
+        fs::write(repo.join("README.md"), "parent repository\n").expect("parent readme");
+        commit_base(repo);
+
+        let project = repo.join("artifacts/game");
+        fs::create_dir_all(project.join("node_modules/pkg")).expect("dependency directory");
+        fs::create_dir_all(project.join("node_modules/.bin")).expect("binary directory");
+        fs::create_dir_all(project.join(".mitsuro/cache")).expect("runtime directory");
+        fs::create_dir_all(project.join("dist")).expect("distribution directory");
+        fs::write(project.join("README.md"), "game project\n").expect("project readme");
+        fs::write(project.join("node_modules/pkg/index.js"), "dependency\n")
+            .expect("dependency file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../pkg/index.js", project.join("node_modules/.bin/pkg"))
+            .expect("package-manager symlink");
+        fs::write(project.join(".mitsuro/cache/state"), "runtime\n").expect("runtime file");
+        fs::write(project.join("dist/app.js"), "product artifact\n").expect("dist file");
+
+        let isolation = BuildIsolationSet::prepare(
+            project.clone(),
+            project.clone(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["engine".to_string()],
+        )
+        .await
+        .expect("generated trees must not invalidate snapshot isolation")
+        .expect("snapshot isolation");
+
+        let dependency_oid = String::from_utf8(
+            command_output(
+                Command::new("git")
+                    .current_dir(&project)
+                    .args(["hash-object", "node_modules/pkg/index.js"]),
+            )
+            .expect("hash dependency fixture")
+            .stdout,
+        )
+        .expect("dependency object id");
+        let snapshot_repository = isolation.workspaces()[0]
+            .root
+            .parent()
+            .expect("wave directory")
+            .join(SNAPSHOT_REPOSITORY_NAME);
+        let stored_dependency = Command::new("git")
+            .args([
+                "--git-dir",
+                &snapshot_repository.display().to_string(),
+                "cat-file",
+                "-e",
+                dependency_oid.trim(),
+            ])
+            .output()
+            .expect("inspect snapshot object database");
+        assert!(
+            !stored_dependency.status.success(),
+            "excluded dependency content must never enter the snapshot object database"
+        );
+
+        for workspace in isolation.workspaces() {
+            assert!(workspace.root.join("README.md").is_file());
+            assert!(workspace.root.join("dist/app.js").is_file());
+            let linked_dependencies = workspace.root.join("node_modules");
+            assert!(
+                linked_dependencies.is_dir()
+                    && !fs::symlink_metadata(&linked_dependencies)
+                        .expect("dependency facade")
+                        .file_type()
+                        .is_symlink(),
+                "dependency facade itself must remain writable"
+            );
+            assert_eq!(
+                linked_dependencies.join("pkg").canonicalize().unwrap(),
+                project.join("node_modules/pkg").canonicalize().unwrap()
+            );
+            fs::create_dir_all(linked_dependencies.join(".vite-temp"))
+                .expect("write isolated Vite cache");
+            fs::write(
+                linked_dependencies.join(".vite-temp/config.mjs"),
+                "isolated cache\n",
+            )
+            .expect("write isolated cache file");
+            assert!(
+                !project.join("node_modules/.vite-temp/config.mjs").exists(),
+                "isolated tool caches must not mutate authoritative dependencies"
+            );
+            assert_eq!(
+                fs::read_to_string(linked_dependencies.join("pkg/index.js")).unwrap(),
+                "dependency\n"
+            );
+            assert!(
+                !workspace.root.join(".mitsuro/cache/state").exists(),
+                "authoritative runtime state must not enter the snapshot"
+            );
+        }
+
+        fs::create_dir_all(isolation.workspaces()[0].root.join("src"))
+            .expect("isolated source directory");
+        fs::write(
+            isolation.workspaces()[0].root.join("src/engine.js"),
+            "export const ready = true;\n",
+        )
+        .expect("isolated source output");
+        let mut engine = result("engine");
+        engine.evidence.record_attempt();
+        engine
+            .evidence
+            .record_success(super::super::DelegatedEvidenceKind::Mutation);
+        let integrated = isolation.integrate(vec![engine]).await;
+        assert!(integrated[0].success, "{integrated:?}");
+        assert!(project.join("src/engine.js").is_file());
+        assert!(
+            fs::symlink_metadata(project.join("node_modules"))
+                .expect("authoritative dependencies")
+                .is_dir(),
+            "dependency link must never replace the authoritative dependency directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn degraded_partial_mutation_is_integrated_before_dependency_release() {
+        let temp = tempfile::TempDir::new().expect("temp repository");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join("README.md"), "base\n").expect("base file");
+        commit_base(repo);
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["partial".to_string()],
+        )
+        .await
+        .expect("prepare isolation")
+        .expect("git isolation");
+        fs::write(
+            isolation.workspaces()[0].root.join("partial.txt"),
+            "usable partial output\n",
+        )
+        .expect("partial output");
+
+        let integrated = isolation
+            .integrate(vec![degraded_mutation_result("partial")])
+            .await;
+        assert!(!integrated[0].success, "degraded status remains truthful");
+        assert_eq!(
+            integrated[0].termination,
+            SubAgentTermination::ProviderTimeout
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("partial.txt")).unwrap(),
+            "usable partial output\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn reported_mutation_with_empty_patch_fails_closed() {
+        let temp = tempfile::TempDir::new().expect("temp repository");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join("README.md"), "base\n").expect("base file");
+        commit_base(repo);
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["missing".to_string()],
+        )
+        .await
+        .expect("prepare isolation")
+        .expect("git isolation");
+        let recovery_root = isolation.workspaces()[0].root.clone();
+        let mut task_result = result("missing");
+        task_result.evidence.record_attempt();
+        task_result
+            .evidence
+            .record_success(super::super::DelegatedEvidenceKind::Mutation);
+
+        let integrated = isolation.integrate(vec![task_result]).await;
+        assert!(!integrated[0].success);
+        assert_eq!(integrated[0].termination, SubAgentTermination::Failed);
+        assert!(integrated[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("integration patch was empty")));
+        assert!(
+            recovery_root.exists(),
+            "ambiguous workspace must be retained"
+        );
+        remove_worktree(repo, &recovery_root).expect("remove retained test worktree");
+        fs::remove_dir(recovery_root.parent().expect("batch root"))
+            .expect("remove retained test batch");
+    }
+
     #[tokio::test]
     async fn dirty_snapshot_isolated_patches_integrate_in_task_order() {
         let temp = tempfile::TempDir::new().expect("temp repo");
@@ -1219,6 +1812,7 @@ mod tests {
         run(repo, &["init", "-q"]);
         fs::create_dir_all(repo.join("src")).expect("src directory");
         fs::write(repo.join("src/base.txt"), "committed\n").expect("base file");
+        fs::write(repo.join(".gitignore"), "target/\n").expect("base ignore file");
         run(repo, &["add", "-A"]);
         run(
             repo,
@@ -1258,6 +1852,24 @@ mod tests {
         );
         fs::write(isolation.workspaces()[0].root.join("src/a.txt"), "a\n").expect("task a output");
         fs::write(isolation.workspaces()[1].root.join("src/b.txt"), "b\n").expect("task b output");
+        fs::create_dir_all(isolation.workspaces()[0].root.join("target/debug"))
+            .expect("generated target directory");
+        fs::write(
+            isolation.workspaces()[0]
+                .root
+                .join("target/debug/cache.bin"),
+            vec![7_u8; 1024],
+        )
+        .expect("generated target artifact");
+        fs::create_dir_all(isolation.workspaces()[1].root.join(".cargo-home/registry"))
+            .expect("generated cargo home");
+        fs::write(
+            isolation.workspaces()[1]
+                .root
+                .join(".cargo-home/registry/cache.bin"),
+            vec![9_u8; 1024],
+        )
+        .expect("generated cargo cache");
         assert!(!repo.join("src/a.txt").exists());
 
         let context = Arc::new(SharedBuildContext::new());
@@ -1267,6 +1879,14 @@ mod tests {
         assert!(results.iter().all(|result| result.success), "{results:?}");
         assert_eq!(fs::read_to_string(repo.join("src/a.txt")).unwrap(), "a\n");
         assert_eq!(fs::read_to_string(repo.join("src/b.txt")).unwrap(), "b\n");
+        assert!(
+            !repo.join("target").exists(),
+            "delegated build caches must never enter the authoritative patch"
+        );
+        assert!(
+            !repo.join(".cargo-home").exists(),
+            "delegated package caches must never enter the authoritative patch"
+        );
         assert_eq!(
             fs::read_to_string(repo.join("src/base.txt")).unwrap(),
             "dirty source\n"
@@ -1275,6 +1895,176 @@ mod tests {
         assert_eq!(stats.files_modified, 2);
         assert_eq!(stats.lines_added, 2);
         assert_eq!(stats.lines_removed, 0);
+    }
+
+    #[tokio::test]
+    async fn parallel_validation_outputs_do_not_conflict_disjoint_source_patches() {
+        let temp = tempfile::TempDir::new().expect("temporary project");
+        let project = temp.path();
+        fs::create_dir_all(project.join("src")).expect("source directory");
+        fs::create_dir_all(project.join("dist")).expect("distribution directory");
+        fs::write(project.join("src/main.ts"), "export const ready = true;\n")
+            .expect("base source");
+        fs::write(project.join("dist/index.html"), "baseline dist\n").expect("base distribution");
+        fs::write(project.join("tsconfig.tsbuildinfo"), "baseline metadata\n")
+            .expect("base compiler metadata");
+
+        let isolation = BuildIsolationSet::prepare(
+            project.to_path_buf(),
+            project.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["engine".to_string(), "interface".to_string()],
+        )
+        .await
+        .expect("prepare snapshot isolation")
+        .expect("snapshot isolation");
+
+        let engine = &isolation.workspaces()[0].root;
+        fs::write(
+            engine.join("src/engine.ts"),
+            "export const engine = true;\n",
+        )
+        .expect("engine source");
+        fs::write(engine.join("dist/index.html"), "engine build\n").expect("engine distribution");
+        fs::write(engine.join("tsconfig.tsbuildinfo"), "engine metadata\n")
+            .expect("engine compiler metadata");
+
+        let interface = &isolation.workspaces()[1].root;
+        fs::write(
+            interface.join("src/interface.ts"),
+            "export const ui = true;\n",
+        )
+        .expect("interface source");
+        fs::write(interface.join("dist/index.html"), "interface build\n")
+            .expect("interface distribution");
+        fs::write(
+            interface.join("tsconfig.tsbuildinfo"),
+            "interface metadata\n",
+        )
+        .expect("interface compiler metadata");
+
+        let integrated = isolation
+            .integrate(vec![result("engine"), result("interface")])
+            .await;
+        assert!(
+            integrated.iter().all(|result| result.success),
+            "{integrated:?}"
+        );
+        assert!(project.join("src/engine.ts").is_file());
+        assert!(project.join("src/interface.ts").is_file());
+        assert_eq!(
+            fs::read_to_string(project.join("dist/index.html")).unwrap(),
+            "baseline dist\n",
+            "parallel validation builds must not publish generated output implicitly"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("tsconfig.tsbuildinfo")).unwrap(),
+            "baseline metadata\n",
+            "parallel compiler metadata must not enter source patches"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicitly_declared_ignored_deliverable_crosses_isolation_boundary() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "dist/\ntarget/\n").expect("ignore file");
+        fs::write(repo.join("package.json"), "{}\n").expect("package file");
+        run(repo, &["add", "-A"]);
+        run(
+            repo,
+            &[
+                "-c",
+                "user.name=Mitsuro Test",
+                "-c",
+                "user.email=test@mitsuro.local",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["task-a".to_string()],
+        )
+        .await
+        .expect("prepare isolation")
+        .expect("git isolation");
+        let workspace = &isolation.workspaces()[0];
+        fs::create_dir_all(workspace.root.join("dist/assets")).expect("dist directory");
+        fs::write(workspace.root.join("dist/index.html"), "ready\n").expect("dist index");
+        fs::write(workspace.root.join("dist/assets/app.js"), "ok\n").expect("dist asset");
+        fs::create_dir_all(workspace.root.join("target/debug")).expect("target directory");
+        fs::write(workspace.root.join("target/debug/cache"), "cache\n").expect("target cache");
+
+        let mut task_result = result("task-a");
+        task_result.output = r#"Build and validation completed.
+<delegated_handoff>{"status":"complete","summary":"built distributable","acceptance_checks":[{"id":"build","status":"passed","evidence":"bundle emitted"}],"remaining_work":[],"blockers":[],"generated_artifacts":[{"path":"dist","purpose":"final web distributable"}]}</delegated_handoff>"#.to_string();
+        let integrated = isolation.integrate(vec![task_result]).await;
+
+        assert!(integrated[0].success, "{integrated:?}");
+        assert_eq!(
+            fs::read_to_string(repo.join("dist/index.html")).unwrap(),
+            "ready\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("dist/assets/app.js")).unwrap(),
+            "ok\n"
+        );
+        assert!(!repo.join("target").exists());
+    }
+
+    #[tokio::test]
+    async fn declared_cache_artifact_fails_closed_and_retains_workspace() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        let repo = temp.path();
+        run(repo, &["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "target/\n").expect("ignore file");
+        fs::write(repo.join("README.md"), "base\n").expect("base file");
+        run(repo, &["add", "-A"]);
+        run(
+            repo,
+            &[
+                "-c",
+                "user.name=Mitsuro Test",
+                "-c",
+                "user.email=test@mitsuro.local",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+
+        let isolation = BuildIsolationSet::prepare(
+            repo.to_path_buf(),
+            repo.to_path_buf(),
+            format!("group-{}", uuid::Uuid::new_v4()),
+            vec!["task-a".to_string()],
+        )
+        .await
+        .expect("prepare isolation")
+        .expect("git isolation");
+        let recovery_root = isolation.workspaces()[0].root.clone();
+        fs::create_dir_all(recovery_root.join("target/debug")).expect("target directory");
+        fs::write(recovery_root.join("target/debug/cache"), "cache\n").expect("target cache");
+        let mut task_result = result("task-a");
+        task_result.output = r#"<delegated_handoff>{"status":"complete","summary":"done","acceptance_checks":[],"remaining_work":[],"blockers":[],"generated_artifacts":[{"path":"target","purpose":"cache"}]}</delegated_handoff>"#.to_string();
+
+        let integrated = isolation.integrate(vec![task_result]).await;
+
+        assert!(!integrated[0].success);
+        assert!(integrated[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("prohibited cache")));
+        assert!(recovery_root.exists());
+        assert!(!repo.join("target").exists());
     }
 
     #[tokio::test]
@@ -1331,7 +2121,18 @@ mod tests {
 
     #[tokio::test]
     async fn non_git_workspace_isolated_snapshot_integrates_and_restores_without_git_metadata() {
-        let temp = tempfile::TempDir::new().expect("temp project");
+        // The repository pins TMPDIR under target/ for Rust builds. A default
+        // TempDir would therefore still be inside this Git worktree and would
+        // not exercise the non-Git backend at all.
+        let temp_root = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let temp = tempfile::Builder::new()
+            .prefix("mitsuro-non-git-")
+            .tempdir_in(temp_root)
+            .expect("temp project outside repository");
         let project = temp.path();
         fs::create_dir_all(project.join("src")).expect("src directory");
         fs::write(project.join("src/main.txt"), "source\n").expect("source file");

@@ -14,6 +14,7 @@ use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::app::{BrowserSessionStatus, MitsuroApp, ATLAS_RUNTIME_KEY};
+use crate::components::ui_button;
 use crate::theme;
 
 pub fn browser_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -29,7 +30,7 @@ pub fn browser_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
         .min_w_0()
         .h_full()
         .bg(colors.bg_main)
-        .child(title_strip(session.status))
+        .child(title_strip(session))
         .child(browser_toolbar(app, cx))
         .child(
             div()
@@ -39,27 +40,32 @@ pub fn browser_panel(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl Int
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .px(px(28.0))
-                .pb(px(28.0))
                 .child(if is_blank {
                     empty_state(app.browser_embedded_available()).into_any_element()
                 } else if let Some(frame) = app.browser_frame().cloned() {
                     embedded_page(app, frame, cx).into_any_element()
+                } else if session.status == BrowserSessionStatus::Error {
+                    error_state(session).into_any_element()
                 } else {
                     current_url_state(session).into_any_element()
-                })
-                .child(bridge_status(session)),
+                }),
         )
 }
 
-fn title_strip(status: BrowserSessionStatus) -> impl IntoElement {
+fn title_strip(session: &crate::app::BrowserSession) -> impl IntoElement {
     let colors = theme::colors();
-    let label = match status {
-        BrowserSessionStatus::Error => "Unavailable",
-        BrowserSessionStatus::NoNativeHost => "System browser",
-        BrowserSessionStatus::Connecting => "Loading WebKit",
-        BrowserSessionStatus::Ready => "Embedded WebKit",
-        _ => "Browser",
+    let page_title = session.title.trim();
+    let page_title = if page_title.is_empty() || page_title == "about:blank" {
+        None
+    } else {
+        Some(page_title.to_owned())
+    };
+    let status = match session.status {
+        BrowserSessionStatus::Connecting => Some(("Loading", colors.status_connecting)),
+        BrowserSessionStatus::AgentDriving => Some(("Agent control", colors.accent)),
+        BrowserSessionStatus::Error => Some(("Unavailable", colors.status_error)),
+        BrowserSessionStatus::NoNativeHost => Some(("Opens externally", colors.text_tertiary)),
+        BrowserSessionStatus::Idle | BrowserSessionStatus::Ready => None,
     };
     div()
         .id("atlas-title")
@@ -67,7 +73,7 @@ fn title_strip(status: BrowserSessionStatus) -> impl IntoElement {
         .items_center()
         .justify_between()
         .px(px(20.0))
-        .py(px(12.0))
+        .h(px(64.0))
         .border_b_1()
         .border_color(colors.border_subtle)
         .child(
@@ -75,6 +81,8 @@ fn title_strip(status: BrowserSessionStatus) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(9.0))
+                .flex_1()
+                .min_w_0()
                 .child(
                     Icon::new(IconName::Globe)
                         .with_size(px(16.0))
@@ -82,18 +90,41 @@ fn title_strip(status: BrowserSessionStatus) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(colors.text)
-                        .child("Atlas"),
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.text)
+                                .child("Atlas"),
+                        )
+                        .when_some(page_title, |this, page_title| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(colors.text_tertiary)
+                                    .child(page_title),
+                            )
+                        }),
                 ),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_tertiary)
-                .child(label),
-        )
+        .when_some(status, |this, (label, color)| {
+            this.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_xs()
+                    .text_color(color)
+                    .child(div().size(px(6.0)).rounded_full().bg(color))
+                    .child(label),
+            )
+        })
 }
 
 fn browser_toolbar(app: &MitsuroApp, cx: &mut Context<MitsuroApp>) -> impl IntoElement {
@@ -215,25 +246,26 @@ fn nav_button(
     cx: &mut Context<MitsuroApp>,
     on_click: impl Fn(&mut MitsuroApp, &mut gpui::Window, &mut Context<MitsuroApp>) + 'static,
 ) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .id(id)
-        .size(px(34.0))
-        .rounded(px(9.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|style| style.bg(colors.bg_hover))
-                .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
-        })
-        .when(!enabled, |this| this.opacity(0.35))
-        .child(
-            Icon::new(icon)
-                .with_size(px(15.0))
-                .text_color(colors.text_secondary),
-        )
+    let tooltip = match &icon {
+        IconName::ArrowLeft => "Back",
+        IconName::ArrowRight => "Forward",
+        IconName::Redo2 => "Reload",
+        IconName::ExternalLink => "Open in system browser",
+        _ => "Browser action",
+    };
+    ui_button::icon_button(
+        id,
+        Icon::new(icon).with_size(px(theme::shape().icon_sm)),
+        tooltip,
+        ui_button::ButtonTone::Ghost,
+        ui_button::ButtonSize::Medium,
+        ui_button::ButtonState {
+            disabled: !enabled,
+            ..Default::default()
+        },
+        cx,
+    )
+    .on_click(cx.listener(move |app, _, window, cx| on_click(app, window, cx)))
 }
 
 fn empty_state(embedded: bool) -> impl IntoElement {
@@ -416,50 +448,43 @@ fn current_url_state(session: &crate::app::BrowserSession) -> impl IntoElement {
         )
 }
 
-fn bridge_status(session: &crate::app::BrowserSession) -> impl IntoElement {
+fn error_state(session: &crate::app::BrowserSession) -> impl IntoElement {
     let colors = theme::colors();
-    let state = match session.status {
-        BrowserSessionStatus::Error => "Error".to_string(),
-        _ => session.bridge_mode.to_string(),
+    let detail = if session.bridge_detail.trim().is_empty() {
+        "The embedded browser renderer is unavailable. You can still open the address in your system browser.".to_owned()
+    } else {
+        session.bridge_detail.to_string()
     };
-    let detail = session.bridge_detail.to_string();
-    let host = session
-        .engine_version
-        .as_ref()
-        .map(|version| format!("{} · WebKit {version}", session.host_kind))
-        .unwrap_or_else(|| session.host_kind.to_string());
     div()
-        .id("browser-session-status")
+        .id("atlas-error")
         .flex()
         .flex_col()
-        .border_t_1()
-        .border_color(colors.border_subtle)
-        .child(status_row("Browser surface", host))
-        .child(status_row("Bridge", format!("{state} · {detail}")))
-}
-
-fn status_row(label: &'static str, value: String) -> impl IntoElement {
-    let colors = theme::colors();
-    div()
-        .flex()
+        .flex_1()
         .items_center()
-        .justify_between()
-        .gap(px(18.0))
-        .min_h(px(42.0))
-        .border_b_1()
-        .border_color(colors.border_subtle)
+        .justify_center()
+        .min_h(px(320.0))
+        .px(px(24.0))
         .child(
-            div()
-                .text_sm()
-                .text_color(colors.text_secondary)
-                .child(label),
+            Icon::new(IconName::TriangleAlert)
+                .with_size(px(30.0))
+                .text_color(colors.status_error),
         )
         .child(
             div()
+                .mt(px(16.0))
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child("Atlas is unavailable"),
+        )
+        .child(
+            div()
+                .mt(px(7.0))
                 .max_w(px(520.0))
                 .text_sm()
+                .text_center()
                 .text_color(colors.text_tertiary)
-                .child(value),
+                .child(detail),
         )
 }
 

@@ -6,10 +6,10 @@ use crate::tools::registry::ToolRegistry;
 
 use super::{
     AddSubtaskTool, AgentTool, ApplyPatchTool, AskUserQuestionTool, AutonomousTaskTool, BashTool,
-    EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool, MultiEditTool,
-    ProcessesTool, ReadTool, ReportTool, SearchCompactionSegmentsTool, SendUserMessageTool,
-    SetDependencyTool, SetWorkModeTool, SetWorkspaceContextTool, SkillTool, SleepTool,
-    TaskCompleteTool, TaskStartTool, ToolSearchTool, WebFetchTool, WebSearchTool,
+    BrowserCheckTool, EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool,
+    MultiEditTool, ProcessesTool, ReadTool, ReportTool, SearchCompactionSegmentsTool,
+    SendUserMessageTool, SetDependencyTool, SetWorkModeTool, SetWorkspaceContextTool, SkillTool,
+    SleepTool, TaskCompleteTool, TaskStartTool, ToolSearchTool, WebFetchTool, WebSearchTool,
     WorkflowProposeTool, WorkflowUpdateTool, WriteTool,
 };
 
@@ -20,6 +20,7 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(EditTool)).await;
     registry.register(Arc::new(MultiEditTool)).await;
     registry.register(Arc::new(BashTool)).await;
+    registry.register(Arc::new(BrowserCheckTool)).await;
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
     registry.register(Arc::new(ListTool)).await;
@@ -142,6 +143,12 @@ mod tests {
         assert!(unhosted_agent.input_schema["properties"]
             .get("run_in_background")
             .is_none());
+        assert!(unhosted_agent.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "wait")));
+        assert!(unhosted_agent.input_schema["properties"]
+            .get("wait_timeout_ms")
+            .is_some());
 
         let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
         registry
@@ -159,6 +166,8 @@ mod tests {
         assert!(wire_tools.iter().any(|tool| tool.name == "tool_search"));
         assert!(catalog.len() > wire_tools.len());
         assert!(catalog.iter().any(|tool| tool.name == "memory"));
+        assert!(catalog.iter().any(|tool| tool.name == "browser_check"));
+        assert!(!wire_tools.iter().any(|tool| tool.name == "browser_check"));
         let agent = catalog
             .iter()
             .find(|tool| tool.name == "agent")
@@ -174,12 +183,20 @@ mod tests {
         assert!(
             agent.input_schema["properties"]["run_in_background"]["description"]
                 .as_str()
-                .is_some_and(|description| description.contains("parent is notified"))
+                .is_some_and(|description| description.contains("do not poll"))
         );
-        assert_eq!(
-            agent.input_schema["properties"]["action"]["enum"][7],
-            "resume"
-        );
+        assert!(agent.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().all(|action| action != "wait")));
+        assert!(agent.input_schema["properties"]
+            .get("wait_timeout_ms")
+            .is_none());
+        assert!(agent.input_schema["properties"]["limit"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("not a turn budget")));
+        assert!(agent.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "resume")));
         assert!(agent.input_schema.get("required").is_none());
         assert!(agent.input_schema["properties"].get("agent_type").is_none());
         assert_eq!(
@@ -189,12 +206,11 @@ mod tests {
         assert!(agent.input_schema["properties"]["task_ids"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("corresponding to components")));
-        assert!(
-            agent.input_schema["properties"]["tasks"]["items"]["properties"]["max_turns"]
-                ["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("final handoff"))
-        );
+        let task_properties = &agent.input_schema["properties"]["tasks"]["items"]["properties"];
+        assert!(task_properties.get("max_turns").is_none());
+        assert!(task_properties["working_dir"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("scope remains human-readable")));
         assert!(
             agent.input_schema["properties"]["components"]["description"]
                 .as_str()

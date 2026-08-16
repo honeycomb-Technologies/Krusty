@@ -222,6 +222,10 @@ pub enum DelegatedRunCreateOutcome {
         delegated_run_id: String,
         resumed_from_run_id: String,
     },
+    ExistingActiveWorkspaceWriter {
+        delegated_run_id: String,
+        workspace_path: String,
+    },
 }
 
 pub fn normalize_scope_key(target_scope: &[DelegatedRunScope]) -> String {

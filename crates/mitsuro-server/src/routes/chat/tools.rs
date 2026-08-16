@@ -294,6 +294,7 @@ pub(super) fn apply_thinking_config(thinking_level: ThinkingLevel, options: &mut
     }
 
     options.thinking = Some(ThinkingConfig::default());
+    options.reasoning_effort = Some(thinking_level.to_reasoning_effort());
 
     match options.reasoning_control {
         Some(ReasoningControl::OpenAiEffort) => {
@@ -334,6 +335,7 @@ fn anthropic_effort_for_level(thinking_level: ThinkingLevel) -> Option<Anthropic
 
 #[cfg(test)]
 mod tests {
+    use mitsuro_core::ai::providers::ReasoningEffort;
     use mitsuro_core::ai::types::{WebFetchConfig, WebSearchConfig};
     use serde_json::json;
 
@@ -686,6 +688,7 @@ mod tests {
         };
         apply_thinking_config(ThinkingLevel::XHigh, &mut options);
         assert!(options.thinking.is_some());
+        assert_eq!(options.reasoning_effort, Some(ReasoningEffort::XHigh));
         assert_eq!(
             options.anthropic_adaptive_effort,
             Some(AnthropicAdaptiveEffort::XHigh)

@@ -124,8 +124,8 @@ Deno.test("legacy mascot components are no longer app entry points", async () =>
   const surfaces = await Promise.all([
     source("../components/chat/ChatBar.tsx"),
     source("../components/navigation/MobileAppHeader.tsx"),
-    source("../app/(tabs)/chat-screen/BootScreen.tsx"),
-    source("../app/(tabs)/chat-screen/ActiveConversationSurface.tsx"),
+    source("../components/chat-screen/BootScreen.tsx"),
+    source("../components/chat-screen/ActiveConversationSurface.tsx"),
   ]);
   const joined = surfaces.join("\n");
 

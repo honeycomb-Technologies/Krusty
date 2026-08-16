@@ -95,6 +95,10 @@ pub enum McpAppRuntimeEvent {
         can_go_forward: bool,
         loading: bool,
     },
+    Title {
+        key: String,
+        title: String,
+    },
     OpenLink {
         key: String,
         url: String,
@@ -726,7 +730,13 @@ mod platform {
         let title_key = key.clone();
         let title_events = events.clone();
         raw.connect_title_notify(move |view| {
-            emit_navigation(view, &title_key, view.is_loading(), &title_events);
+            let _ = title_events.send(McpAppRuntimeEvent::Title {
+                key: title_key.clone(),
+                title: view
+                    .title()
+                    .map(|title| title.to_string())
+                    .unwrap_or_default(),
+            });
         });
         raw.connect_load_changed(move |view, event| {
             let loading = event != LoadEvent::Finished;
@@ -1039,6 +1049,9 @@ mod tests {
                 }) if key == "atlas-probe" && !loading => {
                     got_navigation = title == "Atlas Probe";
                 }
+                Some(McpAppRuntimeEvent::Title { key, title }) if key == "atlas-probe" => {
+                    got_navigation = title == "Atlas Probe";
+                }
                 Some(McpAppRuntimeEvent::Error { message, .. }) => panic!("{message}"),
                 Some(_) | None => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -1068,7 +1081,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             match runtime.try_recv() {
-                Some(McpAppRuntimeEvent::Navigation { key, title, .. })
+                Some(McpAppRuntimeEvent::Title { key, title })
                     if key == "atlas-probe" && title == expected =>
                 {
                     return;

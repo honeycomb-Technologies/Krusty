@@ -20,6 +20,7 @@ import {
 import { ArrowDown } from "lucide-react-native";
 import { LinearGradient } from "../../platform/linear-gradient";
 import { BlurView } from "../../platform/blur";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
@@ -35,7 +36,6 @@ import {
   type TranscriptMessageRow,
   type TranscriptRowsCache,
 } from "./transcriptRows";
-import { PlanTracker } from "./PlanTracker";
 import { ConversationSkeleton } from "../ui/Skeleton";
 import type { ChatMessage } from "@mitsuro/api";
 import type { SessionType } from "@mitsuro/api";
@@ -68,7 +68,9 @@ interface ChatTranscriptProps {
   ) => void | Promise<void>;
   emptyState?: ReactNode;
   bottomPadding?: number;
-  showPlanTracker?: boolean;
+  topFadeHeight?: number;
+  topFadeOffset?: number;
+  topContentPadding?: number;
   scrollToMessageId?: string | null;
   onScrollTargetHandled?: () => void;
   hideJumpToLatest?: boolean;
@@ -84,17 +86,11 @@ const DESKTOP_BOTTOM_EDGE_HEIGHT = 116;
 const MOBILE_BOTTOM_SCRIM_MIN_HEIGHT = 148;
 const MOBILE_BOTTOM_SCRIM_MAX_HEIGHT = 228;
 const EDGE_GAP = 12;
-const TRACKER_GAP = 10;
 const SCROLL_FOLLOW_THRESHOLD = 72;
-const BOTTOM_SCROLL_OVERSHOOT = 240;
 const BOTTOM_CONTROL_INSET = 10;
 const BOTTOM_CONTROL_SIZE = 56;
 const BOTTOM_CONTROL_RADIUS = 18;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
-/** Coalesce streaming stick-to-bottom work onto one rAF per animation frame. */
-const STREAM_STICK_MIN_INTERVAL_MS = 32;
-/** One delayed measurement pass after stream layout settles. */
-const STREAM_STICK_FALLBACK_MS = 120;
 /** Keep cold mode activation bounded; older turns enter only as the user scrolls up.
  *  Prior defaults (1 / 2) made long chats look like earlier messages were deleted
  *  once the live turn advanced. Keep a usable recent window mounted by default. */
@@ -123,44 +119,6 @@ function setTranscriptScrollCache(
 }
 
 
-function lastMessageLayoutSignature(messages: ChatMessage[]): string {
-  const lastMessage = messages[messages.length - 1];
-  if (!lastMessage) return "empty";
-
-  const toolSignature =
-    lastMessage.toolCalls
-      ?.map((toolCall) =>
-        [
-          toolCall.id,
-          toolCall.status,
-          toolCall.output?.length ?? 0,
-          toolCall.delegated?.thinking?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|") ?? "";
-  const attachmentSignature =
-    lastMessage.attachments
-      ?.map((attachment) =>
-        [
-          attachment.type,
-          attachment.name ?? "",
-          attachment.uri?.length ?? 0,
-          attachment.base64?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|") ?? "";
-
-  return [
-    lastMessage.id,
-    lastMessage.content.length,
-    lastMessage.thinking?.length ?? 0,
-    attachmentSignature,
-    toolSignature,
-    lastMessage.isQueued ? "queued" : "steady",
-    lastMessage.kind ?? "none",
-  ].join("::");
-}
-
 function distanceFromBottom(
   contentHeight: number,
   viewportHeight: number,
@@ -184,7 +142,9 @@ function ChatTranscriptComponent({
   onPlanConfirm,
   emptyState,
   bottomPadding = 130,
-  showPlanTracker = true,
+  topFadeHeight: topFadeHeightOverride,
+  topFadeOffset: topFadeOffsetOverride,
+  topContentPadding: topContentPaddingOverride,
   scrollToMessageId,
   onScrollTargetHandled,
   hideJumpToLatest = false,
@@ -206,21 +166,11 @@ function ChatTranscriptComponent({
   );
   const pendingAutoScrollRef = useRef(false);
   const pendingAutoScrollAnimatedRef = useRef(false);
-  const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
-  const streamStickFrameRef = useRef<number | null>(null);
-  const streamStickThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const streamStickFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const streamStickPendingRef = useRef(false);
-  const lastStreamStickAtRef = useRef(0);
+  const pendingBottomAnchorAnimatedRef = useRef(false);
   const isUserDraggingRef = useRef(false);
   const historyRevealArmedRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
-  const isStreamingRef = useRef(isStreaming);
   const loadedSessionIdRef = useRef<string | null>(
     restoredScrollStateRef.current
       ? `${scrollStateKey}::${sessionId ?? "new"}`
@@ -236,7 +186,6 @@ function ChatTranscriptComponent({
   const firstPaintGenerationRef = useRef(0);
   const firstPaintFrameRef = useRef<number | null>(null);
   const firstPaintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(
     restoredScrollStateRef.current?.autoFollow ?? true,
   );
@@ -245,11 +194,6 @@ function ChatTranscriptComponent({
     theme.scheme === "dark"
       ? "systemChromeMaterialDark"
       : "systemChromeMaterialLight";
-  const jumpTint =
-    theme.scheme === "dark" ? "systemMaterialDark" : "systemMaterialLight";
-  const jumpOverlay = t.surfaceOverlaySubtle;
-
-  isStreamingRef.current = isStreaming;
 
   const messageCount = messages.length;
   const transcriptCacheKey = `${scrollStateKey}::${sessionId ?? "new"}`;
@@ -469,14 +413,15 @@ function ChatTranscriptComponent({
       finishFirstPaint(generation);
     };
   }, [finishFirstPaint, transcriptCacheKey]);
-  const layoutSignature = useMemo(
-    () => lastMessageLayoutSignature(messages),
-    [messages],
-  );
-  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : MOBILE_TOP_EDGE_HEIGHT;
-  const topFadeOffset = isDesktop ? DESKTOP_TOP_EDGE_OFFSET : MOBILE_TOP_EDGE_OFFSET;
+  const topFadeHeight =
+    topFadeHeightOverride ??
+    (isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : MOBILE_TOP_EDGE_HEIGHT);
+  const topFadeOffset =
+    topFadeOffsetOverride ??
+    (isDesktop ? DESKTOP_TOP_EDGE_OFFSET : MOBILE_TOP_EDGE_OFFSET);
   // Content starts lower than the raised fade so the blur sits under header chrome.
-  const topContentGap = isDesktop ? 28 : 34;
+  const topContentGap =
+    topContentPaddingOverride ?? (isDesktop ? 28 : 34);
   const bottomScrimHeight = isDesktop
     ? Math.max(DESKTOP_BOTTOM_EDGE_HEIGHT, Math.min(bottomPadding + 40, 188))
     : Math.max(
@@ -484,35 +429,16 @@ function ChatTranscriptComponent({
         Math.min(bottomPadding + 96, MOBILE_BOTTOM_SCRIM_MAX_HEIGHT),
       );
   const bottomScrimOffset = 0;
-  const listTopPadding = isDesktop
-    ? topContentGap
-    : topContentGap +
-      (showPlanTracker && planTrackerHeight > 0
-        ? planTrackerHeight + TRACKER_GAP
-        : 0);
+  const listTopPadding = topContentGap;
   const listBottomPadding = bottomPadding + EDGE_GAP;
   const showJumpToLatest = messageCount > 0 && !isNearBottom && !hideJumpToLatest;
 
-  const clearBottomAnchorTimers = useCallback(() => {
-    bottomAnchorTimersRef.current.forEach((timer) => clearTimeout(timer));
-    bottomAnchorTimersRef.current = [];
+  const cancelBottomAnchor = useCallback(() => {
     if (bottomAnchorFrameRef.current !== null) {
       cancelAnimationFrame(bottomAnchorFrameRef.current);
       bottomAnchorFrameRef.current = null;
     }
-    if (streamStickFrameRef.current !== null) {
-      cancelAnimationFrame(streamStickFrameRef.current);
-      streamStickFrameRef.current = null;
-    }
-    if (streamStickThrottleRef.current !== null) {
-      clearTimeout(streamStickThrottleRef.current);
-      streamStickThrottleRef.current = null;
-    }
-    if (streamStickFallbackRef.current !== null) {
-      clearTimeout(streamStickFallbackRef.current);
-      streamStickFallbackRef.current = null;
-    }
-    streamStickPendingRef.current = false;
+    pendingBottomAnchorAnimatedRef.current = false;
   }, []);
 
   const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
@@ -534,10 +460,10 @@ function ChatTranscriptComponent({
       return;
     }
 
-    const targetOffset = Math.max(
-      0,
-      contentHeight - listHeight + BOTTOM_SCROLL_OVERSHOOT,
-    );
+    // onContentSizeChange has committed this measurement before the sole rAF
+    // scheduler runs. Include content-container insets explicitly; web
+    // scrollToEnd stops at the last row and can leave the composer inset below.
+    const targetOffset = Math.max(0, contentHeight - listHeight);
     scrollOffsetRef.current = targetOffset;
     setIsNearBottom(true);
     markProgrammaticScroll(animated ? PROGRAMMATIC_SCROLL_SETTLE_MS : 180);
@@ -554,94 +480,21 @@ function ChatTranscriptComponent({
     [scrollToBottom],
   );
 
-  /**
-   * Streaming stick path: coalesce content-size / layout / delta noise into at
-   * most one rAF stick per interval while auto-follow remains enabled.
-   */
-  const requestStreamStick = useCallback(() => {
-    if (!autoFollowRef.current || isUserDraggingRef.current) {
-      return;
-    }
-
-    streamStickPendingRef.current = true;
-
-    const runStick = () => {
-      if (!autoFollowRef.current || isUserDraggingRef.current) {
-        streamStickPendingRef.current = false;
-        return;
-      }
-      streamStickPendingRef.current = false;
-      lastStreamStickAtRef.current = Date.now();
-      stickToBottomNow(false);
-    };
-
-    const scheduleFrame = () => {
-      if (streamStickFrameRef.current !== null) {
-        return;
-      }
-      streamStickFrameRef.current = requestAnimationFrame(() => {
-        streamStickFrameRef.current = null;
-        if (!streamStickPendingRef.current) {
-          return;
-        }
-        runStick();
-      });
-    };
-
-    const elapsed = Date.now() - lastStreamStickAtRef.current;
-    if (elapsed >= STREAM_STICK_MIN_INTERVAL_MS) {
-      scheduleFrame();
-    } else if (streamStickThrottleRef.current === null) {
-      streamStickThrottleRef.current = setTimeout(() => {
-        streamStickThrottleRef.current = null;
-        if (!streamStickPendingRef.current) return;
-        scheduleFrame();
-      }, STREAM_STICK_MIN_INTERVAL_MS - elapsed);
-    }
-
-    // One delayed measurement pass for late Markdown/layout growth. This has a
-    // separate slot from the throttle so neither timer suppresses the other.
-    if (streamStickFallbackRef.current !== null) {
-      clearTimeout(streamStickFallbackRef.current);
-    }
-    streamStickFallbackRef.current = setTimeout(() => {
-      streamStickFallbackRef.current = null;
-      if (!autoFollowRef.current || isUserDraggingRef.current) return;
-      streamStickPendingRef.current = true;
-      scheduleFrame();
-    }, STREAM_STICK_FALLBACK_MS);
-  }, [stickToBottomNow]);
-
   const scheduleBottomAnchor = useCallback(
     (animated: boolean) => {
-      // Streaming auto-follow uses the throttled rAF stick path so content-size
-      // blips do not issue a scroll storm.
-      if (isStreamingRef.current) {
-        requestStreamStick();
-        return;
-      }
-
-      clearBottomAnchorTimers();
-
-      const anchor = (useAnimated: boolean) => {
-        if (!autoFollowRef.current || isUserDraggingRef.current) {
-          return;
-        }
-        scrollToBottom(useAnimated);
-      };
-
+      // Content-size changes can arrive in bursts while a token frame lays out.
+      // One frame is the sole bottom-follow scheduler; later requests coalesce.
+      pendingBottomAnchorAnimatedRef.current ||= animated;
+      if (bottomAnchorFrameRef.current !== null) return;
       bottomAnchorFrameRef.current = requestAnimationFrame(() => {
         bottomAnchorFrameRef.current = null;
-        anchor(animated);
+        const useAnimated = pendingBottomAnchorAnimatedRef.current;
+        pendingBottomAnchorAnimatedRef.current = false;
+        if (!autoFollowRef.current || isUserDraggingRef.current) return;
+        stickToBottomNow(useAnimated);
       });
-
-      // One bounded fallback catches delayed Markdown measurement without
-      // issuing a multi-frame scroll storm for every streamed delta.
-      bottomAnchorTimersRef.current = [
-        setTimeout(() => anchor(false), STREAM_STICK_FALLBACK_MS),
-      ];
     },
-    [clearBottomAnchorTimers, requestStreamStick, scrollToBottom],
+    [stickToBottomNow],
   );
 
   const queueAutoScroll = useCallback((animated: boolean) => {
@@ -741,11 +594,10 @@ function ChatTranscriptComponent({
   const handleJumpToLatest = useCallback(() => {
     autoFollowRef.current = true;
     setIsNearBottom(true);
-    scrollToBottom(false);
     scheduleBottomAnchor(false);
-  }, [scheduleBottomAnchor, scrollToBottom]);
+  }, [scheduleBottomAnchor]);
 
-  useEffect(() => clearBottomAnchorTimers, [clearBottomAnchorTimers]);
+  useEffect(() => cancelBottomAnchor, [cancelBottomAnchor]);
 
   useEffect(
     () => () => {
@@ -764,10 +616,9 @@ function ChatTranscriptComponent({
       historyRevealArmedRef.current = true;
       autoFollowRef.current = true;
       pendingAutoScrollRef.current = false;
-      clearBottomAnchorTimers();
+      cancelBottomAnchor();
       scrollOffsetRef.current = 0;
       contentHeightRef.current = 0;
-      setPlanTrackerHeight(0);
       setIsNearBottom(true);
       return;
     }
@@ -784,10 +635,9 @@ function ChatTranscriptComponent({
     historyRevealArmedRef.current = true;
     autoFollowRef.current = cached?.autoFollow ?? true;
     pendingAutoScrollRef.current = false;
-    clearBottomAnchorTimers();
+    cancelBottomAnchor();
     scrollOffsetRef.current = cached?.offset ?? 0;
     contentHeightRef.current = 0;
-    setPlanTrackerHeight(0);
     setIsNearBottom(cached?.autoFollow ?? true);
 
     // Restore without remounting the FlatList tree. contentOffset only applies
@@ -807,7 +657,7 @@ function ChatTranscriptComponent({
       scheduleBottomAnchor(false);
     });
   }, [
-    clearBottomAnchorTimers,
+    cancelBottomAnchor,
     markProgrammaticScroll,
     scheduleBottomAnchor,
     scrollStateKey,
@@ -815,67 +665,28 @@ function ChatTranscriptComponent({
   ]);
 
   useEffect(() => {
-    if (!isActive) {
+    if (!isActive || messageCount !== 0) {
       return;
     }
+    pendingAutoScrollRef.current = false;
+    autoFollowRef.current = true;
+    cancelBottomAnchor();
+    scrollOffsetRef.current = 0;
+    setIsNearBottom(true);
+  }, [cancelBottomAnchor, isActive, messageCount]);
 
-    if (messageCount === 0) {
-      pendingAutoScrollRef.current = false;
-      autoFollowRef.current = true;
-      clearBottomAnchorTimers();
-      scrollOffsetRef.current = 0;
-      setIsNearBottom(true);
-      return;
-    }
-
-    if (!autoFollowRef.current) {
-      return;
-    }
-
-    // While streaming, only queue/coalesce stick work. Avoid dual schedule
-    // from both layoutSignature ticks and onContentSizeChange.
-    if (isStreaming) {
+  const maintainBottomAfterGeometryChange = useCallback(() => {
+    if (!isActive || !autoFollowRef.current) return;
+    if (isUserDraggingRef.current) {
       queueAutoScroll(false);
-      requestStreamStick();
       return;
     }
 
-    queueAutoScroll(true);
-    scheduleBottomAnchor(true);
-  }, [
-    clearBottomAnchorTimers,
-    isActive,
-    isStreaming,
-    layoutSignature,
-    messageCount,
-    queueAutoScroll,
-    requestStreamStick,
-    scheduleBottomAnchor,
-  ]);
-
-  useEffect(() => {
-    if (!isActive || messageCount === 0 || !autoFollowRef.current) {
-      return;
-    }
-
-    // Padding/tracker geometry changes still need an immediate re-anchor, but
-    // stream mode stays on the coalesced stick path.
-    if (isStreaming) {
-      requestStreamStick();
-      return;
-    }
-
+    // Geometry callbacks are the sole auto-follow authority. The native list
+    // receives one coalesced end request after the new layout is committed.
+    setIsNearBottom(true);
     scheduleBottomAnchor(false);
-  }, [
-    bottomPadding,
-    isActive,
-    isStreaming,
-    listTopPadding,
-    messageCount,
-    planTrackerHeight,
-    requestStreamStick,
-    scheduleBottomAnchor,
-  ]);
+  }, [isActive, queueAutoScroll, scheduleBottomAnchor]);
 
   useEffect(() => {
     if (!isActive || !scrollToMessageId) {
@@ -1030,17 +841,20 @@ function ChatTranscriptComponent({
         keyExtractor={(row) => row.id}
         // Completed messages are isolated from live tail stream ticks.
         extraData={liveFooterRow?.id ?? "no-live"}
-        windowSize={3}
-        maxToRenderPerBatch={1}
-        initialNumToRender={1}
-        updateCellsBatchingPeriod={80}
+        // Keep three viewports on either side mounted. The previous one-row,
+        // three-window policy could be outrun by a normal phone fling and
+        // exposed blank cells while expensive Markdown rows caught up.
+        windowSize={7}
+        maxToRenderPerBatch={6}
+        initialNumToRender={8}
+        updateCellsBatchingPeriod={32}
         // removeClippedSubviews is a known native crash source on iOS New
         // Architecture with nested message/tool cells and absolute chrome.
         removeClippedSubviews={false}
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
           historyRevealArmedRef.current = true;
-          clearBottomAnchorTimers();
+          cancelBottomAnchor();
           if (scrollOffsetRef.current <= SCROLL_FOLLOW_THRESHOLD) {
             revealOlderHistory();
           }
@@ -1064,7 +878,9 @@ function ChatTranscriptComponent({
         }}
         renderItem={renderTranscriptRow}
         ListFooterComponent={liveFooter}
-        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        maintainVisibleContentPosition={
+          isNearBottom ? undefined : { minIndexForVisible: 0 }
+        }
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -1076,42 +892,17 @@ function ChatTranscriptComponent({
         ]}
         onLayout={(event) => {
           markFirstPaintReady();
-          listHeightRef.current = event.nativeEvent.layout.height;
-          const shouldMaintainBottom =
-            autoFollowRef.current && !isUserDraggingRef.current;
-          updateNearBottom();
-          if (shouldMaintainBottom) {
-            if (isStreamingRef.current) {
-              requestStreamStick();
-            } else {
-              scheduleBottomAnchor(false);
-            }
-          } else {
-            flushAutoScroll();
+          const nextHeight = event.nativeEvent.layout.height;
+          if (nextHeight !== listHeightRef.current) {
+            listHeightRef.current = nextHeight;
+            maintainBottomAfterGeometryChange();
           }
         }}
         onContentSizeChange={(_width, height) => {
           markFirstPaintReady();
-          // Ignore no-op measurement blips while streaming.
-          if (
-            isStreamingRef.current &&
-            height === contentHeightRef.current
-          ) {
-            return;
-          }
+          if (height === contentHeightRef.current) return;
           contentHeightRef.current = height;
-          const shouldMaintainBottom =
-            autoFollowRef.current && !isUserDraggingRef.current;
-          updateNearBottom();
-          if (shouldMaintainBottom) {
-            if (isStreamingRef.current) {
-              requestStreamStick();
-            } else {
-              scheduleBottomAnchor(false);
-            }
-          } else {
-            flushAutoScroll();
-          }
+          maintainBottomAfterGeometryChange();
         }}
         onScrollToIndexFailed={({ index }) => {
           const clampedIndex = Math.max(
@@ -1139,9 +930,9 @@ function ChatTranscriptComponent({
         style={[
           styles.edgeMask,
           styles.edgeMaskTop,
+          styles.ignorePointerEvents,
           { height: topFadeHeight, top: topFadeOffset },
         ]}
-        pointerEvents="none"
       >
         {isDesktop ? (
           <BlurView
@@ -1167,19 +958,13 @@ function ChatTranscriptComponent({
           style={StyleSheet.absoluteFill}
         />
       </View>
-      {!isDesktop && showPlanTracker ? (
-        <PlanTracker
-          sessionType={sessionType}
-          onHeightChange={setPlanTrackerHeight}
-        />
-      ) : null}
       <View
         style={[
           styles.edgeMask,
           styles.edgeMaskBottom,
+          styles.ignorePointerEvents,
           { height: bottomScrimHeight, bottom: bottomScrimOffset },
         ]}
-        pointerEvents="none"
       >
         {isDesktop ? (
           <BlurView
@@ -1207,8 +992,11 @@ function ChatTranscriptComponent({
       </View>
       {showJumpToLatest ? (
         <View
-          pointerEvents="box-none"
-          style={[styles.jumpToLatestSlot, { bottom: bottomPadding + EDGE_GAP }]}
+          style={[
+            styles.jumpToLatestSlot,
+            styles.pointerBoxNone,
+            { bottom: bottomPadding + EDGE_GAP },
+          ]}
         >
           <Pressable
             accessibilityRole="button"
@@ -1216,15 +1004,14 @@ function ChatTranscriptComponent({
             onPress={handleJumpToLatest}
             style={styles.jumpToLatest}
           >
-            <BlurView
-              intensity={20}
-              tint={jumpTint}
-              style={StyleSheet.absoluteFill}
+            <AdaptiveMaterial
+              borderRadius={BOTTOM_CONTROL_RADIUS}
+              blurIntensity={20}
+              tone="regular"
             />
             <View
-              style={[StyleSheet.absoluteFill, { backgroundColor: jumpOverlay }]}
-            />
-            <View pointerEvents="none" style={styles.jumpToLatestInner}>
+              style={[styles.jumpToLatestInner, styles.ignorePointerEvents]}
+            >
               <ArrowDown size={24} color={t.foreground} strokeWidth={2.2} />
             </View>
           </Pressable>
@@ -1276,6 +1063,7 @@ const TranscriptMessageRowView = memo(function TranscriptMessageRowView({
     >
       <MessageBubble
         message={row.message}
+        sessionId={sessionId}
         isLast={isLastTranscriptMessage}
         isStreaming={isStreaming}
         isThinking={isThinking}
@@ -1313,6 +1101,12 @@ const TranscriptMessageRowView = memo(function TranscriptMessageRowView({
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
+  },
+  pointerBoxNone: {
+    pointerEvents: "box-none",
+  },
+  ignorePointerEvents: {
+    pointerEvents: "none",
   },
   empty: {
     flex: 1,

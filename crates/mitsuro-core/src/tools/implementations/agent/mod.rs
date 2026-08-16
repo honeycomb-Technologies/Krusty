@@ -13,7 +13,7 @@ mod single;
 mod tests;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -106,6 +106,10 @@ struct Params {
     #[serde(default)]
     expected_output: Option<String>,
 
+    /// Canonical acceptance contract for a single task or legacy component set.
+    #[serde(default)]
+    acceptance_checks: Vec<AcceptanceCheckParams>,
+
     /// Concise reason delegation improves this task.
     #[serde(default)]
     delegation_reason: Option<String>,
@@ -192,15 +196,53 @@ struct StructuredAgentTaskParams {
     #[serde(default)]
     expected_output: Option<String>,
     #[serde(default)]
+    acceptance_checks: Vec<AcceptanceCheckParams>,
+    #[serde(default)]
     capabilities: Vec<String>,
     #[serde(default)]
     scope: Option<String>,
+    /// Optional filesystem execution directory. Unlike `scope`, this is a
+    /// concrete path and must resolve to an existing directory inside the
+    /// selected project workspace.
+    #[serde(default)]
+    working_dir: Option<String>,
     #[serde(default)]
     write_intent: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
     max_turns: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(super) struct AcceptanceCheckParams {
+    id: String,
+    criterion: String,
+    /// Optional canonical evidence tier. Browser tiers can only be satisfied
+    /// by the governed browser_check tool; ordinary implementation checks use
+    /// the structured delegated handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_kind: Option<String>,
+}
+
+pub(super) fn compose_child_objective(prompt: &str, checks: &[AcceptanceCheckParams]) -> String {
+    let prompt = prompt.trim_end();
+    if checks.is_empty() {
+        return prompt.to_string();
+    }
+    format!("{prompt}\n\n{}", acceptance_contract_block(checks))
+}
+
+fn acceptance_contract_block(checks: &[AcceptanceCheckParams]) -> String {
+    if checks.is_empty() {
+        return "ACCEPTANCE CONTRACT:\nReport concrete checks proportional to this bounded task. Do not expand into downstream integration or product-wide verification. Runtime interaction is required only when this task owns interactive behavior or verification."
+            .to_string();
+    }
+    let payload = serde_json::to_string(&json!({"required": checks}))
+        .expect("acceptance contract contains serializable strings");
+    format!(
+        "ACCEPTANCE CONTRACT:\nEvery required check below must appear in the final delegated_handoff with the exact id, passed status, and concrete evidence. A skipped, missing, or failed check means the objective is degraded, not complete. Browser evidence kinds require the execute capability and a successful governed browser_check call.\n<delegated_acceptance_contract>{payload}</delegated_acceptance_contract>"
+    )
 }
 
 impl StructuredAgentTaskParams {
@@ -220,12 +262,12 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate substantial independent work in parallel, not simple lookups or tightly coupled edits. Prefer one tasks graph: ready tasks run together and dependencies run later; avoid repeated sibling spawns. Each task supports capabilities, scope, write_intent, depends_on, and max_turns. Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent integrates and verifies."
+        "Delegate substantial work, not simple lookups. One graph runs disjoint tasks in parallel; dependency-order overlaps. Interactive journeys need browser_check and typed acceptance evidence."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Spawn a named child for substantial independent work. For several tasks in one objective, use one structured tasks graph: run disjoint ready work concurrently and dependency-order shared-file or downstream work. max_turns includes one runtime-reserved tool-free final handoff, so budget preceding tool work accordingly. Use tasks or legacy components, never both. Use wait only when you must block. message steers a live child; followup/resume continue from durable evidence.",
+            "Delegate substantial work. In one tasks graph, run disjoint ready tasks concurrently and dependency-order shared-file, integration, or verification work. Declare acceptance_checks; set evidence_kind to browser_runtime, browser_keyboard, or browser_touch for governed browser proof. Interactive web journeys require browser_check at phone and desktop sizes without errors; builds and HTTP 200s are not substitutes. scope is prose; working_dir is an existing project-relative directory. Never combine tasks and components. In hosted Chat/Code, after run_in_background=true, do not call wait or status: finish the foreground response normally and let durable completion wake the parent. Use wait only for explicitly synchronous monitoring. status reads terminal evidence; message steers live work; followup/resume starts new work.",
         )
     }
 
@@ -236,7 +278,7 @@ impl Tool for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["spawn", "list", "status", "wait", "message", "followup", "interrupt", "resume"],
-                    "description": "Spawn or supervise a delegated child; defaults to spawn"
+                    "description": "Spawn/supervise; defaults to spawn. status reads evidence; followup/resume starts work."
                 },
                 "delegated_run_id": {
                     "type": "string"
@@ -246,11 +288,13 @@ impl Tool for AgentTool {
                 },
                 "wait_timeout_ms": {
                     "type": "integer",
+                    "description": "action=wait only; one synchronous wait",
                     "minimum": 0,
                     "maximum": 300000
                 },
                 "limit": {
                     "type": "integer",
+                    "description": "action=list only; not a turn budget",
                     "minimum": 1,
                     "maximum": 100
                 },
@@ -284,10 +328,6 @@ impl Tool for AgentTool {
                 "context": {
                     "type": "string",
                     "enum": ["auto", "project", "brief", "full"]
-                },
-                "max_turns": {
-                    "type": "integer",
-                    "minimum": 1
                 },
                 "scope": {
                     "type": "string"
@@ -324,11 +364,6 @@ impl Tool for AgentTool {
                                 "type": "array",
                                 "items": {"type": "string"}
                             },
-                            "max_turns": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "description": "Includes one runtime-reserved tool-free final handoff after canonical evidence exists"
-                            }
                         },
                         "additionalProperties": false
                     }
@@ -350,7 +385,7 @@ impl Tool for AgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Hosted Chat/Code only: return immediately; the parent is notified when the child completes"
+                    "description": "Hosted only: return now; do not poll. Completion wakes the parent."
                 },
                 "description": {
                     "type": "string",
@@ -359,7 +394,39 @@ impl Tool for AgentTool {
             },
             "additionalProperties": false
         });
-        if !self.runtime.has_completion_listener() {
+        schema["properties"]["tasks"]["items"]["properties"]["working_dir"] = json!({
+            "type": "string",
+            "description": "Optional existing workspace-relative directory for task execution; scope remains human-readable and is never interpreted as a path"
+        });
+        let acceptance_check_schema = json!({
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "criterion": {"type": "string"},
+                    "evidence_kind": {
+                        "type": "string",
+                        "enum": ["handoff", "browser_runtime", "browser_keyboard", "browser_touch"]
+                    }
+                },
+                "required": ["id", "criterion"],
+                "additionalProperties": false
+            }
+        });
+        schema["properties"]["acceptance_checks"] = acceptance_check_schema.clone();
+        schema["properties"]["tasks"]["items"]["properties"]["acceptance_checks"] =
+            acceptance_check_schema;
+        if self.runtime.has_completion_listener() {
+            if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+                actions.retain(|action| action.as_str() != Some("wait"));
+            }
+            schema["properties"]
+                .as_object_mut()
+                .expect("Agent schema properties")
+                .remove("wait_timeout_ms");
+        } else {
             schema["properties"]
                 .as_object_mut()
                 .expect("Agent schema properties")
@@ -405,12 +472,22 @@ fn has_explicit_empty_capabilities(params: &Value) -> bool {
 
 impl AgentTool {
     async fn execute_spawn(&self, mut params: Params, ctx: &ToolContext) -> ToolResult {
+        if let Err(error) = normalize_acceptance_checks(&mut params.acceptance_checks) {
+            return ToolResult::error_with_code("invalid_agent_acceptance_checks", error);
+        }
         let structured_group = match normalize_structured_tasks(&mut params) {
             Ok(structured_group) => structured_group,
             Err(error) => {
                 return ToolResult::error_with_code("invalid_agent_task_graph", error);
             }
         };
+        if params
+            .name
+            .as_deref()
+            .is_none_or(|name| name.trim().is_empty())
+        {
+            params.name = Some(derived_spawn_name(&params));
+        }
         let spec = match AgentSpec::resolve(
             params.profile.as_deref(),
             params.agent_type.as_deref(),
@@ -499,6 +576,39 @@ impl AgentTool {
     }
 }
 
+fn derived_spawn_name(params: &Params) -> String {
+    let candidate = params
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            params.tasks.as_ref().map(|tasks| {
+                tasks
+                    .iter()
+                    .take(3)
+                    .map(|task| {
+                        task.name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(&task.id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            })
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "delegated task".to_string());
+
+    let mut end = candidate.len().min(96);
+    while end > 0 && !candidate.is_char_boundary(end) {
+        end -= 1;
+    }
+    candidate[..end].trim().to_string()
+}
+
 fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
     let Some(tasks) = params.tasks.as_mut() else {
         return Ok(false);
@@ -530,6 +640,8 @@ fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
         if task.objective().is_empty() {
             return Err(format!("Agent task '{}' requires instructions", task.id));
         }
+        normalize_acceptance_checks(&mut task.acceptance_checks)
+            .map_err(|error| format!("Agent task '{}': {error}", task.id))?;
         if task.capabilities.is_empty() {
             task.capabilities.push("read".to_string());
         }
@@ -540,6 +652,23 @@ fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
                 crate::agent::subagent::AgentCapability::Write => "write".to_string(),
                 crate::agent::subagent::AgentCapability::Execute => "execute".to_string(),
             });
+        }
+        if !task
+            .capabilities
+            .iter()
+            .any(|capability| capability == "execute")
+        {
+            if let Some(check) = task.acceptance_checks.iter().find(|check| {
+                check
+                    .evidence_kind
+                    .as_deref()
+                    .is_some_and(|kind| kind.starts_with("browser_"))
+            }) {
+                return Err(format!(
+                    "Agent task '{}' acceptance check '{}' requires browser evidence but the task lacks execute capability. Add execute or move the browser check to an execute-capable verifier task",
+                    task.id, check.id
+                ));
+            }
         }
         task.depends_on = task
             .depends_on
@@ -645,7 +774,7 @@ fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
                     .any(|right_path| write_intents_overlap(left_path, right_path))
             }) {
                 return Err(format!(
-                    "Agent tasks '{}' and '{}' have overlapping write_intent but no dependency ordering",
+                    "Agent tasks '{}' and '{}' have overlapping write_intent but no dependency ordering. Add a depends_on edge between them or narrow their write_intent paths; no child was started.",
                     left.id, right.id
                 ));
             }
@@ -670,6 +799,42 @@ fn normalize_structured_tasks(params: &mut Params) -> Result<bool, String> {
         );
     }
     Ok(true)
+}
+
+fn normalize_acceptance_checks(checks: &mut Vec<AcceptanceCheckParams>) -> Result<(), String> {
+    if checks.len() > 16 {
+        return Err("acceptance_checks cannot exceed 16 items".to_string());
+    }
+    let mut ids = BTreeSet::new();
+    for check in checks {
+        check.id = check.id.trim().to_ascii_lowercase();
+        check.criterion = check.criterion.trim().to_string();
+        if check.id.is_empty() || check.id.len() > 128 {
+            return Err(
+                "every acceptance check needs an id of 128 characters or fewer".to_string(),
+            );
+        }
+        if check.criterion.is_empty() || check.criterion.len() > 1_200 {
+            return Err(
+                "every acceptance check needs a criterion of 1200 characters or fewer".to_string(),
+            );
+        }
+        if check.evidence_kind.as_deref().is_some_and(|kind| {
+            !matches!(
+                kind,
+                "handoff" | "browser_runtime" | "browser_keyboard" | "browser_touch"
+            )
+        }) {
+            return Err(format!(
+                "acceptance check '{}' has an unsupported evidence_kind",
+                check.id
+            ));
+        }
+        if !ids.insert(check.id.clone()) {
+            return Err(format!("duplicate acceptance check id '{}'", check.id));
+        }
+    }
+    Ok(())
 }
 
 fn write_intents_overlap(left: &str, right: &str) -> bool {

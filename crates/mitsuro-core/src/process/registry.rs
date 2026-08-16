@@ -8,6 +8,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
+use super::environment::CommandEnvironment;
 use super::model::{
     elapsed_millis_u64, ProcessCompletionEvent, ProcessEntry, ProcessId, ProcessInfo,
     ProcessOutputBuffer, ProcessStatus,
@@ -135,6 +136,26 @@ impl ProcessRegistry {
         description: Option<String>,
         session_id: Option<String>,
     ) -> Result<ProcessId> {
+        self.spawn_for_user_with_environment(
+            user_id,
+            command,
+            working_dir,
+            description,
+            session_id,
+            CommandEnvironment::inherited(),
+        )
+        .await
+    }
+
+    pub async fn spawn_for_user_with_environment(
+        &self,
+        user_id: &str,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+        session_id: Option<String>,
+        environment: CommandEnvironment,
+    ) -> Result<ProcessId> {
         let launch_gate = self.launch_gate_for_user(user_id).await;
         let _launch_guard = launch_gate.lock().await;
         self.spawn_for_user_with_launch_guard(
@@ -143,6 +164,7 @@ impl ProcessRegistry {
             working_dir,
             description,
             session_id,
+            environment,
         )
         .await
     }
@@ -161,12 +183,36 @@ impl ProcessRegistry {
     where
         F: Fn(&ProcessInfo) -> bool + Send,
     {
-        self.spawn_or_reuse_matching_for_user(
+        self.spawn_or_reuse_matching_with_environment(
+            command,
+            working_dir,
+            description,
+            session_id,
+            CommandEnvironment::inherited(),
+            is_equivalent,
+        )
+        .await
+    }
+
+    pub async fn spawn_or_reuse_matching_with_environment<F>(
+        &self,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+        session_id: Option<String>,
+        environment: CommandEnvironment,
+        is_equivalent: F,
+    ) -> Result<(ProcessInfo, bool)>
+    where
+        F: Fn(&ProcessInfo) -> bool + Send,
+    {
+        self.spawn_or_reuse_matching_for_user_with_environment(
             DEFAULT_USER,
             command,
             working_dir,
             description,
             session_id,
+            environment,
             is_equivalent,
         )
         .await
@@ -187,8 +233,34 @@ impl ProcessRegistry {
     where
         F: Fn(&ProcessInfo) -> bool + Send,
     {
+        self.spawn_or_reuse_matching_for_user_with_environment(
+            user_id,
+            command,
+            working_dir,
+            description,
+            session_id,
+            CommandEnvironment::inherited(),
+            is_equivalent,
+        )
+        .await
+    }
+
+    pub async fn spawn_or_reuse_matching_for_user_with_environment<F>(
+        &self,
+        user_id: &str,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+        session_id: Option<String>,
+        environment: CommandEnvironment,
+        is_equivalent: F,
+    ) -> Result<(ProcessInfo, bool)>
+    where
+        F: Fn(&ProcessInfo) -> bool + Send,
+    {
         let launch_gate = self.launch_gate_for_user(user_id).await;
         let _launch_guard = launch_gate.lock().await;
+        let environment_fingerprint = environment.fingerprint();
 
         let existing = self
             .processes
@@ -198,7 +270,10 @@ impl ProcessRegistry {
             .and_then(|user_map| {
                 user_map
                     .values()
-                    .find(|entry| is_equivalent(&entry.info))
+                    .find(|entry| {
+                        entry.environment_fingerprint == environment_fingerprint
+                            && is_equivalent(&entry.info)
+                    })
                     .map(|entry| entry.info.clone())
             });
         if let Some(process) = existing {
@@ -218,6 +293,7 @@ impl ProcessRegistry {
                 working_dir,
                 description,
                 session_id,
+                environment,
             )
             .await?;
         let process = self
@@ -243,6 +319,7 @@ impl ProcessRegistry {
         working_dir: PathBuf,
         description: Option<String>,
         session_id: Option<String>,
+        environment: CommandEnvironment,
     ) -> Result<ProcessId> {
         let active_count = self
             .processes
@@ -278,6 +355,8 @@ impl ProcessRegistry {
         };
 
         cmd.current_dir(&working_dir);
+        let environment_fingerprint = environment.fingerprint();
+        environment.apply(&mut cmd);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
@@ -351,6 +430,7 @@ impl ProcessRegistry {
         {
             let entry = ProcessEntry {
                 info,
+                environment_fingerprint,
                 output: Arc::clone(&output_tail),
                 _handle: None,
             };
@@ -743,6 +823,34 @@ impl ProcessRegistry {
         }
     }
 
+    /// Stop every active process belonging to one exact owner. This is used
+    /// for delegated-task lease cleanup and never crosses an owner boundary.
+    pub async fn kill_all_for_user(&self, user_id: &str) -> Vec<(ProcessId, String)> {
+        let active = self
+            .list_for_user(user_id)
+            .await
+            .into_iter()
+            .filter(ProcessInfo::is_active)
+            .map(|process| process.id)
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for id in active {
+            if let Err(error) = self.kill_for_user(user_id, &id).await {
+                // A monitor may have observed natural completion between the
+                // snapshot and signal. Only retain failures for still-active
+                // processes.
+                if self
+                    .get_for_user(user_id, &id)
+                    .await
+                    .is_some_and(|process| process.is_active())
+                {
+                    failures.push((id, error.to_string()));
+                }
+            }
+        }
+        failures
+    }
+
     pub async fn register_external(
         &self,
         id: ProcessId,
@@ -810,6 +918,7 @@ impl ProcessRegistry {
         };
         let entry = ProcessEntry {
             info,
+            environment_fingerprint: CommandEnvironment::inherited().fingerprint(),
             output: Arc::new(Mutex::new(ProcessOutputBuffer::default())),
             _handle: None,
         };

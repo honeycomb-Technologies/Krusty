@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-	MitsuroClient,
 	type DelegationEventResponse,
+	MitsuroClient,
 	type ModelKey,
 	type StreamCallbacks,
 } from "../src";
@@ -95,10 +95,13 @@ describe("MitsuroClient streaming lifecycle", () => {
 	test("surfaces a readable 402 provider limit error before streaming starts", async () => {
 		const errors: string[] = [];
 		const client = clientFor(
-			new Response(JSON.stringify({ error: "Grok Build usage balance exhausted" }), {
-				status: 402,
-				headers: { "content-type": "application/json" },
-			}),
+			new Response(
+				JSON.stringify({ error: "Grok Build usage balance exhausted" }),
+				{
+					status: 402,
+					headers: { "content-type": "application/json" },
+				},
+			),
 		);
 
 		await client.streamChat(
@@ -106,9 +109,7 @@ describe("MitsuroClient streaming lifecycle", () => {
 			createCallbacks({ onError: (error) => errors.push(error) }),
 		);
 
-		expect(errors).toEqual([
-			"API 402: Grok Build usage balance exhausted",
-		]);
+		expect(errors).toEqual(["API 402: Grok Build usage balance exhausted"]);
 	});
 
 	test("reports a clean EOF that has no finish or error event", async () => {
@@ -134,20 +135,23 @@ describe("MitsuroClient streaming lifecycle", () => {
 
 	test("accepts spec-valid data fields without a space after the colon", async () => {
 		const errors: string[] = [];
-		const finishes: string[] = [];
+		const finishes: Array<[string, string | undefined]> = [];
 		const client = clientFor(
-			streamResponse('data:{"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n'),
+			streamResponse(
+				'data:{"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+			),
 		);
 
 		await client.streamChat(
 			{ message: "hello" },
 			createCallbacks({
-				onFinish: (sessionId) => finishes.push(sessionId),
+				onFinish: (sessionId, stopReason) =>
+					finishes.push([sessionId, stopReason]),
 				onError: (error) => errors.push(error),
 			}),
 		);
 
-		expect(finishes).toEqual(["session-1"]);
+		expect(finishes).toEqual([["session-1", "end_turn"]]);
 		expect(errors).toEqual([]);
 	});
 
@@ -155,8 +159,8 @@ describe("MitsuroClient streaming lifecycle", () => {
 		const steering: Array<[string | undefined, string]> = [];
 		const client = clientFor(
 			streamResponse(
-				'data: {"type":"steering_injected","pending_id":"steer-1","message":"change direction"}\n\n'
-					+ 'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+				'data: {"type":"steering_injected","pending_id":"steer-1","message":"change direction"}\n\n' +
+					'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
 			),
 		);
 
@@ -171,12 +175,33 @@ describe("MitsuroClient streaming lifecycle", () => {
 		expect(steering).toEqual([["steer-1", "change direction"]]);
 	});
 
+	test("delivers bounded tool argument preparation progress", async () => {
+		const progress: Array<[string, string, number]> = [];
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"tool_call_start","id":"patch-1","name":"apply_patch"}\n\n' +
+					'data: {"type":"tool_call_preparing","id":"patch-1","name":"apply_patch","received_bytes":8192}\n\n' +
+					'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+			),
+		);
+
+		await client.streamChat(
+			{ message: "hello" },
+			createCallbacks({
+				onToolCallPreparing: (id, name, receivedBytes) =>
+					progress.push([id, name, receivedBytes]),
+			}),
+		);
+
+		expect(progress).toEqual([["patch-1", "apply_patch", 8192]]);
+	});
+
 	test("delivers typed durable delegation events with their replay cursor", async () => {
 		const events: unknown[] = [];
 		const client = clientFor(
 			streamResponse(
-				'data: {"type":"delegation_event","event":{"event_id":42,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":"task-1","event_type":"task_running","payload":{"state":"running"},"created_at":"2026-08-08T12:00:00Z"}}\n\n'
-					+ 'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+				'data: {"type":"delegation_event","event":{"event_id":42,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":"task-1","event_type":"task_running","payload":{"state":"running"},"created_at":"2026-08-08T12:00:00Z"}}\n\n' +
+					'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
 			),
 		);
 
@@ -187,15 +212,35 @@ describe("MitsuroClient streaming lifecycle", () => {
 			}),
 		);
 
-		expect(events).toEqual([{
-			event_id: 42,
-			parent_session_id: "session-1",
-			delegation_group_id: "group-1",
-			delegation_task_id: "task-1",
-			event_type: "task_running",
-			payload: { state: "running" },
-			created_at: "2026-08-08T12:00:00Z",
-		}]);
+		expect(events).toEqual([
+			{
+				event_id: 42,
+				parent_session_id: "session-1",
+				delegation_group_id: "group-1",
+				delegation_task_id: "task-1",
+				event_type: "task_running",
+				payload: { state: "running" },
+				created_at: "2026-08-08T12:00:00Z",
+			},
+		]);
+	});
+
+	test("scopes delegation event subscriptions to mounted consumers", async () => {
+		const subscribed: DelegationEventResponse[] = [];
+		const client = clientFor(
+			streamResponse(
+				'data: {"type":"delegation_event","event":{"event_id":42,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":"task-1","event_type":"task_running","payload":{"state":"running"},"created_at":"2026-08-08T12:00:00Z"}}\n\n' +
+					'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+			),
+		);
+		const unsubscribe = client.subscribeDelegationEvents((event) =>
+			subscribed.push(event),
+		);
+
+		await client.streamChat({ message: "hello" }, createCallbacks());
+		unsubscribe();
+
+		expect(subscribed.map((event) => event.event_id)).toEqual([42]);
 	});
 
 	test("preserves unknown durable delegation event kinds", async () => {
@@ -204,8 +249,8 @@ describe("MitsuroClient streaming lifecycle", () => {
 			"future_scheduler_event";
 		const client = clientFor(
 			streamResponse(
-				'data: {"type":"delegation_event","event":{"event_id":43,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":null,"event_type":"future_scheduler_event","payload":{"domain":"workspace"},"created_at":"2026-08-08T12:00:01Z"}}\n\n'
-					+ 'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
+				'data: {"type":"delegation_event","event":{"event_id":43,"parent_session_id":"session-1","delegation_group_id":"group-1","delegation_task_id":null,"event_type":"future_scheduler_event","payload":{"domain":"workspace"},"created_at":"2026-08-08T12:00:01Z"}}\n\n' +
+					'data: {"type":"finish","session_id":"session-1","stop_reason":"end_turn"}\n\n',
 			),
 		);
 
@@ -237,8 +282,8 @@ describe("MitsuroClient streaming lifecycle", () => {
 	test("preserves split UTF-8 code points and CRLF event boundaries", async () => {
 		const encoder = new TextEncoder();
 		const payload = encoder.encode(
-			'data: {"type":"text_delta","delta":"working 🦀"}\r\n\r\n'
-				+ 'data: {"type":"finish","session_id":"session-utf8","stop_reason":"end_turn"}\r\n\r\n',
+			'data: {"type":"text_delta","delta":"working 🦀"}\r\n\r\n' +
+				'data: {"type":"finish","session_id":"session-utf8","stop_reason":"end_turn"}\r\n\r\n',
 		);
 		const emojiStart = payload.indexOf(0xf0);
 		expect(emojiStart).toBeGreaterThan(0);
@@ -271,8 +316,8 @@ describe("MitsuroClient streaming lifecycle", () => {
 		const errors: string[] = [];
 		const client = clientFor(
 			streamResponse(
-				': heartbeat\r\nevent: message\r\ndata: {"type":"text_delta",\r\ndata: "delta":"joined"}\r\n\r\n'
-					+ 'data: {"type":"finish","session_id":"session-2","stop_reason":"end_turn"}\r\n\r\n',
+				': heartbeat\r\nevent: message\r\ndata: {"type":"text_delta",\r\ndata: "delta":"joined"}\r\n\r\n' +
+					'data: {"type":"finish","session_id":"session-2","stop_reason":"end_turn"}\r\n\r\n',
 			),
 		);
 

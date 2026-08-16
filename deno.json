@@ -1,6 +1,7 @@
 {
   "imports": {
     "@mitsuro/api": "./packages/api/src/index.ts",
+    "diff": "npm:diff@9.0.0",
     "react": "npm:react@19.2.0",
     "zustand": "npm:zustand@5.0.12"
   },

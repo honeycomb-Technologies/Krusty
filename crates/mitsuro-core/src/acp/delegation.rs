@@ -99,6 +99,7 @@ impl AcpDelegationProjection {
             DelegationEventType::TaskRunning => {
                 self.project_event_task(group, event, DelegationTaskState::Running, &mut updates);
             }
+            DelegationEventType::TaskActivity | DelegationEventType::TaskConversation => {}
             DelegationEventType::TaskStateChanged => {
                 if let Some(state) = event
                     .payload
@@ -382,7 +383,8 @@ mod tests {
                 failure_policy: DelegationFailurePolicy::Continue,
                 governance: DelegationGovernance {
                     permission_mode: PermissionMode::Supervised,
-                    delegated_turn_budget: 4,
+                    reasoning_effort: None,
+                    delegated_turn_budget: Some(4),
                     max_parallelism: 1,
                     execution_tool_allowlist: None,
                     delegation_policy: DelegationPolicy::for_subagent_build(

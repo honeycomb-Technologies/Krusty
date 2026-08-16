@@ -5,7 +5,7 @@ import type { ChatRequest, StreamCallbacks } from '../packages/api/src/types';
 import { createSessionStore } from '../packages/state/src/session/store';
 import { MemoryStorage } from '../packages/state/src/storage';
 import { createWorkspaceStore, type WorkspaceStoreState } from '../packages/state/src/workspace';
-import { resolveSendIntent } from '../apps/mobile/app/(tabs)/chat-screen/sendIntent';
+import { resolveSendIntent } from '../apps/mobile/components/chat-screen/sendIntent';
 
 function resolveIntentForWorkspace(
   activeTab: number,

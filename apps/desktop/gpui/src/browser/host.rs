@@ -20,8 +20,6 @@ pub trait BrowserHost {
     fn can_go_forward(&self) -> bool;
     /// Human-readable backend label for chips / status.
     fn host_kind(&self) -> &'static str;
-    /// Optional WebKit / engine version when native is linked.
-    fn engine_version(&self) -> Option<&str>;
 }
 
 /// One history entry. `body` describes the bridge state, not remote page content.
@@ -37,7 +35,7 @@ pub struct PageEntry {
 #[allow(dead_code)] // inspected via host_kind / tests
 pub enum HostBackend {
     /// External browser bridge — no embedded renderer linked.
-    Mock,
+    External,
     /// wry compiled + WebKitGTK available; embedding still depends on the native bridge.
     #[cfg(feature = "browser-native")]
     WryLinked { webkit_version: Option<String> },
@@ -59,8 +57,8 @@ pub type MockBrowserHost = DesktopBrowserHost;
 impl DesktopBrowserHost {
     /// External-bridge host (used when `browser-native` is off).
     #[cfg_attr(feature = "browser-native", allow(dead_code))]
-    pub fn new_mock() -> Self {
-        Self::with_backend(HostBackend::Mock, BrowserSessionStatus::NoNativeHost)
+    pub fn new_external() -> Self {
+        Self::with_backend(HostBackend::External, BrowserSessionStatus::NoNativeHost)
     }
 
     #[cfg(feature = "browser-native")]
@@ -114,7 +112,7 @@ impl BrowserHost for DesktopBrowserHost {
         self.index = self.history.len() - 1;
         // Keep explicit NoNativeHost for an external-only build; otherwise Ready after a nav.
         match &self.backend {
-            HostBackend::Mock => {
+            HostBackend::External => {
                 self.status = BrowserSessionStatus::NoNativeHost;
             }
             #[cfg(feature = "browser-native")]
@@ -176,17 +174,9 @@ impl BrowserHost for DesktopBrowserHost {
 
     fn host_kind(&self) -> &'static str {
         match &self.backend {
-            HostBackend::Mock => "System browser (external)",
+            HostBackend::External => "System browser (external)",
             #[cfg(feature = "browser-native")]
             HostBackend::WryLinked { .. } => "wry/WebKitGTK (linked bridge)",
-        }
-    }
-
-    fn engine_version(&self) -> Option<&str> {
-        match &self.backend {
-            HostBackend::Mock => None,
-            #[cfg(feature = "browser-native")]
-            HostBackend::WryLinked { webkit_version } => webkit_version.as_deref(),
         }
     }
 }
@@ -199,7 +189,7 @@ pub fn create_default_host() -> DesktopBrowserHost {
     }
     #[cfg(not(feature = "browser-native"))]
     {
-        DesktopBrowserHost::new_mock()
+        DesktopBrowserHost::new_external()
     }
 }
 
@@ -262,7 +252,7 @@ mod tests {
 
     #[test]
     fn history_navigate_back_forward() {
-        let mut h = DesktopBrowserHost::new_mock();
+        let mut h = DesktopBrowserHost::new_external();
         assert!(!h.can_go_back());
         assert!(!h.can_go_forward());
         assert_eq!(h.url(), "about:blank");
@@ -292,7 +282,7 @@ mod tests {
 
     #[test]
     fn normalize_adds_scheme() {
-        let mut h = DesktopBrowserHost::new_mock();
+        let mut h = DesktopBrowserHost::new_external();
         h.navigate("  localhost:3000/app  ");
         assert_eq!(h.url(), "http://localhost:3000/app");
     }

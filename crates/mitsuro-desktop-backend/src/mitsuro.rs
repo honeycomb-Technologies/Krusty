@@ -80,6 +80,7 @@ pub struct MitsuroServerBackend {
     client: MitsuroClient,
     status: RwLock<ConnectionStatus>,
     next_turn_id: AtomicU64,
+    server_version: RwLock<Option<String>>,
 }
 
 impl MitsuroServerBackend {
@@ -99,6 +100,7 @@ impl MitsuroServerBackend {
             client,
             status: RwLock::new(ConnectionStatus::Disconnected),
             next_turn_id: AtomicU64::new(1),
+            server_version: RwLock::new(None),
         })
     }
 
@@ -111,6 +113,13 @@ impl MitsuroServerBackend {
 
     pub fn client(&self) -> &MitsuroClient {
         &self.client
+    }
+
+    pub fn server_version(&self) -> Option<String> {
+        self.server_version
+            .read()
+            .ok()
+            .and_then(|version| version.clone())
     }
 
     fn set_status(&self, status: ConnectionStatus) {
@@ -1036,6 +1045,9 @@ impl AgentBackend for MitsuroServerBackend {
         self.set_status(ConnectionStatus::Connecting);
         match self.client.health().await {
             Ok(health) => {
+                if let Ok(mut version) = self.server_version.write() {
+                    *version = Some(health.version.clone());
+                }
                 self.set_status(ConnectionStatus::Ready);
                 Ok(InitializeResponse {
                     codex_home: String::new(),
@@ -2194,12 +2206,7 @@ mod tests {
             .ok()
             .filter(|model| !model.trim().is_empty());
         let outcome = backend
-            .run_turn_streaming(
-                turn,
-                event_tx,
-                bridge,
-                Duration::from_secs(120),
-            )
+            .run_turn_streaming(turn, event_tx, bridge, Duration::from_secs(120))
             .await;
         responder_stop.store(true, AtomicOrdering::Release);
         responder.join().expect("approval responder join");

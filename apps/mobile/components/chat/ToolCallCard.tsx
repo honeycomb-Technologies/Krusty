@@ -20,6 +20,7 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { BashOutput } from "./BashOutput";
 import { ToolDiffViewer } from "./ToolDiffViewer";
 import { InlineReportCard } from "../reports/InlineReportCard";
+import { AgentTeamCard } from "./AgentTeamCard";
 import { ToolDiffPeek } from "./ToolDiffPeek";
 import {
   buildReadFilePresentation,
@@ -31,12 +32,23 @@ import {
 } from "./toolPresentation";
 import type { ToolCall } from "@mitsuro/api";
 
+function isAgentLaunch(toolCall: ToolCall): boolean {
+  const name = toolCall.name.toLowerCase();
+  if (["explore", "plan", "verify", "build"].includes(name)) return true;
+  if (name !== "agent") return false;
+  const action = typeof toolCall.arguments?.action === "string"
+    ? toolCall.arguments.action.toLowerCase()
+    : "spawn";
+  return action === "spawn";
+}
+
 interface ToolCallCardProps {
   toolCall: ToolCall;
   isStreaming?: boolean;
   defaultExpanded?: boolean;
   /** Nested chips inside an exploration cluster stay extra quiet. */
   compact?: boolean;
+  sessionId?: string | null;
 }
 
 export const ToolCallCard = memo(function ToolCallCard({
@@ -44,6 +56,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   isStreaming,
   defaultExpanded,
   compact = false,
+  sessionId,
 }: ToolCallCardProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -89,6 +102,15 @@ export const ToolCallCard = memo(function ToolCallCard({
 
   if (presentation.family === "hidden") {
     return null;
+  }
+
+  if (isAgentLaunch(toolCall) && !compact) {
+    return (
+      <AgentTeamCard
+        toolCall={toolCall}
+        sessionId={sessionId}
+      />
+    );
   }
 
   const toggle = () => {
@@ -178,6 +200,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   previous.isStreaming === next.isStreaming &&
   previous.defaultExpanded === next.defaultExpanded &&
   previous.compact === next.compact &&
+  previous.sessionId === next.sessionId &&
   sameToolCallPresentation(previous.toolCall, next.toolCall),
 );
 

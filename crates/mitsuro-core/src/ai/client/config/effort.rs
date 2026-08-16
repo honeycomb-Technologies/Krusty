@@ -75,6 +75,8 @@ pub fn supports_openai_xhigh_reasoning(model_id: &str) -> bool {
     normalized.contains("codex")
         || normalized == "grok-build"
         || normalized.starts_with("grok-composer-")
+        || normalized.contains("grok-4.6")
+        || normalized.contains("grok-4-6")
         || supports_gpt5_xhigh_reasoning(normalized)
 }
 
@@ -124,6 +126,22 @@ mod tests {
     fn grok_build_models_support_xhigh_reasoning() {
         assert!(supports_openai_xhigh_reasoning("grok-build"));
         assert!(supports_openai_xhigh_reasoning("grok-composer-2.5-fast"));
+    }
+
+    #[test]
+    fn grok_46_supports_xhigh_and_grok_45_does_not() {
+        assert!(supports_openai_xhigh_reasoning("grok-4.6"));
+        assert!(supports_openai_xhigh_reasoning("grok-4-6"));
+        assert!(supports_openai_xhigh_reasoning("xai/grok-4.6"));
+        assert!(!supports_openai_xhigh_reasoning("grok-4.5"));
+        assert_eq!(
+            CodexReasoningEffort::XHigh.normalized_for_model("grok-4.6"),
+            CodexReasoningEffort::XHigh
+        );
+        assert_eq!(
+            CodexReasoningEffort::XHigh.normalized_for_model("grok-4.5"),
+            CodexReasoningEffort::High
+        );
     }
 
     #[test]

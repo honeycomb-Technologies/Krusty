@@ -423,7 +423,8 @@ impl PromptProcessor {
                         }
                     }
                 }
-                LoopEvent::AwaitingInput { .. }
+                LoopEvent::ToolCallPreparing { .. }
+                | LoopEvent::AwaitingInput { .. }
                 | LoopEvent::SteeringInjected { .. }
                 | LoopEvent::PlanComplete { .. }
                 | LoopEvent::Usage { .. }

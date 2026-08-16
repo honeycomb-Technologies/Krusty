@@ -124,6 +124,14 @@ pub enum LoopEvent {
     /// AI is starting to stream a tool call (arguments not yet complete).
     ToolCallStart { id: String, name: String },
 
+    /// Bounded progress while the provider is still composing a large tool
+    /// argument payload. Raw arguments remain private until completion.
+    ToolCallPreparing {
+        id: String,
+        name: String,
+        received_bytes: usize,
+    },
+
     /// Tool call arguments fully received from AI.
     ToolCallComplete {
         id: String,

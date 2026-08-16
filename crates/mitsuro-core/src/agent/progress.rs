@@ -133,6 +133,16 @@ impl LoopGuard {
         tool_calls: &[AiToolCall],
         tool_results: &[Content],
     ) -> LoopGuardOutcome {
+        // A producer-verified mutation creates a new program state. Failures
+        // observed before that boundary are no longer consecutive evidence
+        // about the current state, so a first validation rerun after a fix
+        // must not trip the repeated-failure guard. Subsequent identical
+        // failures still converge under the normal threshold.
+        if turn_has_verified_mutation(tool_calls, tool_results) {
+            self.failure_signatures.clear();
+            self.validation_signatures.clear();
+            self.read_only_signatures.clear();
+        }
         LoopGuardOutcome {
             repeated_failure: failure::detect_repeated_failures(
                 &mut self.failure_signatures,
@@ -152,6 +162,16 @@ impl LoopGuard {
             progress: self.progress.record_turn(tool_calls, tool_results),
         }
     }
+}
+
+fn turn_has_verified_mutation(tool_calls: &[AiToolCall], tool_results: &[Content]) -> bool {
+    let results = results_by_call_id(tool_results);
+    tool_calls.iter().any(|call| {
+        action_fingerprint(call).class == ActionClass::Mutate
+            && results
+                .get(call.id.as_str())
+                .is_some_and(|result| !result.is_error && result.changed == Some(true))
+    })
 }
 
 /// Parent-only pressure toward delegation after sustained, successful
@@ -402,13 +422,8 @@ impl ProgressLedger {
             // normalized intent in the current steering window. This contains
             // timestamp churn, random rewrites, and repeated background starts
             // without reintroducing an arbitrary global turn cap.
-            let effect_identity = result
-                .progress_change_key
-                .as_ref()
-                .unwrap_or(&fingerprint.intent);
-            if result.changed == Some(true)
-                && self.seen_changed_effects.insert(effect_identity.clone())
-            {
+            let effect_identity = producer_effect_identity(call, fingerprint, result);
+            if result.changed == Some(true) && self.seen_changed_effects.insert(effect_identity) {
                 discovered_new_changed_effect = true;
             } else if result.changed.is_none()
                 && effect_class
@@ -538,6 +553,32 @@ impl ProgressLedger {
             },
             triggered: self.no_progress_turns >= NO_PROGRESS_TURN_THRESHOLD,
         }
+    }
+}
+
+fn producer_effect_identity(
+    call: &AiToolCall,
+    fingerprint: &ActionFingerprint,
+    result: &ResultEvidence,
+) -> String {
+    let Some(change_key) = result.progress_change_key.as_deref() else {
+        return fingerprint.intent.clone();
+    };
+    let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
+
+    // Structured editors publish a trusted target-surface key, while their
+    // normalized input identifies the exact requested state transition. A
+    // second legitimate patch to the same file is therefore new progress,
+    // but replaying the exact patch is not. Free-form shell keeps the narrower
+    // target-only identity so timestamp/random-content churn cannot evade
+    // convergence by spelling the command differently.
+    if matches!(
+        effective_name,
+        "apply_patch" | "edit" | "multiedit" | "write"
+    ) {
+        format!("{change_key}:{}", fingerprint.intent)
+    } else {
+        change_key.to_string()
     }
 }
 
@@ -1181,6 +1222,52 @@ mod tests {
     }
 
     #[test]
+    fn verified_mutation_invalidates_pre_change_validation_failures() {
+        let validation = |id: &str| {
+            call(
+                id,
+                "bash",
+                json!({ "command": "cargo test -p app focused_regression" }),
+            )
+        };
+        let mut guard = LoopGuard::new();
+
+        let first = validation("validate-before");
+        let first_result = result("validate-before", "compile error E0308", true);
+        assert!(guard
+            .evaluate(std::slice::from_ref(&first), &[first_result])
+            .repeated_failure
+            .is_none());
+
+        let mutation = call(
+            "fix",
+            "apply_patch",
+            json!({ "patch": "*** Begin Patch\n*** End Patch" }),
+        );
+        assert!(guard
+            .evaluate(
+                std::slice::from_ref(&mutation),
+                &[result_with_changed("fix", true)],
+            )
+            .repeated_failure
+            .is_none());
+
+        let rerun = validation("validate-after-1");
+        let rerun_result = result("validate-after-1", "compile error E0308", true);
+        assert!(guard
+            .evaluate(std::slice::from_ref(&rerun), &[rerun_result])
+            .repeated_failure
+            .is_none());
+
+        let repeated = validation("validate-after-2");
+        let repeated_result = result("validate-after-2", "compile error E0308", true);
+        assert!(guard
+            .evaluate(std::slice::from_ref(&repeated), &[repeated_result])
+            .repeated_failure
+            .is_some());
+    }
+
+    #[test]
     fn explicit_noop_mutations_trigger_after_three_attempts() {
         let mut ledger = ProgressLedger::new();
 
@@ -1252,6 +1339,63 @@ mod tests {
                 .expect("a repeated producer change target must converge");
             assert_eq!(telemetry.action, expected);
             assert_eq!(telemetry.triggered, expected == ProgressGuardAction::Stop);
+        }
+    }
+
+    #[test]
+    fn distinct_structured_edits_to_same_target_are_progress() {
+        let mut ledger = ProgressLedger::new();
+        for (index, replacement) in ["first", "second", "third"].into_iter().enumerate() {
+            let id = format!("edit-{index}");
+            let calls = vec![call(
+                &id,
+                "edit",
+                json!({
+                    "file_path": "vite.config.ts",
+                    "old_string": "before",
+                    "new_string": replacement,
+                }),
+            )];
+            assert!(
+                ledger
+                    .record_turn(
+                        &calls,
+                        &[result_with_changed_key(&id, "vite-config-target")],
+                    )
+                    .is_none(),
+                "a different structured edit to the same file is a new state transition"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_structured_edit_replay_still_converges() {
+        let mut ledger = ProgressLedger::new();
+        for attempt in 1..=NO_PROGRESS_TURN_THRESHOLD + 1 {
+            let id = format!("edit-{attempt}");
+            let calls = vec![call(
+                &id,
+                "edit",
+                json!({
+                    "file_path": "vite.config.ts",
+                    "old_string": "before",
+                    "new_string": "after",
+                }),
+            )];
+            let telemetry = ledger.record_turn(
+                &calls,
+                &[result_with_changed_key(&id, "vite-config-target")],
+            );
+            if attempt == 1 {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("an exact structured replay must converge");
+                assert_eq!(telemetry.no_progress_turns, attempt - 1);
+                assert_eq!(
+                    telemetry.triggered,
+                    attempt - 1 == NO_PROGRESS_TURN_THRESHOLD
+                );
+            }
         }
     }
 

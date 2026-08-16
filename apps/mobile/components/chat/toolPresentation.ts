@@ -287,6 +287,9 @@ function buildSummary(
   args: Record<string, unknown>,
   diff: ToolDiffPresentation | null,
 ): string {
+  if (toolCall.status === "running" && toolCall.description) {
+    return toolCall.description;
+  }
   if (family === "bash") {
     return firstString(args.command) || toolCall.output?.split("\n")[0] || "command";
   }

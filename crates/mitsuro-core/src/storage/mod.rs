@@ -70,9 +70,9 @@ pub use delegation::{
     DelegationGovernance, DelegationGroupContract, DelegationGroupRecord,
     DelegationGroupStartInput, DelegationGroupState, DelegationLeaseRenewalBatchResult,
     DelegationParentContinuationState, DelegationStore, DelegationSynthesisLease,
-    DelegationSynthesisLeaseRenewal, DelegationTaskLease, DelegationTaskLeaseRenewal,
-    DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState, DelegationWriterMode,
-    DELEGATION_EXECUTOR_ENVELOPE_VERSION,
+    DelegationSynthesisLeaseRenewal, DelegationTaskActivity, DelegationTaskLease,
+    DelegationTaskLeaseRenewal, DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState,
+    DelegationWriterMode, DELEGATION_EXECUTOR_ENVELOPE_VERSION,
 };
 pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
 pub use expo_push_devices::{ExpoPushDevice, ExpoPushDeviceRegistration, ExpoPushDeviceStore};

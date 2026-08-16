@@ -4,18 +4,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, ImageFormat,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
-    Pixels, Render, ScrollHandle, SharedString, Styled as _, Window,
+    div, point, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable, ImageFormat, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _,
+    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Styled as _, Task, Window,
 };
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, SelectAll};
 use mitsuro_desktop_backend::{
     activity_item_fields, command_execution_fields, conversation_messages_from_thread_value,
     decode_base64_lossy, file_change_fields, fixture_demo_account_response,
@@ -24,10 +24,11 @@ use mitsuro_desktop_backend::{
     fixture_demo_skills, fixture_demo_usage, join_abs, load_sample_turn_events, normalize_abs_path,
     summarize_file_changes, valid_mcp_server_name, Account, ActivityFields,
     AddCreditsNudgeCreditType, AddCreditsNudgeEmailStatus, AgentBackend, AppInfo, ApprovalChoice,
-    AppsInstalledParams, AppsListParams, BackendKind, BackendSelection, BackendSessionId,
-    CancelLoginAccountParams, CancelLoginAccountStatus, CodexSessionSettings,
+    AppsInstalledParams, AppsListParams, BackendCapabilities, BackendKind, BackendSelection,
+    BackendSessionId, CancelLoginAccountParams, CancelLoginAccountStatus, CodexSessionSettings,
     CollaborationModeListParams, CollaborationModeMask, CommandExecOutputDeltaNotification,
     CommandExecOutputStream, CommandExecParams, CommandExecTerminateParams, CommandExecWriteParams,
+    ComposerAccessModeContract, ComposerSpeedModeContract, ComposerWorkModeContract,
     ConfigBatchWriteParams, ConfigEdit, ConfigReadParams, ConfigRequirements, ConfigWriteStatus,
     ConsumeAccountRateLimitResetCreditOutcome, ConsumeAccountRateLimitResetCreditParams,
     ConversationAudio, ConversationImage, ConversationMessage, ConversationReference,
@@ -86,13 +87,18 @@ use crate::browser::open_system_browser;
 use crate::browser::NativeWebViewHost;
 use crate::browser::{create_default_host, BrowserHost, DesktopBrowserHost};
 use crate::components;
+use crate::connection_registry::{
+    ConnectionId, ConnectionRegistry, ConnectionStatus as RegistryConnectionStatus, SessionKey,
+};
 use crate::demo::{
     self, DemoAudioAttachment, DemoAudioSource, DemoGoal, DemoGoalStatus, DemoImageAttachment,
     DemoImageSource, DemoMessage, DemoMessageKind, DemoReferenceAttachment, DemoReferenceKind,
     DemoThread, ThreadSurface,
 };
 use crate::mcp_app_runtime::{McpAppRuntime, McpAppRuntimeEvent, McpAppRuntimeHandle};
-use crate::preferences::{DesktopPreferences, DesktopProject};
+use crate::preferences::{
+    DesktopPreferences, DesktopProject, PersistedComposerDraft, PersistedDraftAttachment,
+};
 use crate::theme;
 
 gpui::actions!(
@@ -113,6 +119,8 @@ gpui::actions!(
         GoToCodex,
         OpenTerminal,
         OpenAtlas,
+        FocusNextControl,
+        FocusPreviousControl,
     ]
 );
 
@@ -136,6 +144,8 @@ pub fn init_keybindings(cx: &mut App) {
         KeyBinding::new("ctrl-3", GoToCodex, None),
         KeyBinding::new("ctrl-`", OpenTerminal, None),
         KeyBinding::new("ctrl-shift-b", OpenAtlas, None),
+        KeyBinding::new("tab", FocusNextControl, None),
+        KeyBinding::new("shift-tab", FocusPreviousControl, None),
     ]);
 }
 
@@ -529,6 +539,15 @@ fn parse_start_thread(mode_raw: Option<&str>) -> Option<String> {
     None
 }
 
+fn environment_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 const SETTINGS_SECTIONS: [SettingsSection; 21] = [
     SettingsSection::General,
     SettingsSection::LinuxDesktop,
@@ -717,10 +736,10 @@ impl ProductMode {
         )
     }
 
-    /// Mode switcher pill label (Chat vs Codex surfaces).
+    /// Mode switcher product label (ChatGPT vs Codex surfaces).
     pub fn mode_switcher_label(self) -> &'static str {
         match self {
-            Self::Chat => "Chat",
+            Self::Chat => "ChatGPT",
             _ => "Codex",
         }
     }
@@ -734,6 +753,13 @@ pub enum TerminalSessionStatus {
     Running,
     Exited,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalBackgroundContract {
+    ThreadTerminals,
+    TrackedProcesses,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -847,8 +873,6 @@ pub struct BrowserSession {
     pub page_body: SharedString,
     /// Host backend chip label.
     pub host_kind: SharedString,
-    /// Optional WebKit version when wry is linked.
-    pub engine_version: Option<SharedString>,
     /// Bridge / attach detail (external, sibling, embed probe).
     pub bridge_detail: SharedString,
     /// Short bridge mode label for chips.
@@ -870,9 +894,6 @@ impl BrowserSession {
             can_go_forward: host.can_go_forward(),
             page_body: host.page_body().to_string().into(),
             host_kind: host_kind_override.unwrap_or_else(|| SharedString::from(host.host_kind())),
-            engine_version: host
-                .engine_version()
-                .map(|v| SharedString::from(v.to_string())),
             bridge_detail,
             bridge_mode,
         }
@@ -917,6 +938,291 @@ impl UiConnection {
             Self::Error { .. } => "Error",
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct UiConnectionSummary {
+    pub connection_id: ConnectionId,
+    pub kind: BackendKind,
+    pub label: String,
+    pub provenance: Option<String>,
+    pub capability_schema_version: Option<u32>,
+    pub provider_version: Option<String>,
+    pub last_error: Option<String>,
+    pub state: UiConnectionState,
+    pub selected: bool,
+    pub buffered_updates: usize,
+    pub running_sessions: usize,
+    pub needs_attention: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiConnectionState {
+    Connecting,
+    Online {
+        session_count: usize,
+    },
+    Degraded {
+        session_count: usize,
+        reason: String,
+    },
+    Offline {
+        reason: Option<String>,
+    },
+    Reconnecting,
+    Unsupported {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct DesktopConnectionSpec {
+    id: ConnectionId,
+    kind: BackendKind,
+    display_name: String,
+    mitsuro_url: Option<String>,
+    bearer_token_env: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentConnectionSpec {
+    name: String,
+    kind: BackendKind,
+    display_name: Option<String>,
+    url: Option<String>,
+    token_env: Option<String>,
+}
+
+fn additional_connection_specs(raw: &str) -> Result<Vec<DesktopConnectionSpec>, String> {
+    let entries: Vec<EnvironmentConnectionSpec> =
+        serde_json::from_str(raw).map_err(|error| format!("connection JSON: {error}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut specs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !matches!(
+            entry.kind,
+            BackendKind::CodexStdio | BackendKind::MitsuroHttp
+        ) {
+            return Err(format!(
+                "connection {} uses unsupported backend {}",
+                entry.name,
+                entry.kind.id()
+            ));
+        }
+        let id = ConnectionId::named(entry.kind, &entry.name)
+            .map_err(|error| format!("connection {}: {error}", entry.name))?;
+        if !seen.insert(id.clone()) {
+            return Err(format!("duplicate connection id {id}"));
+        }
+        let mitsuro_url = match entry.kind {
+            BackendKind::MitsuroHttp => Some(
+                entry
+                    .url
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| format!("connection {id} requires a URL"))?,
+            ),
+            BackendKind::CodexStdio => {
+                if entry.url.is_some() || entry.token_env.is_some() {
+                    return Err(format!(
+                        "connection {id} cannot define url or tokenEnv for codex-stdio"
+                    ));
+                }
+                None
+            }
+            BackendKind::CodexWebSocket | BackendKind::Fixture => unreachable!(),
+        };
+        let display_name = entry
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} · {}",
+                    MitsuroApp::backend_display_name(entry.kind),
+                    entry.name
+                )
+            });
+        specs.push(DesktopConnectionSpec {
+            id,
+            kind: entry.kind,
+            display_name,
+            mitsuro_url,
+            bearer_token_env: entry.token_env.filter(|name| !name.trim().is_empty()),
+        });
+    }
+    Ok(specs)
+}
+
+fn configured_connection_specs() -> (
+    Vec<ConnectionId>,
+    std::collections::HashMap<ConnectionId, DesktopConnectionSpec>,
+    Option<String>,
+) {
+    let primary_codex = DesktopConnectionSpec {
+        id: ConnectionId::primary(BackendKind::CodexStdio),
+        kind: BackendKind::CodexStdio,
+        display_name: MitsuroApp::backend_display_name(BackendKind::CodexStdio).to_owned(),
+        mitsuro_url: None,
+        bearer_token_env: None,
+    };
+    let primary_mitsuro = DesktopConnectionSpec {
+        id: ConnectionId::primary(BackendKind::MitsuroHttp),
+        kind: BackendKind::MitsuroHttp,
+        display_name: MitsuroApp::backend_display_name(BackendKind::MitsuroHttp).to_owned(),
+        mitsuro_url: None,
+        bearer_token_env: None,
+    };
+    let mut ordered = vec![primary_codex.id.clone(), primary_mitsuro.id.clone()];
+    let mut specs = [primary_codex, primary_mitsuro]
+        .into_iter()
+        .map(|spec| (spec.id.clone(), spec))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut configuration_error = None;
+    if let Ok(raw) = std::env::var("MITSURO_DESKTOP_CONNECTIONS") {
+        match additional_connection_specs(&raw) {
+            Ok(additional) => {
+                for spec in additional {
+                    ordered.push(spec.id.clone());
+                    specs.insert(spec.id.clone(), spec);
+                }
+            }
+            Err(error) => configuration_error = Some(error),
+        }
+    }
+    (ordered, specs, configuration_error)
+}
+
+fn ui_connection_state(
+    status: Option<&RegistryConnectionStatus>,
+    configuration_error: Option<&str>,
+) -> UiConnectionState {
+    match status {
+        Some(RegistryConnectionStatus::Connecting) => UiConnectionState::Connecting,
+        Some(RegistryConnectionStatus::Reconnecting) => UiConnectionState::Reconnecting,
+        Some(RegistryConnectionStatus::Ready { session_count, .. }) => UiConnectionState::Online {
+            session_count: *session_count,
+        },
+        Some(RegistryConnectionStatus::Degraded {
+            session_count,
+            message,
+            ..
+        }) => UiConnectionState::Degraded {
+            session_count: *session_count,
+            reason: message.clone(),
+        },
+        Some(RegistryConnectionStatus::Error { message }) => UiConnectionState::Offline {
+            reason: Some(message.clone()),
+        },
+        Some(RegistryConnectionStatus::Disconnected) => UiConnectionState::Offline { reason: None },
+        None => configuration_error.map_or(UiConnectionState::Offline { reason: None }, |reason| {
+            UiConnectionState::Unsupported {
+                reason: reason.to_owned(),
+            }
+        }),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UiConnectionThreadPreview {
+    pub connection_id: ConnectionId,
+    pub provider_session_id: String,
+    pub title: String,
+    pub activity: Option<UiThreadActivity>,
+}
+
+/// A provider-qualified session state rendered in navigation.
+///
+/// Attention states intentionally win over `Running`: an approval/input request
+/// means the turn is still alive but cannot advance without the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiThreadActivity {
+    Running,
+    ApprovalNeeded,
+    InputNeeded,
+    Completed,
+    Failed,
+}
+
+/// Shared presentation contract for controls whose backend semantics differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionAvailability {
+    Available,
+    Hidden(&'static str),
+    Disabled(&'static str),
+    Unavailable(&'static str),
+    ReadOnly(&'static str),
+    Offline(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionStartIntent {
+    ReuseOrStart,
+    ReconnectAfterTeardown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionStartDisposition {
+    Start,
+    ReuseInFlight,
+    RefreshReady,
+    ReuseWithoutRefresh,
+    AwaitExplicitReconnect,
+}
+
+fn connection_start_disposition(
+    status: Option<&RegistryConnectionStatus>,
+    has_cached_initialization: bool,
+    intent: ConnectionStartIntent,
+) -> ConnectionStartDisposition {
+    if intent == ConnectionStartIntent::ReconnectAfterTeardown {
+        return ConnectionStartDisposition::Start;
+    }
+    match status {
+        None => ConnectionStartDisposition::Start,
+        Some(RegistryConnectionStatus::Connecting | RegistryConnectionStatus::Reconnecting) => {
+            ConnectionStartDisposition::ReuseInFlight
+        }
+        Some(
+            RegistryConnectionStatus::Ready { .. } | RegistryConnectionStatus::Degraded { .. },
+        ) if has_cached_initialization => ConnectionStartDisposition::RefreshReady,
+        Some(
+            RegistryConnectionStatus::Ready { .. } | RegistryConnectionStatus::Degraded { .. },
+        ) => ConnectionStartDisposition::ReuseWithoutRefresh,
+        Some(RegistryConnectionStatus::Error { .. } | RegistryConnectionStatus::Disconnected) => {
+            ConnectionStartDisposition::AwaitExplicitReconnect
+        }
+    }
+}
+
+impl ActionAvailability {
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Available => None,
+            Self::Hidden(reason)
+            | Self::Disabled(reason)
+            | Self::Unavailable(reason)
+            | Self::ReadOnly(reason)
+            | Self::Offline(reason) => Some(reason),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ThreadAction {
+    Create,
+    Open,
+    Resume,
+    Rename,
+    Delete,
+    Archive,
+    Unarchive,
+    Fork,
+    SideConversation,
 }
 
 /// Provenance for data rendered by a product surface.
@@ -1546,12 +1852,76 @@ struct RealtimeVoiceRuntime {
     playback: Option<RealtimePlayback>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct TranscriptPaginationState {
     older_turns_cursor: Option<String>,
     fully_loaded: bool,
     loading: bool,
+    /// Invalidates overlapping snapshot/page reads for this provider thread.
     generation: u64,
+    /// Advances whenever a live turn event touches this transcript.
+    live_revision: u64,
+    /// Older in-memory messages were compacted and must be restored from the
+    /// authoritative provider before this transcript is treated as complete.
+    requires_rehydrate: bool,
+    /// Provider item ids that reached `item/completed`. Pre-terminal replay
+    /// for these ids is ignored so delayed deltas cannot reopen final content.
+    completed_item_ids: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptUnreadAnchor {
+    /// Stable provider item identity when one exists. The fallback index keeps
+    /// local/user/voice rows addressable too.
+    item_id: Option<String>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptViewportState {
+    /// True while incoming content should remain pinned to the newest item.
+    /// A deliberate upward scroll disables this until the user returns to the
+    /// bottom or presses the jump control.
+    follow_latest: bool,
+    unseen_messages: usize,
+    unread_anchor: Option<TranscriptUnreadAnchor>,
+}
+
+impl Default for TranscriptViewportState {
+    fn default() -> Self {
+        Self {
+            follow_latest: true,
+            unseen_messages: 0,
+            unread_anchor: None,
+        }
+    }
+}
+
+const INACTIVE_TRANSCRIPT_MESSAGE_LIMIT: usize = 256;
+const COMPLETED_TRANSCRIPT_ITEM_LIMIT: usize = 512;
+const TRANSCRIPT_BOTTOM_THRESHOLD_PX: f32 = 48.0;
+const LIVE_UI_EVENT_BATCH_WINDOW_MS: u64 = 33;
+const LIVE_UI_EVENT_BATCH_LIMIT: usize = 256;
+
+fn compact_transcript_messages(
+    messages: &mut Vec<DemoMessage>,
+    state: &mut TranscriptPaginationState,
+    retained_tail: usize,
+) -> usize {
+    let removed = messages.len().saturating_sub(retained_tail);
+    if removed == 0 {
+        return 0;
+    }
+    messages.drain(0..removed);
+    let retained_ids = messages
+        .iter()
+        .filter_map(|message| message.item_id.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    state
+        .completed_item_ids
+        .retain(|item_id| retained_ids.contains(item_id));
+    state.requires_rehydrate = true;
+    removed
 }
 
 /// A side chat can run while its main thread remains active. The existing
@@ -1661,6 +2031,328 @@ impl ConcurrentSideTurnState {
     }
 }
 
+#[derive(Default)]
+struct SessionInteractionState {
+    pending_approval: Option<PendingApproval>,
+    pending_user_input: Option<PendingUserInput>,
+    user_input_question_index: usize,
+    user_input_answers: BTreeMap<String, Vec<String>>,
+    pending_mcp_elicitation: Option<PendingMcpElicitation>,
+    mcp_form_field_index: usize,
+    mcp_form_values: BTreeMap<String, serde_json::Value>,
+    live_approval_bridge: Option<Arc<LiveApprovalBridge>>,
+}
+
+#[derive(Default)]
+struct SessionTurnState {
+    in_progress: bool,
+    generation: u64,
+    active_thread_id: Option<String>,
+    turn_id: Option<String>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Default)]
+struct SessionDraftState {
+    text: String,
+    attachments: Vec<ComposerAttachment>,
+}
+
+#[derive(Clone)]
+struct SessionComposerSelectionState {
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
+    fast_mode: bool,
+    plan_mode: bool,
+}
+
+#[derive(Default)]
+struct SessionMessageEditState {
+    edit: Option<LatestMessageEdit>,
+    in_progress: bool,
+    error: Option<String>,
+    generation: u64,
+    text: String,
+}
+
+impl SessionMessageEditState {
+    fn is_pristine(&self) -> bool {
+        self.edit.is_none()
+            && !self.in_progress
+            && self.error.is_none()
+            && self.generation == 0
+            && self.text.is_empty()
+    }
+}
+
+impl SessionDraftState {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.attachments.is_empty()
+    }
+}
+
+impl SessionInteractionState {
+    fn is_empty(&self) -> bool {
+        self.pending_approval.is_none()
+            && self.pending_user_input.is_none()
+            && self.user_input_answers.is_empty()
+            && self.pending_mcp_elicitation.is_none()
+            && self.mcp_form_values.is_empty()
+            && self.live_approval_bridge.is_none()
+    }
+}
+
+impl SessionTurnState {
+    fn is_pristine(&self) -> bool {
+        !self.in_progress
+            && self.generation == 0
+            && self.active_thread_id.is_none()
+            && self.turn_id.is_none()
+            && self.cancel.is_none()
+    }
+}
+
+#[derive(Default)]
+struct ProviderThreadProjection {
+    threads: Vec<DemoThread>,
+    delegations: std::collections::HashMap<String, SessionDelegationProjection>,
+    transcript_visible_limits: std::collections::HashMap<String, usize>,
+    transcript_pagination: std::collections::HashMap<String, TranscriptPaginationState>,
+    expanded_transcript_messages: std::collections::HashSet<String>,
+    selected_thread: Option<String>,
+    selected_chat_thread: Option<String>,
+    selected_codex_thread: Option<String>,
+    side_conversation_parents: std::collections::HashMap<String, String>,
+    codex_thread_subscriptions: std::collections::HashSet<SessionKey>,
+    codex_read_only_threads: std::collections::HashSet<SessionKey>,
+    guardian_denials: std::collections::HashMap<String, Vec<GuardianDeniedAction>>,
+    queued_follow_ups: std::collections::HashMap<SessionKey, VecDeque<QueuedFollowUp>>,
+    concurrent_side_turn: Option<ConcurrentSideTurnState>,
+    side_turn_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionAttention {
+    Approval,
+    Input,
+    Completed,
+    Failed,
+}
+
+struct SessionRuntimeState {
+    ui_thread_id: String,
+    generation: u64,
+    in_progress: bool,
+    turn_id: Option<String>,
+    attention: Option<SessionAttention>,
+}
+
+struct SubscriptionOperationOwner {
+    generation: u64,
+    latest_generation: Arc<AtomicU64>,
+    serial: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone)]
+struct SubscriptionOperation {
+    generation: u64,
+    latest_generation: Arc<AtomicU64>,
+    serial: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SubscriptionOperation {
+    fn is_current(&self) -> bool {
+        self.latest_generation.load(Ordering::SeqCst) == self.generation
+    }
+}
+
+fn begin_subscription_operation(
+    operations: &mut std::collections::HashMap<SessionKey, SubscriptionOperationOwner>,
+    session_key: &SessionKey,
+) -> SubscriptionOperation {
+    let owner =
+        operations
+            .entry(session_key.clone())
+            .or_insert_with(|| SubscriptionOperationOwner {
+                generation: 0,
+                latest_generation: Arc::new(AtomicU64::new(0)),
+                serial: Arc::new(tokio::sync::Mutex::new(())),
+            });
+    owner.generation = owner.generation.wrapping_add(1);
+    owner
+        .latest_generation
+        .store(owner.generation, Ordering::SeqCst);
+    SubscriptionOperation {
+        generation: owner.generation,
+        latest_generation: Arc::clone(&owner.latest_generation),
+        serial: Arc::clone(&owner.serial),
+    }
+}
+
+fn session_runtime_counts(
+    runtimes: &std::collections::HashMap<SessionKey, SessionRuntimeState>,
+    connection_id: &ConnectionId,
+) -> (usize, usize) {
+    runtimes
+        .iter()
+        .filter(|(key, _)| key.connection_id == *connection_id)
+        .fold((0, 0), |(running, attention), (_, runtime)| {
+            (
+                running + usize::from(runtime.in_progress),
+                attention + usize::from(runtime.attention.is_some()),
+            )
+        })
+}
+
+fn session_runtime_activity(
+    runtimes: &std::collections::HashMap<SessionKey, SessionRuntimeState>,
+    session_key: &SessionKey,
+) -> Option<UiThreadActivity> {
+    let runtime = runtimes.get(session_key)?;
+    match runtime.attention {
+        Some(SessionAttention::Approval) => Some(UiThreadActivity::ApprovalNeeded),
+        Some(SessionAttention::Input) => Some(UiThreadActivity::InputNeeded),
+        Some(SessionAttention::Completed) => Some(UiThreadActivity::Completed),
+        Some(SessionAttention::Failed) => Some(UiThreadActivity::Failed),
+        None if runtime.in_progress => Some(UiThreadActivity::Running),
+        None => None,
+    }
+}
+
+fn interaction_attention_for_event(event: &TurnStreamEvent) -> Option<SessionAttention> {
+    match event {
+        TurnStreamEvent::ApprovalRequested(_) => Some(SessionAttention::Approval),
+        TurnStreamEvent::UserInputRequested(_) | TurnStreamEvent::McpElicitationRequested(_) => {
+            Some(SessionAttention::Input)
+        }
+        _ => None,
+    }
+}
+
+fn clear_interaction_attention(runtime: &mut SessionRuntimeState) -> bool {
+    if matches!(
+        runtime.attention,
+        Some(SessionAttention::Approval | SessionAttention::Input)
+    ) {
+        runtime.attention = None;
+    }
+    !runtime.in_progress && runtime.attention.is_none()
+}
+
+fn clear_terminal_attention(runtime: &mut SessionRuntimeState) -> bool {
+    if matches!(
+        runtime.attention,
+        Some(SessionAttention::Completed | SessionAttention::Failed)
+    ) {
+        runtime.attention = None;
+    }
+    !runtime.in_progress && runtime.attention.is_none()
+}
+
+fn session_is_foreground(
+    routing_background_projection: bool,
+    selected_thread: Option<&str>,
+    thread_id: &str,
+) -> bool {
+    !routing_background_projection && selected_thread == Some(thread_id)
+}
+
+fn backend_supports_thread_action(capabilities: BackendCapabilities, action: ThreadAction) -> bool {
+    match action {
+        ThreadAction::Create => capabilities.thread_create,
+        ThreadAction::Open => capabilities.thread_open,
+        ThreadAction::Resume => capabilities.thread_resume,
+        ThreadAction::Rename => capabilities.thread_rename,
+        ThreadAction::Delete => capabilities.thread_delete,
+        ThreadAction::Archive => capabilities.thread_archive,
+        ThreadAction::Unarchive => capabilities.thread_unarchive,
+        ThreadAction::Fork => capabilities.fork,
+        ThreadAction::SideConversation => capabilities.side_conversations,
+    }
+}
+
+fn persisted_session_drafts(
+    preferences: &DesktopPreferences,
+) -> std::collections::HashMap<SessionKey, SessionDraftState> {
+    preferences
+        .composer_drafts
+        .iter()
+        .filter_map(|draft| {
+            let connection_id = ConnectionId::parse_persisted(&draft.connection_id).ok()?;
+            let session_key =
+                SessionKey::new(connection_id, draft.provider_session_id.clone()).ok()?;
+            let attachments = draft
+                .attachments
+                .iter()
+                .filter_map(|attachment| {
+                    let kind = match attachment.kind.as_str() {
+                        "image" => ComposerAttachmentKind::Image,
+                        "audio" => ComposerAttachmentKind::Audio,
+                        "skill" => ComposerAttachmentKind::Skill,
+                        "mention" => ComposerAttachmentKind::Mention,
+                        _ => return None,
+                    };
+                    Some(ComposerAttachment {
+                        path: attachment.path.clone(),
+                        name: attachment.name.clone(),
+                        kind,
+                    })
+                })
+                .collect();
+            Some((
+                session_key,
+                SessionDraftState {
+                    text: draft.text.clone(),
+                    attachments,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn persisted_composer_drafts(
+    drafts: &std::collections::HashMap<SessionKey, SessionDraftState>,
+) -> Vec<PersistedComposerDraft> {
+    let mut persisted = drafts
+        .iter()
+        .filter(|(_, draft)| !draft.is_empty())
+        .filter_map(|(key, draft)| {
+            let backend_id = key.connection_id.as_str().split(':').next()?;
+            let backend = BackendKind::from_id(backend_id)?;
+            if backend == BackendKind::Fixture {
+                return None;
+            }
+            Some(PersistedComposerDraft {
+                backend,
+                connection_id: key.connection_id.as_str().to_owned(),
+                provider_session_id: key.provider_session_id.clone(),
+                text: draft.text.clone(),
+                attachments: draft
+                    .attachments
+                    .iter()
+                    .map(|attachment| PersistedDraftAttachment {
+                        path: attachment.path.clone(),
+                        name: attachment.name.clone(),
+                        kind: match attachment.kind {
+                            ComposerAttachmentKind::Image => "image",
+                            ComposerAttachmentKind::Audio => "audio",
+                            ComposerAttachmentKind::Skill => "skill",
+                            ComposerAttachmentKind::Mention => "mention",
+                        }
+                        .to_owned(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Vec<_>>();
+    persisted.sort_by(|left, right| {
+        left.connection_id
+            .cmp(&right.connection_id)
+            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
+    });
+    persisted
+}
+
 impl From<mitsuro_desktop_backend::SessionHistoryState> for TranscriptPaginationState {
     fn from(history: mitsuro_desktop_backend::SessionHistoryState) -> Self {
         Self {
@@ -1668,6 +2360,9 @@ impl From<mitsuro_desktop_backend::SessionHistoryState> for TranscriptPagination
             fully_loaded: history.fully_loaded,
             loading: false,
             generation: 0,
+            live_revision: 0,
+            requires_rehydrate: false,
+            completed_item_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -1711,12 +2406,21 @@ pub struct MitsuroApp {
     /// `thread/searchOccurrences` (or Mitsuro's real transcript projection).
     thread_find_input: Entity<InputState>,
     thread_find_open: bool,
+    /// Optional wide-context inspector for real outputs and transcript sources.
+    thread_inspector_open: bool,
     thread_find_matches: Vec<ThreadSearchOccurrence>,
     thread_find_selected: usize,
     thread_find_loading: bool,
     thread_find_hydrating: bool,
     thread_find_error: Option<String>,
     thread_find_generation: u64,
+    /// Inline title editor. Real sessions commit through the owning provider's
+    /// rename contract; local drafts update only their local summary.
+    thread_rename_input: Entity<InputState>,
+    thread_rename_open: bool,
+    thread_rename_in_progress: bool,
+    thread_rename_error: Option<String>,
+    thread_rename_generation: u64,
     /// Inline editor for the latest persisted Codex user message. Submission
     /// performs one real turn rollback before starting the replacement turn.
     latest_message_edit_input: Entity<InputState>,
@@ -1922,22 +2626,89 @@ pub struct MitsuroApp {
     /// Backend-specific access preset picked before an optimistic draft exists.
     composer_default_access_mode: Option<ProductAccessMode>,
     /// Explicit per-thread access overrides; absent means preserve backend defaults.
-    composer_access_modes: std::collections::HashMap<String, ProductAccessMode>,
+    composer_access_modes: std::collections::HashMap<SessionKey, ProductAccessMode>,
     composer_access_menu_open: bool,
     search_input: Entity<InputState>,
     search_query: String,
+    sidebar_search_open: bool,
+    configured_connection_order: Vec<ConnectionId>,
+    connection_specs: std::collections::HashMap<ConnectionId, DesktopConnectionSpec>,
+    connection_specs_error: Option<String>,
+    /// All live provider connections. `backend` remains the active projection
+    /// during the incremental UI-state migration; entries here are not evicted
+    /// merely because the user selects another provider.
+    connections: ConnectionRegistry,
+    /// Local configuration failures for providers that cannot construct a
+    /// transport at all. These render as Unsupported rather than pretending
+    /// the provider is merely offline.
+    connection_configuration_errors: std::collections::HashMap<ConnectionId, String>,
+    /// Hydrated transcripts and thread-local UI state retained while another
+    /// provider is selected, including provider-owned turn interactions.
+    thread_projections: std::collections::HashMap<ConnectionId, ProviderThreadProjection>,
+    /// Successful transport handshakes retained per provider. Re-selecting a
+    /// ready connection reuses its initialization identity while refreshing
+    /// catalogs, without reconnecting or installing another lifecycle listener.
+    backend_initializations:
+        std::collections::HashMap<ConnectionId, mitsuro_desktop_backend::InitializeResponse>,
+    /// Exactly one application-owned lifecycle consumer per connection.
+    /// Replacing the task cancels the previous receiver immediately.
+    lifecycle_listener_tasks: std::collections::HashMap<ConnectionId, Task<()>>,
+    /// Exactly one connection/catalog bootstrap task per connection. Completed
+    /// tasks remain as inert ownership records until an explicit reconnect
+    /// replaces them; ordinary selection can never spawn a duplicate process.
+    connection_bootstrap_tasks: std::collections::HashMap<ConnectionId, Task<()>>,
+    /// Provider-independent ownership index for real live turns. Legacy
+    /// foreground fields still render the selected projection, while this map
+    /// prevents runtime identity from collapsing back to raw thread ids.
+    session_runtimes: std::collections::HashMap<SessionKey, SessionRuntimeState>,
+    /// Pending approval/question/MCP state lives with the exact real session.
+    /// The legacy foreground fields below are only the currently projected
+    /// session (or explicit fixture) and are swapped through this map.
+    session_interactions: std::collections::HashMap<SessionKey, SessionInteractionState>,
+    /// Primary turn fields are projected from this exact-session store. Side
+    /// chats retain their dedicated concurrent state below.
+    session_turns: std::collections::HashMap<SessionKey, SessionTurnState>,
+    /// Composer text and attachments follow the exact real session. Local
+    /// drafts use a connection-qualified internal `draft/…` key until promotion.
+    session_drafts: std::collections::HashMap<SessionKey, SessionDraftState>,
+    /// Debounced permission-restricted persistence of unsent user input.
+    draft_save_task: Option<Task<()>>,
+    /// Model, effort, response tier, and plan/build choice follow the selected
+    /// session instead of leaking across same-provider conversations.
+    session_composer_selections:
+        std::collections::HashMap<SessionKey, SessionComposerSelectionState>,
+    /// Each session retains its own GPUI scroll handle, including the exact
+    /// pixel offset and visible child tracked internally by GPUI.
+    session_scroll_handles: std::collections::HashMap<SessionKey, ScrollHandle>,
+    /// Follow-latest and unread boundaries belong to the provider-qualified
+    /// conversation, so Codex and Mitsuro sessions can stream concurrently
+    /// without stealing one another's viewport behavior.
+    session_transcript_viewports: std::collections::HashMap<SessionKey, TranscriptViewportState>,
+    /// Destructive latest-message rollback/resubmit state is conversation-owned.
+    session_message_edits: std::collections::HashMap<SessionKey, SessionMessageEditState>,
+    /// Codex resume/unsubscribe operations are serialized and invalidated per
+    /// provider-qualified session so late work cannot steal or close a newer
+    /// subscription after navigation.
+    subscription_operations: std::collections::HashMap<SessionKey, SubscriptionOperationOwner>,
+    /// Draft text belonging to the provider projection currently loaded into
+    /// the legacy foreground fields. The visible InputState is synchronized
+    /// only on a real user-facing provider switch, never during background routing.
+    projected_composer_text: String,
+    /// True only while an inactive provider projection is synchronously loaded
+    /// to apply a background event on the GPUI thread.
+    routing_background_projection: bool,
     backend: Option<Arc<DesktopBackend>>,
-    /// Rejects stale async bootstrap results after an in-app backend switch.
+    /// Generation of the connection currently projected into legacy active fields.
     backend_generation: u64,
     /// Serializes persistent `thread/settings/update` writes so rapid composer
     /// changes cannot reach app-server out of order.
     thread_settings_write_lock: Arc<tokio::sync::Mutex<()>>,
     thread_settings_update_generation: u64,
-    /// Raw Codex thread ids for subscriptions successfully owned by this app-server.
-    codex_thread_subscriptions: std::collections::HashSet<String>,
-    /// Raw Codex thread ids opened through a truthful snapshot because another
+    /// Connection-qualified Codex sessions whose subscriptions are owned by this app-server.
+    codex_thread_subscriptions: std::collections::HashSet<SessionKey>,
+    /// Connection-qualified Codex sessions opened through a truthful snapshot because another
     /// app-server owns the active writer.
-    codex_read_only_threads: std::collections::HashSet<String>,
+    codex_read_only_threads: std::collections::HashSet<SessionKey>,
     preferences: DesktopPreferences,
     fixture: Option<Arc<FixtureBackend>>,
     turn_in_progress: bool,
@@ -1950,7 +2721,7 @@ pub struct MitsuroApp {
     active_turn_id: Option<String>,
     /// User-authored follow-ups waiting for the active turn on each real thread.
     /// Entries are local dispatch intent, never synthetic backend success.
-    queued_follow_ups: std::collections::HashMap<String, VecDeque<QueuedFollowUp>>,
+    queued_follow_ups: std::collections::HashMap<SessionKey, VecDeque<QueuedFollowUp>>,
     /// Independent live turn state for the single ephemeral side chat.
     concurrent_side_turn: Option<ConcurrentSideTurnState>,
     side_turn_generation: u64,
@@ -1967,6 +2738,9 @@ pub struct MitsuroApp {
     sidebar_activity_view: bool,
     /// Thread title overflow menu (Archive / Fork / Delete) open state.
     thread_menu_open: bool,
+    /// Sidebar row whose local overflow is open. The selected thread remains
+    /// the action owner, but the menu stays anchored to the navigation row.
+    sidebar_thread_menu: Option<String>,
     /// Nested native-host Project membership picker inside thread actions.
     thread_project_menu_open: bool,
     /// Dismissible home promo card: usage.
@@ -2011,7 +2785,7 @@ pub struct MitsuroApp {
     terminal: TerminalSession,
     /// Command line for process/spawn.
     terminal_cmd_input: Entity<InputState>,
-    /// Stdin line for process/writeStdin.
+    /// Stdin line for the active terminal process.
     terminal_stdin_input: Entity<InputState>,
     /// Monotonic handle counter for client-supplied processHandle.
     terminal_handle_seq: u64,
@@ -2040,6 +2814,10 @@ pub struct MitsuroApp {
     scheduled_enabled: Vec<bool>,
     /// Some, including an empty vec, means the Mitsuro Hive schedule API is live.
     scheduled_tasks: Option<Vec<ProductSchedule>>,
+    /// Capability-qualified load state for the schedule catalog. Keeping this
+    /// separate from the optional rows distinguishes a real empty catalog from
+    /// an unsupported or failed provider request.
+    scheduled_tasks_state: SurfaceDataState,
     /// Schedule id currently being changed through the Mitsuro control plane.
     schedule_mutation_in_progress: Option<String>,
     /// Destructive cancellation requires the same schedule to be selected twice.
@@ -2098,7 +2876,12 @@ impl MitsuroApp {
             &composer_input,
             window,
             |app, input, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => {
+                    let _ = input;
+                    app.sync_current_draft_state(cx);
+                    app.schedule_draft_save(cx);
+                    cx.notify();
+                }
                 InputEvent::PressEnter { secondary }
                     if composer_enter_should_send(
                         &app.settings_choice("send_shortcut", "Enter"),
@@ -2111,7 +2894,25 @@ impl MitsuroApp {
             },
         )
         .detach();
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search")
+                .clean_on_escape()
+        });
+        cx.subscribe_in(
+            &search_input,
+            window,
+            |app, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    app.sync_search_from_input(cx);
+                    if app.sidebar_search_open && app.search_query.is_empty() {
+                        app.sidebar_search_open = false;
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let latest_message_edit_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Edit message")
@@ -2136,6 +2937,21 @@ impl MitsuroApp {
             |app, _input, event: &InputEvent, _window, cx| match event {
                 InputEvent::Change => app.search_selected_thread_occurrences(cx),
                 InputEvent::PressEnter { .. } => app.select_next_thread_find_match(1, cx),
+                _ => {}
+            },
+        )
+        .detach();
+        let thread_rename_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Conversation name"));
+        cx.subscribe_in(
+            &thread_rename_input,
+            window,
+            |app, _input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    app.thread_rename_error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => app.commit_thread_rename(window, cx),
                 _ => {}
             },
         )
@@ -2178,13 +2994,10 @@ impl MitsuroApp {
         )
         .detach();
 
-        let terminal_cmd_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("bash -lc 'echo hello from mitsuro'")
-                .default_value("echo hello from mitsuro")
-        });
-        let terminal_stdin_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("stdin (writeStdin)…"));
+        let terminal_cmd_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Enter a shell command"));
+        let terminal_stdin_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Send input to the running process"));
         cx.subscribe_in(
             &terminal_cmd_input,
             window,
@@ -2441,6 +3254,8 @@ impl MitsuroApp {
             Ok(runtime) => (Some(runtime), None),
             Err(error) => (None, Some(error)),
         };
+        let (configured_connection_order, connection_specs, connection_specs_error) =
+            configured_connection_specs();
 
         let mut app = Self {
             focus_handle: cx.focus_handle(),
@@ -2461,12 +3276,18 @@ impl MitsuroApp {
             transcript_scroll_handle: ScrollHandle::new(),
             thread_find_input,
             thread_find_open: false,
+            thread_inspector_open: environment_flag("MITSURO_START_THREAD_INSPECTOR"),
             thread_find_matches: Vec::new(),
             thread_find_selected: 0,
             thread_find_loading: false,
             thread_find_hydrating: false,
             thread_find_error: None,
             thread_find_generation: 0,
+            thread_rename_input,
+            thread_rename_open: false,
+            thread_rename_in_progress: false,
+            thread_rename_error: None,
+            thread_rename_generation: 0,
             latest_message_edit_input,
             latest_message_edit: None,
             latest_message_edit_in_progress: false,
@@ -2481,6 +3302,7 @@ impl MitsuroApp {
             mode_menu_open: false,
             sidebar_activity_view: false,
             thread_menu_open: false,
+            sidebar_thread_menu: None,
             thread_project_menu_open: false,
             dismiss_usage_card: false,
             pending_user_input: None,
@@ -2625,6 +3447,28 @@ impl MitsuroApp {
             composer_access_menu_open: false,
             search_input,
             search_query: String::new(),
+            sidebar_search_open: false,
+            configured_connection_order,
+            connection_specs,
+            connection_specs_error,
+            connections: ConnectionRegistry::default(),
+            connection_configuration_errors: std::collections::HashMap::new(),
+            thread_projections: std::collections::HashMap::new(),
+            backend_initializations: std::collections::HashMap::new(),
+            lifecycle_listener_tasks: std::collections::HashMap::new(),
+            connection_bootstrap_tasks: std::collections::HashMap::new(),
+            session_runtimes: std::collections::HashMap::new(),
+            session_interactions: std::collections::HashMap::new(),
+            session_turns: std::collections::HashMap::new(),
+            session_drafts: persisted_session_drafts(&preferences),
+            draft_save_task: None,
+            session_composer_selections: std::collections::HashMap::new(),
+            session_scroll_handles: std::collections::HashMap::new(),
+            session_transcript_viewports: std::collections::HashMap::new(),
+            session_message_edits: std::collections::HashMap::new(),
+            subscription_operations: std::collections::HashMap::new(),
+            projected_composer_text: String::new(),
+            routing_background_projection: false,
             backend: None,
             backend_generation: 0,
             thread_settings_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2674,6 +3518,7 @@ impl MitsuroApp {
             scheduled_show_tasks: false,
             scheduled_enabled: vec![true, true],
             scheduled_tasks: None,
+            scheduled_tasks_state: SurfaceDataState::Loading,
             schedule_mutation_in_progress: None,
             schedule_cancel_confirmation: None,
             schedule_editor: None,
@@ -2767,11 +3612,914 @@ impl MitsuroApp {
         &self.connection
     }
 
+    pub fn connection_specs_error(&self) -> Option<&str> {
+        self.connection_specs_error.as_deref()
+    }
+
+    pub fn connection_summaries(&self) -> Vec<UiConnectionSummary> {
+        if self.is_explicit_fixture() {
+            return Vec::new();
+        }
+        self.configured_connection_order
+            .iter()
+            .map(|id| {
+                let kind = id.kind();
+                let entry = self.connections.get(id);
+                let (running_sessions, needs_attention) =
+                    session_runtime_counts(&self.session_runtimes, id);
+                UiConnectionSummary {
+                    connection_id: id.clone(),
+                    kind,
+                    label: entry
+                        .map(|entry| entry.metadata.display_name.clone())
+                        .or_else(|| {
+                            self.connection_specs
+                                .get(id)
+                                .map(|spec| spec.display_name.clone())
+                        })
+                        .unwrap_or_else(|| Self::backend_display_name(kind).to_owned()),
+                    provenance: entry.map(|entry| entry.metadata.provenance.summary().to_owned()),
+                    capability_schema_version: entry
+                        .map(|entry| entry.metadata.capability_negotiation.schema_version),
+                    provider_version: entry.and_then(|entry| {
+                        entry
+                            .metadata
+                            .capability_negotiation
+                            .provider_version
+                            .clone()
+                    }),
+                    last_error: entry
+                        .and_then(|entry| entry.metadata.last_error.as_ref())
+                        .map(|error| error.message.clone()),
+                    state: ui_connection_state(
+                        entry.map(|entry| &entry.status),
+                        self.connection_configuration_errors
+                            .get(id)
+                            .map(String::as_str),
+                    ),
+                    selected: self.connections.selected_id() == Some(id),
+                    buffered_updates: self.connections.pending_lifecycle_event_count(id),
+                    running_sessions,
+                    needs_attention,
+                }
+            })
+            .collect()
+    }
+
+    pub fn inactive_connection_thread_previews(
+        &self,
+        connection_id: &ConnectionId,
+        limit: usize,
+    ) -> Vec<UiConnectionThreadPreview> {
+        if self.connections.selected_id() == Some(connection_id) {
+            return Vec::new();
+        }
+        let Some(projection) = self.thread_projections.get(connection_id) else {
+            return Vec::new();
+        };
+        projection
+            .threads
+            .iter()
+            .filter(|thread| thread.summary.archived != Some(true))
+            .filter_map(|thread| {
+                let session = thread.backend_session_id.as_ref()?;
+                let key = SessionKey::new(connection_id.clone(), session.raw.clone()).ok()?;
+                Some(UiConnectionThreadPreview {
+                    connection_id: connection_id.clone(),
+                    provider_session_id: session.raw.clone(),
+                    title: thread.summary.display_title(),
+                    activity: session_runtime_activity(&self.session_runtimes, &key),
+                })
+            })
+            .take(limit)
+            .collect()
+    }
+
+    fn primary_interaction_owner_thread_id(&self) -> Option<&str> {
+        self.selected_side_conversation_parent()
+            .or(self.selected_thread.as_deref())
+    }
+
+    fn take_primary_session_interaction(&mut self) -> SessionInteractionState {
+        SessionInteractionState {
+            pending_approval: self.pending_approval.take(),
+            pending_user_input: self.pending_user_input.take(),
+            user_input_question_index: std::mem::take(&mut self.user_input_question_index),
+            user_input_answers: std::mem::take(&mut self.user_input_answers),
+            pending_mcp_elicitation: self.pending_mcp_elicitation.take(),
+            mcp_form_field_index: std::mem::take(&mut self.mcp_form_field_index),
+            mcp_form_values: std::mem::take(&mut self.mcp_form_values),
+            live_approval_bridge: self.live_approval_bridge.take(),
+        }
+    }
+
+    fn apply_primary_session_interaction(&mut self, state: SessionInteractionState) {
+        self.pending_approval = state.pending_approval;
+        self.pending_user_input = state.pending_user_input;
+        self.user_input_question_index = state.user_input_question_index;
+        self.user_input_answers = state.user_input_answers;
+        self.pending_mcp_elicitation = state.pending_mcp_elicitation;
+        self.mcp_form_field_index = state.mcp_form_field_index;
+        self.mcp_form_values = state.mcp_form_values;
+        self.live_approval_bridge = state.live_approval_bridge;
+    }
+
+    fn store_session_interaction(
+        &mut self,
+        session_key: SessionKey,
+        state: SessionInteractionState,
+    ) {
+        if state.is_empty() {
+            self.session_interactions.remove(&session_key);
+        } else {
+            self.session_interactions.insert(session_key, state);
+        }
+    }
+
+    fn stash_selected_session_interaction(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let session_key = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|thread_id| self.draft_key_for_ui_thread(&thread_id));
+        let state = self.take_primary_session_interaction();
+        if let Some(session_key) = session_key {
+            self.store_session_interaction(session_key, state);
+        }
+    }
+
+    fn restore_selected_session_interaction(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let state = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|thread_id| self.draft_key_for_ui_thread(&thread_id))
+            .and_then(|session_key| self.session_interactions.remove(&session_key))
+            .unwrap_or_default();
+        self.apply_primary_session_interaction(state);
+    }
+
+    fn with_session_interaction<R>(
+        &mut self,
+        thread_id: &str,
+        update: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if self.thread_is_concurrent_side_turn(thread_id)
+            || self.primary_interaction_owner_thread_id() == Some(thread_id)
+        {
+            return update(self);
+        }
+        let Some(target_key) = self.draft_key_for_ui_thread(thread_id) else {
+            return update(self);
+        };
+        let original_key = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|owner_id| self.draft_key_for_ui_thread(&owner_id));
+        let mut original_state = Some(self.take_primary_session_interaction());
+        if let Some(original_key) = original_key.as_ref() {
+            self.store_session_interaction(
+                original_key.clone(),
+                original_state.take().expect("original interaction present"),
+            );
+        }
+
+        let target_state = self
+            .session_interactions
+            .remove(&target_key)
+            .unwrap_or_default();
+        self.apply_primary_session_interaction(target_state);
+        let result = update(self);
+        let target_state = self.take_primary_session_interaction();
+        self.store_session_interaction(target_key, target_state);
+
+        if let Some(original_key) = original_key {
+            let original_state = self
+                .session_interactions
+                .remove(&original_key)
+                .unwrap_or_default();
+            self.apply_primary_session_interaction(original_state);
+        } else {
+            self.apply_primary_session_interaction(original_state.unwrap_or_default());
+        }
+        result
+    }
+
+    fn take_primary_session_turn(&mut self) -> SessionTurnState {
+        SessionTurnState {
+            in_progress: std::mem::take(&mut self.turn_in_progress),
+            generation: std::mem::take(&mut self.turn_generation),
+            active_thread_id: self.active_turn_thread_id.take(),
+            turn_id: self.active_turn_id.take(),
+            cancel: self.turn_cancel.take(),
+        }
+    }
+
+    fn apply_primary_session_turn(&mut self, state: SessionTurnState) {
+        self.turn_in_progress = state.in_progress;
+        self.turn_generation = state.generation;
+        self.active_turn_thread_id = state.active_thread_id;
+        self.active_turn_id = state.turn_id;
+        self.turn_cancel = state.cancel;
+    }
+
+    fn store_session_turn(&mut self, session_key: SessionKey, state: SessionTurnState) {
+        if state.is_pristine() {
+            self.session_turns.remove(&session_key);
+        } else {
+            self.session_turns.insert(session_key, state);
+        }
+    }
+
+    fn stash_selected_session_turn(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let session_key = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|thread_id| self.draft_key_for_ui_thread(&thread_id));
+        let state = self.take_primary_session_turn();
+        if let Some(session_key) = session_key {
+            self.store_session_turn(session_key, state);
+        }
+    }
+
+    fn restore_selected_session_turn(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let state = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|thread_id| self.draft_key_for_ui_thread(&thread_id))
+            .and_then(|session_key| self.session_turns.remove(&session_key))
+            .unwrap_or_default();
+        self.apply_primary_session_turn(state);
+    }
+
+    fn with_session_turn<R>(&mut self, thread_id: &str, update: impl FnOnce(&mut Self) -> R) -> R {
+        if self.thread_is_concurrent_side_turn(thread_id)
+            || self.primary_interaction_owner_thread_id() == Some(thread_id)
+        {
+            return update(self);
+        }
+        let Some(target_key) = self.draft_key_for_ui_thread(thread_id) else {
+            return update(self);
+        };
+        let original_key = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+            .and_then(|owner_id| self.draft_key_for_ui_thread(&owner_id));
+        let mut original_state = Some(self.take_primary_session_turn());
+        if let Some(original_key) = original_key.as_ref() {
+            self.store_session_turn(
+                original_key.clone(),
+                original_state.take().expect("original turn present"),
+            );
+        }
+
+        let target_state = self.session_turns.remove(&target_key).unwrap_or_default();
+        self.apply_primary_session_turn(target_state);
+        let result = update(self);
+        let target_state = self.take_primary_session_turn();
+        self.store_session_turn(target_key, target_state);
+
+        if let Some(original_key) = original_key {
+            let original_state = self.session_turns.remove(&original_key).unwrap_or_default();
+            self.apply_primary_session_turn(original_state);
+        } else {
+            self.apply_primary_session_turn(original_state.unwrap_or_default());
+        }
+        result
+    }
+
+    fn draft_key_for_ui_thread(&self, ui_thread_id: &str) -> Option<SessionKey> {
+        self.session_key_for_ui_thread(ui_thread_id).or_else(|| {
+            let connection_id = self.connections.selected_id()?.clone();
+            SessionKey::new(connection_id, format!("draft/{ui_thread_id}")).ok()
+        })
+    }
+
+    fn current_draft_key(&self) -> Option<SessionKey> {
+        self.selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+            .or_else(|| {
+                let connection_id = self.connections.selected_id()?.clone();
+                SessionKey::new(connection_id, "draft/__home").ok()
+            })
+    }
+
+    fn take_selected_session_draft(&mut self, cx: &Context<Self>) -> SessionDraftState {
+        let text = if self.routing_background_projection {
+            std::mem::take(&mut self.projected_composer_text)
+        } else {
+            self.projected_composer_text.clear();
+            self.composer_input.read(cx).value().to_string()
+        };
+        SessionDraftState {
+            text,
+            attachments: std::mem::take(&mut self.composer_attachments),
+        }
+    }
+
+    fn store_session_draft(&mut self, session_key: SessionKey, state: SessionDraftState) {
+        if state.is_empty() {
+            self.session_drafts.remove(&session_key);
+        } else {
+            self.session_drafts.insert(session_key, state);
+        }
+    }
+
+    fn stash_selected_session_draft(&mut self, cx: &Context<Self>) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let session_key = self.current_draft_key();
+        let state = self.take_selected_session_draft(cx);
+        if let Some(session_key) = session_key {
+            self.store_session_draft(session_key, state);
+        }
+    }
+
+    fn restore_selected_session_draft(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let state = self
+            .current_draft_key()
+            .and_then(|session_key| self.session_drafts.get(&session_key).cloned())
+            .unwrap_or_default();
+        self.projected_composer_text = state.text;
+        self.composer_attachments = state.attachments;
+    }
+
+    fn sync_current_draft_state(&mut self, cx: &Context<Self>) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let Some(session_key) = self.current_draft_key() else {
+            return;
+        };
+        let text = self.composer_input.read(cx).value().to_string();
+        self.projected_composer_text = text.clone();
+        self.store_session_draft(
+            session_key,
+            SessionDraftState {
+                text,
+                attachments: self.composer_attachments.clone(),
+            },
+        );
+    }
+
+    fn schedule_draft_save(&mut self, cx: &mut Context<Self>) {
+        self.draft_save_task = Some(cx.spawn(async move |this, cx| {
+            let _ = cx
+                .background_spawn(async {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                })
+                .await;
+            let _ = this.update(cx, |app, _cx| app.save_preferences_best_effort());
+        }));
+    }
+
+    fn stash_selected_composer_selection(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let Some(session_key) = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+        else {
+            return;
+        };
+        self.session_composer_selections.insert(
+            session_key,
+            SessionComposerSelectionState {
+                model_id: self.selected_model_id.clone(),
+                reasoning_effort: self.selected_reasoning_effort.clone(),
+                fast_mode: self.selected_fast_mode,
+                plan_mode: self.composer_plan_mode,
+            },
+        );
+    }
+
+    fn restore_selected_composer_selection(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let state = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+            .and_then(|session_key| self.session_composer_selections.get(&session_key).cloned());
+        let Some(state) = state else {
+            return;
+        };
+        self.selected_model_id = state.model_id;
+        self.selected_reasoning_effort = state.reasoning_effort;
+        self.selected_fast_mode = state.fast_mode;
+        self.composer_plan_mode = state.plan_mode;
+    }
+
+    fn stash_selected_scroll_handle(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let Some(session_key) = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+        else {
+            return;
+        };
+        self.session_scroll_handles
+            .insert(session_key, self.transcript_scroll_handle.clone());
+    }
+
+    fn restore_selected_scroll_handle(&mut self) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        self.transcript_scroll_handle = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+            .and_then(|session_key| self.session_scroll_handles.remove(&session_key))
+            .unwrap_or_default();
+    }
+
+    fn stash_selected_message_edit(&mut self, cx: &Context<Self>) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let Some(session_key) = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+        else {
+            return;
+        };
+        let state = SessionMessageEditState {
+            edit: self.latest_message_edit.take(),
+            in_progress: std::mem::take(&mut self.latest_message_edit_in_progress),
+            error: self.latest_message_edit_error.take(),
+            generation: std::mem::take(&mut self.latest_message_edit_generation),
+            text: self.latest_message_edit_input.read(cx).value().to_string(),
+        };
+        if state.is_pristine() {
+            self.session_message_edits.remove(&session_key);
+        } else {
+            self.session_message_edits.insert(session_key, state);
+        }
+    }
+
+    fn restore_selected_message_edit(&mut self, cx: &mut Context<Self>) {
+        if self.is_explicit_fixture() {
+            return;
+        }
+        let state = self
+            .selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+            .and_then(|session_key| self.session_message_edits.remove(&session_key))
+            .unwrap_or_default();
+        self.latest_message_edit = state.edit;
+        self.latest_message_edit_in_progress = state.in_progress;
+        self.latest_message_edit_error = state.error;
+        self.latest_message_edit_generation = state.generation;
+        let input = self.latest_message_edit_input.clone();
+        let window_handle = self.window_handle;
+        let _ = window_handle.update(cx, move |_root, window, cx| {
+            input.update(cx, |input, cx| input.set_value(state.text, window, cx));
+        });
+    }
+
+    fn project_selected_thread(&mut self, selected_thread: Option<String>, cx: &mut Context<Self>) {
+        if self.selected_thread == selected_thread {
+            return;
+        }
+        self.stash_selected_message_edit(cx);
+        self.stash_selected_session_draft(cx);
+        self.stash_selected_composer_selection();
+        self.stash_selected_scroll_handle();
+        self.stash_selected_session_interaction();
+        self.stash_selected_session_turn();
+        self.selected_thread = selected_thread;
+        self.restore_selected_session_turn();
+        self.restore_selected_session_interaction();
+        self.restore_selected_session_draft();
+        self.restore_selected_composer_selection();
+        self.restore_selected_scroll_handle();
+        self.restore_selected_message_edit(cx);
+        if !self.routing_background_projection {
+            self.sync_projected_composer_input(cx);
+        }
+    }
+
+    fn compaction_protected_threads(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> std::collections::HashSet<String> {
+        self.session_runtimes
+            .iter()
+            .filter(|(key, runtime)| {
+                key.connection_id == *connection_id
+                    && (runtime.in_progress
+                        || matches!(
+                            runtime.attention,
+                            Some(SessionAttention::Approval | SessionAttention::Input)
+                        ))
+            })
+            .map(|(_, runtime)| runtime.ui_thread_id.clone())
+            .collect()
+    }
+
+    fn compact_current_inactive_transcripts(&mut self) {
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            return;
+        };
+        let protected = self.compaction_protected_threads(&connection_id);
+        let visible_thread = (!self.routing_background_projection)
+            .then_some(self.selected_thread.as_deref())
+            .flatten();
+        for thread in &mut self.threads {
+            let thread_id = thread.summary.id.as_str();
+            if thread.backend_session_id.is_none()
+                || visible_thread == Some(thread_id)
+                || protected.contains(thread_id)
+            {
+                continue;
+            }
+            let state = self
+                .transcript_pagination
+                .entry(thread.summary.id.clone())
+                .or_default();
+            let removed = compact_transcript_messages(
+                &mut thread.messages,
+                state,
+                INACTIVE_TRANSCRIPT_MESSAGE_LIMIT,
+            );
+            if removed > 0 {
+                self.transcript_visible_limits
+                    .entry(thread.summary.id.clone())
+                    .and_modify(|visible| *visible = (*visible).min(thread.messages.len()));
+                if let Some(session_id) = thread.backend_session_id.as_ref().and_then(|session| {
+                    SessionKey::new(connection_id.clone(), session.raw.clone()).ok()
+                }) {
+                    if let Some(anchor) = self
+                        .session_transcript_viewports
+                        .get_mut(&session_id)
+                        .and_then(|state| state.unread_anchor.as_mut())
+                    {
+                        anchor.index = anchor.index.saturating_sub(removed);
+                    }
+                }
+            }
+        }
+    }
+
+    fn compact_stored_connection_transcripts(&mut self, connection_id: &ConnectionId) {
+        let protected = self.compaction_protected_threads(connection_id);
+        let Some(projection) = self.thread_projections.get_mut(connection_id) else {
+            return;
+        };
+        for thread in &mut projection.threads {
+            let thread_id = thread.summary.id.as_str();
+            if thread.backend_session_id.is_none() || protected.contains(thread_id) {
+                continue;
+            }
+            let state = projection
+                .transcript_pagination
+                .entry(thread.summary.id.clone())
+                .or_default();
+            let removed = compact_transcript_messages(
+                &mut thread.messages,
+                state,
+                INACTIVE_TRANSCRIPT_MESSAGE_LIMIT,
+            );
+            if removed > 0 {
+                projection
+                    .transcript_visible_limits
+                    .entry(thread.summary.id.clone())
+                    .and_modify(|visible| *visible = (*visible).min(thread.messages.len()));
+                if let Some(session_key) = thread.backend_session_id.as_ref().and_then(|session| {
+                    SessionKey::new(connection_id.clone(), session.raw.clone()).ok()
+                }) {
+                    if let Some(anchor) = self
+                        .session_transcript_viewports
+                        .get_mut(&session_key)
+                        .and_then(|state| state.unread_anchor.as_mut())
+                    {
+                        anchor.index = anchor.index.saturating_sub(removed);
+                    }
+                }
+            }
+        }
+    }
+
+    fn stash_selected_thread_projection(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            return;
+        };
+        if self.is_explicit_fixture() {
+            return;
+        }
+        self.compact_current_inactive_transcripts();
+        self.stash_selected_session_draft(cx);
+        self.stash_selected_composer_selection();
+        self.stash_selected_scroll_handle();
+        self.stash_selected_session_interaction();
+        self.stash_selected_session_turn();
+        let projection = ProviderThreadProjection {
+            threads: std::mem::take(&mut self.threads),
+            delegations: std::mem::take(&mut self.delegations),
+            transcript_visible_limits: std::mem::take(&mut self.transcript_visible_limits),
+            transcript_pagination: std::mem::take(&mut self.transcript_pagination),
+            expanded_transcript_messages: std::mem::take(&mut self.expanded_transcript_messages),
+            selected_thread: self.selected_thread.take(),
+            selected_chat_thread: self.selected_chat_thread.take(),
+            selected_codex_thread: self.selected_codex_thread.take(),
+            side_conversation_parents: std::mem::take(&mut self.side_conversation_parents),
+            codex_thread_subscriptions: std::mem::take(&mut self.codex_thread_subscriptions),
+            codex_read_only_threads: std::mem::take(&mut self.codex_read_only_threads),
+            guardian_denials: std::mem::take(&mut self.guardian_denials),
+            queued_follow_ups: std::mem::take(&mut self.queued_follow_ups),
+            concurrent_side_turn: self.concurrent_side_turn.take(),
+            side_turn_generation: std::mem::take(&mut self.side_turn_generation),
+        };
+        self.thread_projections.insert(connection_id, projection);
+    }
+
+    fn apply_thread_projection(&mut self, projection: ProviderThreadProjection) {
+        self.threads = projection.threads;
+        self.delegations = projection.delegations;
+        self.transcript_visible_limits = projection.transcript_visible_limits;
+        self.transcript_pagination = projection.transcript_pagination;
+        self.expanded_transcript_messages = projection.expanded_transcript_messages;
+        self.selected_thread = projection.selected_thread;
+        self.selected_chat_thread = projection.selected_chat_thread;
+        self.selected_codex_thread = projection.selected_codex_thread;
+        self.side_conversation_parents = projection.side_conversation_parents;
+        self.codex_thread_subscriptions = projection.codex_thread_subscriptions;
+        self.codex_read_only_threads = projection.codex_read_only_threads;
+        self.guardian_denials = projection.guardian_denials;
+        self.queued_follow_ups = projection.queued_follow_ups;
+        self.concurrent_side_turn = projection.concurrent_side_turn;
+        self.side_turn_generation = projection.side_turn_generation;
+        self.restore_selected_session_turn();
+        self.restore_selected_session_interaction();
+        self.restore_selected_session_draft();
+        self.restore_selected_composer_selection();
+        self.restore_selected_scroll_handle();
+    }
+
+    fn activate_cached_thread_projection(&mut self, connection_id: &ConnectionId) -> bool {
+        let Some(projection) = self.thread_projections.remove(connection_id) else {
+            // A cold-start connection has no in-memory thread projection yet,
+            // but it may own a persisted provider-qualified Home draft. Load
+            // that draft before the first visible-input synchronization so an
+            // empty startup value cannot erase it.
+            self.restore_selected_session_draft();
+            return false;
+        };
+        self.apply_thread_projection(projection);
+        true
+    }
+
+    fn sync_projected_composer_input(&self, cx: &mut Context<Self>) {
+        let value = self.projected_composer_text.clone();
+        let input = self.composer_input.clone();
+        let window_handle = self.window_handle;
+        let expected_connection = self.connections.selected_id().cloned();
+        let expected_thread = self.selected_thread.clone();
+        let root = cx.entity();
+        // Connection and thread switches are dispatched from inside the same
+        // window update that currently owns the input entity. Defer the write
+        // until that update is returned; an immediate nested window update can
+        // fail and leave the previous provider's text visibly projected.
+        cx.defer(move |cx| {
+            let still_current = {
+                let root = root.read(cx);
+                root.connections.selected_id() == expected_connection.as_ref()
+                    && root.selected_thread == expected_thread
+            };
+            if !still_current {
+                return;
+            }
+            let _ = window_handle.update(cx, move |_root, window, cx| {
+                input.update(cx, |state, cx| state.set_value(value, window, cx));
+            });
+        });
+    }
+
+    fn restore_thread_projection(
+        &mut self,
+        connection_id: &ConnectionId,
+        remote: Vec<SessionSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mut projection) = self.thread_projections.remove(connection_id) {
+            projection.threads =
+                merge_remote_threads(remote, projection.threads, &self.preferences, connection_id);
+            self.apply_thread_projection(projection);
+        } else {
+            self.threads = merge_remote_threads(
+                remote,
+                std::mem::take(&mut self.threads),
+                &self.preferences,
+                connection_id,
+            );
+        }
+        let selected_thread = self.selected_thread.clone().filter(|selected| {
+            self.threads
+                .iter()
+                .any(|thread| thread.summary.id == *selected)
+        });
+        self.project_selected_thread(selected_thread, cx);
+        if self.selected_thread.is_none() {
+            self.restore_selected_session_draft();
+            self.sync_projected_composer_input(cx);
+        }
+        self.selected_chat_thread = self.selected_chat_thread.take().filter(|selected| {
+            self.threads
+                .iter()
+                .any(|thread| thread.summary.id == *selected)
+        });
+        self.selected_codex_thread = self.selected_codex_thread.take().filter(|selected| {
+            self.threads
+                .iter()
+                .any(|thread| thread.summary.id == *selected)
+        });
+    }
+
+    fn restore_inactive_thread_projection(
+        &mut self,
+        connection_id: &ConnectionId,
+        remote: Vec<SessionSummary>,
+    ) {
+        let mut projection = self
+            .thread_projections
+            .remove(connection_id)
+            .unwrap_or_default();
+        projection.threads =
+            merge_remote_threads(remote, projection.threads, &self.preferences, connection_id);
+        let contains = |thread_id: &str| {
+            projection
+                .threads
+                .iter()
+                .any(|thread| thread.summary.id == thread_id)
+        };
+        projection.selected_thread = projection.selected_thread.filter(|id| contains(id));
+        projection.selected_chat_thread = projection.selected_chat_thread.filter(|id| contains(id));
+        projection.selected_codex_thread =
+            projection.selected_codex_thread.filter(|id| contains(id));
+        if projection.selected_thread.is_none() {
+            projection.selected_thread = self
+                .preferences
+                .session_for_connection(connection_id.as_str())
+                .and_then(|preferred| {
+                    projection
+                        .threads
+                        .iter()
+                        .find(|thread| thread.backend_session_id.as_ref() == Some(preferred))
+                })
+                .map(|thread| thread.summary.id.clone());
+        }
+        if let Some(selected) = projection.selected_thread.as_deref() {
+            if let Some(thread) = projection
+                .threads
+                .iter()
+                .find(|thread| thread.summary.id == selected)
+            {
+                match thread.surface {
+                    ThreadSurface::Chat => {
+                        projection.selected_chat_thread = Some(selected.to_owned())
+                    }
+                    ThreadSurface::Codex => {
+                        projection.selected_codex_thread = Some(selected.to_owned())
+                    }
+                }
+            }
+        }
+        self.thread_projections
+            .insert(connection_id.clone(), projection);
+    }
+
+    fn project_connection_transport(&mut self, connection_id: &ConnectionId) -> bool {
+        let Some(entry) = self.connections.get(connection_id) else {
+            return false;
+        };
+        let backend = Arc::clone(&entry.backend);
+        let generation = entry.generation;
+        let connection = match &entry.status {
+            RegistryConnectionStatus::Connecting | RegistryConnectionStatus::Reconnecting => {
+                UiConnection::Connecting
+            }
+            RegistryConnectionStatus::Ready {
+                detail, has_auth, ..
+            }
+            | RegistryConnectionStatus::Degraded {
+                detail, has_auth, ..
+            } => UiConnection::Ready {
+                detail: detail.clone(),
+                has_auth: *has_auth,
+            },
+            RegistryConnectionStatus::Error { message } => UiConnection::Error {
+                message: message.clone(),
+            },
+            RegistryConnectionStatus::Disconnected => UiConnection::Error {
+                message: "Backend disconnected".into(),
+            },
+        };
+        self.backend = Some(backend);
+        self.backend_generation = generation;
+        self.connection = connection;
+        true
+    }
+
+    /// Apply a background provider update through the same reducers used by
+    /// the foreground UI, then put both provider projections back exactly
+    /// where they were before GPUI renders again.
+    fn with_connection_thread_projection<R>(
+        &mut self,
+        connection_id: &ConnectionId,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut Self, &mut Context<Self>) -> R,
+    ) -> Option<R> {
+        if self.connections.selected_id() == Some(connection_id) {
+            return Some(update(self, cx));
+        }
+        let original_id = self.connections.selected_id()?.clone();
+        if !self.thread_projections.contains_key(connection_id) {
+            return None;
+        }
+
+        let original_status = self.status_line.clone();
+        let original_routing = self.routing_background_projection;
+        self.stash_selected_thread_projection(cx);
+        if !self.connections.select(connection_id)
+            || !self.project_connection_transport(connection_id)
+            || !self.activate_cached_thread_projection(connection_id)
+        {
+            let _ = self.connections.select(&original_id);
+            let _ = self.project_connection_transport(&original_id);
+            let _ = self.activate_cached_thread_projection(&original_id);
+            self.status_line = original_status;
+            self.routing_background_projection = original_routing;
+            return None;
+        }
+
+        self.routing_background_projection = true;
+        let result = update(self, cx);
+        self.stash_selected_thread_projection(cx);
+        let _ = self.connections.select(&original_id);
+        let _ = self.project_connection_transport(&original_id);
+        let _ = self.activate_cached_thread_projection(&original_id);
+        self.status_line = original_status;
+        self.routing_background_projection = original_routing;
+        Some(result)
+    }
+
     pub fn active_backend_kind(&self) -> Option<BackendKind> {
-        self.backend
-            .as_ref()
-            .map(|backend| backend.kind())
+        self.connections
+            .selected()
+            .map(|entry| entry.kind)
+            .or_else(|| self.backend.as_ref().map(|backend| backend.kind()))
             .or(self.preferences.selected_backend)
+    }
+
+    pub fn active_backend_capabilities(&self) -> Option<BackendCapabilities> {
+        self.backend.as_ref().map(|backend| backend.capabilities())
+    }
+
+    fn active_composer_work_mode_contract(&self) -> Option<ComposerWorkModeContract> {
+        self.active_backend_capabilities()
+            .map(|capabilities| capabilities.composer_work_modes)
+            .or_else(|| {
+                matches!(self.active_backend_kind(), Some(BackendKind::Fixture))
+                    .then_some(ComposerWorkModeContract::CollaborationPresets)
+            })
+    }
+
+    fn active_composer_access_mode_contract(&self) -> Option<ComposerAccessModeContract> {
+        self.active_backend_capabilities()
+            .map(|capabilities| capabilities.composer_access_modes)
+    }
+
+    fn active_composer_speed_mode_contract(&self) -> Option<ComposerSpeedModeContract> {
+        self.active_backend_capabilities()
+            .map(|capabilities| capabilities.composer_speed_modes)
+            .or_else(|| {
+                matches!(self.active_backend_kind(), Some(BackendKind::Fixture))
+                    .then_some(ComposerSpeedModeContract::ServiceTier)
+            })
     }
 
     pub fn is_explicit_fixture(&self) -> bool {
@@ -2794,10 +4542,10 @@ impl MitsuroApp {
         if self.is_explicit_fixture() {
             return SurfaceDataState::Fixture;
         }
-        match (&self.connection, self.active_backend_kind()) {
+        match (&self.connection, self.active_backend_capabilities()) {
             (UiConnection::Connecting, _) => SurfaceDataState::Loading,
             (UiConnection::Error { .. }, _) => SurfaceDataState::Error,
-            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => {
+            (UiConnection::Ready { .. }, Some(capabilities)) if capabilities.hive => {
                 self.hive_snapshot_state
             }
             _ => SurfaceDataState::Unsupported,
@@ -2808,10 +4556,12 @@ impl MitsuroApp {
         if self.is_explicit_fixture() {
             return SurfaceDataState::Fixture;
         }
-        match (&self.connection, self.active_backend_kind()) {
+        match (&self.connection, self.active_backend_capabilities()) {
             (UiConnection::Connecting, _) => SurfaceDataState::Loading,
             (UiConnection::Error { .. }, _) => SurfaceDataState::Error,
-            (UiConnection::Ready { .. }, Some(BackendKind::MitsuroHttp)) => SurfaceDataState::Live,
+            (UiConnection::Ready { .. }, Some(capabilities)) if capabilities.schedules => {
+                self.scheduled_tasks_state
+            }
             _ => SurfaceDataState::Unsupported,
         }
     }
@@ -2825,17 +4575,77 @@ impl MitsuroApp {
         }
     }
 
-    pub fn switch_backend(&mut self, kind: BackendKind, cx: &mut Context<Self>) {
-        if self.latest_message_edit_in_progress {
-            self.status_line =
-                "Finish the message rollback and resend before switching backends.".into();
+    fn create_backend_for_connection(
+        &mut self,
+        connection_id: &ConnectionId,
+    ) -> Result<Arc<DesktopBackend>, String> {
+        let spec = self
+            .connection_specs
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| format!("connection {connection_id} is not configured"))?;
+        let result = match spec.kind {
+            BackendKind::CodexStdio => Ok(DesktopBackend::codex_stdio()),
+            BackendKind::MitsuroHttp => match spec.mitsuro_url {
+                Some(url) => {
+                    let token = match spec.bearer_token_env.as_deref() {
+                        Some(name) => std::env::var(name).map(Some).map_err(|_| {
+                            format!(
+                                "connection {connection_id} requires environment variable {name}"
+                            )
+                        }),
+                        None => Ok(None),
+                    };
+                    token.and_then(|token| {
+                        DesktopBackend::mitsuro_from_url(url, token.as_deref())
+                            .map_err(|error| error.to_string())
+                    })
+                }
+                None => DesktopBackend::mitsuro_from_env().map_err(|error| error.to_string()),
+            },
+            BackendKind::CodexWebSocket | BackendKind::Fixture => Err(format!(
+                "connection {connection_id} uses unsupported backend {}",
+                spec.kind.id()
+            )),
+        };
+        match result {
+            Ok(backend) => {
+                self.connection_configuration_errors.remove(connection_id);
+                Ok(Arc::new(backend))
+            }
+            Err(error) => {
+                self.connection_configuration_errors
+                    .insert(connection_id.clone(), error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    pub fn switch_connection(&mut self, connection_id: ConnectionId, cx: &mut Context<Self>) {
+        let kind = connection_id.kind();
+        if self.thread_rename_in_progress {
+            self.status_line = "Wait for the conversation rename to finish.".into();
             cx.notify();
             return;
         }
-        self.latest_message_edit = None;
-        self.latest_message_edit_error = None;
-        self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
-        if self.active_backend_kind() == Some(kind)
+        if self.thread_rename_open {
+            self.thread_rename_open = false;
+            self.thread_rename_error = None;
+            self.thread_rename_generation = self.thread_rename_generation.wrapping_add(1);
+        }
+        if self.turn_in_progress && self.live_approval_bridge.is_none() {
+            self.status_line =
+                "Wait for the active session to finish starting before switching providers.".into();
+            cx.notify();
+            return;
+        }
+        if self.latest_message_edit.is_some() || self.latest_message_edit_in_progress {
+            self.status_line =
+                "Finish or cancel the message edit before switching backends.".into();
+            cx.notify();
+            return;
+        }
+        if self.connections.selected_id() == Some(&connection_id)
             && matches!(
                 self.connection,
                 UiConnection::Ready { .. } | UiConnection::Connecting
@@ -2846,13 +4656,24 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
+        if self.connections.get(&connection_id).is_some_and(|entry| {
+            matches!(
+                entry.status,
+                RegistryConnectionStatus::Connecting | RegistryConnectionStatus::Reconnecting
+            )
+        }) {
+            self.status_line =
+                format!("{} is still connecting.", Self::backend_display_name(kind)).into();
+            cx.notify();
+            return;
+        }
         self.close_all_mcp_app_views();
-        self.preferences.remember_backend(kind);
+        self.preferences
+            .remember_connection(connection_id.as_str(), kind);
         self.save_preferences_best_effort();
         self.pending_start_thread = self
             .preferences
-            .selected_session
-            .as_ref()
+            .session_for_connection(connection_id.as_str())
             .map(BackendSessionId::qualified);
         let selection = match kind {
             BackendKind::MitsuroHttp => BackendSelection::MitsuroHttp,
@@ -2860,12 +4681,65 @@ impl MitsuroApp {
             BackendKind::CodexWebSocket => BackendSelection::CodexWebSocket,
             BackendKind::Fixture => BackendSelection::Fixture,
         };
-        self.connect_backend_selection(selection, cx);
+        self.connect_backend_selection_with_intent(
+            selection,
+            Some(connection_id),
+            ConnectionStartIntent::ReuseOrStart,
+            cx,
+        );
+    }
+
+    pub fn open_connection_thread(
+        &mut self,
+        connection_id: ConnectionId,
+        provider_session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = connection_id.kind();
+        let session = BackendSessionId::new(kind, provider_session_id);
+        if self.connections.selected_id() == Some(&connection_id)
+            && matches!(self.connection, UiConnection::Ready { .. })
+        {
+            if let Some(thread_id) = self
+                .threads
+                .iter()
+                .find(|thread| thread.backend_session_id.as_ref() == Some(&session))
+                .map(|thread| thread.summary.id.clone())
+            {
+                self.select_thread_with_window(thread_id, window, cx);
+            }
+            return;
+        }
+
+        self.preferences
+            .remember_session_for_connection(connection_id.as_str(), session.clone());
+        self.save_preferences_best_effort();
+        self.pending_start_thread = Some(session.qualified());
+        self.switch_connection(connection_id.clone(), cx);
+        // Ready provider selection restores its cached thread projection before
+        // refreshing catalogs, so the requested session can open immediately.
+        if self.connections.selected_id() == Some(&connection_id)
+            && matches!(self.connection, UiConnection::Ready { .. })
+        {
+            self.apply_pending_start_thread(cx);
+        }
     }
 
     pub fn reconnect_backend(&mut self, cx: &mut Context<Self>) {
-        if self.latest_message_edit_in_progress {
-            self.status_line = "Finish the message rollback and resend before reconnecting.".into();
+        if matches!(self.connection, UiConnection::Connecting) {
+            self.status_line = "This connection is already starting or restarting.".into();
+            cx.notify();
+            return;
+        }
+        if self.has_inflight_session_runtime() {
+            self.status_line =
+                "Finish, stop, or answer the active session before reconnecting.".into();
+            cx.notify();
+            return;
+        }
+        if self.latest_message_edit.is_some() || self.latest_message_edit_in_progress {
+            self.status_line = "Finish or cancel the message edit before reconnecting.".into();
             cx.notify();
             return;
         }
@@ -2878,7 +4752,207 @@ impl MitsuroApp {
             BackendKind::CodexWebSocket => BackendSelection::CodexWebSocket,
             BackendKind::Fixture => BackendSelection::Fixture,
         };
-        self.connect_backend_selection(selection, cx);
+        let connection_id = self
+            .connections
+            .selected_id()
+            .cloned()
+            .unwrap_or_else(|| ConnectionId::primary(kind));
+        let Some(backend) = self.connections.backend(&connection_id) else {
+            self.connect_backend_selection_with_intent(
+                selection,
+                Some(connection_id),
+                ConnectionStartIntent::ReuseOrStart,
+                cx,
+            );
+            return;
+        };
+        let Some(generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.connect_backend_selection(selection, cx);
+            return;
+        };
+
+        self.backend_initializations.remove(&connection_id);
+        self.connection_bootstrap_tasks.remove(&connection_id);
+        // Dropping a GPUI task cancels its receiver even when no future event
+        // arrives to observe a stale registry generation.
+        self.lifecycle_listener_tasks.remove(&connection_id);
+        self.connections
+            .mark_reconnecting(&connection_id, generation);
+        self.connection = UiConnection::Connecting;
+        self.status_line = format!("Restarting {}…", Self::backend_display_name(kind)).into();
+        cx.notify();
+
+        let bootstrap_task_id = connection_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let runtime = Arc::clone(&backend);
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    runtime
+                        .block_on(async move { runner.disconnect().await })
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if !app
+                    .connections
+                    .generation_matches(&connection_id, generation)
+                    || app.connections.selected_id() != Some(&connection_id)
+                {
+                    return;
+                }
+                if let Err(error) = result {
+                    eprintln!(
+                        "[mitsuro] disconnect before reconnect failed backend={}: {error}",
+                        kind.id()
+                    );
+                }
+                app.connect_backend_selection_with_intent(
+                    selection,
+                    Some(connection_id.clone()),
+                    ConnectionStartIntent::ReconnectAfterTeardown,
+                    cx,
+                );
+            });
+        });
+        self.connection_bootstrap_tasks
+            .insert(bootstrap_task_id, task);
+    }
+
+    pub fn disconnect_selected_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.status_line = "No connection is selected.".into();
+            cx.notify();
+            return;
+        };
+        self.disconnect_connection(connection_id, cx);
+    }
+
+    fn disconnect_connection(&mut self, connection_id: ConnectionId, cx: &mut Context<Self>) {
+        let kind = connection_id.kind();
+        if self.connection_has_inflight_session_runtime(&connection_id) {
+            self.status_line = format!(
+                "Finish, stop, or answer active {} sessions before disconnecting.",
+                Self::backend_display_name(kind)
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+        let Some(entry) = self.connections.get(&connection_id) else {
+            self.status_line =
+                format!("{} is already offline.", Self::backend_display_name(kind)).into();
+            cx.notify();
+            return;
+        };
+        if matches!(entry.status, RegistryConnectionStatus::Reconnecting) {
+            self.status_line = format!(
+                "{} is already reconnecting.",
+                Self::backend_display_name(kind)
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+        if matches!(entry.status, RegistryConnectionStatus::Disconnected) {
+            self.status_line =
+                format!("{} is already offline.", Self::backend_display_name(kind)).into();
+            cx.notify();
+            return;
+        }
+        let generation = entry.generation;
+        let backend = Arc::clone(&entry.backend);
+        let selected = self.connections.selected_id() == Some(&connection_id);
+
+        self.backend_initializations.remove(&connection_id);
+        self.connection_bootstrap_tasks.remove(&connection_id);
+        self.lifecycle_listener_tasks.remove(&connection_id);
+        self.connections
+            .mark_disconnected(&connection_id, generation);
+        if selected {
+            self.connection = UiConnection::Error {
+                message: "Backend disconnected".into(),
+            };
+        }
+        self.status_line = format!("Disconnecting {}…", Self::backend_display_name(kind)).into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let runtime = Arc::clone(&backend);
+            let runner = Arc::clone(&backend);
+            let result = cx
+                .background_spawn(async move {
+                    runtime
+                        .block_on(async move { runner.disconnect().await })
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if !app
+                    .connections
+                    .generation_matches(&connection_id, generation)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        app.connections
+                            .mark_disconnected(&connection_id, generation);
+                        if app.connections.selected_id() == Some(&connection_id) {
+                            app.connection = UiConnection::Error {
+                                message: "Backend disconnected".into(),
+                            };
+                            app.status_line = format!(
+                                "{} disconnected · select Reconnect to restore it.",
+                                Self::backend_display_name(kind)
+                            )
+                            .into();
+                        }
+                    }
+                    Err(error) => {
+                        app.connections
+                            .mark_error(&connection_id, generation, error.clone());
+                        if app.connections.selected_id() == Some(&connection_id) {
+                            app.connection = UiConnection::Error {
+                                message: error.clone(),
+                            };
+                            app.status_line = format!("Disconnect failed · {error}").into();
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn has_inflight_session_runtime(&self) -> bool {
+        self.connections.selected_id().is_some_and(|connection_id| {
+            self.connection_has_inflight_session_runtime(connection_id)
+        })
+    }
+
+    fn connection_has_inflight_session_runtime(&self, connection_id: &ConnectionId) -> bool {
+        self.session_runtimes.iter().any(|(key, runtime)| {
+            key.connection_id == *connection_id
+                && (runtime.in_progress
+                    || matches!(
+                        runtime.attention,
+                        Some(SessionAttention::Approval | SessionAttention::Input)
+                    ))
+        }) || (self.connections.selected_id() == Some(connection_id)
+            && (self.turn_in_progress
+                || self.pending_approval.is_some()
+                || self.pending_user_input.is_some()
+                || self.pending_mcp_elicitation.is_some()
+                || self
+                    .concurrent_side_turn
+                    .as_ref()
+                    .is_some_and(|side| side.in_progress || side.has_pending_interaction())))
     }
 
     pub fn status_line(&self) -> &SharedString {
@@ -3008,11 +5082,13 @@ impl MitsuroApp {
             cx.notify();
             return;
         }
-        if mode != self.active_mode && self.latest_message_edit.is_some() {
-            self.latest_message_edit = None;
-            self.latest_message_edit_error = None;
-            self.latest_message_edit_generation =
-                self.latest_message_edit_generation.wrapping_add(1);
+        if self.thread_rename_in_progress && mode != self.active_mode {
+            self.status_line = "Wait for the conversation rename to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.thread_rename_open && mode != self.active_mode {
+            self.cancel_thread_rename(window, cx);
         }
         if mode != self.active_mode && !self.navigation_replaying {
             push_bounded_navigation(&mut self.navigation_back, self.active_mode);
@@ -3074,9 +5150,8 @@ impl MitsuroApp {
             }
             ProductMode::Terminal => {
                 if self
-                    .backend
-                    .as_ref()
-                    .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp)
+                    .active_backend_capabilities()
+                    .is_some_and(|capabilities| capabilities.tracked_processes)
                 {
                     format!(
                         "Processes · {} tracked process(es)",
@@ -3195,7 +5270,7 @@ impl MitsuroApp {
                 .map(|t| t.surface == surface)
                 .unwrap_or(false);
             if remembered_ok {
-                self.selected_thread = remembered;
+                self.project_selected_thread(remembered, cx);
             } else {
                 let selected_ok = self
                     .selected_thread
@@ -3205,7 +5280,7 @@ impl MitsuroApp {
                     .unwrap_or(false);
                 if !selected_ok {
                     // Empty selection → centered greeting (product density, not demo wall).
-                    self.selected_thread = None;
+                    self.project_selected_thread(None, cx);
                 }
             }
             self.remember_thread_selection_for_mode(mode);
@@ -4069,30 +6144,17 @@ impl MitsuroApp {
             .unwrap_or_else(|| self.is_explicit_fixture())
     }
 
-    pub fn terminal_contract_label(&self) -> &'static str {
-        match self.terminal.transport {
-            TerminalTransport::CodexCommandExec => "command/exec*",
-            TerminalTransport::LegacyProcess | TerminalTransport::FixtureProcess => "process/*",
-            TerminalTransport::None => self
-                .backend
-                .as_ref()
-                .map(|backend| {
-                    if backend.capabilities().command_exec {
-                        "command/exec*"
-                    } else if backend.capabilities().processes {
-                        "process/*"
-                    } else {
-                        "read-only"
-                    }
-                })
-                .unwrap_or_else(|| {
-                    if self.is_explicit_fixture() {
-                        "process/*"
-                    } else {
-                        "unavailable"
-                    }
-                }),
+    pub fn terminal_provider_label(&self) -> &'static str {
+        match self.active_backend_kind() {
+            Some(BackendKind::CodexStdio | BackendKind::CodexWebSocket) => "ChatGPT / Codex",
+            Some(BackendKind::MitsuroHttp) => "Mitsuro server",
+            Some(BackendKind::Fixture) => "Offline fixtures",
+            None => "Disconnected",
         }
+    }
+
+    pub fn terminal_working_directory(&self) -> String {
+        self.preferred_workspace_cwd()
     }
 
     pub fn thread_background_terminals(&self) -> &[ThreadBackgroundTerminal] {
@@ -4115,8 +6177,16 @@ impl MitsuroApp {
         self.background_process_mutation_in_progress.as_deref()
     }
 
-    pub fn terminal_background_backend_kind(&self) -> Option<BackendKind> {
-        self.active_backend_kind()
+    pub fn terminal_background_contract(&self) -> TerminalBackgroundContract {
+        match self.active_backend_capabilities() {
+            Some(capabilities) if capabilities.background_terminals => {
+                TerminalBackgroundContract::ThreadTerminals
+            }
+            Some(capabilities) if capabilities.tracked_processes => {
+                TerminalBackgroundContract::TrackedProcesses
+            }
+            _ => TerminalBackgroundContract::Unsupported,
+        }
     }
 
     pub fn terminal_background_thread_label(&self) -> Option<String> {
@@ -4164,126 +6234,119 @@ impl MitsuroApp {
             return;
         };
         let generation = self.backend_generation;
-        match backend.kind() {
-            BackendKind::CodexStdio => {
-                self.background_processes.clear();
-                self.background_processes_state = SurfaceDataState::Unsupported;
-                let Some(session) = self.terminal_background_session_id() else {
-                    self.thread_background_terminals.clear();
-                    self.thread_background_terminals_state = SurfaceDataState::Live;
-                    self.status_line =
-                        "Terminal · select a Codex thread to inspect its background terminals"
-                            .into();
-                    cx.notify();
-                    return;
-                };
-                self.thread_background_terminals_state = SurfaceDataState::Loading;
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(async move {
-                            let runner = Arc::clone(&backend);
-                            backend.block_on(async move {
-                                let mut terminals = Vec::new();
-                                let mut cursor = None;
-                                let mut seen_cursors = std::collections::HashSet::new();
-                                for _ in 0..100 {
-                                    let mut params = ThreadBackgroundTerminalsListParams::new(
-                                        session.raw.clone(),
-                                    );
-                                    params.cursor = cursor;
-                                    params.limit = Some(100);
-                                    let response = runner
-                                        .list_thread_background_terminals(&session, params)
-                                        .await
-                                        .map_err(|error| error.to_string())?;
-                                    terminals.extend(response.data);
-                                    let Some(next) = response.next_cursor else {
-                                        return Ok(terminals);
-                                    };
-                                    if !seen_cursors.insert(next.clone()) {
-                                        return Err(format!(
-                                            "app-server repeated background-terminal cursor {next}"
-                                        ));
-                                    }
-                                    cursor = Some(next);
-                                }
-                                Err("background-terminal pagination exceeded 100 pages".to_owned())
-                            })
-                        })
-                        .await;
-                    let _ = this.update(cx, |app, cx| {
-                        if app.backend_generation != generation {
-                            return;
-                        }
-                        match result {
-                            Ok(terminals) => {
-                                let count = terminals.len();
-                                app.thread_background_terminals = terminals;
-                                app.thread_background_terminals_state = SurfaceDataState::Live;
-                                app.status_line =
-                                    format!("Terminal · {count} thread background terminal(s)")
-                                        .into();
-                            }
-                            Err(error) => {
-                                app.thread_background_terminals.clear();
-                                app.thread_background_terminals_state = SurfaceDataState::Error;
-                                app.status_line =
-                                    format!("Terminal · background list failed: {error}").into();
-                            }
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            BackendKind::MitsuroHttp => {
+        let capabilities = backend.capabilities();
+        if capabilities.background_terminals {
+            self.background_processes.clear();
+            self.background_processes_state = SurfaceDataState::Unsupported;
+            let Some(session) = self.terminal_background_session_id() else {
                 self.thread_background_terminals.clear();
-                self.thread_background_terminals_state = SurfaceDataState::Unsupported;
-                self.background_processes_state = SurfaceDataState::Loading;
+                self.thread_background_terminals_state = SurfaceDataState::Live;
+                self.status_line =
+                    "Terminal · select a Codex thread to inspect its background terminals".into();
                 cx.notify();
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(async move {
-                            let runner = Arc::clone(&backend);
-                            backend.block_on(async move {
-                                runner
-                                    .list_background_processes()
+                return;
+            };
+            self.thread_background_terminals_state = SurfaceDataState::Loading;
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        let runner = Arc::clone(&backend);
+                        backend.block_on(async move {
+                            let mut terminals = Vec::new();
+                            let mut cursor = None;
+                            let mut seen_cursors = std::collections::HashSet::new();
+                            for _ in 0..100 {
+                                let mut params =
+                                    ThreadBackgroundTerminalsListParams::new(session.raw.clone());
+                                params.cursor = cursor;
+                                params.limit = Some(100);
+                                let response = runner
+                                    .list_thread_background_terminals(&session, params)
                                     .await
-                                    .map_err(|error| error.to_string())
-                            })
+                                    .map_err(|error| error.to_string())?;
+                                terminals.extend(response.data);
+                                let Some(next) = response.next_cursor else {
+                                    return Ok(terminals);
+                                };
+                                if !seen_cursors.insert(next.clone()) {
+                                    return Err(format!(
+                                        "app-server repeated background-terminal cursor {next}"
+                                    ));
+                                }
+                                cursor = Some(next);
+                            }
+                            Err("background-terminal pagination exceeded 100 pages".to_owned())
                         })
-                        .await;
-                    let _ = this.update(cx, |app, cx| {
-                        if app.backend_generation != generation {
-                            return;
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.backend_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(terminals) => {
+                            let count = terminals.len();
+                            app.thread_background_terminals = terminals;
+                            app.thread_background_terminals_state = SurfaceDataState::Live;
+                            app.status_line =
+                                format!("Terminal · {count} thread background terminal(s)").into();
                         }
-                        match result {
-                            Ok(processes) => {
-                                let count = processes.len();
-                                app.background_processes = processes;
-                                app.background_processes_state = SurfaceDataState::Live;
-                                app.status_line =
-                                    format!("Processes · {count} tracked process(es)").into();
-                            }
-                            Err(error) => {
-                                app.background_processes.clear();
-                                app.background_processes_state = SurfaceDataState::Error;
-                                app.status_line =
-                                    format!("Processes · refresh failed: {error}").into();
-                            }
+                        Err(error) => {
+                            app.thread_background_terminals.clear();
+                            app.thread_background_terminals_state = SurfaceDataState::Error;
+                            app.status_line =
+                                format!("Terminal · background list failed: {error}").into();
                         }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            BackendKind::CodexWebSocket | BackendKind::Fixture => {
-                self.thread_background_terminals.clear();
-                self.background_processes.clear();
-                self.thread_background_terminals_state = SurfaceDataState::Unsupported;
-                self.background_processes_state = SurfaceDataState::Unsupported;
-                cx.notify();
-            }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        } else if capabilities.tracked_processes {
+            self.thread_background_terminals.clear();
+            self.thread_background_terminals_state = SurfaceDataState::Unsupported;
+            self.background_processes_state = SurfaceDataState::Loading;
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        let runner = Arc::clone(&backend);
+                        backend.block_on(async move {
+                            runner
+                                .list_background_processes()
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.backend_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(processes) => {
+                            let count = processes.len();
+                            app.background_processes = processes;
+                            app.background_processes_state = SurfaceDataState::Live;
+                            app.status_line =
+                                format!("Processes · {count} tracked process(es)").into();
+                        }
+                        Err(error) => {
+                            app.background_processes.clear();
+                            app.background_processes_state = SurfaceDataState::Error;
+                            app.status_line = format!("Processes · refresh failed: {error}").into();
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        } else {
+            self.thread_background_terminals.clear();
+            self.background_processes.clear();
+            self.thread_background_terminals_state = SurfaceDataState::Unsupported;
+            self.background_processes_state = SurfaceDataState::Unsupported;
+            cx.notify();
         }
     }
 
@@ -4350,12 +6413,9 @@ impl MitsuroApp {
             return;
         };
         let generation = self.backend_generation;
-        let kind = backend.kind();
-        let supported = match kind {
-            BackendKind::CodexStdio => backend.capabilities().background_terminals,
-            BackendKind::MitsuroHttp => backend.capabilities().tracked_process_kill,
-            BackendKind::CodexWebSocket | BackendKind::Fixture => false,
-        };
+        let capabilities = backend.capabilities();
+        let thread_terminal_contract = capabilities.background_terminals;
+        let supported = thread_terminal_contract || capabilities.tracked_process_kill;
         if !supported {
             self.status_line =
                 "Terminal · the selected backend cannot terminate background processes".into();
@@ -4366,7 +6426,7 @@ impl MitsuroApp {
         self.status_line = format!("Terminal · terminating {process_id}…").into();
         cx.notify();
 
-        let session = if kind == BackendKind::CodexStdio {
+        let session = if thread_terminal_contract {
             match self.terminal_background_session_id() {
                 Some(session) => Some(session),
                 None => {
@@ -4386,32 +6446,31 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     let runner = Arc::clone(&backend);
                     backend.block_on(async move {
-                        match kind {
-                            BackendKind::CodexStdio => {
-                                let session = session.expect("Codex session checked before spawn");
-                                let params = ThreadBackgroundTerminalsTerminateParams::new(
-                                    session.raw.clone(),
-                                    process_id,
-                                );
-                                let response = runner
-                                    .terminate_thread_background_terminal(&session, params)
-                                    .await
-                                    .map_err(|error| error.to_string())?;
-                                if response.terminated {
-                                    Ok(())
-                                } else {
-                                    Err("app-server reported that the process was not terminated"
-                                        .to_owned())
-                                }
-                            }
-                            BackendKind::MitsuroHttp => runner
-                                .terminate_background_process(process_id)
+                        if thread_terminal_contract {
+                            let session =
+                                session.expect("thread-terminal session checked before spawn");
+                            let params = ThreadBackgroundTerminalsTerminateParams::new(
+                                session.raw.clone(),
+                                process_id,
+                            );
+                            let response = runner
+                                .terminate_thread_background_terminal(&session, params)
                                 .await
-                                .map_err(|error| error.to_string()),
-                            BackendKind::CodexWebSocket | BackendKind::Fixture => {
-                                Err("the selected backend cannot terminate background processes"
+                                .map_err(|error| error.to_string())?;
+                            if response.terminated {
+                                Ok(())
+                            } else {
+                                Err("app-server reported that the process was not terminated"
                                     .to_owned())
                             }
+                        } else if capabilities.tracked_process_kill {
+                            runner
+                                .terminate_background_process(process_id)
+                                .await
+                                .map_err(|error| error.to_string())
+                        } else {
+                            Err("the selected backend cannot terminate background processes"
+                                .to_owned())
                         }
                     })
                 })
@@ -4471,6 +6530,10 @@ impl MitsuroApp {
                 .backend
                 .as_ref()
                 .is_some_and(|backend| backend.capabilities().file_mutations)
+    }
+
+    pub fn files_provider_label(&self) -> &'static str {
+        self.terminal_provider_label()
     }
 
     pub fn files_delete_pending(&self) -> bool {
@@ -5084,7 +7147,6 @@ impl MitsuroApp {
                 }
                 TurnStreamEvent::ProcessExited {
                     exit_code,
-                    process_handle,
                     stdout,
                     stderr,
                     ..
@@ -5095,9 +7157,7 @@ impl MitsuroApp {
                     if !stderr.is_empty() {
                         self.append_terminal_output(stderr);
                     }
-                    self.append_terminal_output(&format!(
-                        "\n[exited {exit_code}] processHandle={process_handle}\n"
-                    ));
+                    self.append_terminal_output(&format!("\n[exited {exit_code}]\n"));
                     self.terminal.running = false;
                     self.terminal.status = TerminalSessionStatus::Exited;
                     self.terminal.exit_code = Some(*exit_code);
@@ -5209,8 +7269,8 @@ impl MitsuroApp {
                                     app.append_terminal_output(&response.stderr);
                                 }
                                 app.append_terminal_output(&format!(
-                                    "\n[exited {} · command/exec · {}]\n",
-                                    response.exit_code, handle
+                                    "\n[exited {}]\n",
+                                    response.exit_code
                                 ));
                                 app.terminal.running = false;
                                 app.terminal.status = TerminalSessionStatus::Exited;
@@ -5249,10 +7309,6 @@ impl MitsuroApp {
                     if let Some(h) = resp.process_handle {
                         self.terminal.process_handle = Some(h);
                     }
-                    self.append_terminal_output(
-                        "[process/spawn · app-server]\n\
-                         (stdout/stderr via process/outputDelta when notification bridge is active)\n",
-                    );
                     self.status_line = "Terminal · process/spawn (app-server)".into();
                 }
                 Err(e) => {
@@ -5484,9 +7540,7 @@ impl MitsuroApp {
                     }
                     match result {
                         Ok(_) => {
-                            app.append_terminal_output(
-                                "\n[terminate requested · command/exec/terminate]\n",
-                            );
+                            app.append_terminal_output("\n[termination requested]\n");
                             app.status_line = "Terminal · waiting for command exit…".into();
                         }
                         Err(error) => {
@@ -6479,8 +8533,12 @@ impl MitsuroApp {
                     return;
                 }
                 match result {
-                    Ok(schedules) => app.scheduled_tasks = Some(schedules),
+                    Ok(schedules) => {
+                        app.scheduled_tasks = Some(schedules);
+                        app.scheduled_tasks_state = SurfaceDataState::Live;
+                    }
                     Err(error) => {
+                        app.scheduled_tasks_state = SurfaceDataState::Error;
                         app.status_line = format!(
                             "Scheduled · change applied, but catalog refresh failed: {error}"
                         )
@@ -6600,12 +8658,8 @@ impl MitsuroApp {
 
     pub fn open_feedback_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.feedback_submission_available() {
-            self.status_line = match self.active_backend_kind() {
-                Some(BackendKind::MitsuroHttp) => {
-                    "Feedback upload is not exposed by the Mitsuro server.".into()
-                }
-                _ => "Feedback upload is unavailable for this backend or managed policy.".into(),
-            };
+            self.status_line =
+                "Feedback upload is unavailable for this backend or managed policy.".into();
             cx.notify();
             return;
         }
@@ -6670,7 +8724,7 @@ impl MitsuroApp {
             .selected_thread
             .as_deref()
             .and_then(|thread_id| self.live_session_id(thread_id))
-            .filter(|session| session.backend == BackendKind::CodexStdio)
+            .filter(|session| self.active_backend_kind() == Some(session.backend))
             .map(|session| session.raw);
         let mut tags = BTreeMap::new();
         tags.insert(
@@ -6762,17 +8816,13 @@ impl MitsuroApp {
                 .selected_thread
                 .as_deref()
                 .and_then(|thread_id| self.live_session_id(thread_id))
-                .is_some_and(|session| session.backend == BackendKind::CodexStdio)
+                .is_some_and(|session| self.active_backend_kind() == Some(session.backend))
     }
 
     fn open_guardian_dialog(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.guardian_approval_available() {
-            self.status_line = match self.active_backend_kind() {
-                Some(BackendKind::MitsuroHttp) => {
-                    "Auto-review retry approval is not exposed by the Mitsuro server.".into()
-                }
-                _ => "Auto-review retry approval is unavailable for this conversation.".into(),
-            };
+            self.status_line =
+                "Auto-review retry approval is unavailable for this conversation.".into();
             cx.notify();
             return false;
         }
@@ -6804,7 +8854,7 @@ impl MitsuroApp {
             .selected_thread
             .as_deref()
             .and_then(|thread_id| self.live_session_id(thread_id))
-            .filter(|session| session.backend == BackendKind::CodexStdio)
+            .filter(|session| self.active_backend_kind() == Some(session.backend))
         else {
             return;
         };
@@ -7101,6 +9151,11 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) {
         let backend_generation = self.backend_generation;
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.status_line = "Voice chat refused: owning connection unavailable.".into();
+            cx.notify();
+            return;
+        };
         let cwd = self.composer_workspace_dir().map(ToOwned::to_owned);
         let model = self.selected_model_slug();
         let access_mode = self.composer_access_mode();
@@ -7133,8 +9188,15 @@ impl MitsuroApp {
                 match result {
                     Ok(session) => {
                         let backend_session_id = session.id.clone();
-                        let summary = thread_summary_from_session(session, &app.preferences);
+                        let summary = thread_summary_from_session_in_connection(
+                            session,
+                            &app.preferences,
+                            &connection_id,
+                        );
                         let new_id = summary.id.clone();
+                        let access_mode = app
+                            .draft_key_for_ui_thread(&local_id)
+                            .and_then(|key| app.composer_access_modes.remove(&key));
                         if let Some(index) = app
                             .threads
                             .iter()
@@ -7145,8 +9207,10 @@ impl MitsuroApp {
                             thread.backend_session_id = Some(backend_session_id.clone());
                             app.threads.insert(0, thread);
                         }
-                        if let Some(mode) = app.composer_access_modes.remove(&local_id) {
-                            app.composer_access_modes.insert(new_id.clone(), mode);
+                        if let (Some(mode), Some(session_key)) =
+                            (access_mode, app.session_key_for_ui_thread(&new_id))
+                        {
+                            app.composer_access_modes.insert(session_key, mode);
                         }
                         app.selected_thread = Some(new_id.clone());
                         match app.active_thread_surface() {
@@ -7414,7 +9478,9 @@ impl MitsuroApp {
                 _ => None,
             };
             if let Some(mode) = mode {
-                self.composer_access_modes.insert(thread_id, mode);
+                if let Some(session_key) = self.draft_key_for_ui_thread(&thread_id) {
+                    self.composer_access_modes.insert(session_key, mode);
+                }
             }
         }
     }
@@ -7485,9 +9551,8 @@ impl MitsuroApp {
     }
 
     fn selected_speed_mode(&self) -> Option<ProductSpeedMode> {
-        let backend = self.active_backend_kind()?;
-        Some(match backend {
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture => {
+        Some(match self.active_composer_speed_mode_contract()? {
+            ComposerSpeedModeContract::ServiceTier => {
                 if self.fast_mode_enabled() {
                     let tier = self.selected_model()?.service_tiers.first()?.id.clone();
                     ProductSpeedMode::CodexServiceTier(tier)
@@ -7495,7 +9560,7 @@ impl MitsuroApp {
                     ProductSpeedMode::CodexStandard
                 }
             }
-            BackendKind::MitsuroHttp => {
+            ComposerSpeedModeContract::StandardFast => {
                 if self.fast_mode_enabled() {
                     ProductSpeedMode::MitsuroFast
                 } else {
@@ -9327,11 +11392,9 @@ impl MitsuroApp {
     }
 
     pub fn work_mode_available(&self) -> bool {
-        match self.active_backend_kind() {
-            Some(BackendKind::MitsuroHttp) => true,
-            Some(BackendKind::CodexStdio)
-            | Some(BackendKind::CodexWebSocket)
-            | Some(BackendKind::Fixture) => {
+        match self.active_composer_work_mode_contract() {
+            Some(ComposerWorkModeContract::PlanBuild) => true,
+            Some(ComposerWorkModeContract::CollaborationPresets) => {
                 self.collaboration_modes
                     .iter()
                     .any(|preset| preset.mode == Some(ModeKind::Plan))
@@ -9347,7 +11410,9 @@ impl MitsuroApp {
     pub fn work_mode_label(&self) -> &'static str {
         if self.composer_plan_mode {
             "Plan"
-        } else if self.active_backend_kind() == Some(BackendKind::MitsuroHttp) {
+        } else if self.active_composer_work_mode_contract()
+            == Some(ComposerWorkModeContract::PlanBuild)
+        {
             "Build"
         } else {
             "Default"
@@ -9392,13 +11457,13 @@ impl MitsuroApp {
     }
 
     fn selected_work_mode(&self) -> Option<ProductWorkMode> {
-        match self.active_backend_kind()? {
-            BackendKind::MitsuroHttp => Some(if self.composer_plan_mode {
+        match self.active_composer_work_mode_contract()? {
+            ComposerWorkModeContract::PlanBuild => Some(if self.composer_plan_mode {
                 ProductWorkMode::MitsuroPlan
             } else {
                 ProductWorkMode::MitsuroBuild
             }),
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket | BackendKind::Fixture => {
+            ComposerWorkModeContract::CollaborationPresets => {
                 let mode = if self.composer_plan_mode {
                     ModeKind::Plan
                 } else {
@@ -10062,7 +12127,7 @@ impl MitsuroApp {
         }
     }
 
-    /// Navigate from the URL bar (Go / Enter). Updates mock history + optional bridge/WebView.
+    /// Navigate from the URL bar (Go / Enter). Updates fallback history and the live WebView.
     pub fn browser_navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.browser_url_input.read(cx).value().to_string();
         if raw.trim().is_empty() {
@@ -10336,14 +12401,9 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
-        if !backend.capabilities().mcp_resources || session.backend != BackendKind::CodexStdio {
-            self.status_line = match session.backend {
-                BackendKind::MitsuroHttp => {
-                    "Interactive MCP apps are not exposed by the Mitsuro server."
-                }
-                _ => "Interactive MCP apps are not supported by this backend.",
-            }
-            .into();
+        if !backend.capabilities().mcp_resources {
+            self.status_line =
+                "Interactive MCP apps are not supported by the selected backend.".into();
             cx.notify();
             return;
         }
@@ -10592,6 +12652,12 @@ impl MitsuroApp {
                     input.update(cx, |state, cx| state.set_value(display_url, window, cx));
                 });
                 cx.notify();
+            }
+            McpAppRuntimeEvent::Title { key, title } => {
+                if key == ATLAS_RUNTIME_KEY && !title.trim().is_empty() {
+                    self.browser.title = title.into();
+                    cx.notify();
+                }
             }
             McpAppRuntimeEvent::OpenLink { key, url } => {
                 if key == ATLAS_RUNTIME_KEY {
@@ -11801,19 +13867,83 @@ impl MitsuroApp {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
-        let visible = self
+        let current_visible = self
             .transcript_visible_limits
-            .entry(thread_id.clone())
-            .or_insert(16);
-        let hidden = total_messages.saturating_sub(*visible);
+            .get(&thread_id)
+            .copied()
+            .unwrap_or(16);
+        let hidden = total_messages.saturating_sub(current_visible);
         if hidden > 0 {
-            *visible = visible.saturating_add(16).min(total_messages);
+            let old_prefix = 1usize;
+            let (old_top, logical_offset) =
+                Self::capture_transcript_anchor(&self.transcript_scroll_handle, old_prefix);
+            let revealed = hidden.min(16);
+            let next_visible = current_visible.saturating_add(revealed).min(total_messages);
+            self.transcript_visible_limits
+                .insert(thread_id.clone(), next_visible);
+            if let Some(key) = self.draft_key_for_ui_thread(&thread_id) {
+                self.session_transcript_viewports
+                    .entry(key)
+                    .or_default()
+                    .follow_latest = false;
+            }
+            let new_hidden = total_messages.saturating_sub(next_visible);
+            let new_prefix =
+                usize::from(new_hidden > 0 || self.transcript_has_older_server_history());
+            let new_top = old_top
+                .saturating_sub(old_prefix)
+                .saturating_add(revealed)
+                .saturating_add(new_prefix);
+            Self::restore_transcript_anchor_after_layout(
+                self.transcript_scroll_handle.clone(),
+                new_top,
+                logical_offset,
+                cx,
+            );
             self.status_line =
-                format!("Transcript · showing {} of {total_messages}", *visible).into();
+                format!("Transcript · showing {next_visible} of {total_messages}").into();
             cx.notify();
             return;
         }
         self.load_older_transcript_messages(thread_id, cx);
+    }
+
+    fn capture_transcript_anchor(handle: &ScrollHandle, content_prefix: usize) -> (usize, Pixels) {
+        let raw_top = handle.top_item();
+        let anchor_index = raw_top.max(content_prefix);
+        let logical_offset = handle
+            .bounds_for_item(anchor_index)
+            .map(|child| child.origin.y + handle.offset().y - handle.bounds().origin.y)
+            .unwrap_or_else(|| {
+                let (_, offset) = handle.logical_scroll_top();
+                offset
+            });
+        (anchor_index, logical_offset)
+    }
+
+    fn restore_transcript_anchor_after_layout(
+        handle: ScrollHandle,
+        child_index: usize,
+        logical_offset: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        handle.scroll_to_top_of_item(child_index);
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(Duration::from_millis(16));
+            })
+            .await;
+            if let Some(child) = handle.bounds_for_item(child_index) {
+                let viewport = handle.bounds();
+                let current = handle.offset();
+                handle.set_offset(point(
+                    current.x,
+                    viewport.origin.y + logical_offset - child.origin.y,
+                ));
+            }
+            let _ = this.update(cx, |_app, cx| cx.notify());
+        })
+        .detach();
     }
 
     fn load_older_transcript_messages(&mut self, thread_id: String, cx: &mut Context<Self>) {
@@ -11843,6 +13973,20 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.status_line = "Earlier history unavailable · missing owning connection".into();
+            cx.notify();
+            return;
+        };
+        let Some(connection_generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.status_line = "Earlier history unavailable · owning connection is missing".into();
+            cx.notify();
+            return;
+        };
         let pagination_generation = {
             let state = self
                 .transcript_pagination
@@ -11852,7 +13996,16 @@ impl MitsuroApp {
             state.generation = state.generation.wrapping_add(1);
             state.generation
         };
-        let backend_generation = self.backend_generation;
+        let old_prefix = 1usize;
+        let (old_top, logical_offset) =
+            Self::capture_transcript_anchor(&self.transcript_scroll_handle, old_prefix);
+        let anchor_handle = self.transcript_scroll_handle.clone();
+        if let Some(key) = self.draft_key_for_ui_thread(&thread_id) {
+            self.session_transcript_viewports
+                .entry(key)
+                .or_default()
+                .follow_latest = false;
+        }
         self.status_line = "Transcript · loading earlier messages…".into();
         cx.spawn(async move |this, cx| {
             let history_backend = Arc::clone(&backend);
@@ -11867,64 +14020,112 @@ impl MitsuroApp {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if app.backend_generation != backend_generation {
-                    return;
-                }
-                let Some(current_generation) = app
-                    .transcript_pagination
-                    .get(&thread_id)
-                    .map(|state| state.generation)
-                else {
-                    return;
-                };
-                if current_generation != pagination_generation {
-                    return;
-                }
-                match result {
-                    Ok(page) => {
-                        let fully_loaded = page.history.fully_loaded;
-                        if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
-                            state.loading = false;
-                            state.older_turns_cursor = page.history.older_turns_cursor;
-                            state.fully_loaded = fully_loaded;
+                let _ = app.with_connection_thread_projection(&connection_id, cx, |app, cx| {
+                    if !app
+                        .connections
+                        .generation_matches(&connection_id, connection_generation)
+                    {
+                        return;
+                    }
+                    let Some(current_generation) = app
+                        .transcript_pagination
+                        .get(&thread_id)
+                        .map(|state| state.generation)
+                    else {
+                        return;
+                    };
+                    if current_generation != pagination_generation {
+                        return;
+                    }
+                    match result {
+                        Ok(page) => {
+                            let fully_loaded = page.history.fully_loaded;
+                            if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
+                                state.loading = false;
+                                state.older_turns_cursor = page.history.older_turns_cursor;
+                                state.fully_loaded = fully_loaded;
+                            }
+                            let mut added = 0;
+                            let mut total = 0;
+                            if let Some(thread) = app
+                                .threads
+                                .iter_mut()
+                                .find(|thread| thread.summary.id == thread_id)
+                            {
+                                let before = thread.messages.len();
+                                prepend_hydrated_messages(&mut thread.messages, page.messages);
+                                total = thread.messages.len();
+                                added = total.saturating_sub(before);
+                            }
+                            if added > 0 {
+                                let visible = app
+                                    .transcript_visible_limits
+                                    .entry(thread_id.clone())
+                                    .or_insert(16);
+                                *visible = transcript_limit_after_prepend(*visible, added, total);
+                                if let Some(key) = app.draft_key_for_ui_thread(&thread_id) {
+                                    if let Some(anchor) = app
+                                        .session_transcript_viewports
+                                        .get_mut(&key)
+                                        .and_then(|state| state.unread_anchor.as_mut())
+                                    {
+                                        anchor.index = anchor.index.saturating_add(added);
+                                    }
+                                }
+                            }
+                            if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                if added > 0 {
+                                    let hidden = app
+                                        .threads
+                                        .iter()
+                                        .find(|thread| thread.summary.id == thread_id)
+                                        .map(|thread| {
+                                            let visible = app
+                                                .transcript_visible_limits
+                                                .get(&thread_id)
+                                                .copied()
+                                                .unwrap_or(16);
+                                            thread.messages.len().saturating_sub(visible)
+                                        })
+                                        .unwrap_or(0);
+                                    let has_older = app
+                                        .transcript_pagination
+                                        .get(&thread_id)
+                                        .is_some_and(|state| {
+                                            !state.fully_loaded
+                                                && state.older_turns_cursor.is_some()
+                                        });
+                                    let new_prefix = usize::from(hidden > 0 || has_older);
+                                    let new_top = old_top
+                                        .saturating_sub(old_prefix)
+                                        .saturating_add(added)
+                                        .saturating_add(new_prefix);
+                                    Self::restore_transcript_anchor_after_layout(
+                                        anchor_handle.clone(),
+                                        new_top,
+                                        logical_offset,
+                                        cx,
+                                    );
+                                }
+                                app.status_line = if fully_loaded {
+                                    format!("Transcript · loaded {added} earlier · complete").into()
+                                } else {
+                                    format!("Transcript · loaded {added} earlier").into()
+                                };
+                            }
                         }
-                        let mut added = 0;
-                        let mut total = 0;
-                        if let Some(thread) = app
-                            .threads
-                            .iter_mut()
-                            .find(|thread| thread.summary.id == thread_id)
-                        {
-                            let before = thread.messages.len();
-                            prepend_hydrated_messages(&mut thread.messages, page.messages);
-                            total = thread.messages.len();
-                            added = total.saturating_sub(before);
-                        }
-                        if added > 0 {
-                            let visible = app
-                                .transcript_visible_limits
-                                .entry(thread_id.clone())
-                                .or_insert(16);
-                            *visible = transcript_limit_after_prepend(*visible, added, total);
-                        }
-                        if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
-                            app.status_line = if fully_loaded {
-                                format!("Transcript · loaded {added} earlier · complete").into()
-                            } else {
-                                format!("Transcript · loaded {added} earlier").into()
-                            };
+                        Err(error) => {
+                            if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
+                                state.loading = false;
+                            }
+                            if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
+                                app.status_line =
+                                    format!("Earlier history failed · {error}").into();
+                            }
                         }
                     }
-                    Err(error) => {
-                        if let Some(state) = app.transcript_pagination.get_mut(&thread_id) {
-                            state.loading = false;
-                        }
-                        if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
-                            app.status_line = format!("Earlier history failed · {error}").into();
-                        }
-                    }
-                }
-                cx.notify();
+                    cx.notify();
+                });
             });
         })
         .detach();
@@ -11939,12 +14140,370 @@ impl MitsuroApp {
         &self.transcript_scroll_handle
     }
 
+    fn transcript_child_index_for_message(&self, message_index: usize) -> usize {
+        let total = self
+            .selected_thread()
+            .map(|thread| thread.messages.len())
+            .unwrap_or(0);
+        let visible = self.transcript_visible_limit().max(16).min(total);
+        let first_visible = total.saturating_sub(visible);
+        let prefix = usize::from(first_visible > 0 || self.transcript_has_older_server_history());
+        message_index.saturating_sub(first_visible) + prefix
+    }
+
+    fn selected_transcript_viewport_key(&self) -> Option<SessionKey> {
+        self.selected_thread
+            .as_deref()
+            .and_then(|thread_id| self.draft_key_for_ui_thread(thread_id))
+    }
+
+    fn selected_transcript_viewport(&self) -> Option<&TranscriptViewportState> {
+        let key = self.selected_transcript_viewport_key()?;
+        self.session_transcript_viewports.get(&key)
+    }
+
+    pub fn transcript_unseen_message_count(&self) -> usize {
+        self.selected_transcript_viewport()
+            .map(|state| state.unseen_messages)
+            .unwrap_or(0)
+    }
+
+    pub fn transcript_unread_anchor_index(&self) -> Option<usize> {
+        let anchor = self
+            .selected_transcript_viewport()?
+            .unread_anchor
+            .as_ref()?;
+        if let Some(index) = anchor.item_id.as_deref().and_then(|item_id| {
+            self.selected_thread().and_then(|thread| {
+                thread
+                    .messages
+                    .iter()
+                    .position(|message| message.item_id.as_deref() == Some(item_id))
+            })
+        }) {
+            return Some(index);
+        }
+        Some(anchor.index)
+    }
+
+    pub fn transcript_jump_to_latest_visible(&self) -> bool {
+        self.selected_transcript_viewport()
+            .is_some_and(|state| !state.follow_latest || state.unseen_messages > 0)
+    }
+
+    fn selected_transcript_follows_latest(&self) -> bool {
+        self.selected_transcript_viewport()
+            .map(|state| state.follow_latest)
+            .unwrap_or(true)
+    }
+
+    /// Update follow-latest state from the wheel event before GPUI applies its
+    /// built-in scroll delta. This keeps the first upward wheel tick from being
+    /// overwritten by a simultaneous live response event.
+    pub fn note_transcript_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.selected_transcript_viewport_key() else {
+            return;
+        };
+        let delta = event.delta.pixel_delta(window.line_height());
+        let offset_y = f32::from(self.transcript_scroll_handle.offset().y);
+        let max_offset_y = f32::from(self.transcript_scroll_handle.max_offset().height);
+        let follow_latest = transcript_near_bottom_after_delta(
+            offset_y,
+            max_offset_y,
+            f32::from(delta.y),
+            TRANSCRIPT_BOTTOM_THRESHOLD_PX,
+        );
+        let state = self.session_transcript_viewports.entry(key).or_default();
+        let changed = state.follow_latest != follow_latest
+            || (follow_latest && (state.unseen_messages > 0 || state.unread_anchor.is_some()));
+        state.follow_latest = follow_latest;
+        if follow_latest {
+            state.unseen_messages = 0;
+            state.unread_anchor = None;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.selected_transcript_viewport_key() {
+            let state = self.session_transcript_viewports.entry(key).or_default();
+            state.follow_latest = true;
+            state.unseen_messages = 0;
+            state.unread_anchor = None;
+        }
+        self.transcript_scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn apply_transcript_viewport_update(&mut self, thread_id: &str, previous_message_count: usize) {
+        let Some(key) = self.draft_key_for_ui_thread(thread_id) else {
+            return;
+        };
+        let foreground = !self.routing_background_projection
+            && self.selected_thread.as_deref() == Some(thread_id);
+        let follows_latest = self
+            .session_transcript_viewports
+            .get(&key)
+            .map(|state| state.follow_latest)
+            .unwrap_or(true);
+        let (message_count, first_new_item_id) = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == thread_id)
+            .map(|thread| {
+                (
+                    thread.messages.len(),
+                    thread
+                        .messages
+                        .get(previous_message_count)
+                        .and_then(|message| message.item_id.clone()),
+                )
+            })
+            .unwrap_or((previous_message_count, None));
+        let added = message_count.saturating_sub(previous_message_count);
+
+        if foreground && follows_latest {
+            let state = self.session_transcript_viewports.entry(key).or_default();
+            state.unseen_messages = 0;
+            state.unread_anchor = None;
+            self.transcript_scroll_handle.scroll_to_bottom();
+        } else if added > 0 {
+            let state = self.session_transcript_viewports.entry(key).or_default();
+            state.follow_latest = false;
+            if state.unseen_messages == 0 {
+                state.unread_anchor = Some(TranscriptUnreadAnchor {
+                    item_id: first_new_item_id,
+                    index: previous_message_count,
+                });
+            }
+            state.unseen_messages = state.unseen_messages.saturating_add(added);
+        }
+    }
+
+    pub fn thread_rename_input(&self) -> &Entity<InputState> {
+        &self.thread_rename_input
+    }
+
+    pub fn thread_rename_open(&self) -> bool {
+        self.thread_rename_open
+    }
+
+    pub fn thread_rename_in_progress(&self) -> bool {
+        self.thread_rename_in_progress
+    }
+
+    pub fn thread_rename_error(&self) -> Option<&str> {
+        self.thread_rename_error.as_deref()
+    }
+
+    pub fn open_thread_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let availability = self.thread_action_availability(ThreadAction::Rename);
+        if !availability.is_available() {
+            self.status_line = availability
+                .reason()
+                .unwrap_or("Rename is unavailable")
+                .to_owned()
+                .into();
+            self.thread_menu_open = false;
+            cx.notify();
+            return;
+        }
+        let Some(title) = self
+            .selected_thread()
+            .map(|thread| thread.summary.display_title())
+        else {
+            return;
+        };
+        self.thread_menu_open = false;
+        self.sidebar_thread_menu = None;
+        self.thread_project_menu_open = false;
+        self.thread_rename_open = true;
+        self.thread_rename_error = None;
+        let input = self.thread_rename_input.clone();
+        input.update(cx, |state, cx| {
+            state.set_value(title, window, cx);
+            state.focus(window, cx);
+        });
+        window.dispatch_action(Box::new(SelectAll), cx);
+        cx.notify();
+    }
+
+    pub fn cancel_thread_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_rename_in_progress {
+            return;
+        }
+        self.thread_rename_open = false;
+        self.thread_rename_error = None;
+        self.thread_rename_generation = self.thread_rename_generation.wrapping_add(1);
+        let input = self.thread_rename_input.clone();
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
+
+    pub fn commit_thread_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.thread_rename_open || self.thread_rename_in_progress {
+            return;
+        }
+        let name = match validated_thread_name(self.thread_rename_input.read(cx).value().as_ref()) {
+            Ok(name) => name,
+            Err(error) => {
+                self.thread_rename_error = Some(error.to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        let availability = self.thread_action_availability(ThreadAction::Rename);
+        if !availability.is_available() {
+            self.thread_rename_error = Some(
+                availability
+                    .reason()
+                    .unwrap_or("Rename is unavailable")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let is_local = self
+            .selected_thread()
+            .is_some_and(|thread| thread.backend_session_id.is_none());
+        if is_local || self.is_explicit_fixture() {
+            if let Some(thread) = self
+                .threads
+                .iter_mut()
+                .find(|thread| thread.summary.id == thread_id)
+            {
+                thread.summary.name = Some(name.clone());
+            }
+            if self.is_explicit_fixture() {
+                self.set_thread_name_best_effort(&thread_id, name.clone(), cx);
+            }
+            self.thread_rename_open = false;
+            self.thread_rename_error = None;
+            self.status_line = format!("Renamed to {name}").into();
+            let input = self.thread_rename_input.clone();
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            cx.notify();
+            return;
+        }
+
+        let Some(session_id) = self.live_session_id(&thread_id) else {
+            self.thread_rename_error = Some("Live session identity is missing".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(backend) = self.live_backend() else {
+            self.thread_rename_error = Some("The conversation provider is offline".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.thread_rename_error = Some("The owning connection is missing".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(connection_generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.thread_rename_error = Some("The owning connection is missing".to_owned());
+            cx.notify();
+            return;
+        };
+        self.thread_rename_generation = self.thread_rename_generation.wrapping_add(1);
+        let rename_generation = self.thread_rename_generation;
+        self.thread_rename_in_progress = true;
+        self.thread_rename_error = None;
+        self.status_line = "Renaming conversation…".into();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .rename_session(&session_id, name.clone())
+                            .await
+                            .map(|()| name)
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.thread_rename_generation != rename_generation
+                    || !app
+                        .connections
+                        .generation_matches(&connection_id, connection_generation)
+                {
+                    return;
+                }
+                let foreground = app.connections.selected_id() == Some(&connection_id)
+                    && app.selected_thread.as_deref() == Some(thread_id.as_str());
+                match result {
+                    Ok(name) => {
+                        let _ = app.with_connection_thread_projection(
+                            &connection_id,
+                            cx,
+                            |app, _cx| {
+                                if let Some(thread) = app
+                                    .threads
+                                    .iter_mut()
+                                    .find(|thread| thread.summary.id == thread_id)
+                                {
+                                    thread.summary.name = Some(name.clone());
+                                }
+                            },
+                        );
+                        app.thread_rename_open = false;
+                        app.thread_rename_in_progress = false;
+                        app.thread_rename_error = None;
+                        if foreground {
+                            app.status_line = format!("Renamed to {name}").into();
+                        }
+                    }
+                    Err(error) => {
+                        app.thread_rename_in_progress = false;
+                        if foreground {
+                            app.thread_rename_error = Some(error.clone());
+                            app.status_line = format!("Rename failed · {error}").into();
+                        } else {
+                            app.thread_rename_open = false;
+                            app.thread_rename_error = None;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn thread_find_input(&self) -> &Entity<InputState> {
         &self.thread_find_input
     }
 
     pub fn thread_find_open(&self) -> bool {
         self.thread_find_open
+    }
+
+    pub fn thread_inspector_open(&self) -> bool {
+        self.thread_inspector_open
+    }
+
+    pub fn toggle_thread_inspector(&mut self, cx: &mut Context<Self>) {
+        self.thread_inspector_open = !self.thread_inspector_open;
+        self.thread_menu_open = false;
+        cx.notify();
     }
 
     pub fn thread_find_matches(&self) -> &[ThreadSearchOccurrence] {
@@ -12089,9 +14648,11 @@ impl MitsuroApp {
         if self.thread_find_matches.is_empty() {
             return;
         }
-        let count = self.thread_find_matches.len() as isize;
-        self.thread_find_selected =
-            (self.thread_find_selected as isize + delta).rem_euclid(count) as usize;
+        self.thread_find_selected = wrapped_thread_find_index(
+            self.thread_find_selected,
+            delta,
+            self.thread_find_matches.len(),
+        );
         self.reveal_selected_thread_find_match(cx);
         cx.notify();
     }
@@ -12136,15 +14697,16 @@ impl MitsuroApp {
     }
 
     fn scroll_thread_find_match_after_layout(&self, message_index: usize, cx: &mut Context<Self>) {
+        let child_index = self.transcript_child_index_for_message(message_index);
         self.transcript_scroll_handle
-            .scroll_to_top_of_item(message_index);
+            .scroll_to_top_of_item(child_index);
         let handle = self.transcript_scroll_handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_spawn(async move {
                 std::thread::sleep(Duration::from_millis(16));
             })
             .await;
-            handle.scroll_to_top_of_item(message_index);
+            handle.scroll_to_top_of_item(child_index);
             let _ = this.update(cx, |_app, cx| cx.notify());
         })
         .detach();
@@ -12511,20 +15073,36 @@ impl MitsuroApp {
         &self.search_query
     }
 
+    pub fn sidebar_search_open(&self) -> bool {
+        self.sidebar_search_open
+    }
+
+    pub fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_search_open {
+            self.close_sidebar_search(window, cx);
+            return;
+        }
+
+        self.sidebar_search_open = true;
+        self.mode_menu_open = false;
+        self.thread_menu_open = false;
+        self.status_line = "Search conversations".into();
+        let input = self.search_input.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn close_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_search_open = false;
+        self.search_query.clear();
+        let input = self.search_input.clone();
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
+
     /// Local sidebar filter: title, preview, cwd (case-insensitive substring).
     pub fn thread_matches_search(&self, summary: &ThreadSummary) -> bool {
-        let filter = self.search_query.trim().to_lowercase();
-        if filter.is_empty() {
-            return true;
-        }
-        let title = summary.display_title().to_lowercase();
-        let preview = summary.preview.as_deref().unwrap_or("").to_lowercase();
-        let cwd = summary.cwd.as_deref().unwrap_or("").to_lowercase();
-        let meta = demo::meta_line(summary).to_lowercase();
-        title.contains(&filter)
-            || preview.contains(&filter)
-            || cwd.contains(&filter)
-            || meta.contains(&filter)
+        thread_summary_matches_search(summary, &self.search_query)
     }
 
     pub fn model_label(&self) -> SharedString {
@@ -12655,14 +15233,16 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            if backend.kind() == BackendKind::MitsuroHttp {
-                                let empty = AccountSession::empty("mitsuro-http");
+                            let capabilities = backend.capabilities();
+                            let source = backend.kind().id();
+                            if !capabilities.account_read {
+                                let empty = AccountSession::empty(source);
                                 return Ok::<_, String>((
                                     None,
                                     empty.usage,
                                     empty.rate_limits,
                                     Ok(GetWorkspaceMessagesResponse::default()),
-                                    "mitsuro-http",
+                                    source,
                                     SurfaceDataState::Unsupported,
                                 ));
                             }
@@ -12670,34 +15250,34 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let (usage, limits, workspace_messages) = if acc.has_account() {
-                                let usage = backend
-                                    .account_usage_read()
-                                    .await
-                                    .map_err(|error| format!("account/usage/read: {error}"))?;
-                                let limits = backend
-                                    .account_rate_limits_read()
-                                    .await
-                                    .map_err(|error| format!("account/rateLimits/read: {error}"))?;
-                                let workspace_messages =
+                            let (usage, limits) =
+                                if acc.has_account() && capabilities.account_usage {
+                                    let usage = backend
+                                        .account_usage_read()
+                                        .await
+                                        .map_err(|error| format!("account/usage/read: {error}"))?;
+                                    let limits = backend.account_rate_limits_read().await.map_err(
+                                        |error| format!("account/rateLimits/read: {error}"),
+                                    )?;
+                                    (usage, limits)
+                                } else {
+                                    let empty = AccountSession::empty(source);
+                                    (empty.usage, empty.rate_limits)
+                                };
+                            let workspace_messages =
+                                if acc.has_account() && capabilities.account_workspace_messages {
                                     backend.read_account_workspace_messages().await.map_err(
                                         |error| format!("account/workspaceMessages/read: {error}"),
-                                    );
-                                (usage, limits, workspace_messages)
-                            } else {
-                                let empty = AccountSession::empty("app-server");
-                                (
-                                    empty.usage,
-                                    empty.rate_limits,
-                                    Ok(GetWorkspaceMessagesResponse::default()),
-                                )
-                            };
+                                    )
+                                } else {
+                                    Ok(GetWorkspaceMessagesResponse::default())
+                                };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
                                 limits,
                                 workspace_messages,
-                                "app-server",
+                                source,
                                 SurfaceDataState::Live,
                             ));
                         }
@@ -12780,14 +15360,16 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            if backend.kind() == BackendKind::MitsuroHttp {
-                                let empty = AccountSession::empty("mitsuro-http");
+                            let capabilities = backend.capabilities();
+                            let source = backend.kind().id();
+                            if !capabilities.account_read {
+                                let empty = AccountSession::empty(source);
                                 return Ok::<_, String>((
                                     None,
                                     empty.usage,
                                     empty.rate_limits,
                                     Ok(GetWorkspaceMessagesResponse::default()),
-                                    "mitsuro-http",
+                                    source,
                                     SurfaceDataState::Unsupported,
                                 ));
                             }
@@ -12795,34 +15377,34 @@ impl MitsuroApp {
                                 .account_read(GetAccountParams::default())
                                 .await
                                 .map_err(|error| format!("account/read: {error}"))?;
-                            let (usage, limits, workspace_messages) = if acc.has_account() {
-                                let usage = backend
-                                    .account_usage_read()
-                                    .await
-                                    .map_err(|error| format!("account/usage/read: {error}"))?;
-                                let limits = backend
-                                    .account_rate_limits_read()
-                                    .await
-                                    .map_err(|error| format!("account/rateLimits/read: {error}"))?;
-                                let workspace_messages =
+                            let (usage, limits) =
+                                if acc.has_account() && capabilities.account_usage {
+                                    let usage = backend
+                                        .account_usage_read()
+                                        .await
+                                        .map_err(|error| format!("account/usage/read: {error}"))?;
+                                    let limits = backend.account_rate_limits_read().await.map_err(
+                                        |error| format!("account/rateLimits/read: {error}"),
+                                    )?;
+                                    (usage, limits)
+                                } else {
+                                    let empty = AccountSession::empty(source);
+                                    (empty.usage, empty.rate_limits)
+                                };
+                            let workspace_messages =
+                                if acc.has_account() && capabilities.account_workspace_messages {
                                     backend.read_account_workspace_messages().await.map_err(
                                         |error| format!("account/workspaceMessages/read: {error}"),
-                                    );
-                                (usage, limits, workspace_messages)
-                            } else {
-                                let empty = AccountSession::empty("app-server");
-                                (
-                                    empty.usage,
-                                    empty.rate_limits,
-                                    Ok(GetWorkspaceMessagesResponse::default()),
-                                )
-                            };
+                                    )
+                                } else {
+                                    Ok(GetWorkspaceMessagesResponse::default())
+                                };
                             return Ok::<_, String>((
                                 acc.account,
                                 usage,
                                 limits,
                                 workspace_messages,
-                                "app-server",
+                                source,
                                 SurfaceDataState::Live,
                             ));
                         }
@@ -13095,10 +15677,8 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            if backend.kind() == BackendKind::MitsuroHttp {
-                                return Err(
-                                    "account login is not exposed by the Mitsuro server".into()
-                                );
+                            if !backend.capabilities().account_auth {
+                                return Err("account login is not exposed by this backend".into());
                             }
                             match backend
                                 .account_login_start(LoginAccountParams::chatgpt())
@@ -13231,8 +15811,8 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
-        if backend.kind() == BackendKind::MitsuroHttp {
-            self.status_line = "Account login is not exposed by the Mitsuro server.".into();
+        if !backend.capabilities().account_auth {
+            self.status_line = "Account login is not exposed by this backend.".into();
             cx.notify();
             return;
         }
@@ -13290,11 +15870,10 @@ impl MitsuroApp {
                 .background_spawn(async move {
                     if use_live {
                         if let Some(backend) = backend {
-                            if backend.kind() == BackendKind::MitsuroHttp {
-                                return Err(
-                                    "account logout is not exposed by the Mitsuro server".into()
-                                );
+                            if !backend.capabilities().account_auth {
+                                return Err("account logout is not exposed by this backend".into());
                             }
+                            let source = backend.kind().id();
                             backend
                                 .account_logout()
                                 .await
@@ -13304,7 +15883,7 @@ impl MitsuroApp {
                                 .await
                                 .ok()
                                 .and_then(|r| r.account);
-                            return Ok::<_, String>((acc, "app-server"));
+                            return Ok::<_, String>((acc, source));
                         }
                     }
                     if !use_fixture {
@@ -13473,6 +16052,17 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let connection_id = self.connections.selected_id().cloned();
+        let interaction_thread_id = self
+            .selected_concurrent_side_turn()
+            .map(|side| side.thread_id.clone())
+            .or_else(|| {
+                self.primary_interaction_owner_thread_id()
+                    .map(str::to_owned)
+            });
+        if let Some(thread_id) = interaction_thread_id.as_deref() {
+            self.clear_session_runtime_interaction_attention_for_ui_thread(thread_id);
+        }
         self.status_line = format!("{label} · sending…").into();
         cx.spawn(async move |this, cx| {
             let outcome = cx
@@ -13487,11 +16077,19 @@ impl MitsuroApp {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                app.status_line = match outcome {
+                let status_line = match outcome {
                     Ok(()) => format!("{label} · sent").into(),
                     Err(error) => format!("{label} failed · {error}").into(),
                 };
-                cx.notify();
+                if let Some(connection_id) = connection_id.as_ref() {
+                    let _ = app.with_connection_thread_projection(connection_id, cx, |app, cx| {
+                        app.status_line = status_line;
+                        cx.notify();
+                    });
+                } else {
+                    app.status_line = status_line;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -13914,13 +16512,14 @@ impl MitsuroApp {
     /// Approve or reject the current pending approval (fixture resume + live respond).
     pub fn resolve_pending_approval(&mut self, choice: ApprovalChoice, cx: &mut Context<Self>) {
         if self.selected_concurrent_side_turn().is_some() {
-            let (pending, bridge) = {
+            let (pending, bridge, thread_id) = {
                 let side = self
                     .selected_concurrent_side_turn_mut()
                     .expect("selected side turn checked");
                 (
                     side.pending_approval.take(),
                     side.live_approval_bridge.clone(),
+                    side.thread_id.clone(),
                 )
             };
             let Some(pending) = pending else {
@@ -13933,6 +16532,7 @@ impl MitsuroApp {
                 ApprovalChoice::Reject => "rejected",
                 ApprovalChoice::Abort => "aborted",
             };
+            self.clear_session_runtime_interaction_attention_for_ui_thread(&thread_id);
             if bridge.as_ref().is_some_and(|bridge| bridge.submit(choice)) {
                 self.status_line = format!("Side-chat approval {label} · turn continuing…").into();
                 cx.notify();
@@ -13969,6 +16569,12 @@ impl MitsuroApp {
             ApprovalChoice::Reject => "rejected",
             ApprovalChoice::Abort => "aborted",
         };
+        if let Some(thread_id) = self
+            .primary_interaction_owner_thread_id()
+            .map(str::to_owned)
+        {
+            self.clear_session_runtime_interaction_attention_for_ui_thread(&thread_id);
+        }
         self.status_line = format!(
             "Approval {label}: {}",
             pending.summary.chars().take(48).collect::<String>()
@@ -14031,10 +16637,6 @@ impl MitsuroApp {
                     self.release_thread_subscription_best_effort(&previous_id, cx);
                 }
             }
-            self.latest_message_edit = None;
-            self.latest_message_edit_error = None;
-            self.latest_message_edit_generation =
-                self.latest_message_edit_generation.wrapping_add(1);
         }
         self.thread_find_generation = self.thread_find_generation.wrapping_add(1);
         self.thread_find_matches.clear();
@@ -14042,7 +16644,12 @@ impl MitsuroApp {
         self.thread_find_loading = false;
         self.thread_find_hydrating = false;
         self.thread_find_error = None;
-        self.selected_thread = Some(id.clone());
+        self.project_selected_thread(Some(id.clone()), cx);
+        if selection_changed {
+            // Completion/failure badges are unread markers. Interactive
+            // attention remains until the actual request is answered.
+            self.clear_session_runtime_terminal_attention_for_ui_thread(&id);
+        }
         self.thread_menu_open = false;
         self.composer_access_menu_open = false;
         let backend_session_id = self
@@ -14051,7 +16658,10 @@ impl MitsuroApp {
             .find(|thread| thread.summary.id == id)
             .and_then(|thread| thread.backend_session_id.clone());
         if let Some(session_id) = backend_session_id {
-            self.preferences.remember_session(session_id);
+            if let Some(connection_id) = self.connections.selected_id() {
+                self.preferences
+                    .remember_session_for_connection(connection_id.as_str(), session_id);
+            }
             self.save_preferences_best_effort();
         }
         // Keep Chat vs Codex mode aligned with the thread surface when possible.
@@ -14100,8 +16710,15 @@ impl MitsuroApp {
                     .find(|t| t.summary.id == id)
                     .map(|t| t.messages.is_empty())
                     .unwrap_or(true);
-                if empty || (selection_changed && backend.kind() == BackendKind::CodexStdio) {
-                    self.status_line = if backend.kind() == BackendKind::CodexStdio {
+                let requires_rehydrate = self
+                    .transcript_pagination
+                    .get(&id)
+                    .is_some_and(|state| state.requires_rehydrate);
+                if empty
+                    || requires_rehydrate
+                    || (selection_changed && backend.capabilities().thread_resume)
+                {
+                    self.status_line = if backend.capabilities().thread_resume {
                         "thread/resume…".into()
                     } else {
                         "thread/read…".into()
@@ -14116,7 +16733,6 @@ impl MitsuroApp {
         if self.thread_find_open {
             self.search_selected_thread_occurrences(cx);
         }
-        self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
     }
 
@@ -14167,10 +16783,6 @@ impl MitsuroApp {
     }
 
     fn release_thread_subscription_best_effort(&mut self, thread_id: &str, cx: &mut Context<Self>) {
-        self.codex_read_only_threads.remove(thread_id);
-        if !self.codex_thread_subscriptions.remove(thread_id) {
-            return;
-        }
         let Some(session_id) = self
             .threads
             .iter()
@@ -14179,24 +16791,44 @@ impl MitsuroApp {
         else {
             return;
         };
-        let Some(backend) = self.live_backend() else {
+        let Some(session_key) = self.session_key_for_ui_thread(thread_id) else {
             return;
         };
-        if !should_release_thread_subscription(&session_id, backend.kind(), false, true) {
+        self.codex_read_only_threads.remove(&session_key);
+        let owns_subscription = self.codex_thread_subscriptions.remove(&session_key);
+        let has_subscription_operation = self.subscription_operations.contains_key(&session_key);
+        let Some(backend) = self.connections.backend(&session_key.connection_id) else {
+            return;
+        };
+        let has_active_turn = self
+            .session_runtimes
+            .get(&session_key)
+            .is_some_and(|runtime| runtime.in_progress);
+        if !should_release_thread_subscription(
+            backend.capabilities().thread_resume,
+            has_active_turn,
+            owns_subscription || has_subscription_operation,
+        ) {
             return;
         }
+        let operation =
+            begin_subscription_operation(&mut self.subscription_operations, &session_key);
         cx.spawn(async move |_this, cx| {
             let _ = cx
                 .background_spawn(async move {
                     let raw_session_id = session_id.raw.clone();
                     let runner = Arc::clone(&backend);
-                    if let Err(error) =
-                        runner.block_on(async move { backend.close_session(&session_id).await })
-                    {
-                        eprintln!(
-                            "[mitsuro] thread/unsubscribe failed id={raw_session_id}: {error}"
-                        );
-                    }
+                    runner.block_on(async move {
+                        let _serial = operation.serial.lock().await;
+                        if !operation.is_current() {
+                            return;
+                        }
+                        if let Err(error) = backend.close_session(&session_id).await {
+                            eprintln!(
+                                "[mitsuro] thread/unsubscribe failed id={raw_session_id}: {error}"
+                            );
+                        }
+                    });
                 })
                 .await;
         })
@@ -14210,6 +16842,15 @@ impl MitsuroApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sidebar_thread_menu = None;
+        if self.thread_rename_in_progress {
+            self.status_line = "Wait for the conversation rename to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.thread_rename_open {
+            self.cancel_thread_rename(window, cx);
+        }
         if let Some(parent_id) = self.selected_side_conversation_parent().map(str::to_owned) {
             if self.selected_thread.as_deref() != Some(id.as_str()) {
                 if self.turn_in_progress() {
@@ -14229,6 +16870,29 @@ impl MitsuroApp {
         self.update_composer_placeholder(window, cx);
     }
 
+    pub fn open_sidebar_thread(
+        &mut self,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_mode_menu(cx);
+        let surface = self
+            .threads()
+            .iter()
+            .find(|candidate| candidate.summary.id == thread_id)
+            .map(|candidate| candidate.surface)
+            .unwrap_or(ThreadSurface::Codex);
+        let mode = match surface {
+            ThreadSurface::Chat => ProductMode::Chat,
+            ThreadSurface::Codex => ProductMode::Codex,
+        };
+        if self.active_mode() != mode {
+            self.set_mode(mode, window, cx);
+        }
+        self.select_thread_with_window(thread_id, window, cx);
+    }
+
     /// Load offline sample threads into the sidebar (dev/review). Off by default for BAR first paint.
     #[allow(dead_code)]
     pub fn toggle_samples(&mut self, cx: &mut Context<Self>) {
@@ -14245,7 +16909,7 @@ impl MitsuroApp {
                 .as_ref()
                 .is_some_and(|id| demo_ids.contains(id))
             {
-                self.selected_thread = None;
+                self.project_selected_thread(None, cx);
             }
         } else {
             for t in demo::demo_threads() {
@@ -14286,6 +16950,17 @@ impl MitsuroApp {
         self.sidebar_activity_view
     }
 
+    pub fn sidebar_group_expanded(&self, group: &str) -> bool {
+        self.preferences.sidebar_group_expanded(group)
+    }
+
+    pub fn toggle_sidebar_group(&mut self, group: &'static str, cx: &mut Context<Self>) {
+        let expanded = !self.preferences.sidebar_group_expanded(group);
+        self.preferences.set_sidebar_group_expanded(group, expanded);
+        self.save_preferences_best_effort();
+        cx.notify();
+    }
+
     pub fn toggle_sidebar_activity_view(&mut self, cx: &mut Context<Self>) {
         self.sidebar_activity_view = !self.sidebar_activity_view;
         self.mode_menu_open = false;
@@ -14298,33 +16973,74 @@ impl MitsuroApp {
         cx.notify();
     }
 
-    /// Priority is derived only from a real in-flight turn or interaction owned
-    /// by this app instance. Idle catalog rows are never promoted decoratively.
+    /// Provider-qualified activity for a visible thread row.
+    pub fn thread_activity(&self, thread_id: &str) -> Option<UiThreadActivity> {
+        let session_key = self.session_key_for_ui_thread(thread_id)?;
+        session_runtime_activity(&self.session_runtimes, &session_key)
+    }
+
+    /// Priority is derived only from a real runtime state owned by this app
+    /// instance. Idle catalog rows are never promoted decoratively.
     pub fn thread_has_priority_activity(&self, thread_id: &str) -> bool {
-        if self.concurrent_side_turn.as_ref().is_some_and(|side| {
-            side.thread_id == thread_id && (side.in_progress || side.has_pending_interaction())
-        }) {
-            return true;
-        }
-        self.active_turn_thread_id.as_deref() == Some(thread_id)
-            && (self.turn_in_progress
-                || self.pending_approval.is_some()
-                || self.pending_user_input.is_some()
-                || self.pending_mcp_elicitation.is_some())
+        self.thread_activity(thread_id).is_some()
     }
 
     pub fn sidebar_has_priority_activity(&self) -> bool {
-        self.active_turn_thread_id
-            .as_deref()
-            .is_some_and(|id| self.thread_has_priority_activity(id))
-            || self
-                .concurrent_side_turn
-                .as_ref()
-                .is_some_and(|side| self.thread_has_priority_activity(&side.thread_id))
+        self.threads
+            .iter()
+            .any(|thread| self.thread_has_priority_activity(&thread.summary.id))
     }
 
     pub fn thread_menu_open(&self) -> bool {
         self.thread_menu_open
+    }
+
+    pub fn sidebar_thread_menu_open(&self, thread_id: &str) -> bool {
+        self.sidebar_thread_menu.as_deref() == Some(thread_id)
+    }
+
+    pub fn toggle_sidebar_thread_menu(
+        &mut self,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_thread_menu.as_deref() == Some(thread_id.as_str()) {
+            self.sidebar_thread_menu = None;
+            cx.notify();
+            return;
+        }
+        self.select_thread_with_window(thread_id.clone(), window, cx);
+        if self.selected_thread.as_deref() != Some(thread_id.as_str()) {
+            return;
+        }
+        self.sidebar_thread_menu = Some(thread_id);
+        self.thread_menu_open = false;
+        self.thread_project_menu_open = false;
+        self.mode_menu_open = false;
+        cx.notify();
+    }
+
+    pub fn close_sidebar_thread_menu(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_thread_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn copy_selected_thread_id(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.selected_thread() else {
+            return;
+        };
+        let value = thread
+            .backend_session_id
+            .as_ref()
+            .map(|session| session.raw.clone())
+            .unwrap_or_else(|| thread.summary.id.clone());
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.sidebar_thread_menu = None;
+        self.thread_menu_open = false;
+        self.status_line = "Copied conversation ID".into();
+        cx.notify();
     }
 
     pub fn thread_project_menu_open(&self) -> bool {
@@ -14333,6 +17049,7 @@ impl MitsuroApp {
 
     pub fn toggle_thread_menu(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = !self.thread_menu_open;
+        self.sidebar_thread_menu = None;
         self.thread_project_menu_open = false;
         if self.thread_menu_open {
             self.mode_menu_open = false;
@@ -14374,10 +17091,10 @@ impl MitsuroApp {
         };
         // Clear selection so home hero shows (bar: mode switch lands on empty home).
         self.remember_thread_selection_for_mode(self.active_mode);
-        self.selected_thread = None;
+        self.project_selected_thread(None, cx);
         self.set_mode(mode, window, cx);
         // set_mode may restore remembered selection — force home for switcher.
-        self.selected_thread = None;
+        self.project_selected_thread(None, cx);
         self.update_composer_placeholder(window, cx);
         self.status_line = format!("Mode · {}", mode.label()).into();
         cx.notify();
@@ -14439,17 +17156,34 @@ impl MitsuroApp {
 
     /// Return to home (Codex/Chat) with no thread selected.
     pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_rename_in_progress {
+            self.status_line = "Wait for the conversation rename to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.thread_rename_open {
+            self.cancel_thread_rename(window, cx);
+        }
         let mode = match self.active_thread_surface() {
             demo::ThreadSurface::Chat => ProductMode::Chat,
             demo::ThreadSurface::Codex => ProductMode::Codex,
         };
-        self.selected_thread = None;
+        self.project_selected_thread(None, cx);
+        // "New chat" is an explicit request for this surface's home draft.
+        // Clear the remembered selection before set_mode runs; otherwise it
+        // briefly reselects the last conversation and stashes the still-
+        // projected input over the provider-qualified home draft.
+        match mode {
+            ProductMode::Chat => self.selected_chat_thread = None,
+            ProductMode::Codex => self.selected_codex_thread = None,
+            _ => unreachable!("thread homes are Chat or Codex"),
+        }
         self.selected_project_id = None;
         self.project_remove_confirmation = None;
         self.mode_menu_open = false;
         self.thread_menu_open = false;
         self.set_mode(mode, window, cx);
-        self.selected_thread = None;
+        self.project_selected_thread(None, cx);
         self.update_composer_placeholder(window, cx);
         cx.notify();
     }
@@ -14518,9 +17252,11 @@ impl MitsuroApp {
             messages: vec![],
         };
         self.threads.insert(0, thread);
-        self.selected_thread = Some(id.clone());
+        self.project_selected_thread(Some(id.clone()), cx);
         if let Some(mode) = self.composer_default_access_mode {
-            self.composer_access_modes.insert(id.clone(), mode);
+            if let Some(session_key) = self.draft_key_for_ui_thread(&id) {
+                self.composer_access_modes.insert(session_key, mode);
+            }
         }
         match surface {
             ThreadSurface::Chat => {
@@ -14594,7 +17330,8 @@ impl MitsuroApp {
     pub fn selected_thread_is_read_only(&self) -> bool {
         self.selected_thread
             .as_ref()
-            .is_some_and(|id| self.codex_read_only_threads.contains(id))
+            .and_then(|id| self.session_key_for_ui_thread(id))
+            .is_some_and(|key| self.codex_read_only_threads.contains(&key))
     }
 
     pub fn composer_attachments(&self) -> &[ComposerAttachment] {
@@ -14734,10 +17471,11 @@ impl MitsuroApp {
     }
 
     pub fn local_project_for_thread(&self, thread: &DemoThread) -> Option<&DesktopProject> {
-        project_for_thread(
+        project_for_thread_in_connection(
             &thread.summary,
             thread.backend_session_id.as_ref(),
             &self.preferences,
+            self.connections.selected_id().map(ConnectionId::as_str),
         )
     }
 
@@ -14830,6 +17568,8 @@ impl MitsuroApp {
                         app.status_line = format!("Project picker failed · {error}").into();
                     }
                 }
+                app.sync_current_draft_state(cx);
+                app.schedule_draft_save(cx);
                 cx.notify();
             });
         })
@@ -14858,7 +17598,7 @@ impl MitsuroApp {
         if self.active_mode != ProductMode::Codex {
             self.set_mode(ProductMode::Codex, window, cx);
         }
-        self.selected_thread = None;
+        self.project_selected_thread(None, cx);
         self.selected_project_id = Some(project.id);
         self.project_remove_confirmation = None;
         self.composer_default_workspace_dir = project.root_paths.first().cloned();
@@ -14894,7 +17634,7 @@ impl MitsuroApp {
                 self.project_remove_confirmation = None;
                 if self.selected_project_id.as_deref() == Some(project_id.as_str()) {
                     self.selected_project_id = None;
-                    self.selected_thread = None;
+                    self.project_selected_thread(None, cx);
                     self.composer_default_workspace_dir = std::env::current_dir()
                         .ok()
                         .map(|path| path.display().to_string());
@@ -14966,7 +17706,13 @@ impl MitsuroApp {
         };
 
         let previous_preferences = self.preferences.clone();
-        if !self.preferences.set_session_project(
+        let Some(connection_id) = self.connections.selected_id() else {
+            self.status_line = "Moving to a Project failed · owning connection unavailable.".into();
+            cx.notify();
+            return;
+        };
+        if !self.preferences.set_session_project_in_connection(
+            connection_id.as_str(),
             &session,
             working_dir.as_deref(),
             project_id.as_deref(),
@@ -15073,6 +17819,8 @@ impl MitsuroApp {
                         app.status_line = format!("Project picker failed · {error}").into();
                     }
                 }
+                app.sync_current_draft_state(cx);
+                app.schedule_draft_save(cx);
                 cx.notify();
             });
         })
@@ -15091,7 +17839,9 @@ impl MitsuroApp {
 
     fn composer_access_mode(&self) -> Option<ProductAccessMode> {
         match self.selected_thread.as_ref() {
-            Some(id) => self.composer_access_modes.get(id).copied(),
+            Some(id) => self
+                .draft_key_for_ui_thread(id)
+                .and_then(|session_key| self.composer_access_modes.get(&session_key).copied()),
             None => self.composer_default_access_mode,
         }
     }
@@ -15117,8 +17867,8 @@ impl MitsuroApp {
     }
 
     pub fn composer_access_choices(&self) -> Vec<(ProductAccessMode, &'static str, &'static str)> {
-        match self.active_backend_kind() {
-            Some(BackendKind::CodexStdio | BackendKind::CodexWebSocket) => {
+        match self.active_composer_access_mode_contract() {
+            Some(ComposerAccessModeContract::PermissionProfiles) => {
                 if self.permission_profiles_state != SurfaceDataState::Live {
                     return Vec::new();
                 }
@@ -15148,7 +17898,7 @@ impl MitsuroApp {
                 }
                 choices
             }
-            Some(BackendKind::MitsuroHttp) => vec![
+            Some(ComposerAccessModeContract::Governed) => vec![
                 (
                     ProductAccessMode::MitsuroSupervised,
                     "Supervised",
@@ -15201,7 +17951,9 @@ impl MitsuroApp {
             return;
         }
         if let Some(thread_id) = self.selected_thread.clone() {
-            self.composer_access_modes.insert(thread_id, mode);
+            if let Some(session_key) = self.draft_key_for_ui_thread(&thread_id) {
+                self.composer_access_modes.insert(session_key, mode);
+            }
         } else {
             self.composer_default_access_mode = Some(mode);
         }
@@ -15377,6 +18129,8 @@ impl MitsuroApp {
                         app.status_line = format!("Image picker failed · {error}").into();
                     }
                 }
+                app.sync_current_draft_state(cx);
+                app.schedule_draft_save(cx);
                 cx.notify();
             });
         })
@@ -15570,6 +18324,8 @@ impl MitsuroApp {
         }
         self.composer_add_menu_open = false;
         self.status_line = format!("Skill added · {}", skill.name).into();
+        self.sync_current_draft_state(cx);
+        self.schedule_draft_save(cx);
         cx.notify();
     }
 
@@ -15577,6 +18333,8 @@ impl MitsuroApp {
         if index < self.composer_attachments.len() {
             self.composer_attachments.remove(index);
             self.status_line = "Attachment removed.".into();
+            self.sync_current_draft_state(cx);
+            self.schedule_draft_save(cx);
             cx.notify();
         }
     }
@@ -15615,8 +18373,12 @@ impl MitsuroApp {
             .find(|thread| thread.summary.id == ui_id)?
             .backend_session_id
             .as_ref()?;
-        self.preferences
-            .pinned_session_rank(session.backend, &session.raw)
+        let connection_id = self.connections.selected_id()?;
+        self.preferences.pinned_session_rank_for_connection(
+            connection_id.as_str(),
+            session.backend,
+            &session.raw,
+        )
     }
 
     pub fn set_thread_pinned(&mut self, ui_id: String, pinned: bool, cx: &mut Context<Self>) {
@@ -15643,8 +18405,17 @@ impl MitsuroApp {
 
         let previous_preferences = self.preferences.clone();
         let previous_pinned = self.threads[index].summary.is_pinned;
-        self.preferences
-            .set_session_pinned(session.backend, session.raw, pinned);
+        let Some(connection_id) = self.connections.selected_id() else {
+            self.status_line = "Pinning failed · owning connection is unavailable.".into();
+            cx.notify();
+            return;
+        };
+        self.preferences.set_session_pinned_for_connection(
+            connection_id.as_str(),
+            session.backend,
+            session.raw,
+            pinned,
+        );
         self.threads[index].summary.is_pinned = Some(pinned);
 
         match self.preferences.save_default() {
@@ -15726,8 +18497,8 @@ impl MitsuroApp {
     }
 
     fn queued_follow_up_count_for_thread(&self, thread_id: &str) -> usize {
-        self.queued_follow_ups
-            .get(thread_id)
+        self.session_key_for_ui_thread(thread_id)
+            .and_then(|key| self.queued_follow_ups.get(&key))
             .map_or(0, VecDeque::len)
     }
 
@@ -15761,11 +18532,12 @@ impl MitsuroApp {
                 if !self.show_archived && archived {
                     return false;
                 }
-                if !thread_matches_selected_project(
+                if !thread_matches_selected_project_in_connection(
                     &t.summary,
                     t.backend_session_id.as_ref(),
                     self.selected_project_id.as_deref(),
                     &self.preferences,
+                    self.connections.selected_id().map(ConnectionId::as_str),
                 ) {
                     return false;
                 }
@@ -15904,33 +18676,108 @@ impl MitsuroApp {
         cx.notify();
     }
 
+    pub fn thread_action_availability(&self, action: ThreadAction) -> ActionAvailability {
+        if self.is_explicit_fixture() {
+            return ActionAvailability::Available;
+        }
+        let Some(backend) = self.live_backend() else {
+            return match self.connection {
+                UiConnection::Connecting => {
+                    ActionAvailability::Disabled("Available after the provider connects")
+                }
+                UiConnection::Error { .. } | UiConnection::Demo => {
+                    ActionAvailability::Offline("Provider is offline")
+                }
+                UiConnection::Fixture | UiConnection::Ready { .. } => {
+                    ActionAvailability::Offline("Provider transport is unavailable")
+                }
+            };
+        };
+        let selected = self.selected_thread();
+        if action != ThreadAction::Create && selected.is_none() {
+            return ActionAvailability::Disabled("Select a conversation first");
+        }
+        let real_session = selected
+            .and_then(|thread| thread.backend_session_id.as_ref())
+            .is_some();
+        let local_action = !real_session
+            && matches!(
+                action,
+                ThreadAction::Open
+                    | ThreadAction::Rename
+                    | ThreadAction::Delete
+                    | ThreadAction::Archive
+                    | ThreadAction::Unarchive
+                    | ThreadAction::Fork
+            );
+        if local_action {
+            return ActionAvailability::Available;
+        }
+
+        if !backend_supports_thread_action(backend.capabilities(), action) {
+            return if action == ThreadAction::SideConversation {
+                ActionAvailability::Hidden("Not supported by this provider")
+            } else {
+                ActionAvailability::Unavailable("Not supported by this provider")
+            };
+        }
+        if self.selected_thread_is_read_only()
+            && matches!(
+                action,
+                ThreadAction::Rename
+                    | ThreadAction::Delete
+                    | ThreadAction::Archive
+                    | ThreadAction::Unarchive
+                    | ThreadAction::Fork
+                    | ThreadAction::SideConversation
+            )
+        {
+            return ActionAvailability::ReadOnly(
+                "This conversation is active in another Codex client",
+            );
+        }
+        if self.turn_in_progress()
+            && matches!(
+                action,
+                ThreadAction::Delete
+                    | ThreadAction::Archive
+                    | ThreadAction::Unarchive
+                    | ThreadAction::Fork
+            )
+        {
+            return ActionAvailability::Disabled("Wait for the active turn to finish");
+        }
+        ActionAvailability::Available
+    }
+
     /// Archive the selected thread (or toggle unarchive when already archived).
     pub fn archive_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
-        if self.live_backend().is_none() && !self.is_explicit_fixture() {
-            self.status_line = "Archive is unavailable until a backend is ready.".into();
-            cx.notify();
-            return;
-        }
-        if self
-            .live_backend()
-            .is_some_and(|backend| !backend.capabilities().archive)
-        {
-            self.status_line = "Archive is not supported by the selected backend.".into();
+        let is_archived = self
+            .threads
+            .iter()
+            .find(|thread| self.selected_thread.as_deref() == Some(thread.summary.id.as_str()))
+            .and_then(|t| t.summary.archived)
+            .unwrap_or(false);
+        let action = if is_archived {
+            ThreadAction::Unarchive
+        } else {
+            ThreadAction::Archive
+        };
+        let availability = self.thread_action_availability(action);
+        if !availability.is_available() {
+            self.status_line = format!(
+                "{} unavailable · {}",
+                if is_archived { "Unarchive" } else { "Archive" },
+                availability.reason().unwrap_or("Unavailable")
+            )
+            .into();
             cx.notify();
             return;
         }
         let Some(id) = self.selected_thread.clone() else {
-            self.status_line = "Archive · no thread selected".into();
-            cx.notify();
             return;
         };
-        let is_archived = self
-            .threads
-            .iter()
-            .find(|t| t.summary.id == id)
-            .and_then(|t| t.summary.archived)
-            .unwrap_or(false);
 
         if is_archived {
             self.unarchive_thread_id(id, cx);
@@ -15946,11 +18793,12 @@ impl MitsuroApp {
         self.status_line = "thread/archive…".into();
         // Deselect if not showing archived
         if !self.show_archived && self.selected_thread.as_deref() == Some(id.as_str()) {
-            self.selected_thread = self
+            let next = self
                 .threads
                 .iter()
                 .find(|t| !t.summary.archived.unwrap_or(false))
                 .map(|t| t.summary.id.clone());
+            self.project_selected_thread(next, cx);
         }
 
         // Live app-server when Ready + real server id (mirror thread_name_set).
@@ -16071,19 +18919,42 @@ impl MitsuroApp {
     /// Delete the selected thread (backend + local list).
     pub fn delete_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
-        if self.live_backend().is_none() && !self.is_explicit_fixture() {
-            self.status_line = "Delete is unavailable until a backend is ready.".into();
+        let availability = self.thread_action_availability(ThreadAction::Delete);
+        if !availability.is_available() {
+            self.status_line = format!(
+                "Delete unavailable · {}",
+                availability.reason().unwrap_or("Unavailable")
+            )
+            .into();
             cx.notify();
             return;
         }
         let Some(id) = self.selected_thread.clone() else {
-            self.status_line = "Delete · no thread selected".into();
-            cx.notify();
             return;
         };
         let live_session_id = self.live_session_id(&id);
+        let deleted_key = self.session_key_for_ui_thread(&id);
+        let next = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id != id)
+            .map(|thread| thread.summary.id.clone());
+        self.project_selected_thread(next, cx);
+        if let Some(session_key) = deleted_key.as_ref() {
+            self.session_runtimes.remove(session_key);
+            self.session_interactions.remove(session_key);
+            self.session_turns.remove(session_key);
+            self.session_drafts.remove(session_key);
+            self.session_composer_selections.remove(session_key);
+            self.session_scroll_handles.remove(session_key);
+            self.session_transcript_viewports.remove(session_key);
+            self.session_message_edits.remove(session_key);
+            self.composer_access_modes.remove(session_key);
+            self.subscription_operations.remove(session_key);
+            self.queued_follow_ups.remove(session_key);
+        }
+        self.schedule_draft_save(cx);
         self.threads.retain(|t| t.summary.id != id);
-        self.selected_thread = self.threads.first().map(|t| t.summary.id.clone());
         self.status_line = "thread/delete…".into();
 
         if let Some(session_id) = live_session_id {
@@ -16164,8 +19035,8 @@ impl MitsuroApp {
     }
 
     pub fn side_conversations_available(&self) -> bool {
-        self.live_backend()
-            .is_some_and(|backend| backend.capabilities().side_conversations)
+        self.thread_action_availability(ThreadAction::SideConversation)
+            .is_available()
     }
 
     /// Start the reference desktop's ephemeral side fork. The hidden boundary
@@ -16342,13 +19213,20 @@ impl MitsuroApp {
                                 fully_loaded: true,
                                 loading: false,
                                 generation: 0,
+                                live_revision: 0,
+                                requires_rehydrate: false,
+                                completed_item_ids: std::collections::HashSet::new(),
                             },
                         );
-                        app.codex_thread_subscriptions.insert(child_id.clone());
-                        if let Some(mode) = access_mode {
-                            app.composer_access_modes.insert(child_id.clone(), mode);
+                        if let Some(session_key) = app.session_key_for_ui_thread(&child_id) {
+                            app.codex_thread_subscriptions.insert(session_key);
                         }
-                        app.selected_thread = Some(child_id.clone());
+                        if let Some(mode) = access_mode {
+                            if let Some(session_key) = app.session_key_for_ui_thread(&child_id) {
+                                app.composer_access_modes.insert(session_key, mode);
+                            }
+                        }
+                        app.project_selected_thread(Some(child_id.clone()), cx);
                         app.selected_codex_thread = Some(child_id.clone());
                         app.status_line = "Side chat ready.".into();
 
@@ -16386,8 +19264,7 @@ impl MitsuroApp {
                         app.status_line = format!("Could not open side chat · {error}").into();
                     }
                 }
-                app.transcript_scroll_handle.scroll_to_bottom();
-                cx.notify();
+                app.jump_to_latest(cx);
             });
         })
         .detach();
@@ -16417,49 +19294,55 @@ impl MitsuroApp {
             .iter()
             .find(|thread| thread.summary.id == child_id)
             .and_then(|thread| thread.backend_session_id.clone());
+        let session_key = self.session_key_for_ui_thread(&child_id);
         self.concurrent_side_turn = None;
         self.clear_server_request_inputs(window, cx);
         self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
-        self.side_conversation_parents.remove(&child_id);
-        self.codex_thread_subscriptions.remove(&child_id);
-        self.codex_read_only_threads.remove(&child_id);
-        self.transcript_visible_limits.remove(&child_id);
-        self.transcript_pagination.remove(&child_id);
-        self.composer_access_modes.remove(&child_id);
-        self.threads.retain(|thread| thread.summary.id != child_id);
-        self.selected_thread = self
+        let parent_selected = self
             .threads
             .iter()
             .any(|thread| thread.summary.id == parent_id)
             .then_some(parent_id.clone());
+        self.project_selected_thread(parent_selected, cx);
+        self.side_conversation_parents.remove(&child_id);
+        if let Some(session_key) = session_key.as_ref() {
+            self.codex_thread_subscriptions.remove(session_key);
+            self.codex_read_only_threads.remove(session_key);
+            self.composer_access_modes.remove(session_key);
+            self.session_drafts.remove(session_key);
+            self.session_composer_selections.remove(session_key);
+            self.session_scroll_handles.remove(session_key);
+            self.session_transcript_viewports.remove(session_key);
+            self.session_message_edits.remove(session_key);
+            self.session_turns.remove(session_key);
+            self.session_interactions.remove(session_key);
+        }
+        self.schedule_draft_save(cx);
+        self.transcript_visible_limits.remove(&child_id);
+        self.transcript_pagination.remove(&child_id);
+        self.threads.retain(|thread| thread.summary.id != child_id);
         self.selected_codex_thread = self.selected_thread.clone();
         self.status_line = "Returned to main chat · side chat discarded.".into();
         if let (Some(backend), Some(session)) = (self.live_backend(), session) {
             delete_session_best_effort(backend, session, cx);
         }
-        self.transcript_scroll_handle.scroll_to_bottom();
         cx.notify();
     }
 
     /// Fork the selected thread into a new local (and backend) thread.
     pub fn fork_selected_thread(&mut self, cx: &mut Context<Self>) {
         self.thread_menu_open = false;
-        if self.live_backend().is_none() && !self.is_explicit_fixture() {
-            self.status_line = "Fork is unavailable until a backend is ready.".into();
-            cx.notify();
-            return;
-        }
-        if self
-            .live_backend()
-            .is_some_and(|backend| !backend.capabilities().fork)
-        {
-            self.status_line = "Fork is not supported by the selected backend.".into();
+        let availability = self.thread_action_availability(ThreadAction::Fork);
+        if !availability.is_available() {
+            self.status_line = format!(
+                "Fork unavailable · {}",
+                availability.reason().unwrap_or("Unavailable")
+            )
+            .into();
             cx.notify();
             return;
         }
         let Some(id) = self.selected_thread.clone() else {
-            self.status_line = "Fork · no thread selected".into();
-            cx.notify();
             return;
         };
         let Some(source) = self.threads.iter().find(|t| t.summary.id == id).cloned() else {
@@ -16481,7 +19364,7 @@ impl MitsuroApp {
             .unwrap_or_else(|| "Thread".into());
         forked.summary.name = Some(format!("{base} (fork)"));
         self.threads.insert(0, forked);
-        self.selected_thread = Some(fork_id.clone());
+        self.project_selected_thread(Some(fork_id.clone()), cx);
         self.status_line = "thread/fork…".into();
 
         // Live thread/fork when Ready + real source id.
@@ -16536,8 +19419,8 @@ impl MitsuroApp {
                                 }
                             }
                             Err(e) => {
+                                app.project_selected_thread(Some(source_id.clone()), cx);
                                 app.threads.retain(|thread| thread.summary.id != local_id);
-                                app.selected_thread = Some(source_id.clone());
                                 app.status_line = format!("thread/fork failed · {e}").into();
                             }
                         }
@@ -16602,6 +19485,7 @@ impl MitsuroApp {
                 .concurrent_side_turn
                 .take()
                 .expect("selected side turn checked");
+            self.remove_session_runtime_for_ui_thread(&side.thread_id);
             if let Some(bridge) = side.live_approval_bridge {
                 let _ = bridge.submit(ApprovalChoice::Abort);
             }
@@ -16660,6 +19544,9 @@ impl MitsuroApp {
         }
 
         let thread_id = self.active_turn_thread_id.clone();
+        if let Some(thread_id) = thread_id.as_deref() {
+            self.remove_session_runtime_for_ui_thread(thread_id);
+        }
         let turn_id = self.active_turn_id.clone();
         let live_session_id = thread_id.as_deref().and_then(|id| self.live_session_id(id));
 
@@ -17004,6 +19891,10 @@ impl MitsuroApp {
                 auto_name = Some(name);
             }
         }
+        // Sending is an explicit request to follow the new turn. Clear any
+        // older unread boundary and keep the user's bubble plus live response
+        // anchored at the bottom.
+        self.jump_to_latest(cx);
 
         // Best-effort `thread/name/set` when renaming from first message (live or fixture).
         if let Some(name) = auto_name {
@@ -17018,6 +19909,8 @@ impl MitsuroApp {
         self.composer_access_menu_open = false;
         self.composer_model_menu_open = false;
         self.composer_reasoning_menu_open = false;
+        self.sync_current_draft_state(cx);
+        self.schedule_draft_save(cx);
 
         let model_slug = self.selected_model_slug();
         let reasoning_effort = self.selected_reasoning_effort.clone();
@@ -17115,9 +20008,14 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(session_key) = self.session_key_for_ui_thread(&thread_id) else {
+            self.status_line = "Queue unavailable · live session identity is missing.".into();
+            cx.notify();
+            return;
+        };
         let queue_len = self
             .queued_follow_ups
-            .get(&thread_id)
+            .get(&session_key)
             .map_or(0, VecDeque::len);
         if queue_len >= MAX_QUEUED_FOLLOW_UPS_PER_THREAD {
             self.status_line = format!(
@@ -17137,7 +20035,7 @@ impl MitsuroApp {
         } = self.prepare_composer_input(&thread_id, &text);
 
         let queued = QueuedFollowUp {
-            thread_id: thread_id.clone(),
+            thread_id,
             text,
             model: self.selected_model_slug(),
             reasoning_effort: self.selected_reasoning_effort.clone(),
@@ -17151,7 +20049,7 @@ impl MitsuroApp {
             demo_references,
             visible_user_text,
         };
-        let queue = self.queued_follow_ups.entry(thread_id).or_default();
+        let queue = self.queued_follow_ups.entry(session_key).or_default();
         let queued_count = push_bounded_queue(queue, queued, MAX_QUEUED_FOLLOW_UPS_PER_THREAD)
             .expect("queue capacity was checked before composer mutation");
 
@@ -17161,6 +20059,8 @@ impl MitsuroApp {
         self.composer_access_menu_open = false;
         self.composer_model_menu_open = false;
         self.composer_reasoning_menu_open = false;
+        self.sync_current_draft_state(cx);
+        self.schedule_draft_save(cx);
         self.status_line =
             format!("Queued follow-up · {queued_count} waiting for this chat's active turn.")
                 .into();
@@ -17214,6 +20114,22 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.status_line = "Steer unavailable · session connection is missing.".into();
+            cx.notify();
+            return;
+        };
+        let Some(connection_generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.status_line = "Steer unavailable · session connection is missing.".into();
+            cx.notify();
+            return;
+        };
+        let session_key = SessionKey::new(connection_id.clone(), session_id.raw.clone())
+            .expect("live session ids are non-empty");
 
         if let Some(thread) = self
             .threads
@@ -17224,8 +20140,9 @@ impl MitsuroApp {
             thread.summary.preview = Some(text.chars().take(64).collect());
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.sync_current_draft_state(cx);
+        self.schedule_draft_save(cx);
         self.status_line = "Steering active turn…".into();
-        let backend_generation = self.backend_generation;
         let request = ProductSteer {
             session_id,
             expected_turn_id,
@@ -17234,34 +20151,51 @@ impl MitsuroApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    backend
-                        .steer_session(request)
-                        .await
-                        .map_err(|error| error.to_string())
+                    let runner = Arc::clone(&backend);
+                    backend.block_on(async move {
+                        runner
+                            .steer_session(request)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if app.backend_generation != backend_generation
-                    || !app.is_current_turn(turn_generation, &thread_id)
-                {
-                    return;
-                }
-                app.status_line = match result {
-                    Ok(turn_id) => format!("Steered active turn · {turn_id}").into(),
-                    Err(error) => {
-                        if let Some(thread) = app
-                            .threads
-                            .iter_mut()
-                            .find(|thread| thread.summary.id == thread_id)
+                let _ = app.with_connection_thread_projection(&connection_id, cx, |app, cx| {
+                    app.with_session_turn(&thread_id, |app| {
+                        if !app
+                            .connections
+                            .generation_matches(&connection_id, connection_generation)
+                            || !app.session_runtime_is_current(
+                                &session_key,
+                                turn_generation,
+                                &thread_id,
+                            )
+                            || !app.is_current_turn(turn_generation, &thread_id)
                         {
-                            thread.messages.push(DemoMessage::error(format!(
-                                "Steering was not accepted: {error}"
-                            )));
+                            return;
                         }
-                        format!("Steer failed · {error}").into()
-                    }
-                };
-                cx.notify();
+                        let status = match result {
+                            Ok(turn_id) => format!("Steered active turn · {turn_id}"),
+                            Err(error) => {
+                                if let Some(thread) = app
+                                    .threads
+                                    .iter_mut()
+                                    .find(|thread| thread.summary.id == thread_id)
+                                {
+                                    thread.messages.push(DemoMessage::error(format!(
+                                        "Steering was not accepted: {error}"
+                                    )));
+                                }
+                                format!("Steer failed · {error}")
+                            }
+                        };
+                        if !app.routing_background_projection {
+                            app.status_line = status.into();
+                        }
+                        cx.notify();
+                    });
+                });
             });
         })
         .detach();
@@ -17283,7 +20217,39 @@ impl MitsuroApp {
         cx: &mut Context<Self>,
     ) {
         let turn_generation = self.turn_generation;
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
+            self.status_line = "Session creation failed · connection identity is missing.".into();
+            cx.notify();
+            return;
+        };
+        let Some(connection_generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
+            self.status_line = "Session creation failed · connection is unavailable.".into();
+            cx.notify();
+            return;
+        };
+        let provisional_key = self
+            .draft_key_for_ui_thread(&local_id)
+            .expect("selected local drafts have a connection-qualified key");
+        self.session_runtimes.insert(
+            provisional_key.clone(),
+            SessionRuntimeState {
+                ui_thread_id: local_id.clone(),
+                generation: turn_generation,
+                in_progress: true,
+                turn_id: None,
+                attention: None,
+            },
+        );
         let Some(backend) = self.backend.clone() else {
+            self.session_runtimes.remove(&provisional_key);
             self.turn_in_progress = false;
             self.active_turn_thread_id = None;
             self.status_line = "Session creation failed · no connected backend.".into();
@@ -17320,67 +20286,143 @@ impl MitsuroApp {
                     })
                 })
                 .await;
-            let _ = this.update(cx, |app, cx| match result {
-                Ok(session) => {
-                    if app.turn_generation != turn_generation {
-                        delete_session_best_effort(backend, session.id, cx);
-                        return;
+            let _ = this.update(cx, |app, cx| {
+                let _ = app.with_connection_thread_projection(&connection_id, cx, |app, cx| {
+                    let mut promoted_key = None;
+                    app.with_session_turn(&local_id, |app| match result {
+                        Ok(session) => {
+                            if !app
+                                .connections
+                                .generation_matches(&connection_id, connection_generation)
+                                || !app.session_runtime_is_current(
+                                    &provisional_key,
+                                    turn_generation,
+                                    &local_id,
+                                )
+                                || !app.is_current_turn(turn_generation, &local_id)
+                            {
+                                delete_session_best_effort(Arc::clone(&backend), session.id, cx);
+                                return;
+                            }
+                            let backend_session_id = session.id.clone();
+                            let summary = thread_summary_from_session_in_connection(
+                                session,
+                                &app.preferences,
+                                &connection_id,
+                            );
+                            let new_id = summary.id.clone();
+                            let access_mode = app.composer_access_modes.remove(&provisional_key);
+                            if let Some(index) = app
+                                .threads
+                                .iter()
+                                .position(|thread| thread.summary.id == local_id)
+                            {
+                                let mut thread = app.threads.remove(index);
+                                thread.summary = summary;
+                                thread.backend_session_id = Some(backend_session_id.clone());
+                                app.threads.insert(0, thread);
+                            }
+                            let real_key = SessionKey::new(
+                                connection_id.clone(),
+                                backend_session_id.raw.clone(),
+                            )
+                            .expect("created sessions have non-empty ids");
+                            promoted_key = Some(real_key.clone());
+                            app.preferences.remember_session_for_connection(
+                                connection_id.as_str(),
+                                backend_session_id,
+                            );
+                            app.save_preferences_best_effort();
+                            if app.selected_thread.as_deref() == Some(local_id.as_str()) {
+                                app.selected_thread = Some(new_id.clone());
+                            }
+                            if app.selected_chat_thread.as_deref() == Some(local_id.as_str()) {
+                                app.selected_chat_thread = Some(new_id.clone());
+                            }
+                            if app.selected_codex_thread.as_deref() == Some(local_id.as_str()) {
+                                app.selected_codex_thread = Some(new_id.clone());
+                            }
+                            app.active_turn_thread_id = Some(new_id.clone());
+                            if let Some(mode) = access_mode {
+                                app.composer_access_modes.insert(real_key, mode);
+                            }
+                            app.session_runtimes.remove(&provisional_key);
+                            app.status_line = format!("Live turn/start on {new_id}…").into();
+                            app.start_live_turn(
+                                new_id,
+                                text,
+                                model,
+                                reasoning_effort,
+                                speed_mode,
+                                work_mode,
+                                app.composer_workspace_dir().map(ToOwned::to_owned),
+                                access_mode,
+                                attachments,
+                                cx,
+                            );
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            if !app
+                                .connections
+                                .generation_matches(&connection_id, connection_generation)
+                                || !app.session_runtime_is_current(
+                                    &provisional_key,
+                                    turn_generation,
+                                    &local_id,
+                                )
+                                || !app.is_current_turn(turn_generation, &local_id)
+                            {
+                                return;
+                            }
+                            if let Some(thread) = app
+                                .threads
+                                .iter_mut()
+                                .find(|thread| thread.summary.id == local_id)
+                            {
+                                thread.messages.push(DemoMessage::error(format!(
+                                    "Could not create a server session: {error}"
+                                )));
+                            }
+                            app.turn_in_progress = false;
+                            app.turn_cancel = None;
+                            app.active_turn_thread_id = None;
+                            app.active_turn_id = None;
+                            app.session_runtimes.remove(&provisional_key);
+                            app.status_line = format!("Session creation failed: {error}").into();
+                            cx.notify();
+                        }
+                    });
+                    if let Some(real_key) = promoted_key {
+                        if let Some(state) = app.session_turns.remove(&provisional_key) {
+                            app.session_turns.insert(real_key.clone(), state);
+                        }
+                        if let Some(state) = app.session_interactions.remove(&provisional_key) {
+                            app.session_interactions.insert(real_key.clone(), state);
+                        }
+                        if let Some(state) = app.session_drafts.remove(&provisional_key) {
+                            app.session_drafts.insert(real_key.clone(), state);
+                        }
+                        if let Some(state) =
+                            app.session_composer_selections.remove(&provisional_key)
+                        {
+                            app.session_composer_selections
+                                .insert(real_key.clone(), state);
+                        }
+                        if let Some(handle) = app.session_scroll_handles.remove(&provisional_key) {
+                            app.session_scroll_handles.insert(real_key.clone(), handle);
+                        }
+                        if let Some(state) =
+                            app.session_transcript_viewports.remove(&provisional_key)
+                        {
+                            app.session_transcript_viewports
+                                .insert(real_key.clone(), state);
+                        }
+                        if let Some(state) = app.session_message_edits.remove(&provisional_key) {
+                            app.session_message_edits.insert(real_key, state);
+                        }
                     }
-                    let backend_session_id = session.id.clone();
-                    let summary = thread_summary_from_session(session, &app.preferences);
-                    let new_id = summary.id.clone();
-                    // Migrate local thread → server id (preserve user bubble).
-                    if let Some(idx) = app.threads.iter().position(|t| t.summary.id == local_id) {
-                        let mut t = app.threads.remove(idx);
-                        t.summary = summary;
-                        t.backend_session_id = Some(backend_session_id);
-                        // Keep messages (user already appended).
-                        app.threads.insert(0, t);
-                    }
-                    app.selected_thread = Some(new_id.clone());
-                    app.active_turn_thread_id = Some(new_id.clone());
-                    if let Some(mode) = app.composer_access_modes.remove(&local_id) {
-                        app.composer_access_modes.insert(new_id.clone(), mode);
-                    }
-                    match app.active_thread_surface() {
-                        ThreadSurface::Chat => app.selected_chat_thread = Some(new_id.clone()),
-                        ThreadSurface::Codex => app.selected_codex_thread = Some(new_id.clone()),
-                    }
-                    app.status_line = format!("Live turn/start on {new_id}…").into();
-                    app.start_live_turn(
-                        new_id,
-                        text,
-                        model,
-                        reasoning_effort,
-                        speed_mode,
-                        work_mode,
-                        app.composer_workspace_dir().map(ToOwned::to_owned),
-                        access_mode,
-                        attachments,
-                        cx,
-                    );
-                    cx.notify();
-                }
-                Err(e) => {
-                    if app.turn_generation != turn_generation {
-                        return;
-                    }
-                    if let Some(thread) = app
-                        .threads
-                        .iter_mut()
-                        .find(|thread| thread.summary.id == local_id)
-                    {
-                        thread.messages.push(DemoMessage::error(format!(
-                            "Could not create a server session: {e}"
-                        )));
-                    }
-                    app.turn_in_progress = false;
-                    app.turn_cancel = None;
-                    app.active_turn_thread_id = None;
-                    app.active_turn_id = None;
-                    app.status_line = format!("Session creation failed: {e}").into();
-                    cx.notify();
-                }
+                });
             });
         })
         .detach();
@@ -17407,10 +20449,9 @@ impl MitsuroApp {
         let Some(session_id) = self.live_session_id(&ui_thread_id) else {
             return;
         };
-        if !matches!(
-            session_id.backend,
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket
-        ) || self.codex_read_only_threads.contains(&ui_thread_id)
+        if self
+            .session_key_for_ui_thread(&ui_thread_id)
+            .is_some_and(|key| self.codex_read_only_threads.contains(&key))
         {
             return;
         }
@@ -17472,7 +20513,9 @@ impl MitsuroApp {
         })
     }
 
-    fn save_preferences_best_effort(&self) {
+    fn save_preferences_best_effort(&mut self) {
+        self.preferences
+            .replace_composer_drafts(persisted_composer_drafts(&self.session_drafts));
         if let Err(error) = self.preferences.save_default() {
             eprintln!("[mitsuro] desktop preference save failed: {error}");
         }
@@ -17494,6 +20537,57 @@ impl MitsuroApp {
             .iter()
             .find(|thread| thread.summary.id == ui_id)
             .and_then(|thread| thread.backend_session_id.clone())
+    }
+
+    fn session_key_for_ui_thread(&self, ui_id: &str) -> Option<SessionKey> {
+        let connection_id = self.connections.selected_id()?.clone();
+        let session_id = self.live_session_id(ui_id)?;
+        SessionKey::new(connection_id, session_id.raw).ok()
+    }
+
+    fn session_runtime_is_current(
+        &self,
+        session_key: &SessionKey,
+        generation: u64,
+        ui_thread_id: &str,
+    ) -> bool {
+        self.session_runtimes
+            .get(session_key)
+            .is_some_and(|runtime| {
+                runtime.generation == generation && runtime.ui_thread_id == ui_thread_id
+            })
+    }
+
+    fn clear_session_runtime_interaction_attention_for_ui_thread(&mut self, ui_thread_id: &str) {
+        let Some(session_key) = self.draft_key_for_ui_thread(ui_thread_id) else {
+            return;
+        };
+        let remove_terminal = self
+            .session_runtimes
+            .get_mut(&session_key)
+            .is_some_and(clear_interaction_attention);
+        if remove_terminal {
+            self.session_runtimes.remove(&session_key);
+        }
+    }
+
+    fn clear_session_runtime_terminal_attention_for_ui_thread(&mut self, ui_thread_id: &str) {
+        let Some(session_key) = self.draft_key_for_ui_thread(ui_thread_id) else {
+            return;
+        };
+        let remove_terminal = self
+            .session_runtimes
+            .get_mut(&session_key)
+            .is_some_and(clear_terminal_attention);
+        if remove_terminal {
+            self.session_runtimes.remove(&session_key);
+        }
+    }
+
+    fn remove_session_runtime_for_ui_thread(&mut self, ui_thread_id: &str) {
+        if let Some(session_key) = self.draft_key_for_ui_thread(ui_thread_id) {
+            self.session_runtimes.remove(&session_key);
+        }
     }
 
     /// Best-effort `thread/name/set` (live app-server or fixture). UI already updated.
@@ -17688,6 +20782,29 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            if concurrent_side {
+                self.concurrent_side_turn = None;
+            } else {
+                self.turn_in_progress = false;
+                self.active_turn_thread_id = None;
+            }
+            self.status_line = "Live turn refused: the session connection is missing.".into();
+            cx.notify();
+            return;
+        };
+        let session_key = SessionKey::new(connection_id.clone(), session_id.raw.clone())
+            .expect("live session ids are non-empty");
+        self.session_runtimes.insert(
+            session_key.clone(),
+            SessionRuntimeState {
+                ui_thread_id: thread_id.clone(),
+                generation: turn_generation,
+                in_progress: true,
+                turn_id: None,
+                attention: None,
+            },
+        );
 
         // Progressive path: apply events as they arrive; mid-stream approvals
         // surface ApprovalBar and block the turn loop until the user answers.
@@ -17759,7 +20876,9 @@ impl MitsuroApp {
                 }
             });
 
-            // Consumer: apply each event to the UI as soon as it is produced.
+            // Consumer: coalesce a frame's worth of deltas into one GPUI update.
+            // Parsing and laying out a growing Markdown response for every
+            // token can starve the compositor on long lists and code blocks.
             let mut saw_completed = false;
             let mut outcome: Option<Result<mitsuro_desktop_backend::LiveTurnOutcome, String>> =
                 None;
@@ -17774,32 +20893,121 @@ impl MitsuroApp {
 
                 match next {
                     Ok(LiveMsg::Event(ev)) => {
-                        let ev = *ev;
-                        let done = matches!(ev, TurnStreamEvent::TurnCompleted { .. });
-                        let is_approval = matches!(ev, TurnStreamEvent::ApprovalRequested(_));
+                        let mut events = vec![*ev];
+                        let rx = Arc::clone(&msg_rx);
+                        let drained = cx
+                            .background_spawn(async move {
+                                std::thread::sleep(Duration::from_millis(
+                                    LIVE_UI_EVENT_BATCH_WINDOW_MS,
+                                ));
+                                let guard = rx.lock().unwrap_or_else(|error| error.into_inner());
+                                let mut messages = Vec::new();
+                                for _ in 1..LIVE_UI_EVENT_BATCH_LIMIT {
+                                    match guard.try_recv() {
+                                        Ok(message) => messages.push(message),
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                                    }
+                                }
+                                messages
+                            })
+                            .await;
+                        let mut finished = None;
+                        for message in drained {
+                            match message {
+                                LiveMsg::Event(event) => events.push(*event),
+                                LiveMsg::Finished(result) => {
+                                    finished = Some(result);
+                                    break;
+                                }
+                            }
+                        }
+                        let batch_completed = events
+                            .iter()
+                            .any(|event| matches!(event, TurnStreamEvent::TurnCompleted { .. }));
                         let _ = this.update(cx, |app, cx| {
-                            if !app.is_current_turn(turn_generation, &thread_id) {
-                                return;
-                            }
-                            app.apply_stream_event(&thread_id, ev);
-                            if is_approval {
-                                if let Some(side) = app
-                                    .concurrent_side_turn
-                                    .as_mut()
-                                    .filter(|side| side.thread_id == thread_id)
-                                {
-                                    side.in_progress = true;
-                                } else {
-                                    app.turn_in_progress = true;
+                            let _ = app.with_connection_thread_projection(
+                                &connection_id,
+                                cx,
+                                |app, cx| {
+                                    app.with_session_turn(&thread_id, |app| {
+                                        if !app.session_runtime_is_current(
+                                            &session_key,
+                                            turn_generation,
+                                            &thread_id,
+                                        ) || !app.is_current_turn(turn_generation, &thread_id)
+                                        {
+                                            return;
+                                        }
+                                        for event in events {
+                                            let done = matches!(
+                                                event,
+                                                TurnStreamEvent::TurnCompleted { .. }
+                                            );
+                                            let is_approval = matches!(
+                                                event,
+                                                TurnStreamEvent::ApprovalRequested(_)
+                                            );
+                                            let interaction_attention =
+                                                interaction_attention_for_event(&event);
+                                            let request_resolved = matches!(
+                                                &event,
+                                                TurnStreamEvent::Lifecycle(event)
+                                                    if event.method == "serverRequest/resolved"
+                                            );
+                                            let started_turn_id = match &event {
+                                                TurnStreamEvent::TurnStarted {
+                                                    turn_id, ..
+                                                } => Some(turn_id.clone()),
+                                                _ => None,
+                                            };
+                                            app.apply_stream_event(&thread_id, event);
+                                            if let Some(runtime) =
+                                                app.session_runtimes.get_mut(&session_key)
+                                            {
+                                                if let Some(turn_id) = started_turn_id {
+                                                    runtime.turn_id = Some(turn_id);
+                                                }
+                                                if let Some(attention) = interaction_attention {
+                                                    runtime.attention = Some(attention);
+                                                }
+                                                if request_resolved {
+                                                    runtime.attention = None;
+                                                }
+                                                if done {
+                                                    runtime.in_progress = false;
+                                                }
+                                            }
+                                            if is_approval {
+                                                if let Some(side) = app
+                                                    .concurrent_side_turn
+                                                    .as_mut()
+                                                    .filter(|side| side.thread_id == thread_id)
+                                                {
+                                                    side.in_progress = true;
+                                                } else {
+                                                    app.turn_in_progress = true;
+                                                }
+                                                if !app.routing_background_projection
+                                                    && app.selected_thread.as_deref()
+                                                        == Some(thread_id.as_str())
+                                                {
+                                                    app.status_line =
+                                                        "Waiting for approval (live)…".into();
+                                                }
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
                                 }
-                                if app.selected_thread.as_deref() == Some(thread_id.as_str()) {
-                                    app.status_line = "Waiting for approval (live)…".into();
-                                }
-                            }
-                            cx.notify();
+                            );
                         });
-                        if done {
+                        if batch_completed {
                             saw_completed = true;
+                        }
+                        if let Some(result) = finished {
+                            outcome = Some(result);
+                            break;
                         }
                     }
                     Ok(LiveMsg::Finished(result)) => {
@@ -17812,20 +21020,43 @@ impl MitsuroApp {
 
             let outcome = outcome.unwrap_or_else(|| Err("live turn channel closed".into()));
             let _ = this.update(cx, |app, cx| {
-                if !app.is_current_turn(turn_generation, &thread_id) {
+                let _ = app.with_connection_thread_projection(
+                    &connection_id,
+                    cx,
+                    |app, cx| {
+                app.with_session_turn(&thread_id, |app| {
+                if !app.session_runtime_is_current(
+                    &session_key,
+                    turn_generation,
+                    &thread_id,
+                ) || !app.is_current_turn(turn_generation, &thread_id)
+                {
                     return;
                 }
+                app.with_session_interaction(&thread_id, |app| {
                 if app.thread_is_concurrent_side_turn(&thread_id) {
                     let pending_interaction = app
                         .concurrent_side_turn
                         .as_ref()
                         .is_some_and(ConcurrentSideTurnState::has_pending_interaction);
+                    let foreground = session_is_foreground(
+                        app.routing_background_projection,
+                        app.selected_thread.as_deref(),
+                        &thread_id,
+                    );
                     if let Some(side) = app.concurrent_side_turn.as_mut() {
                         side.live_approval_bridge = None;
                     }
                     let mut start_queued_follow_up = false;
                     match &outcome {
                         Ok(o) if o.completed || saw_completed => {
+                            if let Some(thread) = app
+                                .threads
+                                .iter_mut()
+                                .find(|candidate| candidate.summary.id == thread_id)
+                            {
+                                finalize_streaming_messages(&mut thread.messages, false);
+                            }
                             if !pending_interaction {
                                 if let Some(side) = app.concurrent_side_turn.as_mut() {
                                     side.in_progress = false;
@@ -17871,6 +21102,7 @@ impl MitsuroApp {
                                 .iter_mut()
                                 .find(|candidate| candidate.summary.id == thread_id)
                             {
+                                finalize_streaming_messages(&mut thread.messages, true);
                                 thread
                                     .messages
                                     .push(DemoMessage::error(format!("Live turn failed: {error}")));
@@ -17889,6 +21121,28 @@ impl MitsuroApp {
                             }
                         }
                     }
+                    let retain_for_interaction = pending_interaction && outcome.is_ok();
+                    if retain_for_interaction {
+                        if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                            runtime.in_progress = false;
+                            if runtime.attention.is_none() {
+                                runtime.attention = Some(SessionAttention::Input);
+                            }
+                        }
+                    } else if foreground {
+                        app.session_runtimes.remove(&session_key);
+                    } else {
+                        let attention = if matches!(&outcome, Ok(o) if o.completed || saw_completed)
+                        {
+                            SessionAttention::Completed
+                        } else {
+                            SessionAttention::Failed
+                        };
+                        if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                            runtime.in_progress = false;
+                            runtime.attention = Some(attention);
+                        }
+                    }
                     if start_queued_follow_up {
                         app.start_next_queued_follow_up(&thread_id, cx);
                     }
@@ -17899,10 +21153,21 @@ impl MitsuroApp {
                 let pending_interaction = app.pending_approval.is_some()
                     || app.pending_user_input.is_some()
                     || app.pending_mcp_elicitation.is_some();
-                let foreground = app.selected_thread.as_deref() == Some(thread_id.as_str());
+                let foreground = session_is_foreground(
+                    app.routing_background_projection,
+                    app.selected_thread.as_deref(),
+                    &thread_id,
+                );
                 let mut start_queued_follow_up = false;
                 match &outcome {
                     Ok(o) if o.completed || saw_completed => {
+                        if let Some(thread) = app
+                            .threads
+                            .iter_mut()
+                            .find(|candidate| candidate.summary.id == thread_id)
+                        {
+                            finalize_streaming_messages(&mut thread.messages, false);
+                        }
                         if !pending_interaction {
                             app.turn_in_progress = false;
                             app.active_turn_thread_id = None;
@@ -17946,6 +21211,7 @@ impl MitsuroApp {
                             .iter_mut()
                             .find(|candidate| candidate.summary.id == thread_id)
                         {
+                            finalize_streaming_messages(&mut thread.messages, true);
                             thread
                                 .messages
                                 .push(DemoMessage::error(format!("Live turn failed: {e}")));
@@ -17957,6 +21223,27 @@ impl MitsuroApp {
                         if foreground {
                             app.status_line = format!("Live turn failed: {e}").into();
                         }
+                    }
+                }
+                let retain_for_interaction = pending_interaction && outcome.is_ok();
+                if retain_for_interaction {
+                    if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                        runtime.in_progress = false;
+                        if runtime.attention.is_none() {
+                            runtime.attention = Some(SessionAttention::Input);
+                        }
+                    }
+                } else if foreground {
+                    app.session_runtimes.remove(&session_key);
+                } else {
+                    let attention = if matches!(&outcome, Ok(o) if o.completed || saw_completed) {
+                        SessionAttention::Completed
+                    } else {
+                        SessionAttention::Failed
+                    };
+                    if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                        runtime.in_progress = false;
+                        runtime.attention = Some(attention);
                     }
                 }
                 if start_queued_follow_up {
@@ -17972,6 +21259,10 @@ impl MitsuroApp {
                     app.release_thread_subscription_best_effort(&thread_id, cx);
                 }
                 cx.notify();
+                });
+                });
+                    },
+                );
             });
         })
         .detach();
@@ -17982,19 +21273,22 @@ impl MitsuroApp {
         completed_thread_id: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Some(session_key) = self.session_key_for_ui_thread(completed_thread_id) else {
+            return false;
+        };
         let Some(next) = self
             .queued_follow_ups
-            .get_mut(completed_thread_id)
+            .get_mut(&session_key)
             .and_then(VecDeque::pop_front)
         else {
             return false;
         };
         let remaining = self
             .queued_follow_ups
-            .get(completed_thread_id)
+            .get(&session_key)
             .map_or(0, VecDeque::len);
         if remaining == 0 {
-            self.queued_follow_ups.remove(completed_thread_id);
+            self.queued_follow_ups.remove(&session_key);
         }
         if next.thread_id != completed_thread_id {
             self.status_line = "Queued follow-up rejected · thread identity changed.".into();
@@ -18075,8 +21369,11 @@ impl MitsuroApp {
     }
 
     fn discard_queued_follow_ups(&mut self, thread_id: &str) -> usize {
+        let Some(session_key) = self.session_key_for_ui_thread(thread_id) else {
+            return 0;
+        };
         self.queued_follow_ups
-            .remove(thread_id)
+            .remove(&session_key)
             .map_or(0, |queue| queue.len())
     }
 
@@ -18110,6 +21407,25 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.turn_in_progress = false;
+            self.active_turn_thread_id = None;
+            self.status_line = "Review failed · session connection is missing.".into();
+            cx.notify();
+            return;
+        };
+        let session_key = SessionKey::new(connection_id.clone(), session_id.raw.clone())
+            .expect("live session ids are non-empty");
+        self.session_runtimes.insert(
+            session_key.clone(),
+            SessionRuntimeState {
+                ui_thread_id: thread_id.clone(),
+                generation: turn_generation,
+                in_progress: true,
+                turn_id: None,
+                attention: None,
+            },
+        );
 
         // Review is a real Codex turn. Subscribe before review/start and use the
         // normal approval bridge so streamed items and prompts remain interactive.
@@ -18178,22 +21494,111 @@ impl MitsuroApp {
 
                 match next {
                     Ok(LiveReviewMsg::Event(event)) => {
-                        let event = *event;
-                        let done = matches!(event, TurnStreamEvent::TurnCompleted { .. });
-                        let is_approval = matches!(event, TurnStreamEvent::ApprovalRequested(_));
+                        let mut events = vec![*event];
+                        let rx = Arc::clone(&msg_rx);
+                        let drained = cx
+                            .background_spawn(async move {
+                                std::thread::sleep(Duration::from_millis(
+                                    LIVE_UI_EVENT_BATCH_WINDOW_MS,
+                                ));
+                                let guard = rx.lock().unwrap_or_else(|error| error.into_inner());
+                                let mut messages = Vec::new();
+                                for _ in 1..LIVE_UI_EVENT_BATCH_LIMIT {
+                                    match guard.try_recv() {
+                                        Ok(message) => messages.push(message),
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                                    }
+                                }
+                                messages
+                            })
+                            .await;
+                        let mut finished = None;
+                        for message in drained {
+                            match message {
+                                LiveReviewMsg::Event(event) => events.push(*event),
+                                LiveReviewMsg::Finished(result) => {
+                                    finished = Some(result);
+                                    break;
+                                }
+                            }
+                        }
+                        let batch_completed = events
+                            .iter()
+                            .any(|event| matches!(event, TurnStreamEvent::TurnCompleted { .. }));
                         let _ = this.update(cx, |app, cx| {
-                            if !app.is_current_turn(turn_generation, &thread_id) {
-                                return;
-                            }
-                            app.apply_stream_event(&thread_id, event);
-                            if is_approval {
-                                app.turn_in_progress = true;
-                                app.status_line = "Waiting for review approval (live)…".into();
-                            }
-                            cx.notify();
+                            let _ = app.with_connection_thread_projection(
+                                &connection_id,
+                                cx,
+                                |app, cx| {
+                                    app.with_session_turn(&thread_id, |app| {
+                                        if !app.session_runtime_is_current(
+                                            &session_key,
+                                            turn_generation,
+                                            &thread_id,
+                                        ) || !app.is_current_turn(turn_generation, &thread_id)
+                                        {
+                                            return;
+                                        }
+                                        for event in events {
+                                            let done = matches!(
+                                                event,
+                                                TurnStreamEvent::TurnCompleted { .. }
+                                            );
+                                            let is_approval = matches!(
+                                                event,
+                                                TurnStreamEvent::ApprovalRequested(_)
+                                            );
+                                            let interaction_attention =
+                                                interaction_attention_for_event(&event);
+                                            let request_resolved = matches!(
+                                                &event,
+                                                TurnStreamEvent::Lifecycle(event)
+                                                    if event.method == "serverRequest/resolved"
+                                            );
+                                            let started_turn_id = match &event {
+                                                TurnStreamEvent::TurnStarted {
+                                                    turn_id, ..
+                                                } => Some(turn_id.clone()),
+                                                _ => None,
+                                            };
+                                            app.apply_stream_event(&thread_id, event);
+                                            if let Some(runtime) =
+                                                app.session_runtimes.get_mut(&session_key)
+                                            {
+                                                if let Some(turn_id) = started_turn_id {
+                                                    runtime.turn_id = Some(turn_id);
+                                                }
+                                                if let Some(attention) = interaction_attention {
+                                                    runtime.attention = Some(attention);
+                                                }
+                                                if request_resolved {
+                                                    runtime.attention = None;
+                                                }
+                                                if done {
+                                                    runtime.in_progress = false;
+                                                }
+                                            }
+                                            if is_approval {
+                                                app.turn_in_progress = true;
+                                                if !app.routing_background_projection {
+                                                    app.status_line =
+                                                        "Waiting for review approval (live)…"
+                                                            .into();
+                                                }
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            );
                         });
-                        if done {
+                        if batch_completed {
                             saw_completed = true;
+                        }
+                        if let Some(result) = finished {
+                            outcome = Some(result);
+                            break;
                         }
                     }
                     Ok(LiveReviewMsg::Finished(result)) => {
@@ -18206,71 +21611,117 @@ impl MitsuroApp {
 
             let outcome = outcome.unwrap_or_else(|| Err("live review channel closed".into()));
             let _ = this.update(cx, |app, cx| {
-                if !app.is_current_turn(turn_generation, &thread_id) {
-                    return;
-                }
-                app.live_approval_bridge = None;
-                let mut start_queued_follow_up = false;
-                match &outcome {
-                    Ok(review) if review.stream.completed || saw_completed => {
-                        if app.pending_approval.is_none() {
-                            app.turn_in_progress = false;
-                            app.active_turn_thread_id = None;
-                            app.active_turn_id = None;
-                            app.turn_cancel = None;
-                            start_queued_follow_up = true;
-                            if app.queued_follow_up_count_for_thread(&thread_id) == 0 {
-                                app.status_line = "Review complete.".into();
-                            }
+                let _ = app.with_connection_thread_projection(&connection_id, cx, |app, cx| {
+                    app.with_session_turn(&thread_id, |app| {
+                        if !app.session_runtime_is_current(
+                            &session_key,
+                            turn_generation,
+                            &thread_id,
+                        ) || !app.is_current_turn(turn_generation, &thread_id)
+                        {
+                            return;
                         }
-                    }
-                    Ok(_) => {
-                        if app.pending_approval.is_none() {
-                            app.turn_in_progress = false;
-                            app.active_turn_thread_id = None;
-                            app.active_turn_id = None;
-                            app.turn_cancel = None;
-                            let discarded = app.discard_queued_follow_ups_with_notice(
+                        app.with_session_interaction(&thread_id, |app| {
+                            app.live_approval_bridge = None;
+                            let pending_interaction = app.pending_approval.is_some()
+                                || app.pending_user_input.is_some()
+                                || app.pending_mcp_elicitation.is_some();
+                            let foreground = session_is_foreground(
+                                app.routing_background_projection,
+                                app.selected_thread.as_deref(),
                                 &thread_id,
-                                "The review ended before completion.",
                             );
-                            app.status_line = if discarded == 0 {
-                                "Review ended (timeout or closed).".into()
-                            } else {
-                                format!(
+                            let mut start_queued_follow_up = false;
+                            match &outcome {
+                                Ok(review) if review.stream.completed || saw_completed => {
+                                    if !pending_interaction {
+                                        app.turn_in_progress = false;
+                                        app.active_turn_thread_id = None;
+                                        app.active_turn_id = None;
+                                        app.turn_cancel = None;
+                                        start_queued_follow_up = true;
+                                        if app.queued_follow_up_count_for_thread(&thread_id) == 0 {
+                                            app.status_line = "Review complete.".into();
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    if !pending_interaction {
+                                        app.turn_in_progress = false;
+                                        app.active_turn_thread_id = None;
+                                        app.active_turn_id = None;
+                                        app.turn_cancel = None;
+                                        let discarded = app.discard_queued_follow_ups_with_notice(
+                                            &thread_id,
+                                            "The review ended before completion.",
+                                        );
+                                        app.status_line = if discarded == 0 {
+                                            "Review ended (timeout or closed).".into()
+                                        } else {
+                                            format!(
                                     "Review ended · {discarded} queued follow-up(s) were not sent."
                                 )
-                                .into()
-                            };
-                        }
-                    }
-                    Err(error) => {
-                        app.discard_queued_follow_ups_with_notice(&thread_id, "The review failed.");
-                        if let Some(thread) = app
-                            .threads
-                            .iter_mut()
-                            .find(|candidate| candidate.summary.id == thread_id)
-                        {
-                            thread
-                                .messages
-                                .push(DemoMessage::error(format!("Review failed: {error}")));
-                        }
-                        app.turn_in_progress = false;
-                        app.active_turn_thread_id = None;
-                        app.active_turn_id = None;
-                        app.turn_cancel = None;
-                        app.status_line = format!("Review failed: {error}").into();
-                    }
-                }
-                if start_queued_follow_up {
-                    app.start_next_queued_follow_up(&thread_id, cx);
-                }
-                if !app.turn_in_progress
-                    && app.selected_thread.as_deref() != Some(thread_id.as_str())
-                {
-                    app.release_thread_subscription_best_effort(&thread_id, cx);
-                }
-                cx.notify();
+                                            .into()
+                                        };
+                                    }
+                                }
+                                Err(error) => {
+                                    app.discard_queued_follow_ups_with_notice(
+                                        &thread_id,
+                                        "The review failed.",
+                                    );
+                                    if let Some(thread) = app
+                                        .threads
+                                        .iter_mut()
+                                        .find(|candidate| candidate.summary.id == thread_id)
+                                    {
+                                        thread.messages.push(DemoMessage::error(format!(
+                                            "Review failed: {error}"
+                                        )));
+                                    }
+                                    app.turn_in_progress = false;
+                                    app.active_turn_thread_id = None;
+                                    app.active_turn_id = None;
+                                    app.turn_cancel = None;
+                                    app.status_line = format!("Review failed: {error}").into();
+                                }
+                            }
+                            let retain_for_interaction = pending_interaction && outcome.is_ok();
+                            if retain_for_interaction {
+                                if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                                    runtime.in_progress = false;
+                                    if runtime.attention.is_none() {
+                                        runtime.attention = Some(SessionAttention::Input);
+                                    }
+                                }
+                            } else if foreground {
+                                app.session_runtimes.remove(&session_key);
+                            } else {
+                                let attention = if matches!(
+                                    &outcome,
+                                    Ok(review) if review.stream.completed || saw_completed
+                                ) {
+                                    SessionAttention::Completed
+                                } else {
+                                    SessionAttention::Failed
+                                };
+                                if let Some(runtime) = app.session_runtimes.get_mut(&session_key) {
+                                    runtime.in_progress = false;
+                                    runtime.attention = Some(attention);
+                                }
+                            }
+                            if start_queued_follow_up {
+                                app.start_next_queued_follow_up(&thread_id, cx);
+                            }
+                            if !app.turn_in_progress
+                                && app.selected_thread.as_deref() != Some(thread_id.as_str())
+                            {
+                                app.release_thread_subscription_best_effort(&thread_id, cx);
+                            }
+                            cx.notify();
+                        });
+                    });
+                });
             });
         })
         .detach();
@@ -18289,17 +21740,49 @@ impl MitsuroApp {
     }
 
     fn apply_stream_event(&mut self, thread_id: &str, event: TurnStreamEvent) {
+        if !self.thread_is_concurrent_side_turn(thread_id)
+            && self.primary_interaction_owner_thread_id() != Some(thread_id)
+            && self.session_key_for_ui_thread(thread_id).is_some()
+        {
+            self.with_session_interaction(thread_id, move |app| {
+                app.apply_stream_event_inner(thread_id, event)
+            });
+            return;
+        }
+        self.apply_stream_event_inner(thread_id, event);
+    }
+
+    fn apply_stream_event_inner(&mut self, thread_id: &str, event: TurnStreamEvent) {
         // Codex lifecycle notifications are owned by the application-lifetime
         // subscriber. The turn stream still carries them for non-GPUI clients,
         // but applying both subscriptions here would duplicate activity rows.
         if matches!(event, TurnStreamEvent::Lifecycle(_))
-            && self.active_backend_kind() == Some(BackendKind::CodexStdio)
+            && self
+                .active_backend_capabilities()
+                .is_some_and(|capabilities| capabilities.lifecycle_events)
         {
             return;
         }
         let Some(idx) = self.threads.iter().position(|t| t.summary.id == thread_id) else {
             return;
         };
+        let previous_message_count = self.threads[idx].messages.len();
+        if preterminal_item_event_id(&event).is_some_and(|item_id| {
+            self.transcript_pagination
+                .get(thread_id)
+                .is_some_and(|state| state.completed_item_ids.contains(item_id))
+        }) {
+            return;
+        }
+        let completed_item_id = match &event {
+            TurnStreamEvent::ItemCompleted { item_id, .. } => Some(item_id.clone()),
+            _ => None,
+        };
+        let transcript_state = self
+            .transcript_pagination
+            .entry(thread_id.to_owned())
+            .or_default();
+        transcript_state.live_revision = transcript_state.live_revision.wrapping_add(1);
 
         if let TurnStreamEvent::DelegationEvent { event, .. } = &event {
             self.delegations
@@ -18337,69 +21820,45 @@ impl MitsuroApp {
                     ..
                 } => match kind {
                     mitsuro_desktop_backend::ItemKind::AgentMessage => {
-                        let exists = thread
-                            .messages
-                            .iter()
-                            .any(|m| m.item_id.as_deref() == Some(item_id.as_str()));
-                        if !exists {
-                            thread
-                                .messages
-                                .push(DemoMessage::streaming_assistant(item_id));
-                        }
+                        let message = DemoMessage::streaming_assistant(item_id.clone());
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                     mitsuro_desktop_backend::ItemKind::Reasoning => {
-                        thread
-                            .messages
-                            .push(DemoMessage::reasoning(String::new(), Some(item_id)));
-                        if let Some(m) = thread.messages.last_mut() {
-                            m.streaming = true;
-                        }
+                        let message = DemoMessage::reasoning(String::new(), Some(item_id.clone()));
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                     mitsuro_desktop_backend::ItemKind::Plan => {
-                        thread
-                            .messages
-                            .push(DemoMessage::plan(String::new(), Some(item_id)));
-                        if let Some(m) = thread.messages.last_mut() {
-                            m.streaming = true;
-                        }
+                        let message = DemoMessage::plan(String::new(), Some(item_id.clone()));
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                     mitsuro_desktop_backend::ItemKind::CommandExecution => {
                         let fields = item
                             .as_ref()
                             .map(command_execution_fields)
                             .unwrap_or_default();
-                        let mut m = DemoMessage::command_execution(
+                        let message = DemoMessage::command_execution(
                             fields.command,
                             fields.cwd,
                             fields.status,
                             fields.output,
-                            Some(item_id),
+                            Some(item_id.clone()),
                         );
-                        m.streaming = true;
-                        thread.messages.push(m);
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                     mitsuro_desktop_backend::ItemKind::FileChange => {
                         let fields = item.as_ref().map(file_change_fields).unwrap_or_default();
-                        let mut m = DemoMessage::file_change(
+                        let message = DemoMessage::file_change(
                             fields.paths_summary,
                             fields.patch_preview,
                             fields.status,
-                            Some(item_id),
+                            Some(item_id.clone()),
                         );
-                        m.streaming = true;
-                        thread.messages.push(m);
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                     mitsuro_desktop_backend::ItemKind::UserMessage => {}
                     _ => {
-                        let exists = thread
-                            .messages
-                            .iter()
-                            .any(|message| message.item_id.as_deref() == Some(item_id.as_str()));
-                        if !exists {
-                            let mut message = activity_message(&kind, item_id, item.as_ref());
-                            message.streaming = true;
-                            thread.messages.push(message);
-                        }
+                        let message = activity_message(&kind, item_id.clone(), item.as_ref());
+                        apply_item_started(&mut thread.messages, &item_id, message);
                     }
                 },
                 TurnStreamEvent::AgentMessageDelta { item_id, delta, .. } => {
@@ -18601,7 +22060,9 @@ impl MitsuroApp {
                         {
                             match kind {
                                 mitsuro_desktop_backend::ItemKind::AgentMessage => {
-                                    thread.messages.push(DemoMessage::assistant(final_text));
+                                    let mut message = DemoMessage::assistant(final_text);
+                                    message.item_id = Some(item_id);
+                                    thread.messages.push(message);
                                 }
                                 mitsuro_desktop_backend::ItemKind::Reasoning => {
                                     thread
@@ -18695,12 +22156,11 @@ impl MitsuroApp {
                     }
                 }
                 TurnStreamEvent::TurnCompleted { status, .. } => {
-                    for m in &mut thread.messages {
-                        m.streaming = false;
-                    }
                     let label = status.unwrap_or_else(|| "completed".into());
                     let normalized = label.to_ascii_lowercase();
-                    if normalized.contains("fail") || normalized.contains("error") {
+                    let failed = normalized.contains("fail") || normalized.contains("error");
+                    finalize_streaming_messages(&mut thread.messages, failed);
+                    if failed {
                         thread.messages.push(DemoMessage::error(format!(
                             "The turn ended with status: {label}"
                         )));
@@ -18885,33 +22345,68 @@ impl MitsuroApp {
             }
         }
 
-        if self.selected_thread.as_deref() == Some(thread_id) {
+        if let Some(item_id) = completed_item_id {
+            let state = self
+                .transcript_pagination
+                .entry(thread_id.to_owned())
+                .or_default();
+            state.completed_item_ids.insert(item_id);
+            if state.completed_item_ids.len() > COMPLETED_TRANSCRIPT_ITEM_LIMIT {
+                let retained = self.threads[idx]
+                    .messages
+                    .iter()
+                    .rev()
+                    .filter_map(|message| message.item_id.clone())
+                    .take(COMPLETED_TRANSCRIPT_ITEM_LIMIT)
+                    .collect::<std::collections::HashSet<_>>();
+                state
+                    .completed_item_ids
+                    .retain(|item_id| retained.contains(item_id));
+            }
+        }
+
+        if !self.routing_background_projection && self.selected_thread.as_deref() == Some(thread_id)
+        {
             if let Some(line) = status_update {
                 self.status_line = line.into();
             }
         }
-        if self.selected_thread.as_deref() == Some(thread_id) {
-            self.transcript_scroll_handle.scroll_to_bottom();
-        }
+        self.apply_transcript_viewport_update(thread_id, previous_message_count);
     }
 
     fn start_backend_lifecycle_listener(
         &mut self,
+        connection_id: ConnectionId,
         backend: &Arc<DesktopBackend>,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
         let Some(mut events) = backend.subscribe_lifecycle_events() else {
+            self.lifecycle_listener_tasks.remove(&connection_id);
             return;
         };
-        cx.spawn(async move |this, cx| {
+        let listener_id = connection_id.clone();
+        let task = cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 let current = this
                     .update(cx, |app, cx| {
-                        if app.backend_generation != generation {
+                        if !app
+                            .connections
+                            .generation_matches(&connection_id, generation)
+                        {
                             return false;
                         }
-                        app.apply_backend_lifecycle_event(event, cx);
+                        let is_active = app.backend_generation == generation
+                            && app.connections.selected_id() == Some(&connection_id);
+                        if is_active {
+                            app.apply_backend_lifecycle_event(event, cx);
+                        } else {
+                            app.connections.queue_lifecycle_event(
+                                &connection_id,
+                                generation,
+                                event,
+                            );
+                        }
                         cx.notify();
                         true
                     })
@@ -18920,8 +22415,29 @@ impl MitsuroApp {
                     break;
                 }
             }
-        })
-        .detach();
+        });
+        self.lifecycle_listener_tasks.insert(listener_id, task);
+    }
+
+    fn replay_connection_lifecycle_events(
+        &mut self,
+        connection_id: &ConnectionId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connections.selected_id() != Some(connection_id) {
+            return;
+        }
+        if !self.connections.get(connection_id).is_some_and(|entry| {
+            matches!(
+                entry.status,
+                RegistryConnectionStatus::Ready { .. } | RegistryConnectionStatus::Degraded { .. }
+            )
+        }) {
+            return;
+        }
+        for event in self.connections.take_lifecycle_events(connection_id) {
+            self.apply_backend_lifecycle_event(event, cx);
+        }
     }
 
     fn apply_backend_lifecycle_event(
@@ -19044,23 +22560,39 @@ impl MitsuroApp {
                 .params
                 .as_ref()
                 .and_then(|params| params.get("threadId"))
-                .and_then(serde_json::Value::as_str);
-            if let Some(side) = self
-                .concurrent_side_turn
-                .as_mut()
-                .filter(|side| resolved_thread.is_some_and(|thread_id| thread_id == side.thread_id))
-            {
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(side) = self.concurrent_side_turn.as_mut().filter(|side| {
+                resolved_thread
+                    .as_deref()
+                    .is_some_and(|thread_id| thread_id == side.thread_id)
+            }) {
                 side.pending_approval = None;
                 side.pending_user_input = None;
                 side.user_input_answers.clear();
                 side.pending_mcp_elicitation = None;
                 side.mcp_form_values.clear();
+            } else if let Some(thread_id) = resolved_thread.as_deref() {
+                self.with_session_interaction(thread_id, |app| {
+                    app.pending_approval = None;
+                    app.pending_user_input = None;
+                    app.user_input_answers.clear();
+                    app.pending_mcp_elicitation = None;
+                    app.mcp_form_values.clear();
+                });
             } else {
                 self.pending_approval = None;
                 self.pending_user_input = None;
                 self.user_input_answers.clear();
                 self.pending_mcp_elicitation = None;
                 self.mcp_form_values.clear();
+            }
+            if let Some(thread_id) = resolved_thread
+                .as_deref()
+                .or(self.active_turn_thread_id.as_deref())
+                .map(str::to_owned)
+            {
+                self.clear_session_runtime_interaction_attention_for_ui_thread(&thread_id);
             }
         }
         if event.method == "mcpServer/oauthLogin/completed" {
@@ -19172,6 +22704,12 @@ impl MitsuroApp {
                         .is_some_and(|session| session.raw == *thread_id)
             })
         });
+        let transcript_update = thread_idx.map(|idx| {
+            (
+                self.threads[idx].summary.id.clone(),
+                self.threads[idx].messages.len(),
+            )
+        });
         if let Some(idx) = thread_idx {
             let thread = &mut self.threads[idx];
             match event.method.as_str() {
@@ -19212,6 +22750,11 @@ impl MitsuroApp {
                         event.item_id.clone(),
                     ));
                 }
+            }
+        }
+        if event.is_transcript_activity() {
+            if let Some((thread_id, previous_message_count)) = transcript_update {
+                self.apply_transcript_viewport_update(&thread_id, previous_message_count);
             }
         }
 
@@ -19265,10 +22808,6 @@ impl MitsuroApp {
         {
             self.files_schedule_watch_refresh(cx);
         }
-
-        if self.selected_thread.as_deref() == event.thread_id.as_deref() {
-            self.transcript_scroll_handle.scroll_to_bottom();
-        }
     }
 
     fn apply_realtime_event(&mut self, event: RealtimeEvent) {
@@ -19319,20 +22858,31 @@ impl MitsuroApp {
                             })
                             .map(|thread| thread.summary.id.clone())
                     });
-                if let Some(thread) = ui_thread_id.and_then(|ui_id| {
-                    self.threads
+                if let Some(ui_thread_id) = ui_thread_id {
+                    let previous_message_count = self
+                        .threads
+                        .iter()
+                        .find(|thread| thread.summary.id == ui_thread_id)
+                        .map(|thread| thread.messages.len())
+                        .unwrap_or(0);
+                    if let Some(thread) = self
+                        .threads
                         .iter_mut()
-                        .find(|thread| thread.summary.id == ui_id)
-                }) {
-                    if role.eq_ignore_ascii_case("user") {
-                        thread.messages.push(DemoMessage::user(&text));
-                        thread.summary.preview = Some(text.chars().take(64).collect());
-                    } else {
-                        thread.messages.push(DemoMessage::assistant(&text));
+                        .find(|thread| thread.summary.id == ui_thread_id)
+                    {
+                        if role.eq_ignore_ascii_case("user") {
+                            thread.messages.push(DemoMessage::user(&text));
+                            thread.summary.preview = Some(text.chars().take(64).collect());
+                        } else {
+                            thread.messages.push(DemoMessage::assistant(&text));
+                        }
+                        self.apply_transcript_viewport_update(
+                            &ui_thread_id,
+                            previous_message_count,
+                        );
                     }
                 }
                 self.status_line = format!("Voice transcript · {role}").into();
-                self.transcript_scroll_handle.scroll_to_bottom();
             }
             RealtimeEvent::OutputAudio { thread_id, audio } => {
                 let Some(runtime) = self
@@ -19421,6 +22971,9 @@ impl MitsuroApp {
             return;
         };
         let generation = self.backend_generation;
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -19438,7 +22991,11 @@ impl MitsuroApp {
                     for session in sessions {
                         let raw_id = session.id.raw.clone();
                         let backend_session_id = session.id.clone();
-                        let summary = thread_summary_from_session(session, &app.preferences);
+                        let summary = thread_summary_from_session_in_connection(
+                            session,
+                            &app.preferences,
+                            &connection_id,
+                        );
                         if let Some(thread) = app
                             .threads
                             .iter_mut()
@@ -19633,6 +23190,7 @@ impl MitsuroApp {
                 app.selected_goal = app.goals.first().map(|goal| goal.id.clone());
                 app.hive_snapshot_state = SurfaceDataState::Fixture;
                 app.hive_detail_state = SurfaceDataState::Fixture;
+                app.scheduled_tasks_state = SurfaceDataState::Fixture;
                 app.environments = fixture_demo_environments();
                 app.environments_state = SurfaceDataState::Fixture;
                 app.selected_environment_id = app
@@ -19657,6 +23215,30 @@ impl MitsuroApp {
     }
 
     fn clear_live_backend_state(&mut self, kind: BackendKind) {
+        // Provider identity chooses the adapter only. Every user-facing feature
+        // state below is derived from the adapter's advertised capabilities so
+        // another provider can gain a surface without duplicating UI branches.
+        let capabilities = self
+            .backend
+            .as_ref()
+            .filter(|backend| backend.kind() == kind)
+            .map(|backend| backend.capabilities())
+            .or_else(|| match kind {
+                BackendKind::MitsuroHttp => Some(BackendCapabilities::mitsuro()),
+                BackendKind::CodexStdio | BackendKind::CodexWebSocket => {
+                    Some(BackendCapabilities::codex())
+                }
+                BackendKind::Fixture => None,
+            });
+        let capability_state = |supported: bool| {
+            if kind == BackendKind::Fixture {
+                SurfaceDataState::Fixture
+            } else if supported {
+                SurfaceDataState::Loading
+            } else {
+                SurfaceDataState::Unsupported
+            }
+        };
         if let Some(cancel) = self.turn_cancel.take() {
             cancel.store(true, Ordering::SeqCst);
         }
@@ -19670,11 +23252,13 @@ impl MitsuroApp {
         }
         self.turn_generation = self.turn_generation.wrapping_add(1);
         self.side_turn_generation = self.side_turn_generation.wrapping_add(1);
+        self.projected_composer_text.clear();
         self.latest_message_edit = None;
         self.latest_message_edit_in_progress = false;
         self.latest_message_edit_error = None;
         self.latest_message_edit_generation = self.latest_message_edit_generation.wrapping_add(1);
         self.threads.clear();
+        self.delegations.clear();
         self.side_conversation_parents.clear();
         self.codex_thread_subscriptions.clear();
         self.codex_read_only_threads.clear();
@@ -19690,11 +23274,9 @@ impl MitsuroApp {
         self.selected_fast_mode = false;
         self.config_snippet = SharedString::from("");
         self.permission_profiles.clear();
-        self.permission_profiles_state = match kind {
-            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
-            BackendKind::Fixture => SurfaceDataState::Fixture,
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
-        };
+        self.permission_profiles_state = capability_state(
+            capabilities.is_some_and(|capabilities| capabilities.permission_profiles),
+        );
         self.config_requirements = None;
         self.feedback_dialog_open = false;
         self.feedback_category = None;
@@ -19708,50 +23290,38 @@ impl MitsuroApp {
         self.full_access_confirmation_open = false;
         self.external_agent_import_sources.clear();
         self.external_agent_import_histories.clear();
-        self.external_agent_import_state = match kind {
-            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
-            BackendKind::Fixture => SurfaceDataState::Fixture,
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
-        };
+        self.external_agent_import_state = capability_state(
+            capabilities.is_some_and(|capabilities| capabilities.external_agent_import),
+        );
         self.external_agent_import_error = None;
         self.external_agent_import_in_progress = None;
         self.external_agent_import_confirmation = None;
         self.experimental_features.clear();
-        self.experimental_features_state = match kind {
-            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
-            BackendKind::Fixture => SurfaceDataState::Fixture,
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
-        };
+        self.experimental_features_state = capability_state(
+            capabilities.is_some_and(|capabilities| capabilities.experimental_features),
+        );
         self.experimental_features_error = None;
         self.experimental_feature_mutation = None;
         self.memory_settings = None;
-        self.memory_settings_state = match kind {
-            BackendKind::MitsuroHttp => SurfaceDataState::Unsupported,
-            BackendKind::Fixture => SurfaceDataState::Fixture,
-            BackendKind::CodexStdio | BackendKind::CodexWebSocket => SurfaceDataState::Loading,
-        };
+        self.memory_settings_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.memory_settings));
         self.memory_settings_error = None;
         self.memory_settings_mutation = None;
         self.memory_reset_confirmation = false;
         self.skills.clear();
         self.hooks.clear();
-        self.hooks_state = SurfaceDataState::Loading;
+        self.hooks_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.hooks));
         self.connector_apps.clear();
         self.installed_apps.clear();
-        self.connector_apps_state = if kind == BackendKind::MitsuroHttp {
-            SurfaceDataState::Unsupported
-        } else {
-            SurfaceDataState::Loading
-        };
+        self.connector_apps_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.apps));
         self.remote_control_status = None;
         self.remote_control_clients.clear();
         self.remote_control_pairing = None;
         self.remote_control_pairing_claimed = None;
-        self.remote_control_state = if kind == BackendKind::MitsuroHttp {
-            SurfaceDataState::Unsupported
-        } else {
-            SurfaceDataState::Loading
-        };
+        self.remote_control_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.remote_control));
         self.remote_control_error = None;
         self.remote_control_mutation_in_progress = None;
         self.remote_control_revoke_confirmation = None;
@@ -19760,7 +23330,8 @@ impl MitsuroApp {
         self.mcp_add_in_progress = false;
         self.plugins.clear();
         self.plugin_marketplaces.clear();
-        self.extensions_state = SurfaceDataState::Loading;
+        self.extensions_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.extensions));
         self.plugin_mutation_in_progress = None;
         self.marketplace_mutation_in_progress = None;
         self.marketplace_remove_confirmation = None;
@@ -19770,11 +23341,8 @@ impl MitsuroApp {
         self.selected_goal = None;
         self.goals_are_live_hive = false;
         self.hive_snapshot = None;
-        self.hive_snapshot_state = if kind == BackendKind::MitsuroHttp {
-            SurfaceDataState::Loading
-        } else {
-            SurfaceDataState::Unsupported
-        };
+        self.hive_snapshot_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.hive));
         self.hive_session_detail = None;
         self.hive_detail_state = self.hive_snapshot_state;
         self.hive_mutation_in_progress = None;
@@ -19789,31 +23357,26 @@ impl MitsuroApp {
         self.collaboration_modes.clear();
         self.composer_plan_mode = false;
         self.realtime_voices = None;
-        self.realtime_voices_state = if kind == BackendKind::MitsuroHttp {
-            SurfaceDataState::Unsupported
-        } else {
-            SurfaceDataState::Loading
-        };
+        self.realtime_voices_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.realtime_voice));
         if let Some(runtime) = self.realtime_voice_runtime.take() {
             runtime.capture_stop.store(true, Ordering::SeqCst);
         }
         self.realtime_voice_generation = self.realtime_voice_generation.wrapping_add(1);
         self.scheduled_tasks = None;
+        self.scheduled_tasks_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.schedules));
         self.schedule_mutation_in_progress = None;
         self.schedule_cancel_confirmation = None;
         self.schedule_editor = None;
         self.background_processes.clear();
-        self.background_processes_state = if kind == BackendKind::MitsuroHttp {
-            SurfaceDataState::Loading
-        } else {
-            SurfaceDataState::Unsupported
-        };
+        self.background_processes_state = capability_state(
+            capabilities.is_some_and(|capabilities| capabilities.tracked_processes),
+        );
         self.thread_background_terminals.clear();
-        self.thread_background_terminals_state = if kind == BackendKind::CodexStdio {
-            SurfaceDataState::Loading
-        } else {
-            SurfaceDataState::Unsupported
-        };
+        self.thread_background_terminals_state = capability_state(
+            capabilities.is_some_and(|capabilities| capabilities.background_terminals),
+        );
         self.background_process_mutation_in_progress = None;
         self.terminal = TerminalSession::idle(kind.id());
         self.files = FilesSession::new(kind.id());
@@ -19843,13 +23406,13 @@ impl MitsuroApp {
                     .map(|path| path.display().to_string())
             });
         self.composer_default_access_mode = None;
-        self.composer_access_modes.clear();
         self.composer_access_menu_open = false;
         self.thread_settings_write_lock = Arc::new(tokio::sync::Mutex::new(()));
         self.thread_settings_update_generation =
             self.thread_settings_update_generation.wrapping_add(1);
         self.account = AccountSession::empty(kind.id());
-        self.account_state = SurfaceDataState::Loading;
+        self.account_state =
+            capability_state(capabilities.is_some_and(|capabilities| capabilities.account_read));
         self.account_workspace_messages_error = None;
         self.account_reset_confirmation = None;
         self.account_reset_in_progress = false;
@@ -19869,78 +23432,238 @@ impl MitsuroApp {
                 return;
             }
         };
-        self.connect_backend_selection(selection, cx);
+        let preferred_connection = if std::env::var_os("MITSURO_BACKEND").is_none() {
+            self.preferences
+                .selected_connection_id
+                .as_deref()
+                .and_then(|id| ConnectionId::parse_persisted(id).ok())
+                .filter(|id| self.connection_specs.contains_key(id))
+        } else {
+            None
+        };
+        self.connect_backend_selection_with_intent(
+            selection,
+            preferred_connection,
+            ConnectionStartIntent::ReuseOrStart,
+            cx,
+        );
+        // Start the companion immediately instead of waiting for the selected
+        // provider's complete settings/catalog bootstrap. A slow or failed
+        // provider therefore cannot serialize application startup.
+        self.preconnect_companion_backend(cx);
     }
 
     fn connect_backend_selection(&mut self, selection: BackendSelection, cx: &mut Context<Self>) {
+        self.connect_backend_selection_with_intent(
+            selection,
+            None,
+            ConnectionStartIntent::ReuseOrStart,
+            cx,
+        );
+    }
+
+    fn connect_backend_selection_with_intent(
+        &mut self,
+        selection: BackendSelection,
+        connection_override: Option<ConnectionId>,
+        start_intent: ConnectionStartIntent,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_connection_id = self.connections.selected_id().cloned();
+        self.stash_selected_thread_projection(cx);
+        if let Some(previous_connection_id) = previous_connection_id.as_ref() {
+            self.compact_stored_connection_transcripts(previous_connection_id);
+        }
         if matches!(selection, BackendSelection::Fixture) {
-            let previous_backend = self.backend.take();
+            self.backend = None;
             self.backend_generation = self.backend_generation.wrapping_add(1);
             self.clear_live_backend_state(BackendKind::Fixture);
+            self.sync_projected_composer_input(cx);
             self.connection = UiConnection::Fixture;
             self.status_line = "Fixture backend selected explicitly.".into();
             self.bootstrap_fixture(cx);
-            disconnect_backend_best_effort(previous_backend, cx);
             return;
         }
         if matches!(selection, BackendSelection::CodexWebSocket) {
-            let previous_backend = self.backend.take();
+            self.backend = None;
             self.backend_generation = self.backend_generation.wrapping_add(1);
             self.clear_live_backend_state(BackendKind::CodexWebSocket);
+            self.sync_projected_composer_input(cx);
             self.connection = UiConnection::Error {
                 message: "codex-ws is not implemented".to_owned(),
             };
             self.status_line =
                 "codex-ws is not implemented yet; use codex-stdio or mitsuro-http.".into();
-            disconnect_backend_best_effort(previous_backend, cx);
             cx.notify();
             return;
         }
-        let backend = match selection {
-            BackendSelection::CodexStdio => DesktopBackend::codex_stdio(),
-            BackendSelection::Auto | BackendSelection::MitsuroHttp => {
-                match DesktopBackend::mitsuro_from_env() {
-                    Ok(backend) => backend,
-                    Err(error) => {
-                        self.clear_live_backend_state(BackendKind::MitsuroHttp);
-                        self.connection = UiConnection::Error {
-                            message: error.to_string(),
-                        };
-                        self.status_line =
-                            format!("Mitsuro backend configuration error: {error}").into();
-                        cx.notify();
-                        return;
-                    }
-                }
-            }
+        let kind = match selection {
+            BackendSelection::CodexStdio => BackendKind::CodexStdio,
+            BackendSelection::Auto | BackendSelection::MitsuroHttp => BackendKind::MitsuroHttp,
             BackendSelection::CodexWebSocket | BackendSelection::Fixture => unreachable!(),
         };
-        let backend = Arc::new(backend);
-        let previous_backend = self.backend.take();
-        self.backend_generation = self.backend_generation.wrapping_add(1);
-        let generation = self.backend_generation;
+        let connection_id = connection_override.unwrap_or_else(|| ConnectionId::primary(kind));
+        if connection_id.kind() != kind {
+            self.connection = UiConnection::Error {
+                message: "Connection backend identity mismatch".into(),
+            };
+            self.status_line = format!(
+                "Connection {} does not belong to backend {}.",
+                connection_id,
+                kind.id()
+            )
+            .into();
+            cx.notify();
+            return;
+        }
+        let cached_initialization = self.backend_initializations.get(&connection_id).cloned();
+        let disposition = connection_start_disposition(
+            self.connections
+                .get(&connection_id)
+                .map(|entry| &entry.status),
+            cached_initialization.is_some(),
+            start_intent,
+        );
+        let backend = if let Some(backend) = self.connections.backend(&connection_id) {
+            backend
+        } else {
+            match self.create_backend_for_connection(&connection_id) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    if selection == BackendSelection::Auto && connection_id.name().is_none() {
+                        self.status_line = format!(
+                            "Mitsuro configuration unavailable · trying ChatGPT / Codex: {error}"
+                        )
+                        .into();
+                        self.connect_backend_selection(BackendSelection::CodexStdio, cx);
+                        return;
+                    }
+                    self.clear_live_backend_state(kind);
+                    self.sync_projected_composer_input(cx);
+                    self.connection = UiConnection::Error {
+                        message: error.clone(),
+                    };
+                    self.status_line = format!("Backend configuration error: {error}").into();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+
+        if matches!(
+            disposition,
+            ConnectionStartDisposition::ReuseInFlight
+                | ConnectionStartDisposition::ReuseWithoutRefresh
+                | ConnectionStartDisposition::AwaitExplicitReconnect
+        ) {
+            debug_assert!(self.connections.select(&connection_id));
+            self.clear_live_backend_state(backend.kind());
+            self.activate_cached_thread_projection(&connection_id);
+            self.sync_projected_composer_input(cx);
+            debug_assert!(self.project_connection_transport(&connection_id));
+            self.status_line = match disposition {
+                ConnectionStartDisposition::ReuseInFlight => format!(
+                    "{} is already connecting…",
+                    Self::backend_display_name(kind)
+                )
+                .into(),
+                ConnectionStartDisposition::ReuseWithoutRefresh => format!(
+                    "{} is online but needs an explicit reconnect before catalogs can refresh.",
+                    Self::backend_display_name(kind)
+                )
+                .into(),
+                ConnectionStartDisposition::AwaitExplicitReconnect => format!(
+                    "{} is offline · select Reconnect to start it.",
+                    Self::backend_display_name(kind)
+                )
+                .into(),
+                ConnectionStartDisposition::Start | ConnectionStartDisposition::RefreshReady => {
+                    unreachable!()
+                }
+            };
+            cx.notify();
+            return;
+        }
+
+        let generation = match disposition {
+            ConnectionStartDisposition::RefreshReady => self
+                .connections
+                .ready_generation(&connection_id)
+                .expect("ready refresh requires a ready connection"),
+            ConnectionStartDisposition::Start => self
+                .connections
+                .begin_connect(connection_id.clone(), Arc::clone(&backend)),
+            ConnectionStartDisposition::ReuseInFlight
+            | ConnectionStartDisposition::ReuseWithoutRefresh
+            | ConnectionStartDisposition::AwaitExplicitReconnect => unreachable!(),
+        };
+        if let Some(spec) = self.connection_specs.get(&connection_id) {
+            self.connections
+                .set_display_name(&connection_id, spec.display_name.clone());
+        }
+        let cached_initialization = (disposition == ConnectionStartDisposition::RefreshReady)
+            .then_some(cached_initialization)
+            .flatten();
+        debug_assert!(self.connections.select(&connection_id));
+        self.backend_generation = generation;
         let backend_label = backend.kind().id();
         self.backend = Some(Arc::clone(&backend));
-        self.start_backend_lifecycle_listener(&backend, generation, cx);
         self.clear_live_backend_state(backend.kind());
-        self.connection = UiConnection::Connecting;
-        self.status_line = format!("Connecting to {backend_label}…").into();
+        self.activate_cached_thread_projection(&connection_id);
+        self.sync_projected_composer_input(cx);
+        if disposition == ConnectionStartDisposition::RefreshReady {
+            debug_assert!(self.project_connection_transport(&connection_id));
+            self.status_line = format!("Refreshing {backend_label}…").into();
+        } else {
+            self.start_backend_lifecycle_listener(connection_id.clone(), &backend, generation, cx);
+            self.connection = UiConnection::Connecting;
+            self.status_line = format!("Connecting to {backend_label}…").into();
+        }
         cx.notify();
 
         let window_handle = self.window_handle;
-        cx.spawn(async move |this, cx| {
+        let bootstrap_task_id = connection_id.clone();
+        let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    if let Some(previous) = previous_backend {
-                        let runner = Arc::clone(&previous);
-                        let _ = previous.block_on(async move { runner.disconnect().await });
-                    }
-                    connect_list_auth_and_models(backend)
+                    connect_list_auth_and_models(backend, cached_initialization)
                 })
                 .await;
 
             let path_sync = this.update(cx, |app, cx| {
-                if app.backend_generation != generation {
+                match &result {
+                    Ok(bootstrap) => {
+                        if app.connections.mark_ready(
+                            &connection_id,
+                            generation,
+                            format!(
+                                "{} · {}",
+                                bootstrap.init.platform_os, bootstrap.init.user_agent
+                            ),
+                            bootstrap.has_auth,
+                            bootstrap.sessions.clone(),
+                        ) {
+                            app.backend_initializations
+                                .insert(connection_id.clone(), bootstrap.init.clone());
+                        }
+                    }
+                    Err(message) => {
+                        if disposition == ConnectionStartDisposition::RefreshReady {
+                            app.connections.mark_degraded(
+                                &connection_id,
+                                generation,
+                                message.clone(),
+                            );
+                        } else {
+                            app.connections
+                                .mark_error(&connection_id, generation, message.clone());
+                        }
+                    }
+                }
+                let is_active = app.backend_generation == generation
+                    && app.connections.selected_id() == Some(&connection_id);
+                if !is_active {
+                    cx.notify();
                     return None;
                 }
                 match result {
@@ -19964,9 +23687,7 @@ impl MitsuroApp {
                             mcp,
                             plugins,
                             plugin_marketplaces,
-                            processes,
-                            hive,
-                            schedules,
+                            provider,
                         } = bootstrap;
                         eprintln!(
                             "[mitsuro] Connected backend={} os={} threads={} auth={} models={}",
@@ -19986,24 +23707,14 @@ impl MitsuroApp {
                         if let Some(backend_kind) =
                             app.backend.as_ref().map(|backend| backend.kind())
                         {
-                            app.preferences.remember_backend(backend_kind);
+                            app.preferences
+                                .remember_connection(connection_id.as_str(), backend_kind);
                             app.save_preferences_best_effort();
                         }
-                        let preferences = app.preferences.clone();
-                        app.threads = remote
-                            .into_iter()
-                            .map(|session| DemoThread {
-                                backend_session_id: Some(session.id.clone()),
-                                summary: thread_summary_from_session(session, &preferences),
-                                surface: ThreadSurface::Codex,
-                                messages: vec![],
-                            })
-                            .collect();
+                        app.restore_thread_projection(&connection_id, remote, cx);
                         // Default: leave selected_thread None → calm home hero.
                         // Override via MITSURO_START_THREAD / START_MODE=thread-open.
-                        app.apply_models(
-                            models.into_iter().map(model_info_from_product).collect(),
-                        );
+                        app.apply_models(models.into_iter().map(model_info_from_product).collect());
                         app.collaboration_modes = collaboration_modes;
                         match realtime_voices {
                             Ok(Some(voices)) => app.apply_realtime_voices(voices),
@@ -20164,65 +23875,83 @@ impl MitsuroApp {
                         app.environments.clear();
                         app.environments_state = SurfaceDataState::Unsupported;
                         app.selected_environment_id = None;
-                        let is_mitsuro = app
-                            .backend
-                            .as_ref()
-                            .is_some_and(|backend| backend.kind() == BackendKind::MitsuroHttp);
-                        if is_mitsuro {
-                            app.terminal.backend_label = "mitsuro-http · tracked processes".into();
-                            match processes {
-                                Some(processes) => {
-                                    app.terminal.output = process_catalog_text(&processes).into();
-                                    app.background_processes = processes;
-                                    app.background_processes_state = SurfaceDataState::Live;
+                        match provider {
+                            BackendProviderBootstrap::Mitsuro {
+                                processes,
+                                hive,
+                                schedules,
+                            } => {
+                                app.terminal.backend_label =
+                                    "mitsuro-http · tracked processes".into();
+                                match processes {
+                                    Ok(processes) => {
+                                        app.terminal.output = "".into();
+                                        app.background_processes = processes;
+                                        app.background_processes_state = SurfaceDataState::Live;
+                                    }
+                                    Err(error) => {
+                                        app.terminal.output = "".into();
+                                        app.background_processes.clear();
+                                        app.background_processes_state = SurfaceDataState::Error;
+                                        app.status_line = format!(
+                                            "Tracked processes could not be loaded · {error}"
+                                        )
+                                        .into();
+                                    }
                                 }
-                                None => {
-                                    app.terminal.output = "Mitsuro background-process catalog is unavailable.\nInteractive terminal spawning is not exposed by this backend.".into();
-                                    app.background_processes.clear();
-                                    app.background_processes_state = SurfaceDataState::Error;
+                                app.goals_are_live_hive = true;
+                                match hive {
+                                    Ok(hive) => {
+                                        app.goals = hive_goals_from_snapshot(&hive);
+                                        app.selected_goal =
+                                            app.goals.first().map(|goal| goal.id.clone());
+                                        app.hive_snapshot = Some(hive);
+                                        app.hive_snapshot_state = SurfaceDataState::Live;
+                                        app.hive_detail_state = if app.selected_goal.is_some() {
+                                            SurfaceDataState::Loading
+                                        } else {
+                                            SurfaceDataState::Live
+                                        };
+                                    }
+                                    Err(_) => {
+                                        app.goals.clear();
+                                        app.selected_goal = None;
+                                        app.hive_snapshot = None;
+                                        app.hive_snapshot_state = SurfaceDataState::Error;
+                                        app.hive_detail_state = SurfaceDataState::Error;
+                                    }
+                                }
+                                if app.active_mode == ProductMode::Work
+                                    && app.selected_goal.is_some()
+                                {
+                                    app.refresh_selected_hive_session(cx);
+                                }
+                                // Some(empty) intentionally keeps the live schedule
+                                // surface instead of silently falling back to fixture suggestions.
+                                match schedules {
+                                    Ok(schedules) => {
+                                        app.scheduled_tasks = Some(schedules);
+                                        app.scheduled_tasks_state = SurfaceDataState::Live;
+                                    }
+                                    Err(_) => {
+                                        app.scheduled_tasks = None;
+                                        app.scheduled_tasks_state = SurfaceDataState::Error;
+                                    }
                                 }
                             }
-                            app.goals_are_live_hive = true;
-                            match hive {
-                                Some(hive) => {
-                                    app.goals = hive_goals_from_snapshot(&hive);
-                                    app.selected_goal =
-                                        app.goals.first().map(|goal| goal.id.clone());
-                                    app.hive_snapshot = Some(hive);
-                                    app.hive_snapshot_state = SurfaceDataState::Live;
-                                    app.hive_detail_state = if app.selected_goal.is_some() {
-                                        SurfaceDataState::Loading
-                                    } else {
-                                        SurfaceDataState::Live
-                                    };
-                                }
-                                None => {
-                                    app.goals.clear();
-                                    app.selected_goal = None;
-                                    app.hive_snapshot = None;
-                                    app.hive_snapshot_state = SurfaceDataState::Error;
-                                    app.hive_detail_state = SurfaceDataState::Error;
-                                }
+                            BackendProviderBootstrap::Codex => {
+                                app.background_processes.clear();
+                                app.background_processes_state = SurfaceDataState::Unsupported;
+                                app.goals.clear();
+                                app.selected_goal = None;
+                                app.goals_are_live_hive = false;
+                                app.hive_snapshot = None;
+                                app.hive_snapshot_state = SurfaceDataState::Unsupported;
+                                app.hive_session_detail = None;
+                                app.hive_detail_state = SurfaceDataState::Unsupported;
+                                app.scheduled_tasks = None;
+                                app.scheduled_tasks_state = SurfaceDataState::Unsupported;
                             }
-                            if app.active_mode == ProductMode::Work
-                                && app.selected_goal.is_some()
-                            {
-                                app.refresh_selected_hive_session(cx);
-                            }
-                            // Some(empty) intentionally keeps the live schedule
-                            // surface instead of silently falling back to fixture suggestions.
-                            app.scheduled_tasks = Some(schedules.unwrap_or_default());
-                        } else {
-                            app.background_processes.clear();
-                            app.background_processes_state = SurfaceDataState::Unsupported;
-                            app.goals.clear();
-                            app.selected_goal = None;
-                            app.goals_are_live_hive = false;
-                            app.hive_snapshot = None;
-                            app.hive_snapshot_state = SurfaceDataState::Unsupported;
-                            app.hive_session_detail = None;
-                            app.hive_detail_state = SurfaceDataState::Unsupported;
-                            app.scheduled_tasks = None;
                         }
                         let auth_note = if has_auth { "auth" } else { "no auth" };
                         // Short chrome: Connected · N threads · auth (counts for models/skills live in Settings).
@@ -20240,6 +23969,7 @@ impl MitsuroApp {
                         // Best-effort account snapshot from app-server (needs Window for public API —
                         // use internal spawn path via refresh_account with a no-op when possible).
                         app.kick_account_refresh(cx);
+                        app.preconnect_companion_backend(cx);
                         // Defer open-thread so first Connected paint (recents + chrome) settles
                         // before thread/read materializes bubbles (GNOME hang detector).
                         if app.pending_start_thread.is_some() {
@@ -20258,9 +23988,13 @@ impl MitsuroApp {
                     }
                     Err(message) => {
                         eprintln!("[mitsuro] backend connect failed: {message}");
-                        app.connection = UiConnection::Error {
-                            message: message.clone(),
-                        };
+                        if disposition == ConnectionStartDisposition::RefreshReady {
+                            app.project_connection_transport(&connection_id);
+                        } else {
+                            app.connection = UiConnection::Error {
+                                message: message.clone(),
+                            };
+                        }
                         app.account = AccountSession::empty("unavailable");
                         app.account_state = SurfaceDataState::Error;
                         app.extensions_state = SurfaceDataState::Error;
@@ -20279,9 +24013,18 @@ impl MitsuroApp {
                         app.config_default_permissions = None;
                         app.permission_profiles_state = SurfaceDataState::Error;
                         app.environments_state = SurfaceDataState::Error;
-                        app.status_line = format!("Backend unavailable · {message}").into();
+                        app.status_line = if disposition == ConnectionStartDisposition::RefreshReady
+                        {
+                            format!("Degraded · catalog refresh failed · {message}").into()
+                        } else {
+                            format!("Backend unavailable · {message}").into()
+                        };
+                        // A failed selected provider must not prevent the other
+                        // first-class backend from becoming independently usable.
+                        app.preconnect_companion_backend(cx);
                     }
                 }
+                app.replay_connection_lifecycle_events(&connection_id, cx);
                 cx.notify();
                 (app.active_mode == ProductMode::Files)
                     .then(|| (app.files_path_input.clone(), app.files.cwd.to_string()))
@@ -20291,8 +24034,106 @@ impl MitsuroApp {
                     input.update(cx, |state, cx| state.set_value(path, window, cx));
                 });
             }
-        })
-        .detach();
+        });
+        self.connection_bootstrap_tasks
+            .insert(bootstrap_task_id, task);
+    }
+
+    /// Establish every configured inactive provider without changing the
+    /// active projection. Primary Codex/Mitsuro entries and named real
+    /// connections all receive independent transports, catalogs and listeners.
+    fn preconnect_companion_backend(&mut self, cx: &mut Context<Self>) {
+        let selected = self.connections.selected_id().cloned();
+        let connection_ids = self.configured_connection_order.clone();
+        for connection_id in connection_ids {
+            if selected.as_ref() == Some(&connection_id) {
+                continue;
+            }
+            self.preconnect_inactive_connection(connection_id, cx);
+        }
+    }
+
+    fn preconnect_inactive_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connections.get(&connection_id).is_some() {
+            return;
+        }
+        let kind = connection_id.kind();
+        let backend = match self.create_backend_for_connection(&connection_id) {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!(
+                    "[mitsuro] inactive connection={} configuration failed: {error}",
+                    connection_id
+                );
+                cx.notify();
+                return;
+            }
+        };
+        let generation = self
+            .connections
+            .begin_connect(connection_id.clone(), Arc::clone(&backend));
+        if let Some(spec) = self.connection_specs.get(&connection_id) {
+            self.connections
+                .set_display_name(&connection_id, spec.display_name.clone());
+        }
+        self.start_backend_lifecycle_listener(connection_id.clone(), &backend, generation, cx);
+        cx.notify();
+
+        let bootstrap_task_id = connection_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { connect_list_auth_and_models(backend, None) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(bootstrap) => {
+                        let session_count = bootstrap.sessions.len();
+                        let projection_sessions = bootstrap.sessions.clone();
+                        let detail = format!(
+                            "{} · {}",
+                            bootstrap.init.platform_os, bootstrap.init.user_agent
+                        );
+                        if app.connections.mark_ready(
+                            &connection_id,
+                            generation,
+                            detail,
+                            bootstrap.has_auth,
+                            bootstrap.sessions.clone(),
+                        ) {
+                            app.backend_initializations
+                                .insert(connection_id.clone(), bootstrap.init.clone());
+                            app.restore_inactive_thread_projection(
+                                &connection_id,
+                                projection_sessions,
+                            );
+                            eprintln!(
+                                "[mitsuro] Companion connected backend={} connection={} threads={} auth={}",
+                                kind.id(),
+                                connection_id,
+                                session_count,
+                                bootstrap.has_auth
+                            );
+                        }
+                    }
+                    Err(message) => {
+                        app.connections
+                            .mark_error(&connection_id, generation, message.clone());
+                        eprintln!(
+                            "[mitsuro] Companion unavailable backend={} connection={}: {message}",
+                            kind.id(),
+                            connection_id
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.connection_bootstrap_tasks
+            .insert(bootstrap_task_id, task);
     }
 
     /// Apply `pending_start_thread` after Recents are populated (bootstrap).
@@ -20379,7 +24220,46 @@ impl MitsuroApp {
             cx.notify();
             return;
         };
+        let Some(connection_id) = self.connections.selected_id().cloned() else {
+            self.status_line = "Session read refused: the owning connection is missing.".into();
+            cx.notify();
+            return;
+        };
+        let Some(connection_generation) = self
+            .connections
+            .get(&connection_id)
+            .map(|entry| entry.generation)
+        else {
+            self.status_line = "Session read refused: the owning connection is unavailable.".into();
+            cx.notify();
+            return;
+        };
+        let session_key = SessionKey::new(connection_id.clone(), session_id.raw.clone())
+            .expect("live session ids are non-empty");
+        let (hydration_generation, live_revision_at_start) = {
+            let state = self
+                .transcript_pagination
+                .entry(thread_id.clone())
+                .or_default();
+            state.generation = state.generation.wrapping_add(1);
+            state.loading = false;
+            (state.generation, state.live_revision)
+        };
+        let hydration_baseline = self
+            .threads
+            .iter()
+            .find(|thread| thread.summary.id == thread_id)
+            .map(|thread| transcript_hydration_baseline(&thread.messages))
+            .unwrap_or_default();
+        let subscription_operation = backend
+            .capabilities()
+            .thread_resume
+            .then(|| begin_subscription_operation(&mut self.subscription_operations, &session_key));
+        let callback_subscription_operation = subscription_operation.clone();
+        let cleanup_backend = Arc::clone(&backend);
+        let cleanup_session_id = session_id.clone();
         cx.spawn(async move |this, cx| {
+            let callback_thread_id = thread_id.clone();
             let result = cx
                 .background_spawn(async move {
                     // Keep transcript work off the UI thread, but preserve the
@@ -20388,11 +24268,30 @@ impl MitsuroApp {
                     let tid = thread_id.clone();
                     let b = Arc::clone(&backend);
                     let prepared = backend.block_on(async move {
+                        let _serial = match subscription_operation.as_ref() {
+                            Some(operation) => Some(operation.serial.lock().await),
+                            None => None,
+                        };
+                        if subscription_operation
+                            .as_ref()
+                            .is_some_and(|operation| !operation.is_current())
+                        {
+                            return Ok::<_, (String, String)>(None);
+                        }
                         match b.open_session(&session_id).await {
                             Ok(conversation) => {
+                                if subscription_operation
+                                    .as_ref()
+                                    .is_some_and(|operation| !operation.is_current())
+                                {
+                                    if conversation.open_mode == SessionOpenMode::Subscribed {
+                                        let _ = b.close_session(&session_id).await;
+                                    }
+                                    return Ok(None);
+                                }
                                 let open_mode = conversation.open_mode;
-                                let delegation = conversation.delegation;
-                                let codex_settings = conversation.codex_settings;
+                                let (delegation, codex_settings) =
+                                    conversation.provider_data.into_parts();
                                 let history = conversation.history;
                                 let delegation_status = delegation_hydration_status(&delegation);
                                 let msgs = conversation.messages;
@@ -20414,7 +24313,7 @@ impl MitsuroApp {
                                     seen,
                                     ui.len()
                                 );
-                                Ok::<_, (String, String)>((
+                                Ok::<_, (String, String)>(Some((
                                     tid,
                                     seen.max(n_chat),
                                     ui,
@@ -20423,9 +24322,15 @@ impl MitsuroApp {
                                     codex_settings,
                                     history,
                                     open_mode,
-                                ))
+                                )))
                             }
                             Err(e) => {
+                                if subscription_operation
+                                    .as_ref()
+                                    .is_some_and(|operation| !operation.is_current())
+                                {
+                                    return Ok(None);
+                                }
                                 eprintln!("[mitsuro] thread/open failed id={tid}: {e}");
                                 Err((tid, e.to_string()))
                             }
@@ -20438,8 +24343,47 @@ impl MitsuroApp {
                 .await;
 
             let _ = this.update(cx, |app, cx| {
-                match result {
-                    Ok((
+                let _ = app.with_connection_thread_projection(&connection_id, cx, |app, cx| {
+                    let connection_is_current = app
+                        .connections
+                        .generation_matches(&connection_id, connection_generation);
+                    let subscription_is_current = callback_subscription_operation
+                        .as_ref()
+                        .is_none_or(SubscriptionOperation::is_current);
+                    if !connection_is_current || !subscription_is_current {
+                        if !connection_is_current
+                            && matches!(
+                                &result,
+                                Ok(Some((
+                                    _,
+                                    _,
+                                    _,
+                                    _,
+                                    _,
+                                    _,
+                                    _,
+                                    SessionOpenMode::Subscribed
+                                )))
+                            )
+                        {
+                            close_session_best_effort(
+                                Arc::clone(&cleanup_backend),
+                                cleanup_session_id.clone(),
+                                cx,
+                            );
+                        }
+                        return;
+                    }
+                    let Some(current_transcript_state) =
+                        app.transcript_pagination.get(&callback_thread_id)
+                    else {
+                        return;
+                    };
+                    if current_transcript_state.generation != hydration_generation {
+                        return;
+                    }
+                    match result {
+                    Ok(Some((
                         tid,
                         n_in,
                         ui_msgs,
@@ -20448,20 +24392,34 @@ impl MitsuroApp {
                         codex_settings,
                         history,
                         open_mode,
-                    )) => {
-                        app.codex_thread_subscriptions.remove(&tid);
-                        app.codex_read_only_threads.remove(&tid);
+                    ))) => {
+                        app.codex_thread_subscriptions.remove(&session_key);
+                        app.codex_read_only_threads.remove(&session_key);
                         match open_mode {
                             SessionOpenMode::Subscribed => {
-                                app.codex_thread_subscriptions.insert(tid.clone());
+                                app.codex_thread_subscriptions.insert(session_key.clone());
                             }
                             SessionOpenMode::ReadOnlyActiveWriter => {
-                                app.codex_read_only_threads.insert(tid.clone());
+                                app.codex_read_only_threads.insert(session_key.clone());
                             }
                             SessionOpenMode::Snapshot => {}
                         }
-                        app.transcript_pagination
-                            .insert(tid.clone(), history.into());
+                        let snapshot_fully_loaded = history.fully_loaded;
+                        let live_revision = app
+                            .transcript_pagination
+                            .get(&tid)
+                            .map(|state| state.live_revision)
+                            .unwrap_or(live_revision_at_start);
+                        let live_changed = live_revision != live_revision_at_start;
+                        let mut next_history: TranscriptPaginationState = history.into();
+                        next_history.generation = hydration_generation;
+                        next_history.live_revision = live_revision;
+                        next_history.completed_item_ids = app
+                            .transcript_pagination
+                            .get(&tid)
+                            .map(|state| state.completed_item_ids.clone())
+                            .unwrap_or_default();
+                        app.transcript_pagination.insert(tid.clone(), next_history);
                         let is_selected =
                             app.selected_thread.as_deref() == Some(tid.as_str());
                         if is_selected {
@@ -20469,8 +24427,16 @@ impl MitsuroApp {
                                 app.apply_codex_session_settings(settings);
                             }
                         }
+                        let should_follow_latest =
+                            is_selected && app.selected_transcript_follows_latest();
                         if let Some(thread) = app.threads.iter_mut().find(|t| t.summary.id == tid) {
-                            thread.messages = ui_msgs;
+                            reconcile_hydrated_transcript(
+                                &mut thread.messages,
+                                ui_msgs,
+                                snapshot_fully_loaded,
+                                live_changed,
+                                &hydration_baseline,
+                            );
                             app.delegations.insert(tid.clone(), delegation);
                             eprintln!(
                                 "[mitsuro] thread/open applied id={} server={} ui={}",
@@ -20479,7 +24445,9 @@ impl MitsuroApp {
                                 thread.messages.len()
                             );
                             if is_selected {
-                                app.transcript_scroll_handle.scroll_to_bottom();
+                                if should_follow_latest {
+                                    app.transcript_scroll_handle.scroll_to_bottom();
+                                }
                                 app.selected_codex_thread = Some(tid.clone());
                                 if !matches!(
                                     app.active_mode,
@@ -20514,16 +24482,18 @@ impl MitsuroApp {
                             }
                         }
                     }
+                    Ok(None) => {}
                     Err((tid, e)) => {
                         if app.selected_thread.as_deref() == Some(tid.as_str()) {
                             app.status_line = format!("thread/open failed · {e}").into();
                         }
                     }
-                }
-                if app.active_mode == ProductMode::Terminal {
-                    app.refresh_terminal_backgrounds(cx);
-                }
-                cx.notify();
+                    }
+                    if app.active_mode == ProductMode::Terminal {
+                        app.refresh_terminal_backgrounds(cx);
+                    }
+                    cx.notify();
+                });
             });
         })
         .detach();
@@ -20547,23 +24517,77 @@ fn is_app_server_thread_id(id: &str) -> bool {
         || id.starts_with("fixture-"))
 }
 
+fn thread_summary_matches_search(summary: &ThreadSummary, query: &str) -> bool {
+    let filter = query.trim().to_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+    let title = summary.display_title().to_lowercase();
+    let preview = summary.preview.as_deref().unwrap_or("").to_lowercase();
+    let cwd = summary.cwd.as_deref().unwrap_or("").to_lowercase();
+    let meta = demo::meta_line(summary).to_lowercase();
+    title.contains(&filter)
+        || preview.contains(&filter)
+        || cwd.contains(&filter)
+        || meta.contains(&filter)
+}
+
+fn validated_thread_name(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Enter a conversation name");
+    }
+    if value.chars().count() > 120 {
+        return Err("Use 120 characters or fewer");
+    }
+    Ok(value.to_owned())
+}
+
+fn wrapped_thread_find_index(current: usize, delta: isize, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (current as isize + delta).rem_euclid(count as isize) as usize
+}
+
+fn transcript_near_bottom_after_delta(
+    offset_y: f32,
+    max_offset_y: f32,
+    delta_y: f32,
+    threshold: f32,
+) -> bool {
+    let max_offset_y = max_offset_y.max(0.0);
+    let predicted_offset = (offset_y + delta_y).clamp(-max_offset_y, 0.0);
+    max_offset_y + predicted_offset <= threshold.max(0.0)
+}
+
 fn should_release_thread_subscription(
-    session_id: &BackendSessionId,
-    active_backend: BackendKind,
+    supports_subscription_resume: bool,
     has_active_turn: bool,
     owns_subscription: bool,
 ) -> bool {
-    owns_subscription
-        && !has_active_turn
-        && session_id.backend == BackendKind::CodexStdio
-        && active_backend == BackendKind::CodexStdio
+    owns_subscription && !has_active_turn && supports_subscription_resume
 }
 
+#[allow(dead_code)]
 fn thread_summary_from_session(
     session: SessionSummary,
     preferences: &DesktopPreferences,
 ) -> ThreadSummary {
-    let is_pinned = preferences.is_session_pinned(session.id.backend, &session.id.raw);
+    let connection_id = ConnectionId::primary(session.id.backend);
+    thread_summary_from_session_in_connection(session, preferences, &connection_id)
+}
+
+fn thread_summary_from_session_in_connection(
+    session: SessionSummary,
+    preferences: &DesktopPreferences,
+    connection_id: &ConnectionId,
+) -> ThreadSummary {
+    let is_pinned = preferences.is_session_pinned_for_connection(
+        connection_id.as_str(),
+        session.id.backend,
+        &session.id.raw,
+    );
     ThreadSummary {
         id: session.id.raw,
         name: session.title,
@@ -20577,6 +24601,46 @@ fn thread_summary_from_session(
         archived: Some(session.archived),
         raw: None,
     }
+}
+
+fn merge_remote_threads(
+    remote: Vec<SessionSummary>,
+    cached: Vec<DemoThread>,
+    preferences: &DesktopPreferences,
+    connection_id: &ConnectionId,
+) -> Vec<DemoThread> {
+    let (mut local_drafts, mut cached_live): (Vec<_>, Vec<_>) = cached
+        .into_iter()
+        .partition(|thread| thread.backend_session_id.is_none());
+    let mut merged = Vec::with_capacity(local_drafts.len() + remote.len() + cached_live.len());
+    merged.append(&mut local_drafts);
+
+    for session in remote {
+        let session_id = session.id.clone();
+        let summary =
+            thread_summary_from_session_in_connection(session, preferences, connection_id);
+        if let Some(position) = cached_live
+            .iter()
+            .position(|thread| thread.backend_session_id.as_ref() == Some(&session_id))
+        {
+            let mut thread = cached_live.remove(position);
+            thread.summary = summary;
+            thread.backend_session_id = Some(session_id);
+            merged.push(thread);
+        } else {
+            merged.push(DemoThread {
+                backend_session_id: Some(session_id),
+                summary,
+                surface: ThreadSurface::Codex,
+                messages: Vec::new(),
+            });
+        }
+    }
+
+    // The catalog is intentionally bounded. A hydrated session that falls
+    // outside the latest page is retained rather than mistaken for deletion.
+    merged.append(&mut cached_live);
+    merged
 }
 
 fn model_info_from_product(model: ProductModel) -> ModelInfo {
@@ -20763,29 +24827,6 @@ fn plugin_summary_from_product(extension: ProductExtension) -> PluginSummary {
     }
 }
 
-fn process_catalog_text(processes: &[ProductProcess]) -> String {
-    if processes.is_empty() {
-        return "Mitsuro background-process catalog is empty.\nInteractive terminal spawning is not exposed by this backend."
-            .to_owned();
-    }
-    let mut output = String::from(
-        "Mitsuro tracked processes\nRunning entries can be killed above; interactive terminal spawning is not exposed by this backend.\n\n",
-    );
-    for process in processes {
-        output.push_str(&format!(
-            "{}  pid={}  {}  {}\n    {}\n",
-            process.status,
-            process
-                .pid
-                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
-            process.id,
-            process.command,
-            process.working_dir
-        ));
-    }
-    output
-}
-
 fn hive_goals_from_snapshot(snapshot: &ProductHiveSnapshot) -> Vec<DemoGoal> {
     snapshot
         .runs
@@ -20860,6 +24901,49 @@ fn find_message_mut<'a>(
         .iter_mut()
         .rev()
         .find(|m| m.item_id.as_deref() == Some(item_id))
+}
+
+fn preterminal_item_event_id(event: &TurnStreamEvent) -> Option<&str> {
+    match event {
+        TurnStreamEvent::ItemStarted { item_id, .. }
+        | TurnStreamEvent::AgentMessageDelta { item_id, .. }
+        | TurnStreamEvent::ReasoningTextDelta { item_id, .. }
+        | TurnStreamEvent::ReasoningSummaryDelta { item_id, .. }
+        | TurnStreamEvent::PlanDelta { item_id, .. }
+        | TurnStreamEvent::CommandExecutionOutputDelta { item_id, .. }
+        | TurnStreamEvent::FileChangeOutputDelta { item_id, .. }
+        | TurnStreamEvent::FileChangePatchUpdated { item_id, .. } => Some(item_id),
+        _ => None,
+    }
+}
+
+fn apply_item_started(messages: &mut Vec<DemoMessage>, item_id: &str, mut message: DemoMessage) {
+    if let Some(existing) = find_message_mut(messages, item_id) {
+        existing.streaming = true;
+        return;
+    }
+    message.streaming = true;
+    messages.push(message);
+}
+
+fn finalize_streaming_messages(messages: &mut [DemoMessage], failed: bool) {
+    let terminal_status = if failed { "failed" } else { "completed" };
+    for message in messages {
+        message.streaming = false;
+        match &mut message.kind {
+            DemoMessageKind::CommandExecution { status, .. }
+            | DemoMessageKind::FileChange { status, .. } => {
+                let normalized = status.trim().to_ascii_lowercase();
+                if matches!(
+                    normalized.as_str(),
+                    "" | "inprogress" | "in_progress" | "running"
+                ) {
+                    *status = terminal_status.to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn delegation_hydration_status(projection: &SessionDelegationProjection) -> Option<String> {
@@ -21430,6 +25514,347 @@ fn demo_message_from_conversation(message: ConversationMessage) -> DemoMessage {
     demo
 }
 
+fn transcript_reconciliation_key(message: &DemoMessage) -> String {
+    if matches!(&message.kind, DemoMessageKind::User { .. }) {
+        // Optimistic user bubbles do not have the server item id yet. Their
+        // exact structured content is the only safe bridge to hydration.
+        return format!("user:{:?}", &message.kind);
+    }
+    message
+        .item_id
+        .as_ref()
+        .map(|item_id| format!("item:{item_id}"))
+        .unwrap_or_else(|| format!("local:{:?}", &message.kind))
+}
+
+fn transcript_hydration_baseline(
+    messages: &[DemoMessage],
+) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for message in messages {
+        *counts
+            .entry(transcript_reconciliation_key(message))
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn merge_monotonic_transcript_text(snapshot: &str, live: &str) -> String {
+    if snapshot == live || live.is_empty() {
+        return snapshot.to_owned();
+    }
+    if snapshot.is_empty() || live.contains(snapshot) {
+        return live.to_owned();
+    }
+    if snapshot.contains(live) {
+        return snapshot.to_owned();
+    }
+
+    let max_overlap = snapshot.len().min(live.len());
+    for overlap in (1..=max_overlap).rev() {
+        let snapshot_start = snapshot.len() - overlap;
+        if snapshot.is_char_boundary(snapshot_start)
+            && live.is_char_boundary(overlap)
+            && snapshot[snapshot_start..] == live[..overlap]
+        {
+            let mut merged = snapshot.to_owned();
+            merged.push_str(&live[overlap..]);
+            return merged;
+        }
+    }
+
+    // A live item buffer is assembled after the snapshot request started. If
+    // the server normalizes text so no safe overlap exists, prefer that newer
+    // buffer instead of manufacturing duplicated prose.
+    live.to_owned()
+}
+
+fn merge_hydrated_message(
+    snapshot: DemoMessage,
+    mut live: DemoMessage,
+    prefer_live: bool,
+) -> DemoMessage {
+    if !prefer_live || std::mem::discriminant(&snapshot.kind) != std::mem::discriminant(&live.kind)
+    {
+        return snapshot;
+    }
+
+    let snapshot_text = {
+        let mut copy = snapshot.clone();
+        copy.text_mut().clone()
+    };
+    let live_text = live.text_mut().clone();
+    live.set_text(merge_monotonic_transcript_text(&snapshot_text, &live_text));
+    if live.item_id.is_none() {
+        live.item_id = snapshot.item_id.clone();
+    }
+
+    match (&mut live.kind, &snapshot.kind) {
+        (
+            DemoMessageKind::User {
+                images,
+                audio,
+                references,
+                ..
+            },
+            DemoMessageKind::User {
+                images: snapshot_images,
+                audio: snapshot_audio,
+                references: snapshot_references,
+                ..
+            },
+        ) => {
+            if images.is_empty() {
+                images.clone_from(snapshot_images);
+            }
+            if audio.is_empty() {
+                audio.clone_from(snapshot_audio);
+            }
+            if references.is_empty() {
+                references.clone_from(snapshot_references);
+            }
+        }
+        (
+            DemoMessageKind::CommandExecution { command, cwd, .. },
+            DemoMessageKind::CommandExecution {
+                command: snapshot_command,
+                cwd: snapshot_cwd,
+                ..
+            },
+        ) => {
+            if command.is_empty() {
+                command.clone_from(snapshot_command);
+            }
+            if cwd.is_empty() {
+                cwd.clone_from(snapshot_cwd);
+            }
+        }
+        (
+            DemoMessageKind::FileChange { paths_summary, .. },
+            DemoMessageKind::FileChange {
+                paths_summary: snapshot_paths,
+                ..
+            },
+        ) if paths_summary.is_empty() => paths_summary.clone_from(snapshot_paths),
+        (
+            DemoMessageKind::Activity {
+                kind,
+                title,
+                status,
+                mcp_app,
+                ..
+            },
+            DemoMessageKind::Activity {
+                kind: snapshot_kind,
+                title: snapshot_title,
+                status: snapshot_status,
+                mcp_app: snapshot_mcp_app,
+                ..
+            },
+        ) => {
+            if kind.is_empty() {
+                kind.clone_from(snapshot_kind);
+            }
+            if title.is_empty() {
+                title.clone_from(snapshot_title);
+            }
+            if status.is_empty() {
+                status.clone_from(snapshot_status);
+            }
+            if mcp_app.is_none() {
+                mcp_app.clone_from(snapshot_mcp_app);
+            }
+        }
+        _ => {}
+    }
+    live
+}
+
+fn reconcile_hydrated_transcript(
+    current: &mut Vec<DemoMessage>,
+    snapshot: Vec<DemoMessage>,
+    snapshot_fully_loaded: bool,
+    live_changed_during_hydration: bool,
+    hydration_baseline: &std::collections::HashMap<String, usize>,
+) {
+    if current.is_empty() {
+        *current = snapshot;
+        return;
+    }
+
+    let previous = std::mem::take(current);
+    let mut baseline_remaining = hydration_baseline.clone();
+    let current_existed_at_start = previous
+        .iter()
+        .map(|message| {
+            let remaining = baseline_remaining
+                .entry(transcript_reconciliation_key(message))
+                .or_insert(0);
+            let existed = *remaining > 0;
+            *remaining = remaining.saturating_sub(1);
+            existed
+        })
+        .collect::<Vec<_>>();
+    let mut current_slots = previous.into_iter().map(Some).collect::<Vec<_>>();
+    let mut positions: std::collections::HashMap<String, VecDeque<usize>> =
+        std::collections::HashMap::new();
+    for (index, message) in current_slots.iter().enumerate() {
+        if let Some(message) = message {
+            positions
+                .entry(transcript_reconciliation_key(message))
+                .or_default()
+                .push_back(index);
+        }
+    }
+
+    let mut snapshot_slots = snapshot.into_iter().map(Some).collect::<Vec<_>>();
+    let mut anchors = Vec::new();
+    let mut last_current_index = None;
+    for (snapshot_index, message) in snapshot_slots.iter().enumerate() {
+        let Some(message) = message else { continue };
+        let Some(candidates) = positions.get_mut(&transcript_reconciliation_key(message)) else {
+            continue;
+        };
+        while candidates
+            .front()
+            .is_some_and(|index| last_current_index.is_some_and(|last| *index <= last))
+        {
+            candidates.pop_front();
+        }
+        if let Some(current_index) = candidates.pop_front() {
+            anchors.push((snapshot_index, current_index));
+            last_current_index = Some(current_index);
+        }
+    }
+
+    let take_snapshot_range = |slots: &mut [Option<DemoMessage>],
+                               out: &mut Vec<DemoMessage>,
+                               range: std::ops::Range<usize>| {
+        for index in range {
+            if let Some(message) = slots[index].take() {
+                out.push(message);
+            }
+        }
+    };
+    let take_current_range = |slots: &mut [Option<DemoMessage>],
+                              out: &mut Vec<DemoMessage>,
+                              range: std::ops::Range<usize>| {
+        for index in range {
+            if let Some(message) = slots[index].take() {
+                out.push(message);
+            }
+        }
+    };
+
+    let mut reconciled = Vec::with_capacity(current_slots.len() + snapshot_slots.len());
+    if snapshot_fully_loaded {
+        let mut anchor_index = 0;
+        for (snapshot_index, slot) in snapshot_slots.iter_mut().enumerate() {
+            let message = slot
+                .take()
+                .expect("snapshot slots are consumed exactly once");
+            if anchors
+                .get(anchor_index)
+                .is_some_and(|(index, _)| *index == snapshot_index)
+            {
+                let current_index = anchors[anchor_index].1;
+                let live = current_slots[current_index]
+                    .take()
+                    .expect("anchor owns one current message");
+                reconciled.push(merge_hydrated_message(
+                    message,
+                    live,
+                    live_changed_during_hydration,
+                ));
+                anchor_index += 1;
+            } else {
+                reconciled.push(message);
+            }
+        }
+        if live_changed_during_hydration {
+            for (index, message) in current_slots.iter_mut().enumerate() {
+                if !current_existed_at_start[index] {
+                    if let Some(message) = message.take() {
+                        reconciled.push(message);
+                    }
+                }
+            }
+        }
+        *current = reconciled;
+        return;
+    }
+
+    if anchors.is_empty() {
+        if live_changed_during_hydration {
+            let snapshot_len = snapshot_slots.len();
+            let current_len = current_slots.len();
+            take_snapshot_range(&mut snapshot_slots, &mut reconciled, 0..snapshot_len);
+            take_current_range(&mut current_slots, &mut reconciled, 0..current_len);
+        } else {
+            let current_len = current_slots.len();
+            let snapshot_len = snapshot_slots.len();
+            take_current_range(&mut current_slots, &mut reconciled, 0..current_len);
+            take_snapshot_range(&mut snapshot_slots, &mut reconciled, 0..snapshot_len);
+        }
+        *current = reconciled;
+        return;
+    }
+
+    let mut previous_snapshot = 0;
+    let mut previous_current = 0;
+    for (anchor_number, (snapshot_index, current_index)) in anchors.iter().copied().enumerate() {
+        if anchor_number == 0 {
+            take_current_range(
+                &mut current_slots,
+                &mut reconciled,
+                previous_current..current_index,
+            );
+            take_snapshot_range(
+                &mut snapshot_slots,
+                &mut reconciled,
+                previous_snapshot..snapshot_index,
+            );
+        } else {
+            take_snapshot_range(
+                &mut snapshot_slots,
+                &mut reconciled,
+                previous_snapshot..snapshot_index,
+            );
+            take_current_range(
+                &mut current_slots,
+                &mut reconciled,
+                previous_current..current_index,
+            );
+        }
+        let snapshot_message = snapshot_slots[snapshot_index]
+            .take()
+            .expect("anchor owns one snapshot message");
+        let live_message = current_slots[current_index]
+            .take()
+            .expect("anchor owns one current message");
+        reconciled.push(merge_hydrated_message(
+            snapshot_message,
+            live_message,
+            live_changed_during_hydration,
+        ));
+        previous_snapshot = snapshot_index + 1;
+        previous_current = current_index + 1;
+    }
+    let snapshot_len = snapshot_slots.len();
+    let current_len = current_slots.len();
+    take_snapshot_range(
+        &mut snapshot_slots,
+        &mut reconciled,
+        previous_snapshot..snapshot_len,
+    );
+    take_current_range(
+        &mut current_slots,
+        &mut reconciled,
+        previous_current..current_len,
+    );
+    *current = reconciled;
+}
+
 fn prepend_hydrated_messages(current: &mut Vec<DemoMessage>, hydrated: Vec<ConversationMessage>) {
     let existing_ids = current
         .iter()
@@ -21585,18 +26010,23 @@ fn demo_reference_attachments(
         .collect()
 }
 
-fn disconnect_backend_best_effort(
-    backend: Option<Arc<DesktopBackend>>,
+fn close_session_best_effort(
+    backend: Arc<DesktopBackend>,
+    session_id: BackendSessionId,
     cx: &mut Context<MitsuroApp>,
 ) {
-    let Some(backend) = backend else {
-        return;
-    };
     cx.spawn(async move |_this, cx| {
         let _ = cx
             .background_spawn(async move {
+                let raw_session_id = session_id.raw.clone();
                 let runner = Arc::clone(&backend);
-                backend.block_on(async move { runner.disconnect().await })
+                if let Err(error) =
+                    backend.block_on(async move { runner.close_session(&session_id).await })
+                {
+                    eprintln!(
+                        "[mitsuro] stale thread/unsubscribe failed id={raw_session_id}: {error}"
+                    );
+                }
             })
             .await;
     })
@@ -21638,9 +26068,19 @@ struct BackendBootstrap {
     mcp: Vec<McpServerStatus>,
     plugins: Vec<PluginSummary>,
     plugin_marketplaces: Vec<PluginMarketplaceEntry>,
-    processes: Option<Vec<ProductProcess>>,
-    hive: Option<ProductHiveSnapshot>,
-    schedules: Option<Vec<ProductSchedule>>,
+    provider: BackendProviderBootstrap,
+}
+
+/// Provider-only bootstrap data crosses the shared application boundary as a
+/// closed sum type. This prevents a Codex connection from accidentally looking
+/// like a Mitsuro connection whose three control-plane requests all failed.
+enum BackendProviderBootstrap {
+    Codex,
+    Mitsuro {
+        processes: Result<Vec<ProductProcess>, String>,
+        hive: Result<ProductHiveSnapshot, String>,
+        schedules: Result<Vec<ProductSchedule>, String>,
+    },
 }
 
 struct RemoteControlSnapshot {
@@ -21661,11 +26101,17 @@ struct ExternalAgentImportSnapshot {
     histories: Vec<ExternalAgentConfigImportHistory>,
 }
 
-fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendBootstrap, String> {
+fn connect_list_auth_and_models(
+    backend: Arc<DesktopBackend>,
+    initialized: Option<mitsuro_desktop_backend::InitializeResponse>,
+) -> Result<BackendBootstrap, String> {
     // MUST use the backend pump runtime so child I/O stays alive after return.
     let b = Arc::clone(&backend);
     backend.block_on(async move {
-        let init = b.connect().await.map_err(|e| format!("initialize: {e}"))?;
+        let init = match initialized {
+            Some(init) => init,
+            None => b.connect().await.map_err(|e| format!("initialize: {e}"))?,
+        };
         let sessions = b
             .list_sessions(40)
             .await
@@ -21811,9 +26257,20 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             };
             (plugins, Vec::new())
         };
-        let processes = b.list_background_processes().await.ok();
-        let hive = b.hive_snapshot().await.ok();
-        let schedules = b.list_schedules().await.ok();
+        let provider = match b.kind() {
+            BackendKind::MitsuroHttp => BackendProviderBootstrap::Mitsuro {
+                processes: b
+                    .list_background_processes()
+                    .await
+                    .map_err(|error| error.to_string()),
+                hive: b.hive_snapshot().await.map_err(|error| error.to_string()),
+                schedules: b.list_schedules().await.map_err(|error| error.to_string()),
+            },
+            BackendKind::CodexStdio => BackendProviderBootstrap::Codex,
+            BackendKind::CodexWebSocket | BackendKind::Fixture => unreachable!(
+                "live desktop bootstrap only accepts concrete Codex or Mitsuro adapters"
+            ),
+        };
         Ok(BackendBootstrap {
             init,
             sessions,
@@ -21833,9 +26290,7 @@ fn connect_list_auth_and_models(backend: Arc<DesktopBackend>) -> Result<BackendB
             mcp,
             plugins,
             plugin_marketplaces,
-            processes,
-            hive,
-            schedules,
+            provider,
         })
     })
 }
@@ -22083,12 +26538,18 @@ impl MitsuroApp {
     fn on_input_escape(
         &mut self,
         _: &gpui_component::input::Escape,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // InputState propagates Escape only after giving IME/completion state a
         // chance to consume it, preserving normal text-entry behavior.
-        self.stop_active_run(cx);
+        if self.thread_rename_open {
+            self.cancel_thread_rename(window, cx);
+        } else if self.sidebar_search_open {
+            self.close_sidebar_search(window, cx);
+        } else {
+            self.stop_active_run(cx);
+        }
     }
 
     fn on_toggle_realtime_voice(
@@ -22127,6 +26588,45 @@ impl MitsuroApp {
     fn on_open_atlas(&mut self, _: &OpenAtlas, window: &mut Window, cx: &mut Context<Self>) {
         self.open_atlas(window, cx);
     }
+
+    fn on_focus_next_control(
+        &mut self,
+        _: &FocusNextControl,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.focus_next();
+    }
+
+    fn on_focus_previous_control(
+        &mut self,
+        _: &FocusPreviousControl,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.focus_prev();
+    }
+}
+
+impl Drop for MitsuroApp {
+    fn drop(&mut self) {
+        self.draft_save_task.take();
+        self.save_preferences_best_effort();
+        self.connection_bootstrap_tasks.clear();
+        // Cancel GPUI-owned lifecycle receivers before transports so no late
+        // event can retain the root entity during application shutdown.
+        self.lifecycle_listener_tasks.clear();
+        for backend in self.connections.backend_handles() {
+            let runtime = Arc::clone(&backend);
+            let runner = Arc::clone(&backend);
+            if let Err(error) = runtime.block_on(async move { runner.disconnect().await }) {
+                eprintln!(
+                    "[mitsuro] shutdown disconnect failed backend={}: {error}",
+                    backend.kind().id()
+                );
+            }
+        }
+    }
 }
 
 impl Focusable for MitsuroApp {
@@ -22149,6 +26649,17 @@ impl Render for MitsuroApp {
         // Activity rail only for advanced modes outside bar home nav.
         let show_sidebar = self.active_mode.shows_thread_sidebar() && self.thread_sidebar_visible;
         let show_rail = self.active_mode.shows_activity_rail();
+        let viewport_width: f32 = window.viewport_size().width.into();
+        let sidebar_width = if show_sidebar {
+            if self.active_mode == ProductMode::Chat {
+                theme::metrics().chat_sidebar_width
+            } else {
+                theme::metrics().sidebar_width
+            }
+        } else {
+            0.0
+        };
+        let main_column_width = (viewport_width - sidebar_width).max(0.0);
 
         div()
             .size_full()
@@ -22174,6 +26685,8 @@ impl Render for MitsuroApp {
             .on_action(cx.listener(Self::on_go_to_codex))
             .on_action(cx.listener(Self::on_open_terminal))
             .on_action(cx.listener(Self::on_open_atlas))
+            .on_action(cx.listener(Self::on_focus_next_control))
+            .on_action(cx.listener(Self::on_focus_previous_control))
             .child(components::app_header(self, cx))
             .child(
                 div()
@@ -22187,7 +26700,12 @@ impl Render for MitsuroApp {
                     .when(show_sidebar, |this| {
                         this.child(components::sidebar(self, &self.search_input, cx))
                     })
-                    .child(components::main_column(self, &self.composer_input, cx)),
+                    .child(components::main_column(
+                        self,
+                        &self.composer_input,
+                        main_column_width,
+                        cx,
+                    )),
             )
             .when(self.app_menu().is_some(), |this| {
                 this.child(components::app_menu_overlay(self, cx))
@@ -22475,26 +26993,57 @@ fn duplicate_file_name(path: &str) -> String {
     format!("{name} copy")
 }
 
+#[allow(dead_code)]
 fn thread_matches_selected_project(
     summary: &ThreadSummary,
     backend_session_id: Option<&BackendSessionId>,
     selected_project_id: Option<&str>,
     preferences: &DesktopPreferences,
 ) -> bool {
+    thread_matches_selected_project_in_connection(
+        summary,
+        backend_session_id,
+        selected_project_id,
+        preferences,
+        None,
+    )
+}
+
+fn thread_matches_selected_project_in_connection(
+    summary: &ThreadSummary,
+    backend_session_id: Option<&BackendSessionId>,
+    selected_project_id: Option<&str>,
+    preferences: &DesktopPreferences,
+    connection_id: Option<&str>,
+) -> bool {
     let Some(project_id) = selected_project_id else {
         return true;
     };
-    project_for_thread(summary, backend_session_id, preferences)
+    project_for_thread_in_connection(summary, backend_session_id, preferences, connection_id)
         .is_some_and(|project| project.id == project_id)
 }
 
+#[allow(dead_code)]
 fn project_for_thread<'a>(
     summary: &ThreadSummary,
     backend_session_id: Option<&BackendSessionId>,
     preferences: &'a DesktopPreferences,
 ) -> Option<&'a DesktopProject> {
+    project_for_thread_in_connection(summary, backend_session_id, preferences, None)
+}
+
+fn project_for_thread_in_connection<'a>(
+    summary: &ThreadSummary,
+    backend_session_id: Option<&BackendSessionId>,
+    preferences: &'a DesktopPreferences,
+    connection_id: Option<&str>,
+) -> Option<&'a DesktopProject> {
     match backend_session_id {
-        Some(session) => preferences.project_for_session(session, summary.cwd.as_deref()),
+        Some(session) => preferences.project_for_session_in_connection(
+            connection_id.unwrap_or_else(|| session.backend.id()),
+            session,
+            summary.cwd.as_deref(),
+        ),
         None => summary
             .cwd
             .as_deref()
@@ -22511,6 +27060,77 @@ mod tests {
             detail: "test".into(),
             has_auth: true,
         }
+    }
+
+    #[test]
+    fn sidebar_search_matches_real_summary_fields_case_insensitively() {
+        let summary = ThreadSummary {
+            id: "thread-1".into(),
+            name: Some("Review GPUI Parity".into()),
+            preview: Some("Inspect the sidebar interactions".into()),
+            cwd: Some("/home/burgess/Work/Mitsuro".into()),
+            created_at: None,
+            updated_at: None,
+            model_provider: Some("codex".into()),
+            ephemeral: Some(false),
+            is_pinned: Some(false),
+            archived: Some(false),
+            raw: None,
+        };
+
+        assert!(thread_summary_matches_search(&summary, "  gpui  "));
+        assert!(thread_summary_matches_search(&summary, "SIDEBAR"));
+        assert!(thread_summary_matches_search(&summary, "work/mitsuro"));
+        assert!(thread_summary_matches_search(&summary, ""));
+        assert!(!thread_summary_matches_search(&summary, "unrelated"));
+    }
+
+    #[test]
+    fn thread_rename_validation_trims_and_bounds_unicode_titles() {
+        assert_eq!(
+            validated_thread_name("  Release review  ").unwrap(),
+            "Release review"
+        );
+        assert_eq!(
+            validated_thread_name("   "),
+            Err("Enter a conversation name")
+        );
+        assert!(validated_thread_name(&"界".repeat(120)).is_ok());
+        assert_eq!(
+            validated_thread_name(&"界".repeat(121)),
+            Err("Use 120 characters or fewer")
+        );
+    }
+
+    #[test]
+    fn thread_find_navigation_wraps_in_both_directions() {
+        assert_eq!(wrapped_thread_find_index(0, 1, 7), 1);
+        assert_eq!(wrapped_thread_find_index(6, 1, 7), 0);
+        assert_eq!(wrapped_thread_find_index(0, -1, 7), 6);
+        assert_eq!(wrapped_thread_find_index(4, 20, 7), 3);
+        assert_eq!(wrapped_thread_find_index(4, -20, 7), 5);
+        assert_eq!(wrapped_thread_find_index(4, 1, 0), 0);
+    }
+
+    #[test]
+    fn transcript_follow_latest_uses_predicted_scroll_position() {
+        // GPUI offsets are negative: -max is the bottom and zero is the top.
+        assert!(transcript_near_bottom_after_delta(
+            -1_000.0, 1_000.0, 0.0, 48.0
+        ));
+        assert!(transcript_near_bottom_after_delta(
+            -960.0, 1_000.0, 0.0, 48.0
+        ));
+        assert!(!transcript_near_bottom_after_delta(
+            -900.0, 1_000.0, 0.0, 48.0
+        ));
+        assert!(!transcript_near_bottom_after_delta(
+            -1_000.0, 1_000.0, 80.0, 48.0
+        ));
+        assert!(transcript_near_bottom_after_delta(
+            -900.0, 1_000.0, -100.0, 48.0
+        ));
+        assert!(transcript_near_bottom_after_delta(0.0, 0.0, 80.0, 48.0));
     }
 
     #[test]
@@ -22919,39 +27539,11 @@ mod tests {
     }
 
     #[test]
-    fn only_idle_codex_threads_release_app_server_subscriptions() {
-        let codex = BackendSessionId::new(BackendKind::CodexStdio, "thread-1");
-        let mitsuro = BackendSessionId::new(BackendKind::MitsuroHttp, "session-1");
-        assert!(should_release_thread_subscription(
-            &codex,
-            BackendKind::CodexStdio,
-            false,
-            true
-        ));
-        assert!(!should_release_thread_subscription(
-            &codex,
-            BackendKind::CodexStdio,
-            true,
-            true
-        ));
-        assert!(!should_release_thread_subscription(
-            &codex,
-            BackendKind::MitsuroHttp,
-            false,
-            true
-        ));
-        assert!(!should_release_thread_subscription(
-            &mitsuro,
-            BackendKind::MitsuroHttp,
-            false,
-            true
-        ));
-        assert!(!should_release_thread_subscription(
-            &codex,
-            BackendKind::CodexStdio,
-            false,
-            false
-        ));
+    fn only_idle_owned_threads_with_subscription_capability_are_released() {
+        assert!(should_release_thread_subscription(true, false, true));
+        assert!(!should_release_thread_subscription(true, true, true));
+        assert!(!should_release_thread_subscription(false, false, true));
+        assert!(!should_release_thread_subscription(true, false, false));
     }
 
     #[test]
@@ -22978,6 +27570,511 @@ mod tests {
         assert_eq!(codex.is_pinned, Some(false));
         assert_eq!(mitsuro.name.as_deref(), Some("Real thread"));
         assert_eq!(mitsuro.cwd.as_deref(), Some("/workspace"));
+    }
+
+    #[test]
+    fn live_thread_projection_isolates_equal_ids_between_named_connections() {
+        let session = |raw: &str| SessionSummary {
+            id: BackendSessionId::new(BackendKind::MitsuroHttp, raw),
+            title: Some("Real thread".into()),
+            preview: None,
+            working_dir: None,
+            updated_at: Some(1),
+            model_provider: Some("mitsuro".into()),
+            ephemeral: false,
+            archived: false,
+        };
+        let staging = ConnectionId::named(BackendKind::MitsuroHttp, "staging").unwrap();
+        let production = ConnectionId::named(BackendKind::MitsuroHttp, "production").unwrap();
+        let mut preferences = DesktopPreferences::default();
+        preferences.set_session_pinned_for_connection(
+            staging.as_str(),
+            BackendKind::MitsuroHttp,
+            "same-id".into(),
+            true,
+        );
+
+        let staging_summary =
+            thread_summary_from_session_in_connection(session("same-id"), &preferences, &staging);
+        let production_summary = thread_summary_from_session_in_connection(
+            session("same-id"),
+            &preferences,
+            &production,
+        );
+        assert_eq!(staging_summary.is_pinned, Some(true));
+        assert_eq!(production_summary.is_pinned, Some(false));
+    }
+
+    #[test]
+    fn provider_projection_merge_refreshes_summary_and_preserves_transcript() {
+        let session_id = BackendSessionId::new(BackendKind::MitsuroHttp, "session-1");
+        let cached = DemoThread {
+            backend_session_id: Some(session_id.clone()),
+            summary: ThreadSummary {
+                id: "session-1".into(),
+                name: Some("Stale title".into()),
+                preview: Some("Stale preview".into()),
+                cwd: Some("/old".into()),
+                created_at: None,
+                updated_at: Some(1),
+                model_provider: Some("mitsuro".into()),
+                ephemeral: Some(false),
+                is_pinned: Some(false),
+                archived: Some(false),
+                raw: None,
+            },
+            messages: vec![DemoMessage::assistant("Hydrated transcript")],
+            surface: ThreadSurface::Codex,
+        };
+        let remote = SessionSummary {
+            id: session_id,
+            title: Some("Authoritative title".into()),
+            preview: Some("Fresh preview".into()),
+            working_dir: Some("/workspace".into()),
+            updated_at: Some(2),
+            model_provider: Some("mitsuro".into()),
+            ephemeral: false,
+            archived: false,
+        };
+
+        let merged = merge_remote_threads(
+            vec![remote],
+            vec![cached],
+            &DesktopPreferences::default(),
+            &ConnectionId::primary(BackendKind::MitsuroHttp),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].summary.name.as_deref(),
+            Some("Authoritative title")
+        );
+        assert_eq!(merged[0].summary.cwd.as_deref(), Some("/workspace"));
+        assert_eq!(merged[0].messages.len(), 1);
+        assert!(matches!(
+            &merged[0].messages[0].kind,
+            DemoMessageKind::Assistant { body } if body == "Hydrated transcript"
+        ));
+    }
+
+    #[test]
+    fn provider_projection_merge_retains_local_drafts() {
+        let draft = DemoThread {
+            backend_session_id: None,
+            summary: ThreadSummary {
+                id: "local-1".into(),
+                name: Some("Unsent draft".into()),
+                preview: Some("Draft".into()),
+                cwd: None,
+                created_at: None,
+                updated_at: None,
+                model_provider: Some("draft".into()),
+                ephemeral: Some(true),
+                is_pinned: Some(false),
+                archived: Some(false),
+                raw: None,
+            },
+            messages: vec![DemoMessage::user("Unsent message")],
+            surface: ThreadSurface::Codex,
+        };
+        let remote = SessionSummary {
+            id: BackendSessionId::new(BackendKind::CodexStdio, "thread-1"),
+            title: Some("Remote thread".into()),
+            preview: None,
+            working_dir: None,
+            updated_at: Some(1),
+            model_provider: Some("openai".into()),
+            ephemeral: false,
+            archived: false,
+        };
+
+        let merged = merge_remote_threads(
+            vec![remote],
+            vec![draft],
+            &DesktopPreferences::default(),
+            &ConnectionId::primary(BackendKind::CodexStdio),
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].backend_session_id, None);
+        assert_eq!(merged[0].summary.id, "local-1");
+        assert_eq!(merged[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn provider_projection_merge_never_conflates_equal_raw_ids_across_backends() {
+        let codex_id = BackendSessionId::new(BackendKind::CodexStdio, "same-id");
+        let cached_codex = DemoThread {
+            backend_session_id: Some(codex_id.clone()),
+            summary: ThreadSummary {
+                id: "same-id".into(),
+                name: Some("Codex thread".into()),
+                preview: None,
+                cwd: None,
+                created_at: None,
+                updated_at: Some(1),
+                model_provider: Some("openai".into()),
+                ephemeral: Some(false),
+                is_pinned: Some(false),
+                archived: Some(false),
+                raw: None,
+            },
+            messages: vec![DemoMessage::assistant("Codex transcript")],
+            surface: ThreadSurface::Codex,
+        };
+        let mitsuro_id = BackendSessionId::new(BackendKind::MitsuroHttp, "same-id");
+        let remote_mitsuro = SessionSummary {
+            id: mitsuro_id.clone(),
+            title: Some("Mitsuro thread".into()),
+            preview: None,
+            working_dir: None,
+            updated_at: Some(2),
+            model_provider: Some("mitsuro".into()),
+            ephemeral: false,
+            archived: false,
+        };
+
+        let merged = merge_remote_threads(
+            vec![remote_mitsuro],
+            vec![cached_codex],
+            &DesktopPreferences::default(),
+            &ConnectionId::primary(BackendKind::MitsuroHttp),
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].backend_session_id.as_ref(), Some(&mitsuro_id));
+        assert!(merged[0].messages.is_empty());
+        assert_eq!(merged[1].backend_session_id.as_ref(), Some(&codex_id));
+        assert_eq!(merged[1].messages.len(), 1);
+    }
+
+    #[test]
+    fn session_runtime_ownership_is_connection_qualified() {
+        assert!(session_is_foreground(false, Some("thread-a"), "thread-a"));
+        assert!(!session_is_foreground(true, Some("thread-a"), "thread-a"));
+        assert!(!session_is_foreground(false, Some("thread-b"), "thread-a"));
+
+        let codex = ConnectionId::primary(BackendKind::CodexStdio);
+        let mitsuro = ConnectionId::primary(BackendKind::MitsuroHttp);
+        let codex_key = SessionKey::new(codex.clone(), "same-session").unwrap();
+        let mitsuro_key = SessionKey::new(mitsuro.clone(), "same-session").unwrap();
+        let mut runtimes = std::collections::HashMap::from([
+            (
+                codex_key.clone(),
+                SessionRuntimeState {
+                    ui_thread_id: "codex-thread".into(),
+                    generation: 4,
+                    in_progress: true,
+                    turn_id: Some("codex-turn".into()),
+                    attention: None,
+                },
+            ),
+            (
+                mitsuro_key.clone(),
+                SessionRuntimeState {
+                    ui_thread_id: "mitsuro-thread".into(),
+                    generation: 7,
+                    in_progress: true,
+                    turn_id: Some("mitsuro-turn".into()),
+                    attention: Some(SessionAttention::Approval),
+                },
+            ),
+        ]);
+
+        assert_eq!(session_runtime_counts(&runtimes, &codex), (1, 0));
+        assert_eq!(session_runtime_counts(&runtimes, &mitsuro), (1, 1));
+
+        let codex_runtime = runtimes.get_mut(&codex_key).unwrap();
+        codex_runtime.in_progress = false;
+        codex_runtime.attention = Some(SessionAttention::Completed);
+
+        assert_eq!(session_runtime_counts(&runtimes, &codex), (0, 1));
+        assert_eq!(session_runtime_counts(&runtimes, &mitsuro), (1, 1));
+        assert_eq!(
+            session_runtime_activity(&runtimes, &codex_key),
+            Some(UiThreadActivity::Completed)
+        );
+        assert_eq!(
+            session_runtime_activity(&runtimes, &mitsuro_key),
+            Some(UiThreadActivity::ApprovalNeeded)
+        );
+        assert_eq!(
+            runtimes[&mitsuro_key].turn_id.as_deref(),
+            Some("mitsuro-turn")
+        );
+
+        // Reading a terminal result must not clear an unanswered interaction,
+        // and answering an interaction must not clear an unread terminal result.
+        assert!(!clear_terminal_attention(
+            runtimes.get_mut(&mitsuro_key).unwrap()
+        ));
+        assert_eq!(
+            session_runtime_activity(&runtimes, &mitsuro_key),
+            Some(UiThreadActivity::ApprovalNeeded)
+        );
+        assert!(!clear_interaction_attention(
+            runtimes.get_mut(&codex_key).unwrap()
+        ));
+        assert_eq!(
+            session_runtime_activity(&runtimes, &codex_key),
+            Some(UiThreadActivity::Completed)
+        );
+        assert!(clear_terminal_attention(
+            runtimes.get_mut(&codex_key).unwrap()
+        ));
+        assert_eq!(session_runtime_activity(&runtimes, &codex_key), None);
+        assert!(!clear_interaction_attention(
+            runtimes.get_mut(&mitsuro_key).unwrap()
+        ));
+        assert_eq!(
+            session_runtime_activity(&runtimes, &mitsuro_key),
+            Some(UiThreadActivity::Running)
+        );
+    }
+
+    #[test]
+    fn codex_subscription_ownership_is_connection_qualified() {
+        let primary = ConnectionId::primary(BackendKind::CodexStdio);
+        let secondary = ConnectionId::named(BackendKind::CodexStdio, "other").unwrap();
+        let primary_key = SessionKey::new(primary, "same-session").unwrap();
+        let secondary_key = SessionKey::new(secondary, "same-session").unwrap();
+        let mut subscriptions =
+            std::collections::HashSet::from([primary_key.clone(), secondary_key.clone()]);
+
+        assert!(subscriptions.remove(&primary_key));
+        assert!(!subscriptions.contains(&primary_key));
+        assert!(subscriptions.contains(&secondary_key));
+    }
+
+    #[test]
+    fn subscription_operations_invalidate_stale_work_per_session() {
+        let connection = ConnectionId::primary(BackendKind::CodexStdio);
+        let first_key = SessionKey::new(connection.clone(), "first").unwrap();
+        let second_key = SessionKey::new(connection, "second").unwrap();
+        let mut operations = std::collections::HashMap::new();
+
+        let first_resume = begin_subscription_operation(&mut operations, &first_key);
+        let first_close = begin_subscription_operation(&mut operations, &first_key);
+        let second_resume = begin_subscription_operation(&mut operations, &second_key);
+
+        assert!(!first_resume.is_current());
+        assert!(first_close.is_current());
+        assert!(second_resume.is_current());
+        assert!(Arc::ptr_eq(&first_resume.serial, &first_close.serial));
+        assert!(!Arc::ptr_eq(&first_close.serial, &second_resume.serial));
+    }
+
+    #[test]
+    fn interactive_request_state_is_connection_and_session_qualified() {
+        let codex = ConnectionId::primary(BackendKind::CodexStdio);
+        let mitsuro = ConnectionId::primary(BackendKind::MitsuroHttp);
+        let codex_key = SessionKey::new(codex, "same-session").unwrap();
+        let mitsuro_key = SessionKey::new(mitsuro, "same-session").unwrap();
+        let mut codex_state = SessionInteractionState::default();
+        codex_state.user_input_question_index = 1;
+        codex_state
+            .user_input_answers
+            .insert("scope".into(), vec!["workspace".into()]);
+        let mut mitsuro_state = SessionInteractionState::default();
+        mitsuro_state.mcp_form_field_index = 2;
+        mitsuro_state
+            .mcp_form_values
+            .insert("branch".into(), serde_json::json!("main"));
+        let mut interactions = std::collections::HashMap::from([
+            (codex_key.clone(), codex_state),
+            (mitsuro_key.clone(), mitsuro_state),
+        ]);
+
+        let selected = interactions.remove(&codex_key).unwrap();
+        assert_eq!(selected.user_input_question_index, 1);
+        assert_eq!(
+            selected.user_input_answers["scope"],
+            vec!["workspace".to_owned()]
+        );
+        assert_eq!(interactions[&mitsuro_key].mcp_form_field_index, 2);
+        assert_eq!(
+            interactions[&mitsuro_key].mcp_form_values["branch"],
+            serde_json::json!("main")
+        );
+    }
+
+    #[test]
+    fn primary_turn_state_is_connection_and_session_qualified() {
+        let connection = ConnectionId::primary(BackendKind::CodexStdio);
+        let first_key = SessionKey::new(connection.clone(), "first").unwrap();
+        let second_key = SessionKey::new(connection, "second").unwrap();
+        let first_cancel = Arc::new(AtomicBool::new(false));
+        let mut turns = std::collections::HashMap::from([
+            (
+                first_key.clone(),
+                SessionTurnState {
+                    in_progress: true,
+                    generation: 4,
+                    active_thread_id: Some("first-ui".into()),
+                    turn_id: Some("first-turn".into()),
+                    cancel: Some(Arc::clone(&first_cancel)),
+                },
+            ),
+            (
+                second_key.clone(),
+                SessionTurnState {
+                    in_progress: true,
+                    generation: 9,
+                    active_thread_id: Some("second-ui".into()),
+                    turn_id: Some("second-turn".into()),
+                    cancel: None,
+                },
+            ),
+        ]);
+
+        let first = turns.remove(&first_key).unwrap();
+        first.cancel.unwrap().store(true, Ordering::SeqCst);
+
+        assert!(first_cancel.load(Ordering::SeqCst));
+        assert_eq!(turns[&second_key].generation, 9);
+        assert_eq!(turns[&second_key].turn_id.as_deref(), Some("second-turn"));
+        assert!(turns[&second_key].in_progress);
+    }
+
+    #[test]
+    fn composer_drafts_are_connection_and_session_qualified() {
+        let connection = ConnectionId::primary(BackendKind::CodexStdio);
+        let first_key = SessionKey::new(connection.clone(), "first").unwrap();
+        let second_key = SessionKey::new(connection, "second").unwrap();
+        let mut drafts = std::collections::HashMap::from([
+            (
+                first_key.clone(),
+                SessionDraftState {
+                    text: "first draft".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+            (
+                second_key.clone(),
+                SessionDraftState {
+                    text: "second draft".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+        ]);
+
+        let first = drafts.remove(&first_key).unwrap();
+        assert_eq!(first.text, "first draft");
+        assert_eq!(drafts[&second_key].text, "second draft");
+    }
+
+    #[test]
+    fn composer_controls_are_connection_and_session_qualified() {
+        let codex = ConnectionId::primary(BackendKind::CodexStdio);
+        let mitsuro = ConnectionId::primary(BackendKind::MitsuroHttp);
+        let codex_key = SessionKey::new(codex, "same-session").unwrap();
+        let mitsuro_key = SessionKey::new(mitsuro, "same-session").unwrap();
+        let selections = std::collections::HashMap::from([
+            (
+                codex_key.clone(),
+                SessionComposerSelectionState {
+                    model_id: Some("gpt-5.6-sol".into()),
+                    reasoning_effort: Some("high".into()),
+                    fast_mode: true,
+                    plan_mode: true,
+                },
+            ),
+            (
+                mitsuro_key.clone(),
+                SessionComposerSelectionState {
+                    model_id: Some("mitsuro-orchestrator".into()),
+                    reasoning_effort: None,
+                    fast_mode: false,
+                    plan_mode: false,
+                },
+            ),
+        ]);
+        let access = std::collections::HashMap::from([
+            (codex_key.clone(), ProductAccessMode::CodexAuto),
+            (mitsuro_key.clone(), ProductAccessMode::MitsuroSupervised),
+        ]);
+
+        assert_eq!(
+            selections[&codex_key].model_id.as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert!(selections[&codex_key].fast_mode);
+        assert_eq!(access[&codex_key], ProductAccessMode::CodexAuto);
+        assert_eq!(
+            selections[&mitsuro_key].model_id.as_deref(),
+            Some("mitsuro-orchestrator")
+        );
+        assert_eq!(access[&mitsuro_key], ProductAccessMode::MitsuroSupervised);
+    }
+
+    #[test]
+    fn destructive_edit_state_is_connection_and_session_qualified() {
+        let connection = ConnectionId::primary(BackendKind::CodexStdio);
+        let first_key = SessionKey::new(connection.clone(), "first").unwrap();
+        let second_key = SessionKey::new(connection, "second").unwrap();
+        let edits = std::collections::HashMap::from([
+            (
+                first_key.clone(),
+                SessionMessageEditState {
+                    edit: None,
+                    in_progress: true,
+                    error: None,
+                    generation: 7,
+                    text: "replacement one".into(),
+                },
+            ),
+            (
+                second_key.clone(),
+                SessionMessageEditState {
+                    edit: None,
+                    in_progress: false,
+                    error: Some("retry later".into()),
+                    generation: 3,
+                    text: "replacement two".into(),
+                },
+            ),
+        ]);
+
+        assert!(edits[&first_key].in_progress);
+        assert_eq!(edits[&first_key].generation, 7);
+        assert_eq!(edits[&second_key].text, "replacement two");
+        assert_eq!(edits[&second_key].error.as_deref(), Some("retry later"));
+    }
+
+    #[test]
+    fn terminal_turn_outcome_finalizes_incomplete_activity_statuses() {
+        let mut command = DemoMessage::command_execution(
+            "sleep 1",
+            "/workspace",
+            "inProgress",
+            "",
+            Some("command-1".into()),
+        );
+        command.streaming = true;
+        let mut file = DemoMessage::file_change("src/main.rs", "", "", Some("file-1".into()));
+        file.streaming = true;
+        let mut messages = vec![command, file];
+
+        finalize_streaming_messages(&mut messages, false);
+
+        assert!(messages.iter().all(|message| !message.streaming));
+        assert!(matches!(
+            &messages[0].kind,
+            DemoMessageKind::CommandExecution { status, .. } if status == "completed"
+        ));
+        assert!(matches!(
+            &messages[1].kind,
+            DemoMessageKind::FileChange { status, .. } if status == "completed"
+        ));
+
+        if let DemoMessageKind::CommandExecution { status, .. } = &mut messages[0].kind {
+            *status = "running".into();
+        }
+        finalize_streaming_messages(&mut messages, true);
+        assert!(matches!(
+            &messages[0].kind,
+            DemoMessageKind::CommandExecution { status, .. } if status == "failed"
+        ));
     }
 
     #[test]
@@ -23525,6 +28622,107 @@ mod tests {
     }
 
     #[test]
+    fn hydration_reconciliation_preserves_ordered_history_and_live_tail() {
+        let assistant = |body: &str, item_id: &str, streaming: bool| {
+            let mut message = DemoMessage::assistant(body);
+            message.item_id = Some(item_id.to_owned());
+            message.streaming = streaming;
+            message
+        };
+        let mut current = vec![
+            assistant("older", "item-old", false),
+            assistant("Hello", "item-shared", true),
+            assistant("live tail", "item-live", true),
+        ];
+        let snapshot = vec![
+            assistant("middle", "item-middle", false),
+            assistant("Hel", "item-shared", false),
+        ];
+        let baseline = transcript_hydration_baseline(&current[..2]);
+
+        reconcile_hydrated_transcript(&mut current, snapshot, false, true, &baseline);
+
+        assert_eq!(current.len(), 4);
+        assert_eq!(current[0].item_id.as_deref(), Some("item-old"));
+        assert_eq!(current[1].item_id.as_deref(), Some("item-middle"));
+        assert_eq!(current[2].item_id.as_deref(), Some("item-shared"));
+        assert!(matches!(
+            &current[2].kind,
+            DemoMessageKind::Assistant { body } if body == "Hello"
+        ));
+        assert!(current[2].streaming);
+        assert_eq!(current[3].item_id.as_deref(), Some("item-live"));
+    }
+
+    #[test]
+    fn full_snapshot_reconciles_optimistic_user_without_duplication() {
+        let mut current = vec![DemoMessage::user("same prompt")];
+        let mut stale = DemoMessage::assistant("stale cached bubble");
+        stale.item_id = Some("stale-item".to_owned());
+        current.push(stale);
+        let baseline = transcript_hydration_baseline(&current);
+        let mut live = DemoMessage::assistant("new response");
+        live.item_id = Some("agent-live".to_owned());
+        live.streaming = true;
+        current.push(live);
+
+        let mut hydrated_user = DemoMessage::user("same prompt");
+        hydrated_user.item_id = Some("user-server".to_owned());
+        reconcile_hydrated_transcript(&mut current, vec![hydrated_user], true, true, &baseline);
+
+        assert_eq!(current.len(), 2);
+        assert_eq!(current[0].item_id.as_deref(), Some("user-server"));
+        assert_eq!(current[1].item_id.as_deref(), Some("agent-live"));
+    }
+
+    #[test]
+    fn replayed_item_start_is_idempotent() {
+        let mut messages = Vec::new();
+        apply_item_started(
+            &mut messages,
+            "reasoning-1",
+            DemoMessage::reasoning("", Some("reasoning-1".to_owned())),
+        );
+        messages[0].set_text("kept delta".to_owned());
+        apply_item_started(
+            &mut messages,
+            "reasoning-1",
+            DemoMessage::reasoning("", Some("reasoning-1".to_owned())),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].streaming);
+        assert!(matches!(
+            &messages[0].kind,
+            DemoMessageKind::Reasoning { body } if body == "kept delta"
+        ));
+    }
+
+    #[test]
+    fn inactive_transcript_compaction_keeps_tail_and_requires_authoritative_refresh() {
+        let mut messages = (0..300)
+            .map(|index| {
+                let mut message = DemoMessage::assistant(format!("message {index}"));
+                message.item_id = Some(format!("item-{index}"));
+                message
+            })
+            .collect::<Vec<_>>();
+        let mut state = TranscriptPaginationState::default();
+
+        assert_eq!(
+            compact_transcript_messages(&mut messages, &mut state, 256),
+            44
+        );
+        assert_eq!(messages.len(), 256);
+        assert_eq!(messages[0].item_id.as_deref(), Some("item-44"));
+        assert!(state.requires_rehydrate);
+        assert_eq!(
+            compact_transcript_messages(&mut messages, &mut state, 256),
+            0
+        );
+    }
+
+    #[test]
     fn server_history_prepend_keeps_gpui_layout_bounded() {
         assert_eq!(transcript_limit_after_prepend(32, 120, 152), 48);
         assert_eq!(transcript_limit_after_prepend(16, 4, 20), 20);
@@ -23798,5 +28996,200 @@ mod tests {
 
         let unsupported = vec![serde_json::json!({"type":"resource","resource":{}})];
         assert!(parse_mcp_app_message_content(Some(&unsupported)).is_err());
+    }
+
+    #[test]
+    fn thread_action_matrix_distinguishes_open_from_provider_resume() {
+        let codex = BackendCapabilities::codex();
+        let mitsuro = BackendCapabilities::mitsuro();
+        for action in [
+            ThreadAction::Create,
+            ThreadAction::Open,
+            ThreadAction::Rename,
+            ThreadAction::Delete,
+        ] {
+            assert!(backend_supports_thread_action(codex, action));
+            assert!(backend_supports_thread_action(mitsuro, action));
+        }
+        for action in [
+            ThreadAction::Resume,
+            ThreadAction::Archive,
+            ThreadAction::Unarchive,
+            ThreadAction::Fork,
+            ThreadAction::SideConversation,
+        ] {
+            assert!(backend_supports_thread_action(codex, action));
+            assert!(!backend_supports_thread_action(mitsuro, action));
+        }
+    }
+
+    #[test]
+    fn persisted_drafts_round_trip_equal_raw_ids_without_connection_collision() {
+        let codex =
+            SessionKey::new(ConnectionId::primary(BackendKind::CodexStdio), "same-id").unwrap();
+        let mitsuro = SessionKey::new(
+            ConnectionId::named(BackendKind::MitsuroHttp, "local").unwrap(),
+            "same-id",
+        )
+        .unwrap();
+        let mut drafts = std::collections::HashMap::new();
+        drafts.insert(
+            codex.clone(),
+            SessionDraftState {
+                text: "codex draft".into(),
+                attachments: Vec::new(),
+            },
+        );
+        drafts.insert(
+            mitsuro.clone(),
+            SessionDraftState {
+                text: "mitsuro draft".into(),
+                attachments: vec![ComposerAttachment {
+                    path: "/tmp/reference.png".into(),
+                    name: "reference.png".into(),
+                    kind: ComposerAttachmentKind::Image,
+                }],
+            },
+        );
+        let mut preferences = DesktopPreferences::default();
+        preferences.replace_composer_drafts(persisted_composer_drafts(&drafts));
+        let restored = persisted_session_drafts(&preferences);
+
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.get(&codex).unwrap().text, "codex draft");
+        assert_eq!(restored.get(&mitsuro).unwrap().text, "mitsuro draft");
+        assert_eq!(restored.get(&mitsuro).unwrap().attachments.len(), 1);
+    }
+
+    #[test]
+    fn connection_start_disposition_never_implicitly_duplicates_a_transport() {
+        let ready = RegistryConnectionStatus::Ready {
+            detail: "linux".into(),
+            has_auth: true,
+            session_count: 2,
+        };
+        let error = RegistryConnectionStatus::Error {
+            message: "offline".into(),
+        };
+
+        assert_eq!(
+            connection_start_disposition(
+                Some(&RegistryConnectionStatus::Connecting),
+                false,
+                ConnectionStartIntent::ReuseOrStart,
+            ),
+            ConnectionStartDisposition::ReuseInFlight
+        );
+        assert_eq!(
+            connection_start_disposition(Some(&ready), true, ConnectionStartIntent::ReuseOrStart,),
+            ConnectionStartDisposition::RefreshReady
+        );
+        assert_eq!(
+            connection_start_disposition(Some(&ready), false, ConnectionStartIntent::ReuseOrStart,),
+            ConnectionStartDisposition::ReuseWithoutRefresh
+        );
+        for status in [&error, &RegistryConnectionStatus::Disconnected] {
+            assert_eq!(
+                connection_start_disposition(
+                    Some(status),
+                    false,
+                    ConnectionStartIntent::ReuseOrStart,
+                ),
+                ConnectionStartDisposition::AwaitExplicitReconnect
+            );
+            assert_eq!(
+                connection_start_disposition(
+                    Some(status),
+                    false,
+                    ConnectionStartIntent::ReconnectAfterTeardown,
+                ),
+                ConnectionStartDisposition::Start
+            );
+        }
+    }
+
+    #[test]
+    fn connection_presentation_exposes_all_six_operational_states() {
+        let ready = RegistryConnectionStatus::Ready {
+            detail: "linux".into(),
+            has_auth: true,
+            session_count: 3,
+        };
+        let degraded = RegistryConnectionStatus::Degraded {
+            detail: "linux".into(),
+            has_auth: true,
+            session_count: 3,
+            message: "catalog refresh failed".into(),
+        };
+        assert_eq!(
+            ui_connection_state(Some(&RegistryConnectionStatus::Connecting), None),
+            UiConnectionState::Connecting
+        );
+        assert_eq!(
+            ui_connection_state(Some(&ready), None),
+            UiConnectionState::Online { session_count: 3 }
+        );
+        assert!(matches!(
+            ui_connection_state(Some(&degraded), None),
+            UiConnectionState::Degraded {
+                session_count: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ui_connection_state(Some(&RegistryConnectionStatus::Disconnected), None),
+            UiConnectionState::Offline { reason: None }
+        ));
+        assert_eq!(
+            ui_connection_state(Some(&RegistryConnectionStatus::Reconnecting), None),
+            UiConnectionState::Reconnecting
+        );
+        assert!(matches!(
+            ui_connection_state(None, Some("missing endpoint")),
+            UiConnectionState::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn terminal_item_replay_gate_rejects_late_preterminal_events_only() {
+        let late_delta = TurnStreamEvent::AgentMessageDelta {
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            item_id: "item-1".into(),
+            delta: "late".into(),
+        };
+        let repeated_completion = TurnStreamEvent::ItemCompleted {
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            item_id: "item-1".into(),
+            kind: mitsuro_desktop_backend::ItemKind::AgentMessage,
+            text: Some("authoritative".into()),
+            item: None,
+        };
+
+        assert_eq!(preterminal_item_event_id(&late_delta), Some("item-1"));
+        assert_eq!(preterminal_item_event_id(&repeated_completion), None);
+    }
+
+    #[test]
+    fn additional_connection_configuration_is_named_typed_and_secret_indirect() {
+        let specs = additional_connection_specs(
+            r#"[
+                {"name":"staging","kind":"mitsuro-http","displayName":"Mitsuro staging","url":"https://staging.example.test","tokenEnv":"MITSURO_STAGING_TOKEN"},
+                {"name":"review","kind":"codex-stdio","displayName":"Codex review"}
+            ]"#,
+        )
+        .expect("valid named connections");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].id.as_str(), "mitsuro-http:staging");
+        assert_eq!(specs[1].id.as_str(), "codex-stdio:review");
+        assert_eq!(
+            specs[0].bearer_token_env.as_deref(),
+            Some("MITSURO_STAGING_TOKEN")
+        );
+        assert!(additional_connection_specs(
+            r#"[{"name":"bad","kind":"mitsuro-http","url":"https://example.test","token":"secret"}]"#,
+        )
+        .is_err());
     }
 }
