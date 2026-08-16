@@ -87,14 +87,14 @@ pub(super) fn build_hive_knowledge_context(
     db_path: &Path,
     project_dir: Option<&str>,
     user_id: Option<&str>,
-    hive_crew_slug: Option<&str>,
+    hive_memory_namespace: Option<&str>,
     session_id: &str,
     conversation: &[ModelMessage],
 ) -> String {
-    // The materialized snapshot is owner/project scoped rather than crew
-    // scoped. Only the primary Hive presence may consume it; named crew
-    // members receive their own explicit memory namespace below.
-    let generated_snapshot = if hive_crew_slug.is_none() {
+    // The materialized snapshot is owner/project scoped rather than crew or
+    // Worker scoped. Only the primary Hive presence may consume it; named crew
+    // members and Workers receive their own explicit memory namespace below.
+    let generated_snapshot = if hive_memory_namespace.is_none() {
         match refresh_current_snapshot(db_path, project_dir, user_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -113,11 +113,14 @@ pub(super) fn build_hive_knowledge_context(
         } else {
             Vec::new()
         };
-    memories.retain(|memory| match hive_crew_slug {
-        Some(crew_slug) => {
+    // A named presence (legacy crew slug or a Worker's memory namespace) sees
+    // Shared plus exactly its own namespace; the primary companion sees
+    // Shared plus the Hive namespace.
+    memories.retain(|memory| match hive_memory_namespace {
+        Some(namespace_id) => {
             memory.namespace == MemoryNamespace::Shared
                 || (memory.namespace == MemoryNamespace::Crew
-                    && memory.namespace_id.as_deref() == Some(crew_slug))
+                    && memory.namespace_id.as_deref() == Some(namespace_id))
         }
         None => {
             memory.namespace == MemoryNamespace::Shared || memory.namespace == MemoryNamespace::Hive

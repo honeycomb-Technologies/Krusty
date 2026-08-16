@@ -31,6 +31,7 @@ mod current;
 mod home;
 mod learning;
 mod sessions;
+mod workers;
 
 pub fn router() -> Router<AppState> {
     router_with_wire_identity(false)
@@ -62,6 +63,19 @@ fn router_with_wire_identity(legacy_wire: bool) -> Router<AppState> {
         .route("/home/crew/:slug/:kind", put(home::update_crew_document))
         .route("/crew", get(home::crew))
         .route("/channels", get(home::channels))
+        .route(
+            "/workers",
+            get(workers::list_workers).post(workers::create_worker),
+        )
+        .route(
+            "/workers/:id",
+            get(workers::get_worker)
+                .patch(workers::update_worker)
+                .delete(workers::archive_worker),
+        )
+        .route("/workers/:id/pause", post(workers::pause_worker))
+        .route("/workers/:id/resume", post(workers::resume_worker))
+        .route("/workers/:id/dm", post(workers::ensure_worker_dm))
         .route("/current", get(current::current))
         .route("/attention", get(attention::attention))
         .route("/attention/:id/read", post(attention::set_attention_read))

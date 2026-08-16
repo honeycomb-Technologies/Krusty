@@ -5,10 +5,11 @@ use tracing::warn;
 use crate::paths;
 use crate::storage::{
     HiveCrewProfileDocumentKind, HiveHomeProfile, HiveProfileDocumentKind, HiveProfileSnapshot,
+    HiveWorker, HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerStore,
 };
 
 use super::project::discover_named_file;
-use super::truncate_utf8_bytes;
+use super::{open_context_database, truncate_utf8_bytes};
 
 const HIVE_FILES: &[&str] = &[
     "HIVE.md",
@@ -18,18 +19,93 @@ const HIVE_FILES: &[&str] = &[
 ];
 const MAX_HIVE_CONTEXT_BYTES: usize = 24 * 1024;
 
+/// Persona material for a session that is a Hive Worker's private DM lane.
+pub(super) struct HiveWorkerPersona {
+    /// Memory namespace granted to this Worker (Shared + this namespace).
+    pub(super) memory_namespace_id: String,
+    /// Rendered `[HIVE WORKER ...]` sections replacing the crew treatment.
+    pub(super) sections: Vec<String>,
+}
+
+/// Resolve the Worker whose DM lane is this session, if any. The session
+/// itself is ownership-checked upstream; the owner comparison here keeps a
+/// mis-bound row from leaking another owner's persona or memory namespace.
+pub(super) fn load_worker_persona(
+    db_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+) -> Option<HiveWorkerPersona> {
+    let db = open_context_database(db_path, "loading Hive worker persona")?;
+    let store = HiveWorkerStore::new(db);
+    let worker = match store.get_by_dm_session(session_id) {
+        Ok(worker) => worker?,
+        Err(error) => {
+            warn!(session_id, error = %error, "Failed to resolve Hive worker for DM session");
+            return None;
+        }
+    };
+    if worker.user_id.as_deref() != user_id {
+        warn!(
+            session_id,
+            worker_id = %worker.id,
+            "Hive worker DM binding does not match the session owner; skipping persona"
+        );
+        return None;
+    }
+    let documents = match store.documents(&worker.id) {
+        Ok(documents) => documents,
+        Err(error) => {
+            warn!(worker_id = %worker.id, error = %error, "Failed to load Hive worker documents");
+            Vec::new()
+        }
+    };
+    Some(HiveWorkerPersona {
+        sections: build_worker_persona_sections(&worker, &documents),
+        memory_namespace_id: worker.memory_namespace_id,
+    })
+}
+
+fn build_worker_persona_sections(
+    worker: &HiveWorker,
+    documents: &[HiveWorkerDocument],
+) -> Vec<String> {
+    let mut sections = vec![format!(
+        "[HIVE WORKER - {slug}]\n\nYou are {name} (@{slug}), a dedicated Hive Worker. This session is your private DM lane with the user; speak and act as this Worker.\n\n[END HIVE WORKER]",
+        slug = worker.slug,
+        name = worker.display_name,
+    )];
+    for kind in HiveWorkerDocumentKind::ALL {
+        if let Some(document) = documents.iter().find(|document| document.kind == kind) {
+            let label = kind.as_str().to_ascii_uppercase();
+            sections.push(format!(
+                "[HIVE WORKER {label} - {slug}]\n\n{content}\n\n[END HIVE WORKER {label}]",
+                slug = worker.slug,
+                content = document.content,
+            ));
+        }
+    }
+    sections
+}
+
 pub(super) fn build_hive_context_sections(
     project_root: &Path,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let hive_home = paths::hive_dir();
-    build_hive_context_sections_with_home(project_root, &hive_home, hive_crew_slug)
+    build_hive_context_sections_with_home(
+        project_root,
+        &hive_home,
+        hive_crew_slug,
+        worker_persona_sections,
+    )
 }
 
 pub(super) fn build_hive_context_sections_with_home(
     project_root: &Path,
     hive_home: &Path,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let profile = HiveHomeProfile::load_from(hive_home);
     let layers = profile.context_layers();
@@ -44,7 +120,11 @@ pub(super) fn build_hive_context_sections_with_home(
         })
         .collect::<Vec<_>>();
 
-    if let Some(crew_slug) = hive_crew_slug
+    if !worker_persona_sections.is_empty() {
+        // A Worker-bound DM replaces the generic crew treatment with the
+        // Worker's own persona documents.
+        sections.extend_from_slice(worker_persona_sections);
+    } else if let Some(crew_slug) = hive_crew_slug
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -99,6 +179,7 @@ pub(super) fn build_hive_context_sections_with_profile(
     project_root: &Path,
     profile: &HiveProfileSnapshot,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let mut sections = Vec::new();
     for kind in [
@@ -115,7 +196,9 @@ pub(super) fn build_hive_context_sections_with_profile(
         }
     }
 
-    if let Some(crew_slug) = hive_crew_slug
+    if !worker_persona_sections.is_empty() {
+        sections.extend_from_slice(worker_persona_sections);
+    } else if let Some(crew_slug) = hive_crew_slug
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -234,6 +317,7 @@ fn hive_context_priority(section: &str) -> u8 {
         "[HIVE USER",
         "[HIVE CREW IDENTITY",
         "[HIVE CREW SOUL",
+        "[HIVE WORKER",
     ]
     .iter()
     .any(|prefix| section.starts_with(prefix))
@@ -346,11 +430,13 @@ mod tests {
             project.path(),
             &profile(4, "Check queue A.", "Main thread."),
             None,
+            &[],
         );
         let second = build_hive_context_sections_with_profile(
             project.path(),
             &profile(5, "Check queue B.", "Mobile push."),
             None,
+            &[],
         );
         let stable = |sections: &[String]| {
             sections

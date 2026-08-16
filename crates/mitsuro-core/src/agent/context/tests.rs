@@ -4,7 +4,9 @@ use std::io::Write;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-use super::hive::{build_hive_context_sections, build_hive_context_sections_with_home};
+use super::hive::{
+    build_hive_context_sections, build_hive_context_sections_with_home, load_worker_persona,
+};
 use super::reports::build_hive_knowledge_context;
 use super::workspace::{build_environment_context, summarize_git_status};
 use super::{
@@ -20,8 +22,8 @@ use crate::skills::SkillsManager;
 use crate::storage::reports::CreateReportInput;
 use crate::storage::{
     AutonomousTaskStore, CanonicalMemoryInput, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, MemoryNamespace, MemoryStore, MemoryType,
-    ReportStore, SessionManager, WorkMode,
+    DelegatedRunStartInput, DelegatedRunStore, HiveWorkerDocumentKind, HiveWorkerStore,
+    MemoryNamespace, MemoryStore, MemoryType, NewHiveWorker, ReportStore, SessionManager, WorkMode,
 };
 
 #[test]
@@ -57,7 +59,7 @@ fn build_hive_context_loads_global_home_files_and_project_overlay() {
     .unwrap();
     fs::write(repo.join("HIVE.md"), "Project-specific operating notes.").unwrap();
 
-    let context = build_hive_context_sections_with_home(&repo, &hive_home, None).join("\n\n");
+    let context = build_hive_context_sections_with_home(&repo, &hive_home, None, &[]).join("\n\n");
 
     assert!(context.contains("[HIVE SOUL - HIVE_SOUL.md]"));
     assert!(context.contains("Keep moving."));
@@ -78,7 +80,7 @@ fn build_hive_context_falls_back_to_project_overlay_when_global_home_is_empty() 
     fs::create_dir_all(&hive_home).unwrap();
     fs::write(repo.join("HIVE.md"), "Always Swimming.").unwrap();
 
-    let context = build_hive_context_sections_with_home(&repo, &hive_home, None).join("\n\n");
+    let context = build_hive_context_sections_with_home(&repo, &hive_home, None, &[]).join("\n\n");
 
     assert!(context.contains("[HIVE PROJECT OVERLAY - HIVE.md]"));
     assert!(context.contains("Always Swimming."));
@@ -97,11 +99,13 @@ fn build_hive_context_reads_deprecated_project_overlay_but_prefers_canonical_nam
     )
     .unwrap();
 
-    let deprecated = build_hive_context_sections_with_home(&repo, &hive_home, None).join("\n\n");
+    let deprecated =
+        build_hive_context_sections_with_home(&repo, &hive_home, None, &[]).join("\n\n");
     assert!(deprecated.contains("Deprecated overlay."));
 
     fs::write(repo.join("HIVE.md"), "Canonical overlay.").unwrap();
-    let canonical = build_hive_context_sections_with_home(&repo, &hive_home, None).join("\n\n");
+    let canonical =
+        build_hive_context_sections_with_home(&repo, &hive_home, None, &[]).join("\n\n");
     assert!(canonical.contains("Canonical overlay."));
     assert!(!canonical.contains("Deprecated overlay."));
 }
@@ -117,7 +121,7 @@ fn build_hive_context_accepts_legacy_generic_home_file_names() {
     fs::write(hive_home.join("SOUL.md"), "Legacy soul.").unwrap();
     fs::write(hive_home.join("IDENTITY.md"), "Legacy identity.").unwrap();
 
-    let context = build_hive_context_sections_with_home(&repo, &hive_home, None).join("\n\n");
+    let context = build_hive_context_sections_with_home(&repo, &hive_home, None, &[]).join("\n\n");
 
     assert!(context.contains("[HIVE SOUL - SOUL.md]"));
     assert!(context.contains("Legacy soul."));
@@ -137,8 +141,8 @@ fn build_hive_context_never_activates_legacy_crew_memory_as_instructions() {
     fs::write(crew.join("SOUL.md"), "Evidence first.").unwrap();
     fs::write(crew.join("MEMORY.md"), "legacy-secret-memory-marker").unwrap();
 
-    let context =
-        build_hive_context_sections_with_home(&repo, &hive_home, Some("reviewer")).join("\n\n");
+    let context = build_hive_context_sections_with_home(&repo, &hive_home, Some("reviewer"), &[])
+        .join("\n\n");
 
     assert!(context.contains("Reviewer identity."));
     assert!(context.contains("Evidence first."));
@@ -153,7 +157,7 @@ fn build_hive_context_uses_global_home_path_helper_without_panic() {
     fs::create_dir_all(&repo).unwrap();
     fs::write(repo.join("HIVE.md"), "Always Swimming.").unwrap();
 
-    let context = build_hive_context_sections(&repo, None).join("\n\n");
+    let context = build_hive_context_sections(&repo, None, &[]).join("\n\n");
 
     assert!(context.contains("Always Swimming."));
 }
@@ -174,7 +178,7 @@ fn build_hive_context_sections_preserve_layer_order() {
     fs::write(hive_home.join(paths::HIVE_CHANNELS_FILE), "Channels.").unwrap();
     fs::write(repo.join("HIVE.md"), "Overlay.").unwrap();
 
-    let sections = build_hive_context_sections_with_home(&repo, &hive_home, None);
+    let sections = build_hive_context_sections_with_home(&repo, &hive_home, None, &[]);
     let labels = sections
         .iter()
         .map(|section| {
@@ -1173,6 +1177,207 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
     assert!(!reviewer.contains("primary-hive-marker"));
     assert!(!reviewer.contains("researcher-crew-marker"));
     assert!(!reviewer.contains("## Current Snapshot"));
+}
+
+#[test]
+fn worker_persona_sections_replace_generic_crew_treatment() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    let hive_home = temp.path().join("hive-home");
+    let crew_reviewer = hive_home.join("crew").join("reviewer");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&crew_reviewer).unwrap();
+    fs::write(hive_home.join(paths::HIVE_SOUL_FILE), "Home soul.").unwrap();
+    fs::write(crew_reviewer.join("IDENTITY.md"), "Crew reviewer identity.").unwrap();
+
+    let worker_sections = vec![
+        "[HIVE WORKER - reviewer]\n\nYou are Reviewer.\n\n[END HIVE WORKER]".to_string(),
+        "[HIVE WORKER SOUL - reviewer]\n\nWorker soul marker.\n\n[END HIVE WORKER SOUL]"
+            .to_string(),
+    ];
+    let bound = build_hive_context_sections_with_home(
+        &repo,
+        &hive_home,
+        Some("reviewer"),
+        &worker_sections,
+    )
+    .join("\n\n");
+
+    assert!(bound.contains("Home soul."));
+    assert!(bound.contains("[HIVE WORKER - reviewer]"));
+    assert!(bound.contains("Worker soul marker."));
+    assert!(!bound.contains("[HIVE CREW IDENTITY"));
+    assert!(!bound.contains("Crew reviewer identity."));
+
+    let unbound = build_hive_context_sections_with_home(&repo, &hive_home, Some("reviewer"), &[])
+        .join("\n\n");
+    assert!(unbound.contains("[HIVE CREW IDENTITY - reviewer - IDENTITY.md]"));
+    assert!(unbound.contains("Crew reviewer identity."));
+    assert!(!unbound.contains("[HIVE WORKER"));
+}
+
+#[test]
+fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    let db_path = repo.join("mitsuro.db");
+    let project = repo.to_string_lossy().to_string();
+    let db = Database::new(&db_path).unwrap();
+    db.conn()
+        .execute_batch(
+            "INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+             VALUES ('worker-dm', 'Analyst', '2026-08-01T00:00:00.000000Z',
+                     '2026-08-01T00:00:00.000000Z', 'hive');
+             INSERT INTO sessions (id, title, created_at, updated_at, session_type)
+             VALUES ('companion', 'Hive', '2026-08-01T00:00:00.000000Z',
+                     '2026-08-01T00:00:00.000000Z', 'hive');",
+        )
+        .unwrap();
+
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let worker = worker_store.create(&NewHiveWorker::new("analyst")).unwrap();
+    worker_store
+        .upsert_document(
+            &worker.id,
+            HiveWorkerDocumentKind::Identity,
+            "Worker identity marker.",
+        )
+        .unwrap();
+    worker_store
+        .upsert_document(
+            &worker.id,
+            HiveWorkerDocumentKind::Soul,
+            "Worker soul marker.",
+        )
+        .unwrap();
+    worker_store
+        .bind_dm_session(&worker.id, Some("worker-dm"))
+        .unwrap();
+
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    for (canonical_key, title, content, namespace, namespace_id) in [
+        (
+            "shared-style",
+            "Shared style",
+            "shared-memory-marker",
+            MemoryNamespace::Shared,
+            None,
+        ),
+        (
+            "primary-style",
+            "Primary style",
+            "primary-hive-marker",
+            MemoryNamespace::Hive,
+            None,
+        ),
+        (
+            "analyst-style",
+            "Analyst style",
+            "analyst-namespace-marker",
+            MemoryNamespace::Crew,
+            Some("analyst"),
+        ),
+        (
+            "other-style",
+            "Other style",
+            "other-namespace-marker",
+            MemoryNamespace::Crew,
+            Some("researcher"),
+        ),
+    ] {
+        let mut input =
+            CanonicalMemoryInput::new(MemoryType::Project, canonical_key, title, content);
+        input.project_dir = Some(project.clone());
+        input.namespace = namespace;
+        input.namespace_id = namespace_id.map(str::to_string);
+        memory_store.save_canonical(&input).unwrap();
+    }
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Recall the correct working style.".to_string(),
+        }],
+    }];
+    let render = |session_id: &str| {
+        inject_context(
+            &conversation,
+            &db_path,
+            session_id,
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("hive"),
+            None,
+            None,
+        )
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    };
+
+    let dm = render("worker-dm");
+    assert!(dm.contains("[HIVE WORKER - analyst]"));
+    assert!(dm.contains("[HIVE WORKER IDENTITY - analyst]"));
+    assert!(dm.contains("Worker identity marker."));
+    assert!(dm.contains("Worker soul marker."));
+    assert!(dm.contains("shared-memory-marker"));
+    assert!(dm.contains("analyst-namespace-marker"));
+    assert!(!dm.contains("primary-hive-marker"));
+    assert!(!dm.contains("other-namespace-marker"));
+
+    // A hive session without a Worker binding keeps the primary companion
+    // treatment: no Worker persona, primary namespace memories intact.
+    let companion = render("companion");
+    assert!(!companion.contains("[HIVE WORKER"));
+    assert!(companion.contains("shared-memory-marker"));
+    assert!(companion.contains("primary-hive-marker"));
+    assert!(!companion.contains("analyst-namespace-marker"));
+}
+
+#[test]
+fn worker_persona_requires_matching_session_owner() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("mitsuro.db");
+    let db = Database::new(&db_path).unwrap();
+    db.conn()
+        .execute_batch(
+            "INSERT INTO users (id, email, license_tier)
+             VALUES ('alice', 'alice@example.com', 'free');
+             INSERT INTO sessions (id, title, created_at, updated_at, session_type, user_id)
+             VALUES ('alice-dm', 'Analyst', '2026-08-01T00:00:00.000000Z',
+                     '2026-08-01T00:00:00.000000Z', 'hive', 'alice');",
+        )
+        .unwrap();
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let worker = worker_store
+        .create(&NewHiveWorker {
+            user_id: Some("alice".into()),
+            ..NewHiveWorker::new("analyst")
+        })
+        .unwrap();
+    worker_store
+        .bind_dm_session(&worker.id, Some("alice-dm"))
+        .unwrap();
+
+    let owned = load_worker_persona(&db_path, "alice-dm", Some("alice"))
+        .expect("owner resolves their worker persona");
+    assert_eq!(owned.memory_namespace_id, "analyst");
+    assert!(owned
+        .sections
+        .iter()
+        .any(|section| section.starts_with("[HIVE WORKER - analyst]")));
+
+    assert!(load_worker_persona(&db_path, "alice-dm", None).is_none());
+    assert!(load_worker_persona(&db_path, "alice-dm", Some("bob")).is_none());
+    assert!(load_worker_persona(&db_path, "unbound-session", Some("alice")).is_none());
 }
 
 #[test]

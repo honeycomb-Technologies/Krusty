@@ -43,6 +43,10 @@ use super::sessions::{
     recover_daemon, schedule_session, session_status, set_priority, DispatchRequest,
     PriorityRequest, ScheduleRequest,
 };
+use super::workers::{
+    archive_worker, create_worker, ensure_worker_dm, get_worker, list_workers, pause_worker,
+    resume_worker, update_worker, CreateWorkerRequest, UpdateWorkerRequest,
+};
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
 use crate::AppState;
@@ -1677,4 +1681,341 @@ fn map_runtime_trace_event_skips_malformed_payload() {
     };
 
     assert!(map_runtime_trace_event(event).is_none());
+}
+
+fn create_worker_request(slug: &str) -> CreateWorkerRequest {
+    CreateWorkerRequest {
+        slug: slug.to_string(),
+        display_name: None,
+        avatar_color: None,
+        model: None,
+        model_key: None,
+        permission_mode: None,
+        autonomy: None,
+        heartbeat_interval_secs: None,
+        identity: None,
+        soul: None,
+    }
+}
+
+fn empty_update_worker_request() -> UpdateWorkerRequest {
+    UpdateWorkerRequest {
+        display_name: None,
+        avatar_color: None,
+        model: None,
+        model_key: None,
+        permission_mode: None,
+        autonomy: None,
+        heartbeat_interval_secs: None,
+        identity: None,
+        soul: None,
+    }
+}
+
+#[tokio::test]
+async fn workers_crud_lifecycle_is_exact_owner_scoped() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+
+    // Slug validation and creation.
+    assert!(matches!(
+        create_worker(
+            State(state.clone()),
+            alice(),
+            Json(create_worker_request("Bad Slug")),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+    let (created_status, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(CreateWorkerRequest {
+            display_name: Some("Deep Researcher".to_string()),
+            avatar_color: Some("#7743DB".to_string()),
+            identity: Some("You research deeply.".to_string()),
+            soul: Some("Calm and exact.".to_string()),
+            permission_mode: Some("supervised".parse().expect("permission mode should parse")),
+            ..create_worker_request("researcher")
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker create should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(created_status, axum::http::StatusCode::CREATED);
+    assert_eq!(created.worker.slug, "researcher");
+    assert_eq!(created.worker.display_name, "Deep Researcher");
+    assert_eq!(created.worker.status, "active");
+    assert_eq!(created.worker.permission_mode, "supervised");
+    assert_eq!(created.identity.as_deref(), Some("You research deeply."));
+    assert_eq!(created.soul.as_deref(), Some("Calm and exact."));
+
+    // Duplicate active slug for the same owner conflicts; other owners are free.
+    assert!(matches!(
+        create_worker(
+            State(state.clone()),
+            alice(),
+            Json(create_worker_request("researcher")),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    let (_, Json(_)) = create_worker(
+        State(state.clone()),
+        bob(),
+        Json(create_worker_request("researcher")),
+    )
+    .await
+    .expect("same slug under another owner should create");
+
+    // Reads and mutations are exact-owner scoped: bob never sees alice's worker.
+    let worker_id = created.worker.id.clone();
+    assert!(matches!(
+        get_worker(State(state.clone()), bob(), Path(worker_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            Json(empty_update_worker_request()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        ensure_worker_dm(State(state.clone()), bob(), Path(worker_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    // Owner list shows only the owner's workers.
+    let Json(alice_list) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("alice list should succeed");
+    assert_eq!(alice_list.workers.len(), 1);
+    assert_eq!(alice_list.workers[0].id, worker_id);
+
+    // Profile and document updates round-trip.
+    let Json(updated) = update_worker(
+        State(state.clone()),
+        alice(),
+        Path(worker_id.clone()),
+        Json(UpdateWorkerRequest {
+            display_name: Some("Lead Researcher".to_string()),
+            autonomy: Some(
+                serde_json::from_value(serde_json::json!("always_on"))
+                    .expect("autonomy should parse"),
+            ),
+            heartbeat_interval_secs: Some(900),
+            soul: Some("Curious and rigorous.".to_string()),
+            ..empty_update_worker_request()
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker update should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(updated.worker.display_name, "Lead Researcher");
+    assert_eq!(updated.worker.autonomy, "always_on");
+    assert_eq!(updated.worker.heartbeat_interval_secs, Some(900));
+    assert_eq!(updated.soul.as_deref(), Some("Curious and rigorous."));
+    assert_eq!(updated.identity.as_deref(), Some("You research deeply."));
+
+    // Pause and resume flip status without touching identity.
+    let Json(paused) = pause_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("pause should succeed");
+    assert_eq!(paused.status, "paused");
+    let Json(resumed) = resume_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("resume should succeed");
+    assert_eq!(resumed.status, "active");
+
+    // Delete archives instead of destroying, frees the slug, and blocks writes.
+    let Json(archive_response) =
+        archive_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+            .await
+            .expect("archive should succeed");
+    assert!(archive_response.ok);
+    let Json(after_archive) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("list should succeed");
+    assert!(after_archive.workers.is_empty());
+    let Json(archived) = get_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("archived worker remains readable");
+    assert_eq!(archived.worker.status, "archived");
+    assert_eq!(archived.identity.as_deref(), Some("You research deeply."));
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            Json(empty_update_worker_request()),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(
+        ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone())).await,
+        Err(AppError::Conflict(_))
+    ));
+    let (_, Json(_)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("researcher")),
+    )
+    .await
+    .expect("archived slug should be reusable");
+}
+
+#[tokio::test]
+async fn worker_dm_ensure_is_idempotent_and_freezes_worker_model() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    configure_test_model(&state).await;
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(CreateWorkerRequest {
+            model: Some("gpt-5.5".to_string()),
+            permission_mode: Some("supervised".parse().expect("permission mode should parse")),
+            ..create_worker_request("builder")
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker create should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(created.worker.model.as_deref(), Some("gpt-5.5"));
+    assert!(created.worker.model_key.is_some());
+
+    let Json(first) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("dm ensure should succeed: {}", app_error_description(error)));
+    assert!(first.created);
+    assert_eq!(first.session_type, "hive");
+    assert_eq!(first.title, "Builder");
+    assert_eq!(first.permission_mode, "supervised");
+
+    let Json(second) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .expect("second dm ensure should reuse");
+    assert!(!second.created);
+    assert_eq!(second.session_id, first.session_id);
+
+    // The DM session row carries the Worker's frozen identity: hive type,
+    // Worker title, Worker permission mode, and the exact model key, so chat
+    // turns honoring the persisted session model run as this Worker.
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session = session_manager
+        .get_session(&first.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert_eq!(session.session_type, SessionType::Hive);
+    assert_eq!(session.title, "Builder");
+    assert_eq!(session.user_id.as_deref(), Some("alice"));
+    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        session.model_key.as_ref().map(|key| key.model_id.as_str()),
+        Some("gpt-5.5")
+    );
+    assert_eq!(session.permission_mode.as_str(), "supervised");
+    assert!(session.parent_session_id.is_none());
+    assert!(session.project_dir.is_none());
+
+    // The list surface exposes the binding and its idle DM state.
+    let Json(list) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("list should succeed");
+    assert_eq!(
+        list.workers[0].dm_session_id.as_deref(),
+        Some(first.session_id.as_str())
+    );
+    assert_eq!(list.workers[0].dm_agent_state.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
+async fn worker_model_patch_propagates_to_dm_session_row() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    configure_test_model(&state).await;
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("builder")),
+    )
+    .await
+    .expect("worker create should succeed");
+    let Json(dm) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .expect("dm ensure should succeed");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let before = session_manager
+        .get_session(&dm.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert!(before.model.as_deref().unwrap_or("").is_empty());
+    assert!(before.model_key.is_none());
+
+    let Json(updated) = update_worker(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+        Json(UpdateWorkerRequest {
+            model: Some("gpt-5.5".to_string()),
+            ..empty_update_worker_request()
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker model update should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(updated.worker.model.as_deref(), Some("gpt-5.5"));
+
+    let after = session_manager
+        .get_session(&dm.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert_eq!(after.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        after.model_key.as_ref().map(|key| key.model_id.as_str()),
+        Some("gpt-5.5")
+    );
 }

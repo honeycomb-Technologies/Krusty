@@ -109,6 +109,23 @@ pub fn inject_context_with_hive_profile(
     let env_ctx = workspace::build_environment_context(working_dir, model_id);
     let context_project_dir = project_dir.map(|p| p.to_string_lossy().to_string());
     let is_hive = session_type == Some("hive");
+    // When the hive session is a Worker's private DM lane, the Worker's own
+    // persona replaces the generic crew treatment and its memory namespace
+    // scopes retrieval. Sessions without a Worker binding keep the primary
+    // companion behavior unchanged.
+    let worker_persona = if is_hive {
+        hive::load_worker_persona(db_path, session_id, user_id)
+    } else {
+        None
+    };
+    let hive_memory_namespace = worker_persona
+        .as_ref()
+        .map(|persona| persona.memory_namespace_id.as_str())
+        .or(hive_crew_slug);
+    let worker_persona_sections = worker_persona
+        .as_ref()
+        .map(|persona| persona.sections.as_slice())
+        .unwrap_or_default();
     let memory_ctx = if is_hive {
         String::new()
     } else {
@@ -132,7 +149,7 @@ pub fn inject_context_with_hive_profile(
             db_path,
             context_project_dir.as_deref(),
             user_id,
-            hive_crew_slug,
+            hive_memory_namespace,
             session_id,
             conversation,
         )
@@ -158,9 +175,14 @@ pub fn inject_context_with_hive_profile(
                 project_dir.unwrap_or(working_dir),
                 profile,
                 hive_crew_slug,
+                worker_persona_sections,
             )
         } else {
-            hive::build_hive_context_sections(project_dir.unwrap_or(working_dir), hive_crew_slug)
+            hive::build_hive_context_sections(
+                project_dir.unwrap_or(working_dir),
+                hive_crew_slug,
+                worker_persona_sections,
+            )
         }
     } else {
         Vec::new()
@@ -410,6 +432,7 @@ fn is_stable_hive_identity_context(text: &str) -> bool {
         "[HIVE USER",
         "[HIVE CREW IDENTITY",
         "[HIVE CREW SOUL",
+        "[HIVE WORKER",
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))

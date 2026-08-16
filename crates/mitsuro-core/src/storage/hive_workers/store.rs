@@ -96,6 +96,17 @@ impl HiveWorkerStore {
             .context("reading Hive worker")
     }
 
+    /// Fetch the Worker whose private DM lane is this session. The schema
+    /// keeps `dm_session_id` unique, so at most one Worker can own a session.
+    pub fn get_by_dm_session(&self, session_id: &str) -> Result<Option<HiveWorker>> {
+        let sql = format!("SELECT {WORKER_COLUMNS} FROM hive_workers WHERE dm_session_id = ?1");
+        self.db
+            .conn()
+            .query_row(&sql, [session_id], map_worker)
+            .optional()
+            .context("reading Hive worker by DM session")
+    }
+
     /// Fetch the non-archived Worker with this slug for exactly this owner.
     pub fn get_by_slug(&self, user_id: Option<&str>, slug: &str) -> Result<Option<HiveWorker>> {
         let sql = format!(

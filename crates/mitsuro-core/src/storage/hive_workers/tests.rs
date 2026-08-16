@@ -221,6 +221,29 @@ fn worker_dm_session_binding_is_exclusive() {
 }
 
 #[test]
+fn worker_resolves_by_dm_session_binding() {
+    let (store, _temp) = store();
+    let builder = store.create(&NewHiveWorker::new("builder")).unwrap();
+    let reviewer = store.create(&NewHiveWorker::new("reviewer")).unwrap();
+    assert!(store.bind_dm_session(&builder.id, Some("dm-1")).unwrap());
+    assert!(store.bind_dm_session(&reviewer.id, Some("dm-2")).unwrap());
+
+    assert_eq!(
+        store.get_by_dm_session("dm-1").unwrap().unwrap().id,
+        builder.id
+    );
+    assert_eq!(
+        store.get_by_dm_session("dm-2").unwrap().unwrap().id,
+        reviewer.id
+    );
+    assert!(store.get_by_dm_session("missing").unwrap().is_none());
+
+    // Clearing the binding stops resolution for that session.
+    assert!(store.bind_dm_session(&builder.id, None).unwrap());
+    assert!(store.get_by_dm_session("dm-1").unwrap().is_none());
+}
+
+#[test]
 fn worker_documents_round_trip() {
     let (store, _temp) = store();
     let worker = store.create(&NewHiveWorker::new("builder")).unwrap();
