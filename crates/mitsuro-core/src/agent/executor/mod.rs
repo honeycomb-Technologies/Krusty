@@ -78,6 +78,7 @@ pub(crate) async fn execute_tools(
     advertised_tool_names: &HashSet<String>,
     execution_tool_allowlist: Option<&HashSet<String>>,
     disabled_tools: Option<&[String]>,
+    hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
 ) -> ToolExecutionBatch {
     let mut work_mode = current_mode;
@@ -221,6 +222,7 @@ pub(crate) async fn execute_tools(
                             subagent_max_turns_override,
                             delegated_reasoning_effort,
                             execution_tool_allowlist,
+                            hive_group_run,
                             Arc::clone(&file_observations),
                             extension_snapshot_prepared,
                             None,
@@ -429,6 +431,7 @@ pub(crate) async fn execute_tools(
                 subagent_max_turns_override,
                 delegated_reasoning_effort,
                 execution_tool_allowlist,
+                hive_group_run,
                 Arc::clone(&file_observations),
                 extension_snapshot_prepared,
                 Some(execution_cancellation.clone()),
@@ -857,6 +860,7 @@ mod tests {
             &advertised,
             None,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -948,6 +952,7 @@ mod tests {
             &advertised,
             Some(&explicit_scope),
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -1008,6 +1013,7 @@ mod tests {
             None,
             None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),
@@ -1095,6 +1101,7 @@ mod tests {
             &advertised,
             Some(&explicit_scope),
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -1157,6 +1164,7 @@ mod tests {
             &advertised,
             None,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -1214,6 +1222,7 @@ mod tests {
             None,
             &advertised,
             Some(&exact_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -1294,6 +1303,7 @@ mod tests {
             Some(ReasoningEffort::Medium),
             &advertised,
             Some(&exact_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -1435,6 +1445,7 @@ export default (mitsuro) => {
             &advertised,
             None,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -1537,6 +1548,7 @@ export default (mitsuro) => {
             &advertised,
             Some(&explicit_scope),
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -1607,6 +1619,7 @@ export default (mitsuro) => {
             None,
             None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),

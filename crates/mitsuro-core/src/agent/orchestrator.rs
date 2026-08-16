@@ -39,9 +39,9 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, DelegatedRunRecord, DelegatedRunStore, HiveProfileSnapshot, PartialAssistantState,
-    PendingInteractionSnapshot, ProjectSettings, RecoveryStatus, SessionManager, SessionType,
-    WorkMode,
+    Database, DelegatedRunRecord, DelegatedRunStore, HiveGroupRunContext, HiveProfileSnapshot,
+    PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
+    SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::{
     agent_call_action, agent_call_is_research, agent_call_requests_write, effective_tool_call,
@@ -600,6 +600,9 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) working_dir: PathBuf,
     pub(crate) project_dir: Option<PathBuf>,
     pub(crate) hive_crew_slug: Option<String>,
+    /// Group linkage when this run is one member of a Hive group turn. It
+    /// scopes the [GROUP ROOM] context block and the post_to_group tool.
+    pub(crate) hive_group_run: Option<HiveGroupRunContext>,
     /// Database-owned Mako identity frozen once at run start.
     pub(crate) hive_profile: Option<Arc<HiveProfileSnapshot>>,
     pub(crate) session_type: SessionType,
@@ -631,6 +634,7 @@ impl Default for OrchestratorConfig {
             working_dir: PathBuf::new(),
             project_dir: None,
             hive_crew_slug: None,
+            hive_group_run: None,
             hive_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
@@ -703,6 +707,7 @@ fn session_type_name(session_type: SessionType) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inject_runtime_context(
     conversation: &[ModelMessage],
     db_path: &Path,
@@ -710,6 +715,7 @@ fn inject_runtime_context(
     working_dir: &Path,
     project_dir: Option<&Path>,
     hive_crew_slug: Option<&str>,
+    hive_group_run: Option<&HiveGroupRunContext>,
     hive_profile: Option<&HiveProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
@@ -717,7 +723,7 @@ fn inject_runtime_context(
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context_with_hive_profile(
+    context::inject_context_with_hive_profile_and_group(
         conversation,
         db_path,
         session_id,
@@ -730,6 +736,7 @@ fn inject_runtime_context(
         hive_crew_slug,
         user_id,
         hive_profile,
+        hive_group_run,
     )
 }
 
@@ -818,6 +825,7 @@ impl AgenticOrchestrator {
             working_dir,
             project_dir,
             hive_crew_slug,
+            hive_group_run,
             hive_profile,
             session_type,
             permission_mode,
@@ -1059,6 +1067,7 @@ impl AgenticOrchestrator {
                 &working_dir,
                 project_dir.as_deref(),
                 hive_crew_slug.as_deref(),
+                hive_group_run.as_ref(),
                 hive_profile.as_deref(),
                 work_mode,
                 &skills_manager,
@@ -1888,6 +1897,7 @@ impl AgenticOrchestrator {
                         &advertised_tool_names,
                         execution_tool_allowlist.as_ref(),
                         project_settings.disabled_tools.as_deref(),
+                        hive_group_run.as_ref(),
                         Arc::clone(&file_observations),
                     )
                     .await;
@@ -2016,6 +2026,7 @@ impl AgenticOrchestrator {
                 &advertised_tool_names,
                 execution_tool_allowlist.as_ref(),
                 project_settings.disabled_tools.as_deref(),
+                hive_group_run.as_ref(),
                 Arc::clone(&file_observations),
             )
             .await;
@@ -3669,6 +3680,7 @@ mod tests {
             Some(repo),
             None,
             None,
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -3681,6 +3693,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             None,
             None,
             WorkMode::Build,

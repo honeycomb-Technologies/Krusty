@@ -27,6 +27,10 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// First protocol minor that preserves exact provider-aware model identity.
 pub const MODEL_IDENTITY_PROTOCOL_MINOR: u16 = 2;
-pub const PROTOCOL_MINOR: u16 = MODEL_IDENTITY_PROTOCOL_MINOR;
+/// First protocol minor that understands group-room commands. Older daemons
+/// negotiate a lower minor and the client fails closed with a clear
+/// unsupported error instead of silently misrouting a group turn.
+pub const GROUP_MESSAGING_PROTOCOL_MINOR: u16 = 3;
+pub const PROTOCOL_MINOR: u16 = GROUP_MESSAGING_PROTOCOL_MINOR;
 pub const IPC_KEY_BYTES: usize = 32;
 pub const NONCE_BYTES: usize = 32;

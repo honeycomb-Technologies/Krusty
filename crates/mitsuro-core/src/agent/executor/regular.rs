@@ -44,6 +44,7 @@ pub(super) async fn execute_regular_tool(
     subagent_max_turns_override: Option<usize>,
     delegated_reasoning_effort: Option<ReasoningEffort>,
     execution_tool_allowlist: Option<&HashSet<String>>,
+    hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
     extension_intercept_prepared: bool,
     execution_cancellation: Option<CancellationToken>,
@@ -107,6 +108,7 @@ pub(super) async fn execute_regular_tool(
     .with_subagent_max_turns(subagent_max_turns_override)
     .with_delegated_reasoning_effort(delegated_reasoning_effort)
     .with_execution_tool_allowlist(execution_tool_allowlist)
+    .with_hive_group_run(hive_group_run.cloned())
     .with_ai_client(ai_client.clone())
     .with_skills_manager(Arc::clone(skills_manager))
     .with_tool_registry(Arc::clone(tool_registry))

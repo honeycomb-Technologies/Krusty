@@ -25,7 +25,9 @@ use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::skills::SkillsManager;
-use crate::storage::{Database, DelegationMode, HiveProfileSnapshot, ProjectSettings, WorkMode};
+use crate::storage::{
+    Database, DelegationMode, HiveGroupRunContext, HiveProfileSnapshot, ProjectSettings, WorkMode,
+};
 
 pub use plan::build_plan_context;
 pub use project::build_project_context;
@@ -55,7 +57,7 @@ pub fn inject_context(
     hive_crew_slug: Option<&str>,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    inject_context_with_hive_profile(
+    inject_context_with_hive_profile_and_group(
         conversation,
         db_path,
         session_id,
@@ -68,11 +70,12 @@ pub fn inject_context(
         hive_crew_slug,
         user_id,
         None,
+        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn inject_context_with_hive_profile(
+pub fn inject_context_with_hive_profile_and_group(
     conversation: &[ModelMessage],
     db_path: &Path,
     session_id: &str,
@@ -85,6 +88,7 @@ pub fn inject_context_with_hive_profile(
     hive_crew_slug: Option<&str>,
     user_id: Option<&str>,
     hive_profile: Option<&HiveProfileSnapshot>,
+    hive_group_run: Option<&HiveGroupRunContext>,
 ) -> Vec<ModelMessage> {
     let is_chat = session_type == Some("chat");
 
@@ -192,6 +196,16 @@ pub fn inject_context_with_hive_profile(
             0,
             crate::agent::autonomy::coordinator_prompt::hive_coordinator_system_prompt(),
         );
+    }
+    // A group member run sees the room right after its persona: title,
+    // roster, and the bounded recent timeline. Rebuilt per provider call so
+    // parallel members observe each other's posts as they land.
+    if is_hive {
+        if let Some(group_run) = hive_group_run {
+            if let Some(section) = hive::build_group_room_section(db_path, group_run) {
+                hive_ctx_sections.push(section);
+            }
+        }
     }
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
@@ -405,6 +419,9 @@ fn dynamic_context_priority(text: &str) -> u8 {
         || text.starts_with("[WORKSPACE MODE:")
         || text.starts_with("[ENVIRONMENT]")
         || text.starts_with("[DELEGATION MODE:")
+        // The room block is the behavioral contract of a group turn: without
+        // it a member cannot know who is speaking or how to post.
+        || text.starts_with("[GROUP ROOM")
     {
         120
     } else if text.starts_with("[PROJECT INSTRUCTIONS")

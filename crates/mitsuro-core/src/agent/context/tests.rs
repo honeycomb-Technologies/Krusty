@@ -5,7 +5,8 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use super::hive::{
-    build_hive_context_sections, build_hive_context_sections_with_home, load_worker_persona,
+    build_group_room_section, build_hive_context_sections, build_hive_context_sections_with_home,
+    load_worker_persona,
 };
 use super::reports::build_hive_knowledge_context;
 use super::workspace::{build_environment_context, summarize_git_status};
@@ -22,8 +23,9 @@ use crate::skills::SkillsManager;
 use crate::storage::reports::CreateReportInput;
 use crate::storage::{
     AutonomousTaskStore, CanonicalMemoryInput, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, HiveWorkerDocumentKind, HiveWorkerStore,
-    MemoryNamespace, MemoryStore, MemoryType, NewHiveWorker, ReportStore, SessionManager, WorkMode,
+    DelegatedRunStartInput, DelegatedRunStore, HiveGroupRunContext, HiveGroupStore,
+    HiveWorkerDocumentKind, HiveWorkerStore, MemoryNamespace, MemoryStore, MemoryType,
+    NewHiveGroup, NewHiveGroupMessage, NewHiveWorker, ReportStore, SessionManager, WorkMode,
 };
 
 #[test]
@@ -1821,4 +1823,90 @@ fn inject_context_honors_explicit_only_delegation_setting() {
                     && text.contains("only when the user explicitly requests")
         )
     }));
+}
+
+#[test]
+fn group_room_section_carries_roster_timeline_and_posting_contract() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("group-context.db");
+    let worker_store = HiveWorkerStore::new(Database::new(&db_path).unwrap());
+    let researcher = worker_store
+        .create(&NewHiveWorker {
+            display_name: Some("Deep Researcher".into()),
+            model: Some("grok-code-fast-1".into()),
+            ..NewHiveWorker::new("researcher")
+        })
+        .unwrap();
+    let builder = worker_store.create(&NewHiveWorker::new("builder")).unwrap();
+    let group_store = HiveGroupStore::new(Database::new(&db_path).unwrap());
+    let group = group_store
+        .create(&NewHiveGroup {
+            user_id: None,
+            title: "Release Room".into(),
+            member_worker_ids: vec![researcher.id.clone(), builder.id.clone()],
+            ..NewHiveGroup::default()
+        })
+        .unwrap();
+    group_store
+        .append_message(&NewHiveGroupMessage::user(&group.id, "ship the release"))
+        .unwrap();
+    group_store
+        .append_message(&NewHiveGroupMessage::worker(
+            &group.id,
+            &researcher.id,
+            "auditing the diff now",
+        ))
+        .unwrap();
+
+    let section = build_group_room_section(
+        &db_path,
+        &HiveGroupRunContext {
+            group_id: group.id.clone(),
+            group_turn_id: "turn-1".into(),
+            run_id: "run-1".into(),
+            worker_id: builder.id.clone(),
+            max_member_messages_per_turn: 2,
+            context_window_messages: 24,
+        },
+    )
+    .expect("group room section should build");
+
+    assert!(section.starts_with("[GROUP ROOM - Release Room]"));
+    assert!(section.contains("@researcher (Deep Researcher, grok"));
+    assert!(section.contains("<- you"));
+    assert!(section.contains("post_to_group"));
+    assert!(section.contains("at most 2 message(s)"));
+    assert!(section.contains("ship the release"));
+    assert!(section.contains("auditing the diff now"));
+    assert!(section.ends_with("[END GROUP ROOM]"));
+
+    // The context window bounds how much room history is replayed.
+    let bounded = build_group_room_section(
+        &db_path,
+        &HiveGroupRunContext {
+            group_id: group.id.clone(),
+            group_turn_id: "turn-1".into(),
+            run_id: "run-1".into(),
+            worker_id: builder.id,
+            max_member_messages_per_turn: 2,
+            context_window_messages: 1,
+        },
+    )
+    .unwrap();
+    assert!(!bounded.contains("ship the release"));
+    assert!(bounded.contains("auditing the diff now"));
+
+    // An unknown group degrades to no section instead of failing the run.
+    assert!(build_group_room_section(
+        &db_path,
+        &HiveGroupRunContext {
+            group_id: "missing".into(),
+            group_turn_id: "turn-1".into(),
+            run_id: "run-1".into(),
+            worker_id: "nobody".into(),
+            max_member_messages_per_turn: 2,
+            context_window_messages: 24,
+        },
+    )
+    .is_none());
 }

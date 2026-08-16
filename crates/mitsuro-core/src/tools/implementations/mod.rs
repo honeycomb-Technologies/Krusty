@@ -19,6 +19,7 @@ pub mod memory;
 pub mod multiedit;
 mod mutation_diagnostics;
 pub mod plan_mode;
+pub mod post_to_group;
 pub mod processes;
 pub mod read;
 pub mod report;
@@ -55,6 +56,7 @@ pub use list::ListTool;
 pub use memory::MemoryTool;
 pub use multiedit::MultiEditTool;
 pub use plan_mode::EnterPlanModeTool;
+pub use post_to_group::PostToGroupTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
 pub use registration::{

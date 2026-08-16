@@ -365,6 +365,16 @@ impl DurableHiveCommandHandler {
                             &pending_id,
                         )
                     }
+                    Command::GroupMessage(command) => super::groups::group_message(
+                        tx,
+                        actor,
+                        now,
+                        command,
+                        &mutation_idempotency_key,
+                    ),
+                    Command::GroupStop(command) => {
+                        super::groups::group_stop(tx, actor, now, &command.group_id)
+                    }
                     Command::Steer(command) => {
                         let pending_id = steer_pending_id(
                             actor,
@@ -3109,7 +3119,7 @@ fn insert_run(
     Ok(())
 }
 
-fn insert_canonical_user_message(
+pub(super) fn insert_canonical_user_message(
     tx: &Transaction<'_>,
     session_id: &str,
     message: &str,
@@ -3232,7 +3242,7 @@ fn session_mutation(
     }
 }
 
-fn ack(message: &str) -> ResponsePayload {
+pub(super) fn ack(message: &str) -> ResponsePayload {
     ResponsePayload::Ack(AckResponse {
         accepted: true,
         message: Some(message.to_string()),

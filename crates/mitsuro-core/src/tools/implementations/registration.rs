@@ -7,10 +7,10 @@ use crate::tools::registry::ToolRegistry;
 use super::{
     AddSubtaskTool, AgentTool, ApplyPatchTool, AskUserQuestionTool, AutonomousTaskTool, BashTool,
     BrowserCheckTool, EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool,
-    MultiEditTool, ProcessesTool, ReadTool, ReportTool, SearchCompactionSegmentsTool,
-    SendUserMessageTool, SetDependencyTool, SetWorkModeTool, SetWorkspaceContextTool, SkillTool,
-    SleepTool, TaskCompleteTool, TaskStartTool, ToolSearchTool, WebFetchTool, WebSearchTool,
-    WorkflowProposeTool, WorkflowUpdateTool, WriteTool,
+    MultiEditTool, PostToGroupTool, ProcessesTool, ReadTool, ReportTool,
+    SearchCompactionSegmentsTool, SendUserMessageTool, SetDependencyTool, SetWorkModeTool,
+    SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, ToolSearchTool,
+    WebFetchTool, WebSearchTool, WorkflowProposeTool, WorkflowUpdateTool, WriteTool,
 };
 
 /// Register all built-in tools (except agent which needs client)
@@ -93,6 +93,9 @@ pub async fn register_agent_tool(
 pub async fn register_hive_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(AutonomousTaskTool)).await;
     registry.register(Arc::new(ReportTool)).await;
+    // Group-room speech. Outside a group member run the tool returns a
+    // structured not_a_group_run error, so registration stays hive-wide.
+    registry.register(Arc::new(PostToGroupTool)).await;
 }
 
 #[cfg(test)]

@@ -3,9 +3,11 @@ use std::path::Path;
 use tracing::warn;
 
 use crate::paths;
+use crate::storage::hive_groups;
 use crate::storage::{
-    HiveCrewProfileDocumentKind, HiveHomeProfile, HiveProfileDocumentKind, HiveProfileSnapshot,
-    HiveWorker, HiveWorkerDocument, HiveWorkerDocumentKind, HiveWorkerStore,
+    HiveCrewProfileDocumentKind, HiveGroupRunContext, HiveGroupSenderKind, HiveHomeProfile,
+    HiveProfileDocumentKind, HiveProfileSnapshot, HiveWorker, HiveWorkerDocument,
+    HiveWorkerDocumentKind, HiveWorkerStore,
 };
 
 use super::project::discover_named_file;
@@ -18,6 +20,11 @@ const HIVE_FILES: &[&str] = &[
     crate::identity::legacy::HIVE_PROJECT_OVERLAY_FILE_NAME_LOWERCASE,
 ];
 const MAX_HIVE_CONTEXT_BYTES: usize = 24 * 1024;
+/// Independent budget for the [GROUP ROOM] block so a chatty room cannot
+/// displace persona or project context.
+const MAX_GROUP_ROOM_CONTEXT_BYTES: usize = 16 * 1024;
+/// Per-message excerpt bound inside the room timeline.
+const MAX_GROUP_ROOM_MESSAGE_BYTES: usize = 1200;
 
 /// Persona material for a session that is a Hive Worker's private DM lane.
 pub(super) struct HiveWorkerPersona {
@@ -85,6 +92,116 @@ fn build_worker_persona_sections(
         }
     }
     sections
+}
+
+/// Render the [GROUP ROOM] block for one member run of a group turn: group
+/// title, member roster, posting contract, and the last
+/// `context_window_messages` room messages. Ordinary assistant output stays
+/// private to the run; only `post_to_group` reaches the room.
+pub(super) fn build_group_room_section(
+    db_path: &Path,
+    group_run: &HiveGroupRunContext,
+) -> Option<String> {
+    let db = open_context_database(db_path, "loading Hive group room context")?;
+    let conn = db.conn();
+    let group = match hive_groups::load_group(conn, &group_run.group_id) {
+        Ok(group) => group?,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group for room context");
+            return None;
+        }
+    };
+    let roster = match hive_groups::load_member_workers(conn, &group_run.group_id) {
+        Ok(roster) => roster,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group roster");
+            Vec::new()
+        }
+    };
+    let window = group_run.context_window_messages.max(1) as usize;
+    let messages = match hive_groups::load_recent_messages(conn, &group_run.group_id, window) {
+        Ok(messages) => messages,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group messages");
+            Vec::new()
+        }
+    };
+
+    let display_for = |worker_id: Option<&str>| -> String {
+        worker_id
+            .and_then(|id| roster.iter().find(|worker| worker.id == id))
+            .map(|worker| format!("@{}", worker.slug))
+            .unwrap_or_else(|| "@former-member".to_string())
+    };
+    let self_label = roster
+        .iter()
+        .find(|worker| worker.id == group_run.worker_id)
+        .map(|worker| format!("{} (@{})", worker.display_name, worker.slug))
+        .unwrap_or_else(|| "a group member".to_string());
+
+    let mut section = format!(
+        "[GROUP ROOM - {title}]\n\nYou are {self_label}, working in the group room \"{title}\" with the user and the members below. This run was triggered by a room message.\n\nMembers:\n",
+        title = group.title,
+    );
+    for worker in &roster {
+        let provider = worker
+            .model_key
+            .as_ref()
+            .map(|key| format!("{}", key.provider))
+            .or_else(|| worker.model.clone())
+            .unwrap_or_else(|| "default model".to_string());
+        section.push_str(&format!(
+            "- @{} ({}, {}){}\n",
+            worker.slug,
+            worker.display_name,
+            provider,
+            if worker.id == group_run.worker_id {
+                " <- you"
+            } else {
+                ""
+            }
+        ));
+    }
+    section.push_str(&format!(
+        "\nRoom rules:\n- Everything you say normally (assistant text, tool use, reasoning) stays PRIVATE to this run.\n- To speak in the room, call the post_to_group tool. You may post at most {} message(s) this run; make them count.\n- Mention members with @slug when you address them. Reply to a specific message by passing its message id.\n- If you have nothing useful to add, do not post.\n",
+        group_run.max_member_messages_per_turn
+    ));
+
+    if messages.is_empty() {
+        section.push_str("\nThe room has no messages yet.\n");
+    } else {
+        section.push_str("\nRecent room messages (oldest first):\n");
+        for message in &messages {
+            let sender = match message.sender_kind {
+                HiveGroupSenderKind::User => "user".to_string(),
+                HiveGroupSenderKind::System => "system".to_string(),
+                HiveGroupSenderKind::Worker => display_for(message.sender_worker_id.as_deref()),
+            };
+            let reply = message
+                .reply_to_message_id
+                .as_deref()
+                .map(|id| format!(" (reply to {id})"))
+                .unwrap_or_default();
+            section.push_str(&format!(
+                "#{seq} [{id}] {sender}{reply}: {content}\n",
+                seq = message.seq,
+                id = message.id,
+                content = truncate_utf8_bytes(&message.content, MAX_GROUP_ROOM_MESSAGE_BYTES),
+            ));
+        }
+    }
+    section.push_str("\n[END GROUP ROOM]");
+
+    if section.len() > MAX_GROUP_ROOM_CONTEXT_BYTES {
+        let marker = "\n[GROUP ROOM TRUNCATED AT REQUEST BUDGET]\n[END GROUP ROOM]";
+        let mut bounded = truncate_utf8_bytes(
+            &section,
+            MAX_GROUP_ROOM_CONTEXT_BYTES.saturating_sub(marker.len()),
+        );
+        bounded.push_str(marker);
+        return Some(bounded);
+    }
+    Some(section)
 }
 
 pub(super) fn build_hive_context_sections(

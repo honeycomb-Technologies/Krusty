@@ -16,7 +16,7 @@ use crate::ai::types::ModelMessage;
 use crate::mcp::McpManager;
 use crate::process::{CommandEnvironmentPolicy, ProcessRegistry};
 use crate::skills::SkillsManager;
-use crate::storage::WorkspaceMode;
+use crate::storage::{HiveGroupRunContext, WorkspaceMode};
 use crate::tools::git_identity::GitIdentity;
 
 use super::{DelegationPolicy, PermissionMode, ToolRegistry};
@@ -181,6 +181,9 @@ pub struct ToolContext {
     pub provider_call_trace: Option<ProviderCallTraceContext>,
     /// Shared file-observation tracker used to enforce observe-before-edit policy.
     pub file_observations: Arc<FileObservationTracker>,
+    /// Group linkage when this execution is one member run of a Hive group
+    /// turn. post_to_group requires it and enforces its per-run message cap.
+    pub hive_group_run: Option<HiveGroupRunContext>,
 }
 
 impl Default for ToolContext {
@@ -221,6 +224,7 @@ impl Default for ToolContext {
             loop_event_tx: None,
             provider_call_trace: None,
             file_observations: Arc::new(FileObservationTracker::default()),
+            hive_group_run: None,
         }
     }
 }
@@ -439,6 +443,12 @@ impl ToolContext {
     /// Attach a shared file-observation tracker.
     pub fn with_file_observation_tracker(mut self, tracker: Arc<FileObservationTracker>) -> Self {
         self.file_observations = tracker;
+        self
+    }
+
+    /// Attach the group linkage of a Hive group member run.
+    pub fn with_hive_group_run(mut self, group_run: Option<HiveGroupRunContext>) -> Self {
+        self.hive_group_run = group_run;
         self
     }
 

@@ -15,8 +15,8 @@ use mitsuro_core::storage::{
     HiveScheduleStore, RunCompletion, SessionManager, SessionType, WorkspaceMode,
 };
 use mitsuro_hive_protocol::{
-    Actor, Command, CreateScheduleCommand, DispatchCommand, ExtensionCommand, HiveEvent,
-    MessageCommand, ModelKey, PeerIdentity, ReplaceScheduleCommand, ResponsePayload,
+    Actor, Command, CreateScheduleCommand, DispatchCommand, ExtensionCommand, GroupMessageCommand,
+    HiveEvent, MessageCommand, ModelKey, PeerIdentity, ReplaceScheduleCommand, ResponsePayload,
     ScheduleCommand, ScheduleDefinition, SessionCommand, SetPriorityCommand, SteerCommand,
     SubscribeCommand, ToolApprovalCommand, UserResponseCommand,
 };
@@ -3735,4 +3735,257 @@ fn dedupe_hit_runs_retention_and_terminal_outbox_maintenance() {
             .unwrap(),
         0
     );
+}
+
+/// Maps each Worker DM session to a fixed outcome so group fan-out tests are
+/// deterministic regardless of claim order.
+#[derive(Default)]
+struct GroupBackend {
+    executions: Mutex<Vec<(String, String)>>,
+    outcomes_by_session: Mutex<std::collections::HashMap<String, ExecutionOutcome>>,
+    controls: Mutex<Vec<(String, ExecutionControl)>>,
+}
+
+impl GroupBackend {
+    fn fail_session(&self, session_id: &str) {
+        self.outcomes_by_session.lock().unwrap().insert(
+            session_id.to_string(),
+            ExecutionOutcome::Failed {
+                error: "provider unavailable".into(),
+                retryable: false,
+                retry_after: None,
+            },
+        );
+    }
+
+    fn execution_sessions(&self) -> Vec<String> {
+        self.executions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(session, _)| session.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for GroupBackend {
+    async fn execute(&self, request: ExecutionRequest) -> ExecutionOutcome {
+        let session_id = request.claim.run.session_id.clone().unwrap_or_default();
+        self.executions
+            .lock()
+            .unwrap()
+            .push((session_id.clone(), request.claim.run.id.clone()));
+        self.outcomes_by_session
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or(ExecutionOutcome::Succeeded {
+                output: serde_json::json!({"ok": true}),
+            })
+    }
+
+    async fn control(&self, session_id: &str, control: ExecutionControl) -> anyhow::Result<()> {
+        self.controls
+            .lock()
+            .unwrap()
+            .push((session_id.to_string(), control));
+        Ok(())
+    }
+}
+
+struct GroupFixture {
+    group_id: String,
+    /// (worker_id, dm_session_id) in roster order.
+    members: Vec<(String, String)>,
+}
+
+fn seed_group(
+    db_path: &std::path::Path,
+    slugs: &[&str],
+    mode: mitsuro_core::storage::HiveGroupExecutionMode,
+    max_rounds: u32,
+) -> GroupFixture {
+    let session_manager = SessionManager::new(Database::new(db_path).unwrap());
+    let worker_store = mitsuro_core::storage::HiveWorkerStore::new(Database::new(db_path).unwrap());
+    let mut members = Vec::new();
+    for slug in slugs {
+        let dm_session_id = session_manager
+            .create_session_for_user_with_config(
+                &format!("{slug} DM"),
+                Some("test:model"),
+                Some("/work/repo"),
+                None,
+                WorkspaceMode::Neutral,
+                None,
+                None,
+                SessionType::Hive,
+            )
+            .unwrap();
+        let worker = worker_store
+            .create(&mitsuro_core::storage::NewHiveWorker {
+                model: Some("test:model".into()),
+                dm_session_id: Some(dm_session_id.clone()),
+                ..mitsuro_core::storage::NewHiveWorker::new(*slug)
+            })
+            .unwrap();
+        members.push((worker.id, dm_session_id));
+    }
+    let group = mitsuro_core::storage::HiveGroupStore::new(Database::new(db_path).unwrap())
+        .create(&mitsuro_core::storage::NewHiveGroup {
+            user_id: None,
+            title: "Integration Room".into(),
+            execution_mode: mode,
+            max_rounds: Some(max_rounds),
+            max_member_messages_per_turn: Some(2),
+            parallelism: Some(2),
+            context_window_messages: Some(24),
+            default_assignee_worker_id: None,
+            member_worker_ids: members.iter().map(|(id, _)| id.clone()).collect(),
+        })
+        .unwrap();
+    GroupFixture {
+        group_id: group.id,
+        members,
+    }
+}
+
+fn group_turn_response(response: &ResponsePayload) -> mitsuro_hive_protocol::GroupTurnResponse {
+    match response {
+        ResponsePayload::GroupTurn(turn) => turn.clone(),
+        other => panic!("expected group turn response, got {other:?}"),
+    }
+}
+
+fn load_turn_status(
+    db_path: &std::path::Path,
+    turn_id: &str,
+) -> (
+    mitsuro_core::storage::HiveGroupTurnStatus,
+    Option<serde_json::Value>,
+    u32,
+) {
+    let db = Database::new(db_path).unwrap();
+    let turn = mitsuro_core::storage::hive_groups::load_turn(db.conn(), turn_id)
+        .unwrap()
+        .unwrap();
+    (turn.status, turn.member_outcomes, turn.next_speaker_index)
+}
+
+#[tokio::test]
+async fn group_workbench_turn_executes_members_and_aggregates_partial_failure() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let fixture = seed_group(
+        &runtime_config.database_path,
+        &["healthy", "flaky"],
+        mitsuro_core::storage::HiveGroupExecutionMode::Workbench,
+        3,
+    );
+    let backend = Arc::new(GroupBackend::default());
+    backend.fail_session(&fixture.members[1].1);
+
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::clone(&backend) as Arc<dyn ExecutionBackend>,
+    )
+    .await
+    .unwrap();
+    let handler = runtime.handler();
+    let turn = group_turn_response(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "group-workbench-1"),
+            Command::GroupMessage(GroupMessageCommand {
+                group_id: fixture.group_id.clone(),
+                message: "everyone take a look".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+    );
+    assert_eq!(turn.status, "running");
+    assert_eq!(turn.target_worker_ids.len(), 2);
+
+    let db_path = runtime_config.database_path.clone();
+    let turn_id = turn.turn_id.clone();
+    wait_for(move || {
+        load_turn_status(&db_path, &turn_id).0
+            == mitsuro_core::storage::HiveGroupTurnStatus::Partial
+    })
+    .await;
+
+    // Both members executed on their own DM lanes; the healthy sibling was
+    // never cancelled by the flaky one.
+    let sessions = backend.execution_sessions();
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions.contains(&fixture.members[0].1));
+    assert!(sessions.contains(&fixture.members[1].1));
+
+    let (_, outcomes, _) = load_turn_status(&runtime_config.database_path, &turn.turn_id);
+    let outcomes = outcomes.unwrap();
+    assert_eq!(outcomes[&fixture.members[0].0]["status"], "succeeded");
+    assert_eq!(outcomes[&fixture.members[1].0]["status"], "failed");
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn group_roundtable_advances_rotating_speakers_to_completion() {
+    let _test_guard = runtime_test_guard().await;
+    let temp = TempDir::new().unwrap();
+    let runtime_config = config(&temp);
+    let fixture = seed_group(
+        &runtime_config.database_path,
+        &["alpha", "beta"],
+        mitsuro_core::storage::HiveGroupExecutionMode::Roundtable,
+        2,
+    );
+    let backend = Arc::new(GroupBackend::default());
+    let runtime = start_runtime(
+        runtime_config.clone(),
+        "daemon-a",
+        Arc::clone(&backend) as Arc<dyn ExecutionBackend>,
+    )
+    .await
+    .unwrap();
+    let handler = runtime.handler();
+    let turn = group_turn_response(
+        &response(
+            handler.as_ref(),
+            context(Actor::local("test"), "group-roundtable-1"),
+            Command::GroupMessage(GroupMessageCommand {
+                group_id: fixture.group_id.clone(),
+                message: "round table please".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+    );
+
+    let db_path = runtime_config.database_path.clone();
+    let turn_id = turn.turn_id.clone();
+    wait_for(move || {
+        load_turn_status(&db_path, &turn_id).0
+            == mitsuro_core::storage::HiveGroupTurnStatus::Completed
+    })
+    .await;
+
+    // Two rounds over [alpha, beta] rotate the speaker order per round and
+    // execute strictly one at a time.
+    let alpha = fixture.members[0].1.clone();
+    let beta = fixture.members[1].1.clone();
+    assert_eq!(
+        backend.execution_sessions(),
+        vec![alpha.clone(), beta.clone(), beta, alpha]
+    );
+    let (_, outcomes, next_speaker_index) =
+        load_turn_status(&runtime_config.database_path, &turn.turn_id);
+    assert_eq!(next_speaker_index, 4);
+    let outcomes = outcomes.unwrap();
+    assert_eq!(outcomes[&fixture.members[0].0]["status"], "succeeded");
+    assert_eq!(outcomes[&fixture.members[1].0]["status"], "succeeded");
+    runtime.shutdown().await;
 }

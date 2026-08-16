@@ -245,6 +245,11 @@ pub(crate) async fn run_hive_session_inner(
             .map(|spec| spec.crew_slug.clone())
             .unwrap_or_else(|| runtime_state.and_then(|state| state.crew_slug)),
     )
+    .hive_group_run(
+        execution_spec
+            .as_ref()
+            .and_then(|spec| spec.hive_group_run.clone()),
+    )
     .hive_profile(Some(hive_profile))
     .permission_mode(
         execution_spec

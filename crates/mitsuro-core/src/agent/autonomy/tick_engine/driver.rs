@@ -313,6 +313,7 @@ fn clone_for_tick(config: &OrchestratorConfig) -> OrchestratorConfig {
         working_dir: config.working_dir.clone(),
         project_dir: config.project_dir.clone(),
         hive_crew_slug: config.hive_crew_slug.clone(),
+        hive_group_run: config.hive_group_run.clone(),
         hive_profile: config.hive_profile.clone(),
         session_type: config.session_type,
         permission_mode: config.permission_mode,

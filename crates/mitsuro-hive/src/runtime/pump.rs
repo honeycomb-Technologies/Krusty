@@ -23,6 +23,7 @@ use tokio::time::Instant;
 
 use super::backend::{ExecutionEvent, ExecutionEventSink, ExecutionOutcome, ExecutionRequest};
 use super::config::MAX_ABORT_DELIVERY_TIMEOUT;
+use super::groups;
 use super::handler::{
     CommittedCancellation, RuntimeShared, DAEMON_LEASE_NAME, MAX_RETRY_ATTEMPTS,
     MAX_RETRY_DELAY_SECS,
@@ -105,6 +106,9 @@ pub(crate) async fn run(shared: Arc<RuntimeShared>, mut shutdown: watch::Receive
                         }
                         if let Err(error) = promote_due_runs(&shared, token).await {
                             tracing::warn!(error = ?error, "Hive delayed-run promotion failed");
+                        }
+                        if let Err(error) = advance_group_turns(&shared, token).await {
+                            tracing::warn!(error = ?error, "Hive group turn advancement failed");
                         }
                         loop {
                             match claim_next(&shared, token).await {
@@ -1027,6 +1031,328 @@ async fn record_promoted_run_event(
     })
     .await
     .map_err(|error| RuntimeStoreError::Internal(error.into()))?
+}
+
+/// Advance durable group turns each fenced tick:
+/// - roundtable turns whose current speaker finished get their next speaker
+///   dispatched (rotation is pre-encoded in the turn's speaker plan);
+/// - member outcome summaries are refreshed onto the turn row;
+/// - turns whose members all reached terminal states are finalized as
+///   completed, partial, or failed — one member's provider failure never
+///   cancels its siblings;
+/// - cancelled turns get exact CancelRun controls delivered to still-running
+///   member executions until none remain.
+async fn advance_group_turns(
+    shared: &RuntimeShared,
+    fencing_token: u64,
+) -> Result<(), RuntimeStoreError> {
+    let _gate = shared.mutation_gate.lock().await;
+    let path = shared.config.database_path.clone();
+    let fence = daemon_fence(shared, fencing_token);
+    let (events, cancellations, room_updates) = tokio::task::spawn_blocking(move || {
+        let db = Database::new(&path).map_err(RuntimeStoreError::Internal)?;
+        let tx = Transaction::new_unchecked(db.conn(), TransactionBehavior::Immediate)?;
+        let now = canonical_timestamp(Utc::now());
+        if !daemon_fence_is_current(&tx, &fence, &now)? {
+            tx.commit()?;
+            return Ok::<_, RuntimeStoreError>((Vec::new(), Vec::new(), 0usize));
+        }
+        let mut events: Vec<PersistedEvent> = Vec::new();
+        let mut cancellations: Vec<(String, String)> = Vec::new();
+        let mut room_updates = 0usize;
+
+        // Cancelled turns first: durably cancel anything not yet executing
+        // and collect exact cancel controls for live executions.
+        let cancelled_turn_ids = {
+            let mut statement = tx.prepare(
+                "SELECT DISTINCT t.id FROM hive_group_turns t
+                 JOIN hive_runs r ON r.group_turn_id = t.id
+                 WHERE t.status = 'cancelled'
+                   AND r.status IN ('queued', 'leased', 'running', 'sleeping',
+                                    'retry_wait', 'awaiting_input', 'recovery_required')",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for turn_id in cancelled_turn_ids {
+            for run in groups::load_member_runs(&tx, &turn_id)? {
+                match run.status.as_str() {
+                    "queued" | "leased" | "sleeping" | "retry_wait" | "awaiting_input"
+                    | "recovery_required" => {
+                        tx.execute(
+                            "UPDATE hive_runs
+                             SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
+                                 lease_epoch = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+                                 wake_at = NULL, last_stop_reason = 'group turn stopped by user',
+                                 finished_at = ?2, updated_at = ?2
+                             WHERE id = ?1 AND status = ?3",
+                            params![run.id, now, run.status],
+                        )?;
+                        if run.status == "leased" {
+                            if let Some(lease_token) = run.lease_token.as_deref() {
+                                tx.execute(
+                                    "UPDATE hive_run_attempts
+                                     SET finished_at = ?4, outcome = 'cancelled',
+                                         stop_reason = 'group turn stopped by user'
+                                     WHERE run_id = ?1 AND attempt_no = ?2 AND lease_token = ?3
+                                       AND finished_at IS NULL",
+                                    params![run.id, run.attempt_count, lease_token, now],
+                                )?;
+                            }
+                        }
+                        let controller =
+                            super::persistence::require_controller(&tx, &run.session_id)?;
+                        events.push(append_event(
+                            &tx,
+                            &controller,
+                            "run_cancelled",
+                            Some(&run.id),
+                            None,
+                            Some(&format!(
+                                "transition:{}:{}:cancelled",
+                                run.id, run.attempt_count
+                            )),
+                            serde_json::json!({
+                                "run_id": run.id,
+                                "reason": "group turn stopped by user"
+                            }),
+                            &now,
+                        )?);
+                    }
+                    "running" => {
+                        cancellations.push((run.session_id.clone(), run.id.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Running turns: refresh outcomes, advance roundtables, finalize.
+        let running_turn_ids = {
+            let mut statement =
+                tx.prepare("SELECT id FROM hive_group_turns WHERE status = 'running'")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for turn_id in running_turn_ids {
+            let Some(turn) = mitsuro_core::storage::hive_groups::load_turn(&tx, &turn_id)
+                .map_err(RuntimeStoreError::Internal)?
+            else {
+                continue;
+            };
+            let runs = groups::load_member_runs(&tx, &turn.id)?;
+            let has_active = runs
+                .iter()
+                .any(|run| groups::NON_TERMINAL_RUN_STATUSES.contains(&run.status.as_str()));
+
+            // Merge existing entries (dispatch failures without runs) with
+            // fresh per-run summaries keyed by worker id.
+            let mut outcomes = turn
+                .member_outcomes
+                .as_ref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for run in &runs {
+                let key = run
+                    .worker_id
+                    .clone()
+                    .unwrap_or_else(|| format!("run:{}", run.id));
+                outcomes.insert(key, groups::member_run_outcome(run));
+            }
+
+            let mut next_index = turn.next_speaker_index as usize;
+            if !has_active && next_index < turn.speaker_plan.len() {
+                // The lane is idle and the plan continues: dispatch the next
+                // dispatchable speaker in rotation order.
+                let group = mitsuro_core::storage::hive_groups::load_group(&tx, &turn.group_id)
+                    .map_err(RuntimeStoreError::Internal)?;
+                let roster =
+                    mitsuro_core::storage::hive_groups::load_member_workers(&tx, &turn.group_id)
+                        .map_err(RuntimeStoreError::Internal)?;
+                let excerpt = trigger_excerpt(&tx, &turn.trigger_message_id)?;
+                let mut dispatched_next = false;
+                if let Some(group) = group {
+                    while next_index < turn.speaker_plan.len() {
+                        let worker_id = turn.speaker_plan[next_index].clone();
+                        next_index += 1;
+                        let worker = roster.iter().find(|worker| worker.id == worker_id);
+                        match groups::dispatch_member_run(
+                            &tx, &now, &group, &turn, worker, None, &excerpt,
+                        )? {
+                            Ok((run_id, run_events)) => {
+                                events.extend(run_events);
+                                outcomes.insert(
+                                    worker_id,
+                                    serde_json::json!({
+                                        "status": "dispatched",
+                                        "run_id": run_id
+                                    }),
+                                );
+                                dispatched_next = true;
+                                break;
+                            }
+                            Err(reason) => {
+                                outcomes.insert(
+                                    worker_id,
+                                    serde_json::json!({
+                                        "status": "failed",
+                                        "error": reason
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+                mitsuro_core::storage::hive_groups::update_turn_progress_with_conn(
+                    &tx,
+                    &turn.id,
+                    next_index as u32,
+                    &now,
+                )
+                .map_err(RuntimeStoreError::Internal)?;
+                let outcomes_value = Value::Object(outcomes);
+                mitsuro_core::storage::hive_groups::update_turn_member_outcomes_with_conn(
+                    &tx,
+                    &turn.id,
+                    &outcomes_value,
+                    &now,
+                )
+                .map_err(RuntimeStoreError::Internal)?;
+                if dispatched_next || next_index < turn.speaker_plan.len() {
+                    continue;
+                }
+                // The remaining plan could not dispatch at all; fall through
+                // to finalize against the merged outcomes.
+                let status = groups::classify_turn_outcomes(&outcomes_value);
+                finalize_group_turn(&tx, &turn, status, &outcomes_value, &now)?;
+                room_updates += 1;
+                continue;
+            }
+
+            if !has_active && next_index >= turn.speaker_plan.len() {
+                let outcomes_value = Value::Object(outcomes);
+                let status = groups::classify_turn_outcomes(&outcomes_value);
+                finalize_group_turn(&tx, &turn, status, &outcomes_value, &now)?;
+                room_updates += 1;
+                continue;
+            }
+
+            let outcomes_value = Value::Object(outcomes);
+            if turn.member_outcomes.as_ref() != Some(&outcomes_value) {
+                mitsuro_core::storage::hive_groups::update_turn_member_outcomes_with_conn(
+                    &tx,
+                    &turn.id,
+                    &outcomes_value,
+                    &now,
+                )
+                .map_err(RuntimeStoreError::Internal)?;
+            }
+        }
+
+        tx.commit()?;
+        Ok((events, cancellations, room_updates))
+    })
+    .await
+    .map_err(|error| RuntimeStoreError::Internal(error.into()))??;
+
+    for event in events {
+        shared.events.publish(event.envelope());
+    }
+    if room_updates > 0 {
+        tracing::debug!(room_updates, "Hive group turns finalized");
+    }
+    for (session_id, run_id) in cancellations {
+        if let Err(error) = shared
+            .backend
+            .control(
+                &session_id,
+                super::backend::ExecutionControl::CancelRun {
+                    run_id: run_id.clone(),
+                    reason: "group turn stopped by user".into(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id,
+                run_id,
+                error = %error,
+                "Hive group member cancellation delivery failed; retrying next tick"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn trigger_excerpt(
+    conn: &rusqlite::Connection,
+    trigger_message_id: &str,
+) -> Result<String, RuntimeStoreError> {
+    let content: Option<String> = conn
+        .query_row(
+            "SELECT content FROM hive_group_messages WHERE id = ?1",
+            [trigger_message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(content.unwrap_or_else(|| "(the triggering message is no longer available)".into()))
+}
+
+/// Finalize once and post a room-visible system summary for non-clean ends.
+fn finalize_group_turn(
+    tx: &Transaction<'_>,
+    turn: &mitsuro_core::storage::HiveGroupTurn,
+    status: mitsuro_core::storage::HiveGroupTurnStatus,
+    outcomes: &Value,
+    now: &str,
+) -> Result<(), RuntimeStoreError> {
+    use mitsuro_core::storage::HiveGroupTurnStatus as TurnStatus;
+    let finalized = mitsuro_core::storage::hive_groups::finalize_turn_with_conn(
+        tx,
+        &turn.id,
+        status,
+        Some(outcomes),
+        now,
+    )
+    .map_err(RuntimeStoreError::Internal)?;
+    if !finalized || status == TurnStatus::Completed {
+        return Ok(());
+    }
+    let (succeeded, total) = outcome_counts(outcomes);
+    let summary = match status {
+        TurnStatus::Partial => {
+            format!("Turn finished with partial results: {succeeded} of {total} members succeeded.")
+        }
+        TurnStatus::Failed => "Turn failed: no member completed.".to_string(),
+        TurnStatus::Cancelled => "Turn cancelled.".to_string(),
+        TurnStatus::Completed | TurnStatus::Running => return Ok(()),
+    };
+    mitsuro_core::storage::hive_groups::append_message_with_conn(
+        tx,
+        &mitsuro_core::storage::NewHiveGroupMessage {
+            turn_id: Some(turn.id.clone()),
+            ..mitsuro_core::storage::NewHiveGroupMessage::system(&turn.group_id, summary)
+        },
+        now,
+    )
+    .map_err(RuntimeStoreError::Internal)?;
+    Ok(())
+}
+
+fn outcome_counts(outcomes: &Value) -> (usize, usize) {
+    let Some(entries) = outcomes.as_object() else {
+        return (0, 0);
+    };
+    let succeeded = entries
+        .values()
+        .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("succeeded"))
+        .count();
+    (succeeded, entries.len())
 }
 
 async fn claim_next(
