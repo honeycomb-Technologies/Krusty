@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFocusEffect, useRouter } from "expo-router";
 import {
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from "react-native";
+import type { ViewStyle } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
@@ -64,6 +66,9 @@ const DISMISS_SPRING = {
   stiffness: 240,
   mass: 0.8,
 };
+const webGrabberStyle = Platform.OS === "web"
+  ? ({ touchAction: "none" } as unknown as ViewStyle)
+  : undefined;
 
 interface ConversationToolCallPayload {
   id: string;
@@ -444,7 +449,7 @@ export function AgentConversationScreen({
             accessibilityHint="Tap or swipe up"
             hitSlop={12}
             onPress={close}
-            style={styles.grabberRow}
+            style={[styles.grabberRow, webGrabberStyle]}
           >
             <View
               style={[styles.grabber, { backgroundColor: t.mutedForeground }]}
@@ -471,7 +476,6 @@ const styles = StyleSheet.create({
     height: 48,
     alignItems: "center",
     justifyContent: "center",
-    touchAction: "none",
   },
   grabber: { width: 42, height: 4, borderRadius: 999, opacity: 0.42 },
   header: {
