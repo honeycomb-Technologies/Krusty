@@ -6,6 +6,7 @@ import {
   MessagesSquare,
   Toolbox,
 } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { SessionType } from "@mitsuro/api";
 
 import { useThemeContext } from "../../hooks/useTheme";
@@ -47,8 +48,10 @@ export function MobileAppHeader({
   onHeightChange,
 }: MobileAppHeaderProps) {
   const { theme } = useThemeContext();
+  const insets = useSafeAreaInsets();
   const t = theme.colors;
   const visibleTitle = title?.trim() ?? "";
+  const topInset = insets.top;
 
   const impact = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -56,11 +59,23 @@ export function MobileAppHeader({
 
   return (
     <View
-      style={styles.root}
+      style={[styles.root, { paddingTop: topInset }]}
       onLayout={(event) =>
-        onHeightChange?.(Math.ceil(event.nativeEvent.layout.height))
-      }
+        onHeightChange?.(
+          Math.max(0, Math.ceil(event.nativeEvent.layout.height) - topInset),
+        )}
     >
+      {topInset > 0
+        ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.statusBarFill,
+              { height: topInset, backgroundColor: t.background },
+            ]}
+          />
+        )
+        : null}
       <View style={[styles.header, visibleTitle ? styles.headerWithTitle : null]}>
         <Pressable
           accessibilityRole="button"
@@ -189,6 +204,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     zIndex: 40,
     overflow: "visible",
+  },
+  statusBarFill: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
   },
   header: {
     minHeight: 48,
