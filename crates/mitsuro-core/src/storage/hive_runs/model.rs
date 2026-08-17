@@ -47,6 +47,17 @@ impl HiveRunKind {
             _ => None,
         }
     }
+
+    /// Group turns, peer deliveries, and heartbeats are idempotent enough to
+    /// requeue after a crashed `running` lease. User-facing dispatch and
+    /// calendar occurrences stay in `recovery_required` so side effects are
+    /// not silently replayed.
+    pub fn replays_after_expired_running(self) -> bool {
+        matches!(
+            self,
+            Self::GroupTurn | Self::WorkerMessage | Self::WorkerHeartbeat
+        )
+    }
 }
 
 impl std::fmt::Display for HiveRunKind {

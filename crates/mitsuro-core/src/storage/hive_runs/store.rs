@@ -796,7 +796,7 @@ impl HiveRunStore {
             }
         }
         let mut statement = tx.prepare(
-            "SELECT id, status, attempt_count, lease_token
+            "SELECT id, status, attempt_count, lease_token, kind
              FROM hive_runs
              WHERE status IN ('leased', 'running') AND lease_expires_at <= ?1
              ORDER BY lease_expires_at ASC",
@@ -808,14 +808,17 @@ impl HiveRunStore {
                     row.get::<_, String>(1)?,
                     nonnegative_i64(row, 2)? as u32,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
 
         let mut result = LeaseReconciliation::default();
-        for (run_id, status, attempt_no, lease_token) in expired {
-            let (target, message) = if status == HiveRunStatus::Leased.as_str() {
+        for (run_id, status, attempt_no, lease_token, kind) in expired {
+            let replayable =
+                HiveRunKind::parse(&kind).is_some_and(HiveRunKind::replays_after_expired_running);
+            let (target, message) = if status == HiveRunStatus::Leased.as_str() || replayable {
                 result.requeued_unstarted += 1;
                 result.requeued_runs.push(ReconciledRun {
                     run_id: run_id.clone(),
@@ -823,7 +826,11 @@ impl HiveRunStore {
                 });
                 (
                     HiveRunStatus::Queued,
-                    "worker lease expired before execution; requeued",
+                    if status == HiveRunStatus::Leased.as_str() {
+                        "worker lease expired before execution; requeued"
+                    } else {
+                        "worker lease expired during replayable run; requeued"
+                    },
                 )
             } else {
                 result.recovery_required += 1;
