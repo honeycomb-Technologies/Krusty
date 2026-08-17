@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
-use crate::storage::database::Database;
+use crate::storage::database::{Database, SCHEMA_VERSION};
 
 use super::{create_test_db, seed_legacy_delegated_runs_schema};
 
@@ -10,7 +10,10 @@ use super::{create_test_db, seed_legacy_delegated_runs_schema};
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 67, "Expected current schema version to be 67");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "Expected current schema version to be {SCHEMA_VERSION}"
+    );
 }
 
 #[test]
@@ -57,7 +60,10 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 67, "Expected final schema version");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "Expected final schema version {SCHEMA_VERSION}"
+    );
 }
 
 #[test]
@@ -92,7 +98,7 @@ fn concurrent_process_initialization_serializes_migrations() {
             .join()
             .expect("database initializer thread should not panic")
             .expect("concurrent database initialization should succeed");
-        assert_eq!(version, 67);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }
 

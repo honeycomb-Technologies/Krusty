@@ -63,7 +63,14 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            ripgrep \
+            bubblewrap
+      - name: Allow bubblewrap user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable

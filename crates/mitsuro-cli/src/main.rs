@@ -698,7 +698,13 @@ fn print_hive_groups(groups: &[HiveGroupListItem]) {
         let members = group
             .members
             .iter()
-            .map(|member| member.slug.as_str())
+            .map(|member| {
+                if member.display_name.is_empty() || member.display_name == member.slug {
+                    member.slug.clone()
+                } else {
+                    format!("{} ({})", member.slug, member.display_name)
+                }
+            })
             .collect::<Vec<_>>()
             .join(",");
         println!(

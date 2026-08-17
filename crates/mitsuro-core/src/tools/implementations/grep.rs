@@ -373,8 +373,21 @@ mod tests {
         assert!(result.unwrap_err().contains("1500 chars"));
     }
 
+    fn ripgrep_is_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn empty_optional_filters_are_omitted() {
+        if !ripgrep_is_available() {
+            eprintln!("skipping grep filter test: ripgrep (rg) is not installed");
+            return;
+        }
+
         let result = GrepTool
             .execute(
                 json!({
