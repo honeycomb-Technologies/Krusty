@@ -26,6 +26,48 @@ jobs:
       - name: Exercise installer migration and rollback fixtures
         run: sh install.sh --self-test
 
+  start-missing-release:
+    name: Start missing binary release
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: canonical-identity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Dispatch release.yml when the matching v* tag has no GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/mitsuro-cli/Cargo.toml | head -n 1)
+          tag="v${version}"
+          if [ -z "$version" ]; then
+            echo "Could not read cargo/mitsuro version" >&2
+            exit 1
+          fi
+          if ! git rev-parse --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "No ${tag} tag in this history; skip"
+            exit 0
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "${tag} already has a GitHub Release"
+            exit 0
+          fi
+          in_flight=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
+            --status in_progress --limit 5 --json databaseId --jq 'length')
+          queued=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
+            --status queued --limit 5 --json databaseId --jq 'length')
+          if [ "$in_flight" != "0" ] || [ "$queued" != "0" ]; then
+            echo "Release workflow already in flight; skip"
+            exit 0
+          fi
+          echo "Dispatching Release workflow for ${tag}"
+          gh workflow run release.yml --ref main -f "tag=${tag}"
+
   client-quality:
     name: Client Quality Gates
     needs: canonical-identity
