@@ -33,4 +33,6 @@ You can also write `.sampo/changesets/<slug>.md` directly. See
 - Do not retag `v0.9.22` or any existing protected tag.
 - Do not `cargo publish` product crates. They are `publish = false`.
 - Do not run `sampo publish` from a laptop unless you intend to create tags.
-  CI publishes after the Release PR merges.
+  Version (Sampo) tags after the version PR merges; Release binaries then
+  uploads GitHub Release assets. A tag without those assets is not a release.
+  See `docs/operations/release.md`.

@@ -1,4 +1,4 @@
-name: Release
+name: Release binaries
 
 on:
   push:
@@ -10,6 +10,10 @@ on:
         description: "Protected v* tag to build and publish"
         required: true
         type: string
+
+concurrency:
+  group: release-binaries-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -454,3 +458,4 @@ jobs:
               --title "$TAG_NAME" \
               --generate-notes
           fi
+          echo "Released ${TAG_NAME}. Honey: sh scripts/honey-upgrade.sh ${TAG_NAME}"

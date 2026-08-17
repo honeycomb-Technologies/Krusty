@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Dispatch release.yml when the matching v* tag has no GitHub Release
+      - name: Start Release binaries when this version is tagged but unpublished
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -53,20 +53,7 @@ jobs:
             echo "No ${tag} tag in this history; skip"
             exit 0
           fi
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "${tag} already has a GitHub Release"
-            exit 0
-          fi
-          in_flight=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
-            --status in_progress --limit 5 --json databaseId --jq 'length')
-          queued=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
-            --status queued --limit 5 --json databaseId --jq 'length')
-          if [ "$in_flight" != "0" ] || [ "$queued" != "0" ]; then
-            echo "Release workflow already in flight; skip"
-            exit 0
-          fi
-          echo "Dispatching Release workflow for ${tag}"
-          gh workflow run release.yml --ref main -f "tag=${tag}"
+          sh scripts/start-binary-release.sh "$tag"
 
   client-quality:
     name: Client Quality Gates

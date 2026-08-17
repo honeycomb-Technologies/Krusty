@@ -67,7 +67,11 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a semantic-version Git tag that matches `v*`.
+The operator path is [release.md](release.md): promote staging to `main`,
+Version (Sampo) tags `v{version}`, and **Release binaries** uploads the GitHub
+Release. A `v*` tag without archives is not a release; `install.sh` reads
+assets, not tags. The packaging workflow still runs on a protected `v*` tag
+or `workflow_dispatch` with that tag.
 Before packaging, the release workflow calls
 `.github/workflows/client-quality.yml`; no release build starts unless the API
 streaming/error contracts, shared-state type-check/tests, mobile TypeScript
