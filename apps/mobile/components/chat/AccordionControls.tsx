@@ -832,7 +832,7 @@ export function AccordionControls({
   const t = theme.colors;
   const fabAccent = t.thinking;
   const thinkingColor = thinkingLevel === 'off'
-    ? `${t.mutedForeground}${THINKING_ICON_ALPHA.off}`
+    ? `${fabAccent}${THINKING_ICON_ALPHA.off}`
     : `${fabAccent}${THINKING_ICON_ALPHA[thinkingLevel]}`;
   const providerDockOpen = modelPickerOpen && isOpen;
 
@@ -985,7 +985,7 @@ export function AccordionControls({
               >
                 <Bot
                   size={24}
-                  color={modelPickerOpen ? fabAccent : t.mutedForeground}
+                  color={fabAccent}
                   strokeWidth={1.6}
                 />
               </AccordionPill>
@@ -1054,7 +1054,7 @@ export function AccordionControls({
           >
             <Bot
               size={24}
-              color={modelPickerOpen ? fabAccent : t.mutedForeground}
+              color={fabAccent}
               strokeWidth={1.6}
             />
           </AccordionPill>
@@ -1083,7 +1083,7 @@ export function AccordionControls({
                   onPress={onPickFile}
                   accessibilityLabel="Attach file"
                 >
-                  <FileText size={23} color={t.mutedForeground} strokeWidth={1.7} />
+                  <FileText size={23} color={fabAccent} strokeWidth={1.7} />
                 </InlineActionPill>
                 <InlineActionPill
                   index={1}
@@ -1092,7 +1092,7 @@ export function AccordionControls({
                   onPress={onPickCamera}
                   accessibilityLabel="Take photo"
                 >
-                  <Camera size={23} color={t.mutedForeground} strokeWidth={1.7} />
+                  <Camera size={23} color={fabAccent} strokeWidth={1.7} />
                 </InlineActionPill>
                 <InlineActionPill
                   index={0}
@@ -1101,14 +1101,14 @@ export function AccordionControls({
                   onPress={onPickPhoto}
                   accessibilityLabel="Choose photo"
                 >
-                  <ImageIcon size={23} color={t.mutedForeground} strokeWidth={1.7} />
+                  <ImageIcon size={23} color={fabAccent} strokeWidth={1.7} />
                 </InlineActionPill>
               </View>
             }
           >
             <Paperclip
               size={24}
-              color={attachPickerOpen ? fabAccent : t.mutedForeground}
+              color={fabAccent}
               strokeWidth={1.6}
             />
           </AccordionPill>
@@ -1123,9 +1123,9 @@ export function AccordionControls({
               accessibilityHint="Switch between Build and Plan"
             >
               {mode === 'build' ? (
-                <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
+                <Hammer size={24} color={fabAccent} strokeWidth={1.6} />
               ) : (
-                <Compass size={24} color={t.mutedForeground} strokeWidth={1.6} />
+                <Compass size={24} color={fabAccent} strokeWidth={1.6} />
               )}
             </AccordionPill>
           ) : null}
@@ -1139,7 +1139,7 @@ export function AccordionControls({
             accessibilityHint="Switch permission mode"
           >
             {permissionMode === 'supervised' ? (
-              <ShieldCheck size={24} color={t.success} strokeWidth={1.6} />
+              <ShieldCheck size={24} color={fabAccent} strokeWidth={1.6} />
             ) : (
               <ShieldOff size={24} color={fabAccent} strokeWidth={1.6} />
             )}
@@ -1157,13 +1157,7 @@ export function AccordionControls({
           >
             <Zap
               size={24}
-              color={
-                fastModeSupported && fastModeEnabled
-                  ? fabAccent
-                  : fastModeSupported
-                    ? t.mutedForeground
-                    : `${t.mutedForeground}66`
-              }
+              color={fastModeSupported ? fabAccent : `${fabAccent}66`}
               strokeWidth={1.6}
             />
           </AccordionPill>
@@ -1179,7 +1173,7 @@ export function AccordionControls({
           >
             <Brain
               size={24}
-              color={thinkingSupported ? thinkingColor : `${t.mutedForeground}66`}
+              color={thinkingSupported ? thinkingColor : `${fabAccent}66`}
               strokeWidth={1.6}
             />
           </AccordionPill>

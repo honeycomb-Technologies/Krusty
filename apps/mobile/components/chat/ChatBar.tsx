@@ -795,12 +795,12 @@ function ChatBarComponent(props: ChatBarProps) {
         <ProviderLogo
           providerId={provider.id}
           label={provider.label}
-          color={t.foreground}
+          color={t.thinking}
           size={24}
         />
       ),
     })),
-    [t.foreground, visualProviderFilters],
+    [t.thinking, visualProviderFilters],
   );
   const filteredModels = useMemo(
     () => selectedProviderFilter
@@ -1076,7 +1076,7 @@ function ChatBarComponent(props: ChatBarProps) {
     hasAttachments: attachments.length > 0,
   });
   const kActive = accordionOpen;
-  const kColor = kActive ? t.thinking : t.mutedForeground;
+  const kColor = t.thinking;
   const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
 
   // The composer keeps one stable closed-screen inset. Keyboard lift moves
@@ -1350,7 +1350,7 @@ function ChatBarComponent(props: ChatBarProps) {
               >
                 <Maximize2
                   size={17}
-                  color={t.mutedForeground}
+                  color={t.thinking}
                   strokeWidth={1.8}
                 />
               </Pressable>
@@ -1397,7 +1397,7 @@ function ChatBarComponent(props: ChatBarProps) {
               isRecording={isRecording}
               canSend={canSend}
               foreground={t.foreground}
-              mutedForeground={t.mutedForeground}
+              mutedForeground={t.thinking}
               onPress={handleActionBtn}
               onLongPress={toggleRecording}
             />
