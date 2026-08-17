@@ -1,0 +1,52 @@
+name: Sampo Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sampo:
+    name: Release or publish
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.sampo.outputs.released }}
+      published: ${{ steps.sampo.outputs.published }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Sampo
+        id: sampo
+        uses: bruits/sampo/crates/sampo-github-action@cargo-sampo-github-action-v0.18.0
+        with:
+          command: auto
+          create-github-release: false
+          pr-branch: release/sampo
+          pr-title: Release (Sampo)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync Expo marketing version onto the Release PR
+        if: steps.sampo.outputs.released == 'true' && steps.sampo.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin release/sampo
+          git checkout release/sampo
+          sh scripts/sync-product-version.sh
+          if git diff --quiet -- apps/mobile/app.json apps/mobile/package.json; then
+            echo "Expo marketing version already matches cargo/mitsuro"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/mobile/app.json apps/mobile/package.json
+          git commit -m "chore(release): sync Expo marketing version with cargo/mitsuro"
+          git push origin release/sampo

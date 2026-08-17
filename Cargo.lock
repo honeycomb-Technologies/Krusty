@@ -5821,7 +5821,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-client"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5836,7 +5836,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-client-state"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "mitsuro-client",
  "serde",
@@ -5914,7 +5914,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuro-desktop-backend"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

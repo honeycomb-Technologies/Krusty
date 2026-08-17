@@ -1,6 +1,7 @@
 [package]
 name = "mitsuro-desktop-backend"
-version = "0.9.21"
+version = "0.9.22"
+publish = false
 edition = "2021"
 license = "MIT"
 description = "Desktop transport adapters for Codex app-server and the Mitsuro HTTP/SSE API"
