@@ -77,6 +77,13 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Never delete branches, worktrees, caches, build artifacts, databases, credentials, or generated native projects without first proving ownership, current use, and recovery impact. Destructive cleanup requires explicit authorization.
 - End handoffs with the authoritative path/branch/commit, validations run, runtime or release state, preserved dirty work, and the exact remaining action if anything is unfinished.
 
+## Quality Improve Loop
+- The project skill is `.cursor/skills/quality-improve/` (Hive also loads `.mitsuro/skills/quality-improve`).
+- Default is propose-only. Apply only when the user says apply and readiness is green.
+- Write the deepest simple thing: small interface, parse once at the edge, effects in a thin shell, no unpaid seams.
+- Do not use this loop to delete dead code, shrink contracts, change UI, or touch recovery/schema state.
+- Fleet: `quality-scout`, `quality-modularize`, `quality-perf`, `quality-simplifier`, `quality-critic`. One sector, one slice, critic, validate, ledger.
+
 ## Evidence and Runtime Boundaries
 - Treat static checks, unit/integration tests, a Debug simulator run, a Release simulator run, a locally installed device build, TestFlight processing, TestFlight installation, and production runtime behavior as separate evidence levels.
 - Simulator testing is the default fast loop for navigation, rendering, stress gestures, stream behavior, and most performance regressions. Use Release configuration for performance conclusions.
