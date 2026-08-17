@@ -215,16 +215,42 @@ Deno.test("ChatBar has one composer height authority", async () => {
     "ChatBar must derive expanded state from the layout contract",
   );
   assert(
-    source.includes("<KeyboardAvoidingView")
-      && source.includes('behavior="position"')
+    source.includes("function useComposerKeyboardLift")
+      && source.includes("bottom: composerKeyboardLift")
+      && source.includes("const reservedHeight = Math.max(PILL, Math.ceil(height))")
+      && source.includes("onHeightChange(reservedHeight)")
+      && !source.includes("<KeyboardAvoidingView")
       && !source.includes("setKeyboardHeight")
       && !source.includes("keyboardHeight > 0"),
-    "native keyboard avoidance must move the composer without resizing transcript reserve",
+    "keyboard lift must raise the mounted composer without resizing transcript reserve",
   );
   assert(
     source.includes("closedBottomOffset - metaReserveHeight") &&
       source.includes("paddingBottom + metaReserveHeight"),
     "the meta row must live inside the home-indicator inset instead of stacking another full pad under the composer",
+  );
+});
+
+Deno.test("accordion and model list share the input/Agent content band", async () => {
+  const composer = await Deno.readTextFile(
+    new URL("../components/chat/ChatBar.tsx", import.meta.url).pathname,
+  );
+  const modelPopover = await Deno.readTextFile(
+    new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url)
+      .pathname,
+  );
+
+  assert(
+    composer.includes("bottom: controlsLayerBottom,\n              left: 0,\n              right: 0,") &&
+      !composer.includes("right: ROOT_HORIZONTAL_PADDING") &&
+      !composer.includes("controlsLayerWidth"),
+    "accordion stack must fill the padded content box so pills share the Agent FAB's right edge",
+  );
+  assert(
+    modelPopover.includes("left: 0") &&
+      modelPopover.includes("right: PILL + GAP") &&
+      !modelPopover.includes("ROOT_HORIZONTAL_PADDING"),
+    "model list must match the input bar width inside the already-padded composer",
   );
 });
 

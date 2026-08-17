@@ -15,7 +15,6 @@ import {
   Platform,
   Text,
   Keyboard,
-  KeyboardAvoidingView,
   Image,
   Alert,
   useWindowDimensions,
@@ -476,6 +475,55 @@ async function prepareImageAttachment(
   }
 }
 
+/**
+ * KeyboardAvoidingView cannot lift this bar. The composer is `position:
+ * absolute` inside a zero-height host, so KAV compares a parent-relative
+ * onLayout frame to the keyboard's screenY and computes a 0pt move.
+ * Track the keyboard directly and raise the mounted chrome with `bottom`.
+ * Transcript reserve stays on closed-screen chrome height only.
+ */
+function useComposerKeyboardLift(enabled: boolean): number {
+  const [lift, setLift] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) {
+      setLift(0);
+      return;
+    }
+
+    const showEvent = Platform.OS === 'ios'
+      ? 'keyboardWillShow'
+      : 'keyboardDidShow';
+    const changeEvent = Platform.OS === 'ios'
+      ? 'keyboardWillChangeFrame'
+      : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios'
+      ? 'keyboardWillHide'
+      : 'keyboardDidHide';
+
+    const applyLift = (height: number) => {
+      setLift(Math.max(0, Math.round(height)));
+    };
+
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      applyLift(event.endCoordinates.height);
+    });
+    const changeSubscription = Keyboard.addListener(changeEvent, (event) => {
+      applyLift(event.endCoordinates.height);
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      applyLift(0);
+    });
+    return () => {
+      showSubscription.remove();
+      changeSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [enabled]);
+
+  return enabled ? lift : 0;
+}
+
 function ChatBarComponent(props: ChatBarProps) {
   const {
     draftKey = 'chat',
@@ -779,8 +827,12 @@ function ChatBarComponent(props: ChatBarProps) {
   );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
-  // Close transient controls when the keyboard leaves without driving keyboard
-  // geometry through React state. KeyboardAvoidingView owns the native lift.
+  const composerKeyboardLift = useComposerKeyboardLift(
+    !isDesktop && Platform.OS !== 'web',
+  );
+
+  // Close transient controls when the keyboard leaves. Lift is visual-only
+  // (`bottom: composerKeyboardLift`) and must not resize transcript reserve.
   useEffect(() => {
     const hideSub = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
@@ -1027,8 +1079,8 @@ function ChatBarComponent(props: ChatBarProps) {
   const kColor = kActive ? t.thinking : t.mutedForeground;
   const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
 
-  // The composer keeps one stable closed-screen inset. KeyboardAvoidingView
-  // moves this mounted surface natively without changing transcript padding.
+  // The composer keeps one stable closed-screen inset. Keyboard lift moves
+  // this mounted surface with `bottom` and never changes transcript padding.
   // Native phones must clear the full home-indicator inset (typically 34pt);
   // capping below it parks the meta row inside the gesture band.
   const closedGap = isDesktop
@@ -1110,10 +1162,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   // The activity line is a screen-edge indicator, independent of the composer
   // safe-area inset. Keep it flush with the bottom edge on every platform.
-  const controlsLayerWidth = Math.max(
-    PILL,
-    bandWidth - ROOT_HORIZONTAL_PADDING * 2,
-  );
   const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
 
   // Chat and Hive share a five-control stack. Code adds Build/Plan as the
@@ -1155,23 +1203,21 @@ function ChatBarComponent(props: ChatBarProps) {
   const providerDockWidth =
     providerCount * 56 + Math.max(0, providerCount - 1) * 8;
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
-  // Align under the filter strip (same right edge as filters).
-  // controlsLayer is already right-aligned at ROOT_HORIZONTAL_PADDING; bot is the
-  // rightmost control, filters sit 8px left of Agent — do NOT add FAB width again.
+  // Desktop list is a right-aligned dock. Mobile list matches the input bar
+  // inside the already-padded root: left 0, right = Agent + gap.
   const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
-    : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
+    : PILL + DOCK_TO_FAB_GAP;
 
   return (
-    <KeyboardAvoidingView
-      behavior="position"
-      enabled={!isDesktop && Platform.OS !== 'web'}
+    <View
       style={[
         styles.root,
         styles.pointerBoxNone,
         {
           paddingBottom,
+          bottom: composerKeyboardLift,
           // Parent desktop column already caps width; fill that band only.
           // Avoid left+right+maxWidth fights on web that ignore the soft-cap.
           ...(contentMaxWidth != null
@@ -1391,8 +1437,8 @@ function ChatBarComponent(props: ChatBarProps) {
             styles.pointerBoxNone,
             {
               bottom: controlsLayerBottom,
-              width: controlsLayerWidth,
-              right: ROOT_HORIZONTAL_PADDING,
+              left: 0,
+              right: 0,
               zIndex: modelPickerOpen || modelRailOpen ? 40 : 20,
             },
           ]}
@@ -1498,7 +1544,7 @@ function ChatBarComponent(props: ChatBarProps) {
         border={t.border}
         keyboardAppearance={theme.scheme}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
