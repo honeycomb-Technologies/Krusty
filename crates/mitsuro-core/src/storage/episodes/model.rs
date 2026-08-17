@@ -18,6 +18,8 @@ pub struct EpisodeSearch<'a> {
     pub query: &'a str,
     pub user_id: Option<&'a str>,
     pub project_dir: Option<&'a str>,
+    pub session_type: Option<&'a str>,
+    pub session_id: Option<&'a str>,
     pub limit: usize,
 }
 
@@ -27,6 +29,8 @@ impl<'a> EpisodeSearch<'a> {
             query,
             user_id,
             project_dir: None,
+            session_type: None,
+            session_id: None,
             limit: 20,
         }
     }

@@ -119,12 +119,21 @@ impl<'a> EpisodeStore<'a> {
              WHERE conversation_episodes_fts MATCH ?1
                AND ((?2 IS NULL AND s.user_id IS NULL) OR s.user_id = ?2)
                AND (?3 IS NULL OR s.project_dir = ?3)
+               AND (?4 IS NULL OR s.session_type = ?4)
+               AND (?5 IS NULL OR e.session_id = ?5)
              ORDER BY bm25(conversation_episodes_fts), e.occurred_at DESC
-             LIMIT ?4",
+             LIMIT ?6",
         )?;
         let episodes = statement
             .query_map(
-                params![fts_query, search.user_id, search.project_dir, limit],
+                params![
+                    fts_query,
+                    search.user_id,
+                    search.project_dir,
+                    search.session_type,
+                    search.session_id,
+                    limit
+                ],
                 |row| {
                     Ok(ConversationEpisode {
                         id: row.get(0)?,

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use chrono::{Duration, Utc};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
@@ -414,6 +415,25 @@ impl MemoryStore {
 
         sql.push_str(" ORDER BY updated_at DESC");
         self.query_memories(&sql, &bound)
+    }
+
+    /// Lower confidence of unpinned active memories that have not been
+    /// updated recently. Rows are never deleted; confidence is clamped to
+    /// `floor` so stale facts remain recoverable.
+    pub fn decay_stale(&self, older_than_days: i64, factor: f64, floor: f64) -> Result<usize> {
+        let older_than_days = older_than_days.max(1);
+        let factor = factor.clamp(0.0, 1.0);
+        let floor = floor.clamp(0.0, 1.0);
+        let cutoff = (Utc::now() - Duration::days(older_than_days)).to_rfc3339();
+        let changed = self.db.conn().execute(
+            "UPDATE agent_memories
+             SET confidence = MAX(?1, confidence * ?2)
+             WHERE pinned = 0
+               AND status = 'active'
+               AND updated_at < ?3",
+            params![floor, factor, cutoff],
+        )?;
+        Ok(changed)
     }
 
     /// Hive prompt boundary: exact owner, no secret injection, and ACL

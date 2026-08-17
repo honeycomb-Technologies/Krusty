@@ -683,3 +683,39 @@ fn hive_reader_isolates_worker_private_and_secret_memories() {
         &primary_reader
     ));
 }
+
+#[test]
+fn decay_stale_lowers_unpinned_confidence_and_spares_pinned() {
+    let (store, tmp) = create_store();
+    let mut stale = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "stale-fact",
+        "Stale fact",
+        "old scheduler detail",
+    );
+    stale.confidence = 1.0;
+    let stale = store.save_canonical(&stale).unwrap();
+    let mut pinned = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "pinned-fact",
+        "Pinned fact",
+        "keep this scheduler detail",
+    );
+    pinned.confidence = 1.0;
+    pinned.pinned = true;
+    let pinned = store.save_canonical(&pinned).unwrap();
+
+    Database::new(&tmp.path().join("memories.db"))
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE agent_memories SET updated_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?1",
+            rusqlite::params![stale.id],
+        )
+        .unwrap();
+
+    let changed = store.decay_stale(30, 0.5, 0.05).unwrap();
+    assert_eq!(changed, 1);
+    assert!((store.get(&stale.id).unwrap().unwrap().confidence - 0.5).abs() < f64::EPSILON);
+    assert!((store.get(&pinned.id).unwrap().unwrap().confidence - 1.0).abs() < f64::EPSILON);
+}

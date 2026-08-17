@@ -14,7 +14,9 @@ use crate::agent::ProviderCallTraceContext;
 use crate::ai::client::AiClient;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::{
-    CompactionStore, Database, FileActivityTracker, MessageStore, RankedFile, StoredMessageRecord,
+    CanonicalMemoryInput, CompactionStore, Database, FileActivityTracker, MemoryAclScope,
+    MemorySource, MemoryStore, MemoryType, MessageStore, RankedFile, StoredMessageRecord,
+    COMPACTION_FLUSH_TITLE_PREFIX,
 };
 
 use super::apply::build_compacted_conversation;
@@ -236,6 +238,10 @@ async fn run_compaction_pipeline_inner(
         .iter()
         .map(|indexed| indexed.message.clone())
         .collect();
+
+    if let Err(error) = flush_compaction_memory(&request, &summarize_messages, compaction_count) {
+        tracing::warn!(%error, "Failed to flush durable notes before compaction summarization");
+    }
 
     let summary = if let Some(summary) = request.summary_override.clone() {
         summary
@@ -581,6 +587,50 @@ fn deterministic_summary(
         pending_tasks,
         important_files,
     }
+}
+
+fn flush_compaction_memory(
+    request: &CompactionRequest<'_>,
+    summarize_messages: &[ModelMessage],
+    compaction_count: u32,
+) -> Result<()> {
+    let content = compaction_flush_content(summarize_messages);
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    let db = Database::new(request.db_path)?;
+    let mut input = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        format!("compaction-flush:{}:{compaction_count}", request.session_id),
+        format!("{COMPACTION_FLUSH_TITLE_PREFIX}{compaction_count}"),
+        content,
+    );
+    input.project_dir = request.project_dir.map(str::to_string);
+    input.user_id = request.user_id.map(str::to_string);
+    input.source = MemorySource::Compaction;
+    input.source_session_id = Some(request.session_id.to_string());
+    input.acl_scope = MemoryAclScope::Conversation;
+    input.conversation_id = Some(request.session_id.to_string());
+    MemoryStore::new(db).save_canonical(&input)?;
+    Ok(())
+}
+
+fn compaction_flush_content(messages: &[ModelMessage]) -> String {
+    let mut parts = Vec::new();
+    for message in messages {
+        if !matches!(message.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        let Some(text) = first_text(&message.content) else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        parts.push(trimmed.to_string());
+    }
+    truncate_chars(&parts.join("\n\n"), 4_000)
 }
 
 fn first_text(content: &[Content]) -> Option<&str> {
