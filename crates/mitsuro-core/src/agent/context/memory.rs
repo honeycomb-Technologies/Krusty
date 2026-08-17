@@ -68,7 +68,7 @@ pub(super) fn build_memory_context(
             .filter(|memory| memory.memory_type == *memory_type)
             .filter_map(|memory| {
                 let score = memory_relevance_score(memory, &query_terms);
-                (score > 0).then_some((score, memory))
+                (score > 0.0).then_some((score, memory))
             })
             .collect::<Vec<_>>();
         typed.sort_by(|left, right| {
