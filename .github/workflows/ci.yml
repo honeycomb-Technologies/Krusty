@@ -73,6 +73,14 @@ jobs:
     needs: canonical-identity
     uses: ./.github/workflows/client-quality.yml
 
+  mobile-web-export:
+    name: Mobile Web Export
+    needs: client-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Surface the required status-check name
+        run: echo "Client Quality Gates / Mobile Web Export already passed"
+
   rust-check:
     name: Rust Check
     needs: canonical-identity
