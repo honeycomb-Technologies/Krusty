@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::markdown::parse_checkbox_line;
-use super::{PlanFile, PlanPhase, PlanTask, TaskStatus};
+use super::{PlanFile, PlanPhase, PlanTask};
 
 static RE_CHECKBOX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)- \[[xX]\] (?:\*\*)?(?:Task\s*)?(\d+\.\d+)").expect("RE_CHECKBOX: valid regex")
