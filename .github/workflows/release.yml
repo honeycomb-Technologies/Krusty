@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Protected v* tag to build and publish"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -14,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Check canonical names and exact compatibility exceptions
@@ -25,6 +36,8 @@ jobs:
     name: Client Quality Gates
     needs: canonical-identity
     uses: ./.github/workflows/client-quality.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
   build:
     name: Build ${{ matrix.target }}
@@ -47,6 +60,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -148,6 +163,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Install desktop bundling dependencies
         run: |
@@ -190,15 +207,31 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Require protected release tag
-        if: github.ref_protected != true
+      - name: Require a protected v* release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
-          echo "Release tags must be protected before publishing artifacts." >&2
-          exit 1
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "Release tag must look like v0.9.23, got: ${tag:-<empty>}" >&2
+            exit 1
+          fi
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null; then
+            echo "Release tag ${tag} does not exist." >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "push" && "$REF_PROTECTED" != "true" ]]; then
+            echo "Release tags must be protected before publishing artifacts." >&2
+            exit 1
+          fi
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Download all artifacts
         env:
@@ -286,7 +319,7 @@ jobs:
 
       - name: Render and validate Homebrew formula
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ env.RELEASE_TAG }}
         run: |
           bash .github/homebrew/render-formula.sh \
             "$TAG_NAME" \
@@ -296,7 +329,7 @@ jobs:
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ env.RELEASE_TAG }}
         run: |
           mapfile -t release_assets < <(find artifacts -type f -print | sort)
           if [ "${#release_assets[@]}" -eq 0 ]; then

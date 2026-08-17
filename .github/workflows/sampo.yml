@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   sampo:
@@ -65,3 +66,21 @@ jobs:
             echo "Enable: Settings → Actions → General → Allow GitHub Actions to create and approve pull requests."
             exit 0
           fi
+
+      - name: Start binary release for the new v* tag
+        if: steps.sampo.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/mitsuro-cli/Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "Could not read cargo/mitsuro version" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          if ! git rev-parse --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
+          fi
+          echo "Dispatching Release workflow for ${tag}"
+          gh workflow run release.yml --ref main -f "tag=${tag}"
