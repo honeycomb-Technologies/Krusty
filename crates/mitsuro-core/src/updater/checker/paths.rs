@@ -71,7 +71,7 @@ pub fn detect_repo_path() -> Option<PathBuf> {
     None
 }
 
-pub(super) fn detect_platform() -> Result<&'static str> {
+pub(crate) fn detect_platform() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),

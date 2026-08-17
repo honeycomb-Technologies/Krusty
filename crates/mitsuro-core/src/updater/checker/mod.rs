@@ -2,10 +2,11 @@
 
 mod apply;
 mod check;
+pub(crate) mod checksum;
 mod download;
 mod extract;
-mod paths;
-mod policy;
+pub(crate) mod paths;
+pub(crate) mod policy;
 #[cfg(test)]
 mod tests;
 mod types;

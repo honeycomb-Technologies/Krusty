@@ -92,6 +92,7 @@ pub struct PreviewApp {
     extension_toggle: Option<oneshot::Receiver<Result<(), String>>>,
     auth_events: Option<mpsc::UnboundedReceiver<crate::tui_support::utils::OAuthStatusUpdate>>,
     setup_events: Option<mpsc::UnboundedReceiver<SetupServiceUpdate>>,
+    update_events: Option<mpsc::UnboundedReceiver<mitsuro_core::updater::UpdateStatus>>,
     home: Option<HomeSnapshot>,
     setup: Option<SetupSnapshot>,
     sessions: Vec<RecentSession>,
@@ -131,6 +132,7 @@ impl PreviewApp {
             extension_toggle: None,
             auth_events: None,
             setup_events: None,
+            update_events: None,
             home: None,
             setup: None,
             sessions: Vec::new(),
@@ -163,10 +165,28 @@ impl PreviewApp {
         let extensions = runtime.extension_snapshot().await;
         let controls = runtime.controls_snapshot();
         let appearance = runtime.appearance_snapshot();
+        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            match mitsuro_core::updater::check_for_updates().await {
+                Ok(None) => {
+                    let _ = update_tx.send(mitsuro_core::updater::UpdateStatus::UpToDate);
+                }
+                Ok(Some(info)) => {
+                    let _ = update_tx.send(mitsuro_core::updater::UpdateStatus::Available(info));
+                }
+                Err(error) => {
+                    tracing::debug!("Update check failed: {error}");
+                    let _ = update_tx.send(mitsuro_core::updater::UpdateStatus::Error(
+                        error.to_string(),
+                    ));
+                }
+            }
+        });
         let mut app = Self {
             runtime: Some(runtime),
             auth_events: Some(auth_events),
             setup_events: Some(setup_events),
+            update_events: Some(update_rx),
             home: Some(home),
             setup: Some(setup),
             sessions,
@@ -269,6 +289,19 @@ impl PreviewApp {
             }
             // Drop non-text paste noise rather than inserting replacement chars.
             return Redraw::None;
+        }
+        // Ctrl+U installs a ready release. Composer kill-to-start stays when
+        // no applyable update is showing.
+        if matches!(
+            &event,
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.modifiers == KeyModifiers::CONTROL
+                    && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
+                    && self.state.update.as_ref().is_some_and(|notice| notice.can_apply)
+        ) {
+            self.dispatch(UiAction::Invoke(ActionId::ApplyUpdate));
+            return Redraw::Full;
         }
         // Ctrl+V: system clipboard (text or image), legacy input-bar parity.
         if matches!(
@@ -2264,6 +2297,7 @@ impl PreviewApp {
                 self.start_manual_compaction(arguments);
                 None
             }
+            SlashCommand::Update => Some(ActionId::ApplyUpdate),
         };
         if let Some(action) = action {
             self.dispatch(UiAction::Invoke(action));
@@ -2808,6 +2842,30 @@ impl PreviewApp {
             self.state.setup.model_index = 0;
             self.state.setup.oauth_message = Some("Model catalog ready.".to_owned());
             self.state.setup.error = error;
+        }
+    }
+
+    fn handle_update_status(&mut self, status: mitsuro_core::updater::UpdateStatus) {
+        match status {
+            mitsuro_core::updater::UpdateStatus::Available(info) => {
+                self.state.update = Some(state::UpdateNotice {
+                    current_version: info.current_version,
+                    new_version: info.new_version,
+                    can_apply: info.apply.can_apply(),
+                    hint: if info.apply.can_apply() {
+                        "Ctrl+U to install".to_owned()
+                    } else {
+                        info.apply.guidance()
+                    },
+                });
+            }
+            mitsuro_core::updater::UpdateStatus::UpToDate => {
+                self.state.update = None;
+            }
+            mitsuro_core::updater::UpdateStatus::Error(error) => {
+                tracing::debug!("Update check failed: {error}");
+            }
+            _ => {}
         }
     }
 
@@ -3392,7 +3450,7 @@ impl PreviewApp {
     }
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<crate::tui_v2::TuiOutcome> {
     let mut app = PreviewApp::initialize().await?;
     let mut terminal = TerminalSession::enter()?;
     let mut events = EventStream::new();
@@ -3419,6 +3477,7 @@ pub async fn run() -> Result<()> {
             Compaction(Option<Result<(), String>>),
             ExtensionCommand(Option<Result<String, String>>),
             ExtensionToggle(Option<Result<(), String>>),
+            Update(Option<mitsuro_core::updater::UpdateStatus>),
             Motion(u64),
         }
         let edge_scrolling = app.state.mouse.edge_scroll.is_active();
@@ -3447,6 +3506,7 @@ pub async fn run() -> Result<()> {
             let compaction = &mut app.compaction;
             let extension_command = &mut app.extension_command;
             let extension_toggle = &mut app.extension_toggle;
+            let update_events = &mut app.update_events;
             // Prefer terminal input over motion so splash/spinner ticks cannot
             // monopolize the loop and make typing feel frozen.
             tokio::select! {
@@ -3495,6 +3555,12 @@ pub async fn run() -> Result<()> {
                         None => std::future::pending::<Option<Result<(), String>>>().await,
                     }
                 } => NextEvent::ExtensionToggle(event),
+                event = async {
+                    match update_events.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending::<Option<mitsuro_core::updater::UpdateStatus>>().await,
+                    }
+                } => NextEvent::Update(event),
                 _ = motion_tick.tick(), if wants_motion => {
                     NextEvent::Motion(motion_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
                 }
@@ -3587,6 +3653,14 @@ pub async fn run() -> Result<()> {
                 .await;
                 Redraw::Full
             }
+            NextEvent::Update(Some(status)) => {
+                app.handle_update_status(status);
+                Redraw::Full
+            }
+            NextEvent::Update(None) => {
+                app.update_events = None;
+                Redraw::None
+            }
             NextEvent::Motion(elapsed_ms) => {
                 let mut need = Redraw::None;
                 if app.process_selection_edge_scroll() {
@@ -3621,11 +3695,17 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    let outcome = if let Some(version) = app.state.apply_update_version() {
+        crate::tui_v2::TuiOutcome::ApplyUpdate { version }
+    } else {
+        crate::tui_v2::TuiOutcome::Quit
+    };
+
     if let Some(runtime) = &app.runtime {
         runtime.shutdown().await;
     }
 
-    Ok(())
+    Ok(outcome)
 }
 
 /// Char-safe inclusive slice for selection copy.
@@ -4079,6 +4159,7 @@ mod tests {
             extension_toggle: None,
             auth_events: None,
             setup_events: None,
+            update_events: None,
             home: None,
             setup: None,
             sessions: Vec::new(),
@@ -4112,6 +4193,38 @@ mod tests {
             )))
             .handled());
         assert!(app.state.should_exit());
+    }
+
+    #[test]
+    fn ctrl_u_installs_an_available_update_and_otherwise_kills_the_composer_line() {
+        let mut app = PreviewApp::preview();
+        app.dispatch(UiAction::ComposerInserted("keep this".to_owned()));
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
+        assert_eq!(app.state.composer.text(), "");
+        assert!(!matches!(
+            app.state.lifecycle,
+            state::AppLifecycle::ApplyUpdateRequested
+        ));
+
+        app.state.update = Some(state::UpdateNotice {
+            current_version: "0.9.22".to_owned(),
+            new_version: "0.9.23".to_owned(),
+            can_apply: true,
+            hint: "Ctrl+U to install".to_owned(),
+        });
+        app.dispatch(UiAction::ComposerInserted("draft".to_owned()));
+        assert!(app
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+            )))
+            .handled());
+        assert_eq!(app.state.apply_update_version().as_deref(), Some("0.9.23"));
     }
 
     #[test]

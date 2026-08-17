@@ -41,6 +41,7 @@ pub enum ActionId {
     JumpEnd,
     Submit,
     InsertNewline,
+    ApplyUpdate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -535,6 +536,14 @@ pub const ACTIONS: &[ActionDefinition] = &[
         bindings: NEWLINE,
         contexts: COMPOSER,
         global: false,
+        footer_priority: None,
+    },
+    ActionDefinition {
+        id: ActionId::ApplyUpdate,
+        label: "Install update",
+        bindings: NO_KEYS,
+        contexts: ALL_CONTEXTS,
+        global: true,
         footer_priority: None,
     },
 ];

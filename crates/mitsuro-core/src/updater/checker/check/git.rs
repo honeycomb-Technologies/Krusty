@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::updater::checker::types::UpdateInfo;
 
+#[allow(dead_code)]
 pub(super) fn check_for_updates_dev(repo_path: &Path) -> Result<Option<UpdateInfo>> {
     debug!("Fetching from origin...");
 
@@ -35,10 +36,18 @@ pub(super) fn check_for_updates_dev(repo_path: &Path) -> Result<Option<UpdateInf
         new_version: new_commit,
         release_notes: commit_message,
         is_dev_mode: true,
+        apply: crate::updater::UpdateApplyPolicy::Unavailable {
+            reason: "Development check compared git revisions; install a release to auto-update."
+                .to_string(),
+        },
     }))
 }
 
 pub(crate) fn is_newer_version(new: &str, current: &str) -> bool {
+    if let (Ok(new), Ok(current)) = (semver::Version::parse(new), semver::Version::parse(current)) {
+        return new.cmp_precedence(&current) == std::cmp::Ordering::Greater;
+    }
+
     let parse = |s: &str| -> (u32, u32, u32) {
         let mut parts = s.split('.');
         (
@@ -48,10 +57,7 @@ pub(crate) fn is_newer_version(new: &str, current: &str) -> bool {
         )
     };
 
-    let new_v = parse(new);
-    let curr_v = parse(current);
-
-    new_v > curr_v
+    parse(new) > parse(current)
 }
 
 fn git_stdout(repo_path: &Path, args: &[&str]) -> Result<String> {

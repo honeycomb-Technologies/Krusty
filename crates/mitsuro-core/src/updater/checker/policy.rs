@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use anyhow::Result;
 
-const MANAGED_UPDATE_MESSAGE: &str = "Automatic in-app updates are disabled because the Mitsuro CLI, Hive service, compatibility shims, and service integration must be upgraded together. Upgrade the complete Mitsuro release with your platform package manager, or rerun the checksum-verifying installer from https://github.com/honeycomb-Technologies/Mitsuro/blob/main/install.sh.";
+pub(crate) const MANAGED_UPDATE_MESSAGE: &str = "Automatic in-app updates are disabled because the Mitsuro CLI, Hive service, compatibility shims, and service integration must be upgraded together. Upgrade the complete Mitsuro release with your platform package manager, or rerun the checksum-verifying installer from https://github.com/honeycomb-Technologies/Mitsuro/blob/main/install.sh.";
 
 pub(super) fn require_safe_single_binary_update() -> Result<()> {
     Err(anyhow!(MANAGED_UPDATE_MESSAGE))

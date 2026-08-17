@@ -67,6 +67,13 @@ Start the terminal app:
 mitsuro
 ```
 
+When a newer GitHub release exists, the TUI shows a notice. Press `Ctrl+U`
+(or run `/update`) to quit, install the full release (TUI, Hive, and server
+units), then relaunch. `mitsuro update` checks without applying;
+`mitsuro update --apply` runs the same installer path from the shell.
+
+You can also rerun `install.sh` or `brew upgrade BurgessTG/tap/mitsuro`.
+
 Start the server and web workspace:
 
 ```bash
