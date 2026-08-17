@@ -1,5 +1,5 @@
 // @ts-ignore Deno requires an explicit extension; the Expo compiler resolves the same source through its extensionless application imports.
-import { archivedSessions, chronologicalSessions, chronologicalThreadDayGroups, codeDirectoryToAutoExpand, codeProjectThreadGroups, formatThreadMetric, sessionModelLabel, sessionProjectDirectory, sessionProviderKey, sessionProviderLabel, sessionStateLabel } from "../components/navigation/threadSections.ts";
+import { applySessionListOverrides, archivedSessions, chronologicalSessions, chronologicalThreadDayGroups, codeDirectoryToAutoExpand, codeProjectThreadGroups, formatThreadMetric, sessionModelLabel, sessionProjectDirectory, sessionProviderKey, sessionProviderLabel, sessionStateLabel } from "../components/navigation/threadSections.ts";
 import type { SessionResponse } from "@mitsuro/api";
 
 declare const Deno: {
@@ -165,6 +165,36 @@ Deno.test("pinned Code tasks stay in their calendar day", () => {
 
   assertEquals(groups[0]?.label, "Today", "day order remains chronological");
   assertEquals(groups[1]?.sessions[0]?.id, "older-pinned", "pinning does not move a task into Today");
+});
+
+Deno.test("local overrides hide deleted and archived rows immediately", () => {
+  const active = session("active", "2026-08-16T12:00:00Z");
+  const doomed = session("doomed", "2026-08-16T12:00:00Z");
+  const parked = session("parked", "2026-08-16T12:00:00Z");
+  const restored = session("restored", "2026-08-16T11:00:00Z", {
+    archived_at: "2026-08-16T11:30:00Z",
+  });
+
+  const next = applySessionListOverrides(
+    [active, doomed, parked],
+    {
+      doomed: { type: "remove" },
+      parked: { type: "archive", archived_at: "2026-08-16T12:05:00Z" },
+      restored: { type: "archive", archived_at: null },
+    },
+    [restored],
+  );
+
+  assertEquals(
+    chronologicalSessions(next, "code").map((item) => item.id).join(","),
+    "active,restored",
+    "delete and archive must leave the active list in the same pass",
+  );
+  assertEquals(
+    next.find((item) => item.id === "parked")?.archived_at,
+    "2026-08-16T12:05:00Z",
+    "archive override stamps archived_at before the parent store updates",
+  );
 });
 
 Deno.test("a pinned conversation promotes its project folder", () => {

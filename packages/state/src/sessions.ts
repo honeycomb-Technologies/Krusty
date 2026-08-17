@@ -29,6 +29,8 @@ export interface SessionsStoreState {
   upsertSession: (session: SessionListItem) => void;
   removeSession: (id: string) => void;
   setSessionArchived: (id: string, archived: boolean) => void;
+  /** Restore a snapshot and drop in-flight list mutations for that row. */
+  revertSession: (session: SessionListItem) => void;
   createSession: (title?: string, workingDir?: string, targetBranch?: string | null) => Promise<SessionListItem | null>;
   deleteSession: (id: string) => Promise<boolean>;
   selectSession: (id: string) => Promise<void>;
@@ -60,9 +62,74 @@ export function createSessionsStore(
   let loadSessionsInFlight: Promise<void> | null = null;
   let loadGeneration = 0;
   let inFlightGeneration = 0;
+  const pendingRemovedIds = new Set<string>();
+  const pendingArchiveById = new Map<string, string | null>();
 
   const bumpListGeneration = () => {
     loadGeneration += 1;
+  };
+
+  const rememberRemoved = (id: string) => {
+    pendingRemovedIds.add(id);
+    pendingArchiveById.delete(id);
+    bumpListGeneration();
+  };
+
+  const rememberArchived = (id: string, archivedAt: string | null) => {
+    pendingRemovedIds.delete(id);
+    pendingArchiveById.set(id, archivedAt);
+    bumpListGeneration();
+  };
+
+  const clearPending = (id: string) => {
+    pendingRemovedIds.delete(id);
+    pendingArchiveById.delete(id);
+  };
+
+  const applyPendingToList = (sessions: SessionListItem[]): SessionListItem[] =>
+    sessions
+      .filter((session) => !pendingRemovedIds.has(session.id))
+      .map((session) => {
+        if (!pendingArchiveById.has(session.id)) {
+          return session;
+        }
+        const archivedAt = pendingArchiveById.get(session.id) ?? null;
+        return { ...session, archived_at: archivedAt };
+      });
+
+  const reconcilePendingWithServer = (sessions: SessionListItem[]) => {
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    for (const id of [...pendingRemovedIds]) {
+      if (!byId.has(id)) {
+        pendingRemovedIds.delete(id);
+      }
+    }
+    for (const [id, archivedAt] of [...pendingArchiveById]) {
+      const live = byId.get(id);
+      if (archivedAt) {
+        if (!live || live.archived_at) {
+          pendingArchiveById.delete(id);
+        }
+        continue;
+      }
+      if (live && !live.archived_at) {
+        pendingArchiveById.delete(id);
+      }
+    }
+  };
+
+  const mergeIncomingSession = (
+    existing: SessionListItem | undefined,
+    incoming: SessionListItem,
+  ): SessionListItem => {
+    const merged = existing ? { ...existing, ...incoming } : incoming;
+    if (pendingArchiveById.has(merged.id)) {
+      return {
+        ...merged,
+        archived_at: pendingArchiveById.get(merged.id) ?? null,
+      };
+    }
+    return merged;
   };
 
   return create<SessionsStoreState>((set, get) => ({
@@ -92,8 +159,10 @@ export function createSessionsStore(
           if (generation !== loadGeneration) {
             return;
           }
+          const nextSessions = applyPendingToList(data);
+          reconcilePendingWithServer(data);
           set((s) => {
-            const nextSignature = sessionsListSignature(data);
+            const nextSignature = sessionsListSignature(nextSessions);
             const prevSignature = sessionsListSignature(s.sessions);
             if (nextSignature === prevSignature) {
               return {
@@ -104,7 +173,7 @@ export function createSessionsStore(
             }
             return {
               ...s,
-              sessions: data,
+              sessions: nextSessions,
               isLoading: false,
               error: null,
             };
@@ -138,6 +207,57 @@ export function createSessionsStore(
     },
 
     upsertSession(session: SessionListItem) {
+      if (pendingRemovedIds.has(session.id)) {
+        return;
+      }
+      bumpListGeneration();
+      set((s) => {
+        const existingIndex = s.sessions.findIndex((item) => item.id === session.id);
+        const merged = mergeIncomingSession(
+          existingIndex === -1 ? undefined : s.sessions[existingIndex],
+          session,
+        );
+        if (existingIndex === -1) {
+          return {
+            ...s,
+            sessions: [merged, ...s.sessions],
+          };
+        }
+        const next = s.sessions.slice();
+        next[existingIndex] = merged;
+        return { ...s, sessions: next };
+      });
+    },
+
+    removeSession(id: string) {
+      rememberRemoved(id);
+      set((s) => ({
+        ...s,
+        sessions: s.sessions.filter((session) => session.id !== id),
+      }));
+    },
+
+    setSessionArchived(id: string, archived: boolean) {
+      const archivedAt = archived ? new Date().toISOString() : null;
+      rememberArchived(id, archivedAt);
+      set((s) => {
+        const existingIndex = s.sessions.findIndex((session) => session.id === id);
+        if (existingIndex === -1) {
+          return s;
+        }
+        const next = s.sessions.slice();
+        next[existingIndex] = {
+          ...next[existingIndex],
+          archived_at: archived
+            ? next[existingIndex]?.archived_at ?? archivedAt
+            : null,
+        };
+        return { ...s, sessions: next };
+      });
+    },
+
+    revertSession(session: SessionListItem) {
+      clearPending(session.id);
       bumpListGeneration();
       set((s) => {
         const existingIndex = s.sessions.findIndex((item) => item.id === session.id);
@@ -148,30 +268,9 @@ export function createSessionsStore(
           };
         }
         const next = s.sessions.slice();
-        next[existingIndex] = { ...next[existingIndex], ...session };
+        next[existingIndex] = session;
         return { ...s, sessions: next };
       });
-    },
-
-    removeSession(id: string) {
-      bumpListGeneration();
-      set((s) => ({
-        ...s,
-        sessions: s.sessions.filter((session) => session.id !== id),
-      }));
-    },
-
-    setSessionArchived(id: string, archived: boolean) {
-      bumpListGeneration();
-      const archivedAt = archived ? new Date().toISOString() : null;
-      set((s) => ({
-        ...s,
-        sessions: s.sessions.map((session) =>
-          session.id === id
-            ? { ...session, archived_at: archived ? session.archived_at ?? archivedAt : null }
-            : session,
-        ),
-      }));
     },
 
     async createSession(title?: string, workingDir?: string, targetBranch?: string | null) {
@@ -225,7 +324,7 @@ export function createSessionsStore(
         return true;
       } catch (err) {
         if (previous) {
-          get().upsertSession(previous);
+          get().revertSession(previous);
         }
         set((s) => ({
           ...s,

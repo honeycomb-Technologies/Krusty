@@ -142,6 +142,48 @@ Deno.test("archive marks the row locally before the next poll", () => {
   );
 });
 
+Deno.test("a fetch that starts after delete cannot restore the row", async () => {
+  const alpha = session("alpha");
+  const beta = session("beta");
+  const deleteGate = deferred<void>();
+  const loadGate = deferred<SessionListItem[]>();
+  const client = createClient({
+    sessions: [alpha, beta],
+    getSessions: () => loadGate.promise,
+    deleteSession: () => deleteGate.promise,
+  });
+  const store = createSessionsStore(client as never, createWorkspace() as never);
+  store.setState({ sessions: [alpha, beta] });
+
+  const deleted = store.getState().deleteSession("alpha");
+  const loading = store.getState().loadSessions();
+  loadGate.resolve([alpha, beta]);
+  await loading;
+  assertEquals(
+    store.getState().sessions.map((item) => item.id).join(","),
+    "beta",
+    "a refresh that still sees the deleted row must keep the local removal",
+  );
+
+  deleteGate.resolve();
+  assertEquals(await deleted, true, "delete must still succeed after the stale refresh");
+});
+
+Deno.test("upsert cannot clear a pending archive stamp", () => {
+  const alpha = session("alpha");
+  const store = createSessionsStore(
+    createClient({ sessions: [alpha] }) as never,
+    createWorkspace() as never,
+  );
+  store.setState({ sessions: [alpha] });
+  store.getState().setSessionArchived("alpha", true);
+  store.getState().upsertSession({ ...alpha, title: "renamed" });
+  assert(
+    Boolean(store.getState().sessions[0]?.archived_at),
+    "a later upsert missing archived_at must not put the row back in the active list",
+  );
+});
+
 Deno.test("a failed delete restores the previous row", async () => {
   const alpha = session("alpha");
   const store = createSessionsStore(
