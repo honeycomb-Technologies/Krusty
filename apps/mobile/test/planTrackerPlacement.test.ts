@@ -31,8 +31,10 @@ Deno.test("plan tracker is compact and anchored above the composer", async () =>
       surface.includes(
         "const conversationBottomPadding = bottomPadding + planTrackerHeight +",
       ) &&
-      surface.includes("planTrackerGap;"),
-    "conversation surface must anchor the tracker above the measured composer and reserve its height",
+      surface.includes("planTrackerGap;") &&
+      surface.includes("const planTrackerRightInset = 12 + 56 + 10") &&
+      surface.includes("right: planTrackerRightInset"),
+    "conversation surface must anchor the tracker above the measured composer, reserve its height, and clear the Agent FAB column",
   );
   assert(
     tracker.includes(
@@ -105,8 +107,11 @@ Deno.test("plan tracker is compact and anchored above the composer", async () =>
     surface.includes("hidePlanTracker?: boolean") &&
       surface.includes("Animated.timing(planTrackerOpacity") &&
       surface.includes("duration: hidePlanTracker ? 90 : 140") &&
-      surface.includes('pointerEvents={hidePlanTracker ? "none" : "box-none"}'),
-    "the plan tracker must quickly fade and release interaction while the FAB overlay is open",
+      surface.includes('pointerEvents={hidePlanTracker ? "none" : "box-none"}') &&
+      surface.includes("if (hidePlanTracker) setPlanTrackerHeight(0)") &&
+      surface.includes("setPlanTrackerMounted(false)") &&
+      surface.includes("showPlanTracker && planTrackerMounted"),
+    "the plan tracker must fade, drop its reserved height, and unmount so FABs return to their original alignment",
   );
   assert(
     !transcript.includes("import { PlanTracker }") &&

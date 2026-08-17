@@ -320,8 +320,28 @@ function TerminalDirectionPad({
   );
 }
 
-function useTerminalKeyboardInset(): number {
-  const [inset, setInset] = useState(0);
+function useTerminalKeyboardLift(
+  hostRef: { current: View | null },
+): number {
+  const [lift, setLift] = useState(TERMINAL_OVERLAY_OFFSET);
+
+  const syncLift = useCallback((keyboardTop: number | null) => {
+    if (keyboardTop == null) {
+      setLift(TERMINAL_OVERLAY_OFFSET);
+      return;
+    }
+    const node = hostRef.current;
+    if (!node || typeof node.measureInWindow !== "function") {
+      setLift(TERMINAL_OVERLAY_OFFSET);
+      return;
+    }
+    node.measureInWindow((_x, y, _w, h) => {
+      const overlap = Math.max(0, Math.round(y + h - keyboardTop));
+      setLift(
+        Math.min(overlap + TERMINAL_OVERLAY_OFFSET, 420),
+      );
+    });
+  }, [hostRef]);
 
   useEffect(() => {
     if (Platform.OS === "web") {
@@ -330,7 +350,12 @@ function useTerminalKeyboardInset(): number {
       const update = () => {
         const coveredHeight = window.innerHeight -
           (viewport.height + viewport.offsetTop);
-        setInset(Math.max(0, Math.min(coveredHeight, 420)));
+        setLift(
+          Math.max(
+            TERMINAL_OVERLAY_OFFSET,
+            Math.min(coveredHeight + TERMINAL_OVERLAY_OFFSET, 420),
+          ),
+        );
       };
       update();
       viewport.addEventListener("resize", update);
@@ -344,20 +369,29 @@ function useTerminalKeyboardInset(): number {
     const showEvent = Platform.OS === "ios"
       ? "keyboardWillShow"
       : "keyboardDidShow";
+    const changeEvent = Platform.OS === "ios"
+      ? "keyboardWillChangeFrame"
+      : "keyboardDidShow";
     const hideEvent = Platform.OS === "ios"
       ? "keyboardWillHide"
       : "keyboardDidHide";
     const showSubscription = Keyboard.addListener(showEvent, (event) => {
-      setInset(Math.max(0, Math.min(event.endCoordinates.height, 420)));
+      syncLift(event.endCoordinates.screenY);
     });
-    const hideSubscription = Keyboard.addListener(hideEvent, () => setInset(0));
+    const changeSubscription = Keyboard.addListener(changeEvent, (event) => {
+      syncLift(event.endCoordinates.screenY);
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      syncLift(null);
+    });
     return () => {
       showSubscription.remove();
+      changeSubscription.remove();
       hideSubscription.remove();
     };
-  }, []);
+  }, [syncLift]);
 
-  return inset;
+  return lift;
 }
 
 export function TerminalQuickBar({
@@ -368,7 +402,13 @@ export function TerminalQuickBar({
 }: TerminalQuickBarProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const keyboardInset = useTerminalKeyboardInset();
+  const hostRef = useRef<View>(null);
+  // Lift by the keyboard's overlap with this host, not the raw keyboard
+  // height. The toolbox sheet already has a tab footer + home-indicator pad
+  // below the terminal, so adding endCoordinates.height parks the pill in
+  // the middle of the grid. Ghostty's native accessory stays hidden; this
+  // pill is the one control row and must sit on the keyboard.
+  const keyboardLift = useTerminalKeyboardLift(hostRef);
 
   const finishAction = useCallback(() => {
     if (!onRefocus) return;
@@ -422,13 +462,19 @@ export function TerminalQuickBar({
   );
 
   return (
-    <View
-      pointerEvents="box-none"
-      style={[
-        styles.shell,
-        { bottom: TERMINAL_OVERLAY_OFFSET + keyboardInset },
-      ]}
-    >
+    <View pointerEvents="box-none" style={styles.host}>
+      <View
+        ref={hostRef}
+        pointerEvents="none"
+        style={StyleSheet.absoluteFill}
+      />
+      <View
+        pointerEvents="box-none"
+        style={[
+          styles.shell,
+          { bottom: keyboardLift },
+        ]}
+      >
       <View
         style={[
           styles.controlsRow,
@@ -465,16 +511,20 @@ export function TerminalQuickBar({
           {TERMINAL_QUICK_KEYS.slice(2).map(renderQuickKey)}
         </View>
       </View>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  host: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 10,
+  },
   shell: {
     position: "absolute",
     left: 8,
     right: 8,
-    zIndex: 10,
     alignItems: "center",
   },
   controlsRow: {

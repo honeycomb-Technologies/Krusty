@@ -1037,7 +1037,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const closedBottomOffset = isDesktop
     ? Math.max(closedGap, insets.bottom + 12)
     : Math.max(closedGap, insets.bottom);
-  const bottomOffset = closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
   // only when the catalog has not loaded or the model is unknown.
@@ -1094,8 +1093,15 @@ function ChatBarComponent(props: ChatBarProps) {
   const metaReserveHeight = showComposerChrome
     ? META_ROW_HEIGHT + GAUGE_TOP_GAP
     : 0;
+  // The meta row already lives in the home-indicator band. Padding the root
+  // by the full inset *and* stacking the meta row on top of it lifted the
+  // composer, FABs, and plan chips and left a dead strip above the home
+  // indicator.
+  const paddingBottom = showComposerChrome
+    ? Math.max(0, closedBottomOffset - metaReserveHeight)
+    : closedBottomOffset;
   // Distance from root bottom to the top of the input/Agent row.
-  const inputRowBottom = bottomOffset + metaReserveHeight;
+  const inputRowBottom = paddingBottom + metaReserveHeight;
   // Accordion sits just above the Agent FAB.
   const controlsLayerBottom = showComposerChrome
     ? inputRowBottom + PILL + GAP
@@ -1165,7 +1171,7 @@ function ChatBarComponent(props: ChatBarProps) {
         styles.root,
         styles.pointerBoxNone,
         {
-          paddingBottom: bottomOffset,
+          paddingBottom,
           // Parent desktop column already caps width; fill that band only.
           // Avoid left+right+maxWidth fights on web that ignore the soft-cap.
           ...(contentMaxWidth != null

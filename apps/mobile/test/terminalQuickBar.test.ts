@@ -62,7 +62,9 @@ Deno.test("terminal controls center a bounded reactive puck and stay keyboard aw
       bar.includes('position: "absolute"') &&
       bar.includes("maxWidth: 400") &&
       bar.includes("minWidth: 0") &&
-      bar.includes("TERMINAL_OVERLAY_OFFSET + keyboardInset"),
+      bar.includes("measureInWindow") &&
+      bar.includes("endCoordinates.screenY") &&
+      bar.includes("{ bottom: keyboardLift }"),
     "controls must float over the terminal and compress safely at phone widths",
   );
   assert(
@@ -86,8 +88,9 @@ Deno.test("terminal controls center a bounded reactive puck and stay keyboard aw
   assert(
     bar.includes("window.visualViewport") &&
       bar.includes("Keyboard.addListener") &&
-      bar.includes("TERMINAL_OVERLAY_OFFSET + keyboardInset"),
-    "quick keys must move above web and native keyboards",
+      bar.includes("measureInWindow") &&
+      bar.includes("endCoordinates.screenY"),
+    "quick keys must sit on the keyboard using host overlap, not raw keyboard height",
   );
   assert(
     webTerminal.includes("suppressGhosttyScrollbar(terminal)") &&

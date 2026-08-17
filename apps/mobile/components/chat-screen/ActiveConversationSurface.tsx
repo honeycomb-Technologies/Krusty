@@ -74,23 +74,36 @@ function ActiveConversationSurfaceComponent({
   const error = sessionView.error ?? null;
   const showTranscriptError = Boolean(error) && showErrorBanner;
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
+  const [planTrackerMounted, setPlanTrackerMounted] = useState(
+    !hidePlanTracker,
+  );
   const planTrackerOpacity = useRef(
     new Animated.Value(hidePlanTracker ? 0 : 1),
   ).current;
   const planTrackerGap = planTrackerHeight > 0 ? 10 : 0;
   const conversationBottomPadding = bottomPadding + planTrackerHeight +
     planTrackerGap;
+  // Keep collapsed goal/plan chips out of the Agent FAB column so the
+  // accordion can sit in its original right/bottom alignment.
+  const planTrackerRightInset = 12 + 56 + 10;
 
   useEffect(() => {
     if (!showPlanTracker) setPlanTrackerHeight(0);
   }, [showPlanTracker]);
 
   useEffect(() => {
+    if (hidePlanTracker) setPlanTrackerHeight(0);
+  }, [hidePlanTracker]);
+
+  useEffect(() => {
+    if (!hidePlanTracker) setPlanTrackerMounted(true);
     Animated.timing(planTrackerOpacity, {
       toValue: hidePlanTracker ? 0 : 1,
       duration: hidePlanTracker ? 90 : 140,
       useNativeDriver: true,
-    }).start();
+    }).start(({ finished }) => {
+      if (finished && hidePlanTracker) setPlanTrackerMounted(false);
+    });
   }, [hidePlanTracker, planTrackerOpacity]);
 
   return (
@@ -128,14 +141,14 @@ function ActiveConversationSurfaceComponent({
         hideJumpToLatest={hideJumpToLatest}
       />
 
-      {showPlanTracker
+      {showPlanTracker && planTrackerMounted
         ? (
           <Animated.View
             pointerEvents={hidePlanTracker ? "none" : "box-none"}
             style={{
               position: "absolute",
               left: 12,
-              right: 12,
+              right: planTrackerRightInset,
               bottom: bottomPadding + 8,
               zIndex: 40,
               opacity: planTrackerOpacity,
@@ -143,7 +156,9 @@ function ActiveConversationSurfaceComponent({
           >
             <PlanTracker
               sessionType={sessionType}
-              onHeightChange={setPlanTrackerHeight}
+              onHeightChange={hidePlanTracker
+                ? undefined
+                : setPlanTrackerHeight}
             />
           </Animated.View>
         )

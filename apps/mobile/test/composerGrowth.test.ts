@@ -221,6 +221,11 @@ Deno.test("ChatBar has one composer height authority", async () => {
       && !source.includes("keyboardHeight > 0"),
     "native keyboard avoidance must move the composer without resizing transcript reserve",
   );
+  assert(
+    source.includes("closedBottomOffset - metaReserveHeight") &&
+      source.includes("paddingBottom + metaReserveHeight"),
+    "the meta row must live inside the home-indicator inset instead of stacking another full pad under the composer",
+  );
 });
 
 Deno.test("empty draft estimates zero but resolves to one text row", () => {
