@@ -19,6 +19,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Check canonical names and exact compatibility exceptions
         run: bash scripts/check-canonical-names.sh
+      - name: Check product marketing versions stay aligned
+        run: sh scripts/check-product-version.sh
       - name: Exercise installer migration and rollback fixtures
         run: sh install.sh --self-test
 

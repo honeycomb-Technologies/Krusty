@@ -1,6 +1,7 @@
 [package]
 name = "mitsuro-desktop"
 version = "0.9.20"
+publish = false
 edition = "2021"
 
 [build-dependencies]

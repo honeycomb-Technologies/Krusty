@@ -368,15 +368,20 @@ jobs:
             exit 1
           fi
 
+          notes_file=$(mktemp)
+          changelog=crates/mitsuro-cli/CHANGELOG.md
+          if [[ -f "$changelog" ]]; then
+            awk '/^## /{ if (seen++) exit } { print }' "$changelog" > "$notes_file"
+          fi
+          if [[ ! -s "$notes_file" ]]; then
+            notes_file=""
+          fi
+
           if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             existing_dir=$(mktemp -d)
             trap 'rm -rf -- "$existing_dir"' EXIT
-            gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir "$existing_dir"
+            gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir "$existing_dir" || true
             mapfile -t existing_assets < <(find "$existing_dir" -type f -print | sort)
-            if [[ "${#existing_assets[@]}" -ne "${#release_assets[@]}" ]]; then
-              echo "Existing release asset set differs; protected-tag assets are immutable." >&2
-              exit 1
-            fi
             declare -A existing_by_name=()
             for asset in "${existing_assets[@]}"; do
               asset_name=${asset##*/}
@@ -386,17 +391,30 @@ jobs:
               fi
               existing_by_name[$asset_name]=$asset
             done
-            for asset_name in "${!expected_by_name[@]}"; do
+
+            missing_assets=()
+            for asset in "${release_assets[@]}"; do
+              asset_name=${asset##*/}
               if [[ -z "${existing_by_name[$asset_name]+present}" ]]; then
-                echo "Existing release is missing immutable asset: $asset_name" >&2
-                exit 1
+                missing_assets+=("$asset")
+                continue
               fi
-              if ! cmp -s "${expected_by_name[$asset_name]}" "${existing_by_name[$asset_name]}"; then
+              if ! cmp -s "$asset" "${existing_by_name[$asset_name]}"; then
                 echo "Existing release asset differs and will not be replaced: $asset_name" >&2
                 exit 1
               fi
             done
-            echo "Existing release assets are byte-identical; no upload required."
+            if [[ "${#missing_assets[@]}" -gt 0 ]]; then
+              gh release upload "$TAG_NAME" "${missing_assets[@]}" --repo "$GITHUB_REPOSITORY"
+              echo "Uploaded ${#missing_assets[@]} missing assets to $TAG_NAME"
+            else
+              echo "Existing release assets are byte-identical; no upload required."
+            fi
+          elif [[ -n "$notes_file" ]]; then
+            gh release create "$TAG_NAME" "${release_assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG_NAME" \
+              --notes-file "$notes_file"
           else
             gh release create "$TAG_NAME" "${release_assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \

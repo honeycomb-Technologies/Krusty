@@ -1,0 +1,50 @@
+# Sampo configuration
+# https://github.com/bruits/sampo
+version = 1
+
+[git]
+default_branch = "main"
+# Product GitHub Releases stay on v{version} (v0.9.23). Other crates get
+# cargo-<name>-v{version} so they cannot collide with that short tag.
+tag_format = "{ecosystem}-{package_name}-v{version}"
+short_tags = "mitsuro"
+short_tags_format = "v{version}"
+
+[github]
+repository = "honeycomb-Technologies/Mitsuro"
+
+[changesets]
+tags = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
+
+[changelog]
+show_commit_hash = true
+show_acknowledgments = true
+show_release_date = true
+release_date_format = "%Y-%m-%d"
+release_date_timezone = "UTC"
+
+[packages]
+# Version and changelog unpublished crates, but never cargo/npm publish them.
+# Mitsuro ships GitHub Release binaries, not crates.io / npm.
+ignore_unpublished = false
+ignore = [
+  "examples/*",
+  "cargo/mitsuro-native-rust-demo",
+  "cargo/grok-auth",
+  "npm/*",
+]
+fixed = [
+  [
+    "cargo/mitsuro",
+    "cargo/mitsuro-core",
+    "cargo/mitsuro-server",
+    "cargo/mitsuro-client",
+    "cargo/mitsuro-client-state",
+    "cargo/mitsuro-desktop-backend",
+    "cargo/mitsuro-gpui-desktop",
+  ],
+  [
+    "cargo/mitsuro-hive",
+    "cargo/mitsuro-hive-protocol",
+  ],
+]

@@ -1,6 +1,7 @@
 [package]
 name = "grok-auth"
 version = "0.1.0"
+publish = false
 edition = "2021"
 description = "Modular, reusable xAI / Grok authentication client for Rust harnesses including Mitsuro. Interoperable with the official `grok` CLI via ~/.grok/auth.json."
 license = "MIT OR Apache-2.0"

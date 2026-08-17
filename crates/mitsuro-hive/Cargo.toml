@@ -1,6 +1,7 @@
 [package]
 name = "mitsuro-hive"
 version = "0.1.0"
+publish = false
 edition = "2021"
 description = "Independently supervised backend service for Mitsuro Hive"
 default-run = "mitsuro-hive"
