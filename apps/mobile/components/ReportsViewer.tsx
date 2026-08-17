@@ -20,7 +20,6 @@ import { ArrowLeft, X } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
-import { AdaptiveMaterial } from './ui/AdaptiveMaterial';
 import { DetailPaneSkeleton, ListRowsSkeleton } from './ui/Skeleton';
 import { useConnection } from '../hooks/useConnection';
 import { ReportDetailContent } from './reports/ReportDetailContent';
@@ -170,10 +169,16 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
       </Animated.View>
 
       <Animated.View
-        style={[styles.panel, { height: panelHeight }, panelStyle]}
+        style={[
+          styles.panel,
+          {
+            height: panelHeight,
+            backgroundColor: t.background,
+            borderColor: t.border,
+          },
+          panelStyle,
+        ]}
       >
-        <AdaptiveMaterial tone="strong" borderRadius={20} />
-
         {/* Header */}
         <View style={[styles.header, { borderBottomColor: t.border }]}>
           {selectedReport ? (
@@ -379,6 +384,8 @@ const styles = StyleSheet.create({
     zIndex: 201,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 0,
     overflow: 'hidden',
   },
   header: {

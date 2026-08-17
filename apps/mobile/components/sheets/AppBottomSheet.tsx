@@ -22,7 +22,6 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { useThemeContext } from "../../hooks/useTheme";
-import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 import * as Haptics from "../../platform/haptics";
 import { resolveAppBottomSheetHeight } from "./sheetMetrics";
 
@@ -249,17 +248,12 @@ export function AppBottomSheet({
           styles.sheet,
           panelStyle,
           {
+            backgroundColor: t.background,
             borderColor: t.border,
             paddingBottom: Math.max(insets.bottom, 8),
           },
         ]}
       >
-        <AdaptiveMaterial
-          borderRadius={24}
-          blurIntensity={52}
-          tone="strong"
-        />
-
         <GestureDetector gesture={dragGesture}>
           <Pressable
             accessibilityRole="button"

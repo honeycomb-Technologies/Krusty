@@ -137,7 +137,8 @@
             "buildReactNativeFromSource": true
           }
         }
-      ]
+      ],
+      "./plugins/withGhosttyHostAccessory"
     ],
     "experiments": {
       "typedRoutes": true

@@ -1,6 +1,5 @@
 import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { X } from "lucide-react-native";
-import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 import { useThemeContext } from "../../hooks/useTheme";
 
 export interface ImagePreviewCandidate {
@@ -49,9 +48,12 @@ export function ImagePreviewModal({
     >
       <View style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={[styles.card, { borderColor: t.border }]}>
-          <AdaptiveMaterial tone="strong" borderRadius={24} />
-
+        <View
+          style={[
+            styles.card,
+            { backgroundColor: t.background, borderColor: t.border },
+          ]}
+        >
           <View style={[styles.header, { borderBottomColor: t.border }]}>
             <Text
               style={[styles.title, { color: t.foreground }]}
@@ -66,8 +68,8 @@ export function ImagePreviewModal({
                 styles.closeButton,
                 {
                   backgroundColor: pressed
-                    ? t.glass.backgroundPressed
-                    : t.glass.backgroundElevated,
+                    ? t.surfaceElevated
+                    : t.surface,
                 },
               ]}
             >

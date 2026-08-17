@@ -23,9 +23,6 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   const modelPopover = await Deno.readTextFile(
     new URL("../components/chat/ChatBarModelPopover.tsx", import.meta.url),
   );
-  const glassCard = await Deno.readTextFile(
-    new URL("../components/ui/GlassCard.tsx", import.meta.url),
-  );
 
   assert(
     !accordion.includes("style={styles.fabMaterialLayer}")
@@ -82,9 +79,8 @@ Deno.test("FAB material strength is stable before and after interaction", async 
   );
   assert(
     (header.match(/position: "relative"/g)?.length ?? 0) >= 3
-      && modelPopover.includes("position: 'relative'")
-      && glassCard.includes("position: 'relative'"),
-    "every non-absolute material host must bound its backdrop to the component",
+      && modelPopover.includes("position: 'relative'"),
+    "every non-absolute chat-chrome material host must bound its backdrop to the component",
   );
   assert(
     accordion.includes("<Animated.View style={animatedStyle}>")
@@ -131,5 +127,42 @@ Deno.test("glass chrome never sits under an animated opacity ancestor", async ()
   assert(
     layout.includes("animation: 'none'"),
     "the root stack must not fade-in screens that host liquid glass",
+  );
+});
+
+Deno.test("liquid glass stays on chat chrome, not drawers or sheets", async () => {
+  const solidSurfaces = [
+    "../components/sheets/AppBottomSheet.tsx",
+    "../components/SettingsModal.tsx",
+    "../components/ReportsViewer.tsx",
+    "../components/DirectoryPicker.tsx",
+    "../components/chat/ImagePreviewModal.tsx",
+    "../components/ui/GlassCard.tsx",
+    "../components/chat/SessionDrawer.tsx",
+    "../components/ToolboxPanel.tsx",
+    "../components/settings/sections.tsx",
+  ];
+  const sources = await Promise.all(
+    solidSurfaces.map((file) =>
+      Deno.readTextFile(new URL(file, import.meta.url))
+    ),
+  );
+  const leaked = solidSurfaces.filter((file, index) =>
+    sources[index].includes("AdaptiveMaterial")
+  );
+
+  assert(
+    leaked.length === 0,
+    `AdaptiveMaterial is chat chrome only; unexpected uses: ${leaked.join(", ")}`,
+  );
+  assert(
+    sources[0].includes("backgroundColor: t.background"),
+    "session and toolbox drawers must use a solid theme fill",
+  );
+  assert(
+    sources[5].includes(
+      "backgroundColor: elevated ? t.surfaceElevated : t.surface",
+    ),
+    "settings and list cards must stay solid theme surfaces",
   );
 });

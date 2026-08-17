@@ -8,17 +8,23 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 Deno.test("terminal controls center a bounded reactive puck and stay keyboard aware", async () => {
-  const [bar, webTerminal, nativeTerminal] = await Promise.all([
-    Deno.readTextFile(
-      new URL("../components/toolbox/TerminalQuickBar.tsx", import.meta.url),
-    ),
-    Deno.readTextFile(
-      new URL("../components/desktop/Terminal.tsx", import.meta.url),
-    ),
-    Deno.readTextFile(
-      new URL("../components/toolbox/ToolboxTerminal.tsx", import.meta.url),
-    ),
-  ]);
+  const [bar, webTerminal, nativeTerminal, accessoryPlugin, appConfig, packageJson] =
+    await Promise.all([
+      Deno.readTextFile(
+        new URL("../components/toolbox/TerminalQuickBar.tsx", import.meta.url),
+      ),
+      Deno.readTextFile(
+        new URL("../components/desktop/Terminal.tsx", import.meta.url),
+      ),
+      Deno.readTextFile(
+        new URL("../components/toolbox/ToolboxTerminal.tsx", import.meta.url),
+      ),
+      Deno.readTextFile(
+        new URL("../plugins/withGhosttyHostAccessory.js", import.meta.url),
+      ),
+      Deno.readTextFile(new URL("../app.json", import.meta.url)),
+      Deno.readTextFile(new URL("../package.json", import.meta.url)),
+    ]);
 
   for (
     const control of [
@@ -95,5 +101,12 @@ Deno.test("terminal controls center a bounded reactive puck and stay keyboard aw
       nativeTerminal.includes("const sendQuickInput") &&
       nativeTerminal.includes("Clipboard.getStringAsync()"),
     "native Ghostty must share the same quick input and paste controls",
+  );
+  assert(
+    accessoryPlugin.includes("inputAccessoryItems = []") &&
+      accessoryPlugin.includes("addSubview(terminalView)") &&
+      appConfig.includes("./plugins/withGhosttyHostAccessory") &&
+      packageJson.includes("node ./plugins/withGhosttyHostAccessory.js"),
+    "native Ghostty must hide its keyboard accessory so only the Mitsuro pill sits on the keyboard",
   );
 });
