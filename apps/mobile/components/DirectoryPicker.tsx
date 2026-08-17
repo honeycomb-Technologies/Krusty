@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -8,7 +9,6 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { BlurView } from '../platform/blur';
 import { Folder, ChevronLeft, X, Check } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
@@ -30,7 +30,6 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
   const { theme } = useThemeContext();
   const { client } = useConnection();
   const t = theme.colors;
-  const g = theme.colors.glass;
 
   const [currentPath, setCurrentPath] = useState(initialPath ?? '');
   const [parentPath, setParentPath] = useState<string | null>(null);
@@ -82,7 +81,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
       onPress={() => navigateInto(item.path)}
       style={({ pressed }) => [
         styles.dirRow,
-        { backgroundColor: pressed ? g.backgroundPressed : 'transparent' },
+        { backgroundColor: pressed ? t.surface : 'transparent' },
       ]}
     >
       <Folder size={20} color={t.thinking} strokeWidth={1.6} />
@@ -90,7 +89,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
         {item.name}
       </Text>
     </Pressable>
-  ), [navigateInto, t, g]);
+  ), [navigateInto, t]);
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -98,19 +97,12 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
 
         <View style={styles.modalContainer}>
-          <View style={styles.card}>
-            <BlurView
-              intensity={theme.colors.glassBlurIntense}
-              tint={theme.scheme === 'dark' ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight'}
-              style={StyleSheet.absoluteFill}
-            />
-            <View style={[StyleSheet.absoluteFill, {
-              backgroundColor: t.surfaceOverlayElevated,
-              borderRadius: 22,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: g.border,
-            }]} />
-
+          <View
+            style={[
+              styles.card,
+              { backgroundColor: t.background, borderColor: t.border },
+            ]}
+          >
             {/* Header */}
             <View style={[styles.header, { borderBottomColor: t.border }]}>
               <View style={styles.headerLeft}>
@@ -121,7 +113,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
               </View>
               <Pressable
                 onPress={onClose}
-                style={[styles.closeBtn, { backgroundColor: g.backgroundElevated }]}
+                style={[styles.closeBtn, { backgroundColor: t.surface }]}
               >
                 <X size={18} color={t.mutedForeground} strokeWidth={2} />
               </Pressable>
@@ -133,7 +125,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
                 onPress={navigateUp}
                 style={({ pressed }) => [
                   styles.upRow,
-                  { borderBottomColor: t.border, backgroundColor: pressed ? g.backgroundPressed : 'transparent' },
+                  { borderBottomColor: t.border, backgroundColor: pressed ? t.surface : 'transparent' },
                 ]}
               >
                 <ChevronLeft size={20} color={t.primary} strokeWidth={2} />
@@ -172,7 +164,7 @@ export function DirectoryPicker({ visible, onSelect, onClose, initialPath }: Dir
                 onPress={handleSelect}
                 style={[styles.selectBtn, { backgroundColor: t.userMessage }]}
               >
-                <Check size={18} color="#fff" strokeWidth={2.5} />
+                <Check size={18} color={t.onAccent} strokeWidth={2.5} />
                 <Text style={styles.selectBtnText}>Select This Directory</Text>
               </Pressable>
             </View>
@@ -197,6 +189,7 @@ const styles = StyleSheet.create({
   },
   card: {
     borderRadius: 22,
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
   header: {
@@ -283,7 +276,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   selectBtnText: {
-    color: '#fff',
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: '600',
   },

@@ -34,6 +34,7 @@ import * as Haptics from "../../platform/haptics";
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  sessionId?: string | null;
   isLast: boolean;
   isStreaming: boolean;
   isThinking?: boolean;
@@ -52,6 +53,7 @@ interface MessageBubbleProps {
 
 export const MessageBubble = memo(function MessageBubble({
   message,
+  sessionId,
   isLast,
   isStreaming,
   isThinking,
@@ -137,6 +139,7 @@ export const MessageBubble = memo(function MessageBubble({
       <ToolCallCard
         key={toolCall.id}
         toolCall={toolCall}
+        sessionId={sessionId}
         isStreaming={
           toolIsStreaming || (isDelegatedTool(toolCall) && isLast && isStreaming)
         }
@@ -385,8 +388,11 @@ function MessageAttachments({
               style={({ pressed }) => [
                 styles.messageImageThumb,
                 {
+                  backgroundColor: t.glass.background,
                   borderColor:
-                    hoveredAttachmentIndex === index ? t.userMessage : t.border,
+                    hoveredAttachmentIndex === index || pressed
+                      ? t.userMessage
+                      : t.border,
                   opacity: pressed ? 0.86 : 1,
                 },
               ]}
@@ -534,7 +540,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    backgroundColor: "rgba(255,255,255,0.06)",
   },
   messageImage: {
     width: "100%",

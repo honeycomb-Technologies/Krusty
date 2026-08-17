@@ -24,7 +24,9 @@ export type HiveTopLevelView =
   | "runs"
   | "details"
   | "crew"
-  | "channels";
+  | "groups"
+  | "channels"
+  | "memory";
 export type HiveRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
 export type HiveKnowledgeView = "recent" | "memory";
 export type HiveKnowledgeScope = "workspace" | "all";

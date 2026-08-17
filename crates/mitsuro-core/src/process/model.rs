@@ -90,6 +90,8 @@ pub(super) fn elapsed_millis_u64(started_at: Instant) -> u64 {
 
 pub(super) struct ProcessEntry {
     pub(super) info: ProcessInfo,
+    /// Hash-only environment identity used to prevent cross-policy reuse.
+    pub(super) environment_fingerprint: String,
     pub(super) output: Arc<Mutex<ProcessOutputBuffer>>,
     /// Keep handle alive to prevent task cancellation
     pub(super) _handle: Option<tokio::task::JoinHandle<()>>,

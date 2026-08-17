@@ -287,6 +287,9 @@ function buildSummary(
   args: Record<string, unknown>,
   diff: ToolDiffPresentation | null,
 ): string {
+  if (toolCall.status === "running" && toolCall.description) {
+    return toolCall.description;
+  }
   if (family === "bash") {
     return firstString(args.command) || toolCall.output?.split("\n")[0] || "command";
   }
@@ -382,13 +385,18 @@ function buildMeta(
     const delegatedStateLabel = delegated?.stage === "degraded"
       || delegated?.stage === "cancelled"
       ? delegated.stage
-      : delegated?.outcome ?? delegated?.stage;
+      : delegated?.groupState ?? delegated?.outcome ?? delegated?.stage;
     return [
       capabilityLabel,
       delegatedStateLabel,
       delegated?.agentCount !== undefined
         ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? "" : "s"}`
         : undefined,
+      delegated?.activeTargets ? `${delegated.activeTargets} running` : undefined,
+      delegated?.waitingTargets ? `${delegated.waitingTargets} waiting for capacity` : undefined,
+      delegated?.integratingTargets ? `${delegated.integratingTargets} integrating` : undefined,
+      delegated?.pendingTargets ? `${delegated.pendingTargets} queued` : undefined,
+      delegated?.completedTargets ? `${delegated.completedTargets} settled` : undefined,
       delegated?.degradedAgents ? `${delegated.degradedAgents} degraded` : undefined,
       delegated?.cancelledAgents ? `${delegated.cancelledAgents} cancelled` : undefined,
       delegated?.failedAgents ? `${delegated.failedAgents} failed` : undefined,

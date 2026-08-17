@@ -22,7 +22,6 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { useThemeContext } from "../../hooks/useTheme";
-import { BlurView } from "../../platform/blur";
 import * as Haptics from "../../platform/haptics";
 import { resolveAppBottomSheetHeight } from "./sheetMetrics";
 
@@ -222,15 +221,15 @@ export function AppBottomSheet({
     return null;
   }
 
-  const isDark = theme.scheme === "dark";
-
   return (
     <View
-      style={styles.root}
+      style={[
+        styles.root,
+        { pointerEvents: visible ? "box-none" : "none" },
+      ]}
       // Closing content must stop accepting touches immediately. Otherwise the
       // still-mounted panel can dispatch another navigation/session action while
       // its exit animation is running.
-      pointerEvents={visible ? "box-none" : "none"}
     >
       <Animated.View style={[styles.backdrop, backdropStyle]}>
         <Pressable
@@ -249,28 +248,12 @@ export function AppBottomSheet({
           styles.sheet,
           panelStyle,
           {
+            backgroundColor: t.background,
             borderColor: t.border,
             paddingBottom: Math.max(insets.bottom, 8),
           },
         ]}
       >
-        <BlurView
-          intensity={52}
-          tint={
-            isDark ? "systemChromeMaterialDark" : "systemChromeMaterialLight"
-          }
-          style={StyleSheet.absoluteFill}
-        />
-        <View
-          pointerEvents="none"
-          style={[
-            StyleSheet.absoluteFill,
-            {
-              backgroundColor: t.surfaceOverlayStrong,
-            },
-          ]}
-        />
-
         <GestureDetector gesture={dragGesture}>
           <Pressable
             accessibilityRole="button"

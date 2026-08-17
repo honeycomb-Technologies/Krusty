@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -7,15 +7,25 @@ use uuid::Uuid;
 use crate::agent::agent_types::{PlanConfig, VerifyConfig};
 use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
-    execute_single_agent, execute_single_child, AgentCapability, SubAgentTask,
+    execute_single_agent, execute_single_child, AgentCapability, SubAgentResult, SubAgentTask,
+    SubAgentTermination,
 };
-use crate::agent::DelegatedRunStage;
+use crate::agent::{
+    CoordinatedSynthesisPermit, CoordinatedTaskPermit, DelegatedRunStage, DelegationCoordinator,
+    DelegationTaskOutcome,
+};
+use crate::ai::models::ModelKey;
 use crate::storage::{
     DelegatedRunCreateOutcome, DelegatedRunLease, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput,
+    DelegatedRunStartInput, DelegationCompletionPolicy, DelegationExecutionMode,
+    DelegationExecutorEnvelopeV1, DelegationExecutorKind, DelegationExecutorSessionType,
+    DelegationFailurePolicy, DelegationGovernance, DelegationGroupContract,
+    DelegationGroupStartInput, DelegationGroupState, DelegationTaskSpec, DelegationWriterMode,
+    SessionType, DELEGATION_EXECUTOR_ENVELOPE_VERSION,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
+use crate::SessionManager;
 
 use super::{
     background_started_result, build_parent_context_brief, build_resume_seed,
@@ -188,6 +198,340 @@ fn background_persistence_precondition(
     ))
 }
 
+#[derive(Clone)]
+struct SingleTaskDelegation {
+    coordinator: DelegationCoordinator,
+    group_id: String,
+    task_id: String,
+    turn_budget: Option<usize>,
+}
+
+impl SingleTaskDelegation {
+    fn create(
+        ctx: &ToolContext,
+        delegated_run_id: &str,
+        task_key: &str,
+        objective: &str,
+        role: DelegatedRunRole,
+        target_scope: &[DelegatedRunScope],
+        delegation_policy: &DelegationPolicy,
+        background: bool,
+        executor_envelope: Option<DelegationExecutorEnvelopeV1>,
+    ) -> Result<Self, String> {
+        let db_path = ctx
+            .db_path
+            .as_ref()
+            .ok_or_else(|| "durable single-agent delegation has no database path".to_string())?;
+        let parent_session_id = ctx
+            .session_id
+            .as_ref()
+            .ok_or_else(|| "durable single-agent delegation has no parent session".to_string())?;
+        let task_id = format!("{delegated_run_id}:task:0");
+        if objective.len() > 32 * 1024 {
+            return Err(
+                "delegated objective exceeds the 32 KiB exact-replay contract; split the task or shorten its prompt"
+                    .to_string(),
+            );
+        }
+        let coordinator = DelegationCoordinator::new(db_path.clone());
+        let mut durable_scope = target_scope.to_vec();
+        if role == DelegatedRunRole::Build
+            && !durable_scope.iter().any(|scope| scope.kind == "workspace")
+        {
+            durable_scope.push(DelegatedRunScope {
+                label: "authoritative workspace".to_string(),
+                path: ctx.working_dir.display().to_string(),
+                kind: "workspace".to_string(),
+            });
+        }
+        let turn_budget = delegation_policy.max_turns;
+        coordinator
+            .create_group(&DelegationGroupStartInput {
+                delegation_group_id: delegated_run_id.to_string(),
+                parent_session_id: parent_session_id.clone(),
+                parent_tool_call_id: ctx.tool_use_id.clone(),
+                contract: DelegationGroupContract {
+                    execution_mode: if background {
+                        DelegationExecutionMode::Detached
+                    } else {
+                        DelegationExecutionMode::Foreground
+                    },
+                    completion_policy: DelegationCompletionPolicy::AllSettled,
+                    failure_policy: DelegationFailurePolicy::Continue,
+                    governance: DelegationGovernance {
+                        permission_mode: ctx.permission_mode,
+                        reasoning_effort: ctx.delegated_reasoning_effort,
+                        delegated_turn_budget: turn_budget,
+                        max_parallelism: 1,
+                        execution_tool_allowlist: delegation_policy
+                            .execution_tool_allowlist
+                            .clone(),
+                        delegation_policy: delegation_policy.clone(),
+                    },
+                },
+                tasks: vec![DelegationTaskSpec {
+                    delegation_task_id: task_id.clone(),
+                    task_key: task_key.to_string(),
+                    objective: objective.to_string(),
+                    role,
+                    target_scope: durable_scope,
+                    max_attempts: 2,
+                    depends_on: Vec::new(),
+                    write_intent: Vec::new(),
+                    task_policy: Some(delegation_policy.clone()),
+                    // A one-task writer still enters the shared authoritative
+                    // partition. Parallel build groups must not mutate the
+                    // same checkout concurrently merely because this group
+                    // contains only one child.
+                    writer_mode: DelegationWriterMode::Shared,
+                    attempt_workspace: None,
+                    workspace_baseline: None,
+                    executor_envelope,
+                }],
+            })
+            .map_err(|error| error.to_string())?;
+
+        Ok(Self {
+            coordinator,
+            group_id: delegated_run_id.to_string(),
+            task_id,
+            turn_budget,
+        })
+    }
+
+    fn attach(&self, task: SubAgentTask) -> SubAgentTask {
+        // The immutable durable contract is the execution-time authority.
+        // Absence means unlimited rather than a hidden product default.
+        let task = if let Some(turn_budget) = self.turn_budget {
+            task.with_max_turns(turn_budget)
+        } else {
+            task
+        };
+        task.with_delegation_task(self.group_id.clone(), self.task_id.clone())
+    }
+
+    async fn acquire(
+        &self,
+        task: &SubAgentTask,
+        model: &str,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<CoordinatedTaskPermit, String> {
+        self.coordinator
+            .validate_task_runtime(
+                &self.task_id,
+                task.delegation_policy.as_ref(),
+                task.reasoning_effort,
+                &task.working_dir,
+            )
+            .map_err(|error| error.to_string())?;
+        self.coordinator
+            .acquire_task(&self.task_id, model, cancellation)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "delegated task was cancelled before scheduler admission".to_string())
+    }
+
+    fn settle(
+        &self,
+        result: &SubAgentResult,
+        permit: CoordinatedTaskPermit,
+    ) -> Result<Option<CoordinatedSynthesisPermit>, String> {
+        let artifact = bounded_task_artifact(result);
+        let outcome = if result.termination == SubAgentTermination::Cancelled {
+            DelegationTaskOutcome::Cancelled
+        } else if result.success
+            && result.termination == SubAgentTermination::Completed
+            && result.has_usable_evidence()
+        {
+            DelegationTaskOutcome::Complete(artifact)
+        } else if result.termination.is_degraded_interruption() && result.has_usable_evidence() {
+            DelegationTaskOutcome::Degraded {
+                artifact,
+                reason: bounded_text(
+                    result.error.as_deref().unwrap_or(result.outcome_reason()),
+                    1_200,
+                ),
+            }
+        } else {
+            DelegationTaskOutcome::Failed {
+                error: bounded_text(
+                    result.error.as_deref().unwrap_or(result.outcome_reason()),
+                    1_200,
+                ),
+            }
+        };
+        let group_state = permit
+            .complete(outcome)
+            .map_err(|error| error.to_string())?;
+        if group_state.is_terminal() {
+            return Ok(None);
+        }
+        self.coordinator
+            .begin_synthesis(&self.group_id)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    fn finalize(
+        &self,
+        permit: Option<CoordinatedSynthesisPermit>,
+        stage: DelegatedRunStage,
+    ) -> Result<(), String> {
+        if let Some(permit) = permit {
+            debug_assert_eq!(permit.group().delegation_group_id, self.group_id);
+            return permit
+                .finalize(group_terminal_state(stage))
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+        let group = self
+            .coordinator
+            .get_group(&self.group_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "durable single-agent group disappeared".to_string())?;
+        if group.state.is_terminal() {
+            Ok(())
+        } else {
+            Err(format!(
+                "durable single-agent group is {:?} without synthesis ownership",
+                group.state
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_detached_executor_envelope(
+    ctx: &ToolContext,
+    task_id: &str,
+    task_name: &str,
+    objective: &str,
+    kind: DelegationExecutorKind,
+    role: DelegatedRunRole,
+    model_key: &ModelKey,
+    resolved_model: &str,
+    working_dir: &Path,
+    sandbox_root: &Path,
+) -> Result<DelegationExecutorEnvelopeV1, String> {
+    let db_path = ctx
+        .db_path
+        .as_ref()
+        .ok_or_else(|| "detached executor envelope has no database".to_string())?;
+    let session_id = ctx
+        .session_id
+        .as_ref()
+        .ok_or_else(|| "detached executor envelope has no parent session".to_string())?;
+    let session = SessionManager::new(
+        crate::storage::Database::new(db_path).map_err(|error| error.to_string())?,
+    )
+    .get_session(session_id)
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "detached executor envelope parent session disappeared".to_string())?;
+    let session_type = match session.session_type {
+        SessionType::Chat => DelegationExecutorSessionType::Chat,
+        SessionType::Code => DelegationExecutorSessionType::Code,
+        SessionType::Hive => {
+            return Err("Hive does not yet support Chat/Code executor replay envelopes".to_string())
+        }
+    };
+    if session.user_id != ctx.user_id {
+        return Err("detached executor owner differs from the parent session owner".to_string());
+    }
+    let canonicalize = |path: &Path, label: &str| {
+        path.canonicalize()
+            .map_err(|error| format!("detached executor {label} is unavailable: {error}"))
+    };
+    let working_dir = canonicalize(working_dir, "working directory")?;
+    let sandbox_root = canonicalize(sandbox_root, "sandbox root")?;
+    if !working_dir.starts_with(&sandbox_root) {
+        return Err("detached executor working directory escaped its sandbox".to_string());
+    }
+    let project_dir = session
+        .project_dir
+        .as_deref()
+        .map(|path| canonicalize(Path::new(path), "parent project directory"))
+        .transpose()?;
+    let parent_working_dir = session
+        .working_dir
+        .as_deref()
+        .map(|path| canonicalize(Path::new(path), "parent working directory"))
+        .transpose()?;
+    let authorized_workspace = project_dir
+        .as_deref()
+        .or(parent_working_dir.as_deref())
+        .ok_or_else(|| "detached executor parent session has no workspace".to_string())?;
+    let context_working_dir = canonicalize(&ctx.working_dir, "parent context working directory")?;
+    if !context_working_dir.starts_with(authorized_workspace) {
+        return Err("detached executor parent context escaped its session workspace".to_string());
+    }
+    let envelope = DelegationExecutorEnvelopeV1 {
+        version: DELEGATION_EXECUTOR_ENVELOPE_VERSION,
+        session_id: session_id.clone(),
+        parent_tool_call_id: ctx.tool_use_id.clone(),
+        session_type,
+        user_id: session.user_id,
+        task_id: task_id.to_string(),
+        task_name: task_name.to_string(),
+        kind,
+        role,
+        provider_id: model_key.provider.to_string(),
+        model_key: model_key.clone(),
+        resolved_model: resolved_model.to_string(),
+        working_dir: working_dir.display().to_string(),
+        project_dir: project_dir.map(|path| path.display().to_string()),
+        sandbox_root: sandbox_root.display().to_string(),
+        objective_sha256: DelegationExecutorEnvelopeV1::objective_digest(objective),
+    };
+    envelope
+        .validate(objective)
+        .map_err(|error| error.to_string())?;
+    Ok(envelope)
+}
+
+fn bounded_task_artifact(result: &SubAgentResult) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": bounded_text(&result.task_id, 256),
+        "agent_name": bounded_text(&result.agent_name, 256),
+        "success": result.success,
+        "termination": result.termination,
+        "objective_status": result.objective_status(),
+        "handoff": result.bounded_delegated_handoff(),
+        "summary": bounded_text(&result.brief_summary(), 16 * 1024),
+        "files_examined": result.files_examined.iter().take(32).map(|path| bounded_text(path, 512)).collect::<Vec<_>>(),
+        "files_examined_count": result.files_examined.len(),
+        "duration_ms": result.duration_ms,
+        "turns_used": result.turns_used,
+        "outcome_reason": bounded_text(result.outcome_reason(), 1_200),
+    })
+}
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    const ELLIPSIS: &str = "...";
+    if max_bytes <= ELLIPSIS.len() {
+        return ELLIPSIS[..max_bytes].to_string();
+    }
+    let mut end = max_bytes - ELLIPSIS.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], ELLIPSIS)
+}
+
+fn group_terminal_state(stage: DelegatedRunStage) -> DelegationGroupState {
+    match stage {
+        DelegatedRunStage::Complete => DelegationGroupState::Complete,
+        DelegatedRunStage::Degraded => DelegationGroupState::Degraded,
+        DelegatedRunStage::Failed => DelegationGroupState::Failed,
+        DelegatedRunStage::Cancelled => DelegationGroupState::Cancelled,
+        DelegatedRunStage::Created
+        | DelegatedRunStage::Running
+        | DelegatedRunStage::Synthesizing => DelegationGroupState::Failed,
+    }
+}
+
 impl AgentTool {
     // -----------------------------------------------------------------------
     // Unified parent-directed child
@@ -321,7 +665,7 @@ impl AgentTool {
                 delegated_run_id: delegated_run_id.clone(),
                 parent_session_id: session_id.clone(),
                 parent_tool_call_id: ctx.tool_use_id.clone(),
-                role,
+                role: role.clone(),
                 stage: DelegatedRunStage::Created,
                 provider: Some(client.provider_id().to_string()),
                 model: Some(client.config().model.clone()),
@@ -349,6 +693,28 @@ impl AgentTool {
                 }) => {
                     return existing_continuation_error(&resumed_from_run_id, &delegated_run_id);
                 }
+                Ok(DelegatedRunCreateOutcome::ExistingActiveWorkspaceWriter {
+                    delegated_run_id,
+                    workspace_path,
+                }) => {
+                    return ToolResult::error_with_recovery(
+                        "agent_active_workspace_writer",
+                        format!(
+                            "A write-capable Agent run is already active for workspace '{workspace_path}' (delegated run {delegated_run_id}). A second writer was not admitted."
+                        ),
+                        true,
+                        "Use Agent status or wait on the active delegated run. Interrupt it explicitly before starting a replacement writer.",
+                        vec![
+                            format!("Continue with delegated_run_id '{delegated_run_id}' instead of spawning a duplicate writer."),
+                            "Do not retry spawn with a new tool-call id while the active writer is live.".to_string(),
+                        ],
+                        Some(serde_json::json!({
+                            "admitted": false,
+                            "active_delegated_run_id": delegated_run_id,
+                            "workspace_path": workspace_path,
+                        })),
+                    );
+                }
                 Err(error) => {
                     return ToolResult::error_with_code(
                         "agent_persistence_error",
@@ -370,7 +736,8 @@ impl AgentTool {
         }
 
         // Build task prompt with resume context if available
-        let mut task_prompt = params.prompt.clone();
+        let mut task_prompt =
+            super::compose_child_objective(&params.prompt, &params.acceptance_checks);
         if !explicit_resume {
             if let Some(ref previous) = resume_candidate {
                 if let Some(seed) = build_resume_seed(previous, &scope_label) {
@@ -379,16 +746,91 @@ impl AgentTool {
             }
         }
 
-        let inherited_sandbox = ctx
-            .sandbox_root
-            .clone()
-            .unwrap_or_else(|| working_dir.clone());
+        // The executed and durable objectives must be byte-identical so a
+        // detached restart cannot silently lose tail instructions.
+        let durable_objective = task_prompt.clone();
+        let model = self.resolve_model(ctx, &client);
+        // Delegated reads and writes are scoped to the exact selected project,
+        // even when a local parent session has broader filesystem authority.
+        let inherited_sandbox = project_dir.canonicalize().map_err(|error| {
+            ToolResult::error_with_code(
+                "invalid_project_workspace",
+                format!(
+                    "Could not resolve delegated launch workspace '{}': {error}",
+                    project_dir.display()
+                ),
+            )
+        });
+        let inherited_sandbox = match inherited_sandbox {
+            Ok(path) => path,
+            Err(result) => return result,
+        };
+        let executor_envelope = if background {
+            let executor_kind = if role == DelegatedRunRole::Build {
+                // Shared-writer side effects cannot be replayed safely after a
+                // host crash. Classify every write-capable single child as a
+                // build envelope so recovery fails closed just like a
+                // component build until isolated patch restoration exists.
+                DelegationExecutorKind::Build
+            } else if params.agent_type.as_deref() == Some("explore") {
+                DelegationExecutorKind::Explore
+            } else {
+                DelegationExecutorKind::Normal
+            };
+            match build_detached_executor_envelope(
+                ctx,
+                &format!("{delegated_run_id}:task:0"),
+                &child_name,
+                &durable_objective,
+                executor_kind,
+                role.clone(),
+                &client.resolved_model().key,
+                &model,
+                &working_dir,
+                &inherited_sandbox,
+            ) {
+                Ok(envelope) => Some(envelope),
+                Err(error) => {
+                    return ToolResult::error_with_code("agent_persistence_error", error);
+                }
+            }
+        } else {
+            None
+        };
+
+        let single_delegation = if durable_run_started {
+            match SingleTaskDelegation::create(
+                ctx,
+                &delegated_run_id,
+                "child-0",
+                &durable_objective,
+                role,
+                &target_scope,
+                &delegation_policy,
+                background,
+                executor_envelope,
+            ) {
+                Ok(delegation) => Some(delegation),
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated child was not started because its durable group could not be created: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         let mut task = SubAgentTask::new("child-0", &task_prompt)
             .with_name(child_name.clone())
             .with_working_dir(working_dir)
             .with_sandbox_root(inherited_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -398,11 +840,12 @@ impl AgentTool {
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
+        if let Some(delegation) = single_delegation.as_ref() {
+            task = delegation.attach(task);
+        }
 
         // Every capability class follows this same execution path and inherits
         // the parent's resolved model unless the run explicitly overrides it.
-        let model = self.resolve_model(ctx, &client);
-
         // Build project context for the subagent, with optional parent conversation brief
         let mut project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
@@ -443,6 +886,7 @@ impl AgentTool {
             let bg_workspace_root = ctx.filesystem_access_root();
             let bg_child_name = child_name.clone();
             let bg_runtime = self.runtime.clone();
+            let bg_single_delegation = single_delegation.clone();
             let mut bg_run_lease = delegated_lease
                 .take()
                 .expect("background child start has an armed durable lease");
@@ -469,17 +913,61 @@ impl AgentTool {
 
             tokio::spawn(async move {
                 let _bg_host_heartbeat = bg_host_heartbeat;
-                let result = execute_single_child(
-                    client,
-                    task,
-                    registry,
-                    bg_delegation_policy.clone(),
-                    project_context,
-                    model,
-                    cancellation_token,
-                    progress_tx.clone(),
-                )
-                .await;
+                let (result, synthesis_permit) = if let Some(delegation) =
+                    bg_single_delegation.as_ref()
+                {
+                    match delegation.acquire(&task, &model, &cancellation_token).await {
+                        Ok(task_permit) => {
+                            let execution_cancellation = task_permit.cancellation();
+                            let result = execute_single_child(
+                                client,
+                                task,
+                                registry,
+                                bg_delegation_policy.clone(),
+                                project_context,
+                                model,
+                                execution_cancellation,
+                                progress_tx.clone(),
+                            )
+                            .await;
+                            let synthesis_permit = match delegation.settle(&result, task_permit) {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    tracing::error!(
+                                        delegated_run_id = %bg_delegated_run_id,
+                                        %error,
+                                        "Suppressing background child completion because durable task settlement failed"
+                                    );
+                                    return;
+                                }
+                            };
+                            (result, synthesis_permit)
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                %error,
+                                "Suppressing background child completion because scheduler admission failed"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    (
+                        execute_single_child(
+                            client,
+                            task,
+                            registry,
+                            bg_delegation_policy.clone(),
+                            project_context,
+                            model,
+                            cancellation_token,
+                            progress_tx.clone(),
+                        )
+                        .await,
+                        None,
+                    )
+                };
 
                 let artifact = build_single_agent_artifact(
                     &bg_delegated_run_id,
@@ -497,6 +985,18 @@ impl AgentTool {
 
                 match finalization {
                     Ok(authoritative) => {
+                        if let Some(delegation) = bg_single_delegation.as_ref() {
+                            if let Err(error) =
+                                delegation.finalize(synthesis_permit, authoritative.stage)
+                            {
+                                tracing::error!(
+                                    delegated_run_id = %bg_delegated_run_id,
+                                    %error,
+                                    "Suppressing background child completion because durable group finalization failed"
+                                );
+                                return;
+                            }
+                        }
                         bg_run_lease.disarm(&bg_delegated_run_id);
                         let authoritative_success =
                             authoritative.stage == DelegatedRunStage::Complete;
@@ -556,17 +1056,66 @@ impl AgentTool {
 
         // ── Synchronous mode (existing behavior) ─────────────────────
         let completion_tx = progress_tx.clone();
-        let result = execute_single_child(
-            client,
-            task,
-            registry,
-            delegation_policy.clone(),
-            project_context,
-            model,
-            cancellation_token,
-            progress_tx,
-        )
-        .await;
+        let (result, synthesis_permit) = if let Some(delegation) = single_delegation.as_ref() {
+            match delegation.acquire(&task, &model, &cancellation_token).await {
+                Ok(task_permit) => {
+                    let execution_cancellation = task_permit.cancellation();
+                    let result = execute_single_child(
+                        client,
+                        task,
+                        registry,
+                        delegation_policy.clone(),
+                        project_context,
+                        model,
+                        execution_cancellation,
+                        progress_tx,
+                    )
+                    .await;
+                    let synthesis_permit = match delegation.settle(&result, task_permit) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let artifact = build_single_agent_artifact(
+                                &delegated_run_id,
+                                &result,
+                                &delegation_policy,
+                            );
+                            let error = anyhow::anyhow!(
+                                "durable single-agent task settlement failed: {error}"
+                            );
+                            return delegated_persistence_error(
+                                &delegated_run_id,
+                                artifact.payload,
+                                &error,
+                            );
+                        }
+                    };
+                    (result, synthesis_permit)
+                }
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated child did not start because durable scheduler admission failed: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            (
+                execute_single_child(
+                    client,
+                    task,
+                    registry,
+                    delegation_policy.clone(),
+                    project_context,
+                    model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await,
+                None,
+            )
+        };
 
         let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
@@ -591,6 +1140,16 @@ impl AgentTool {
                     );
                 }
             };
+            if let Some(delegation) = single_delegation.as_ref() {
+                if let Err(error) = delegation.finalize(synthesis_permit, authoritative.stage) {
+                    let error = anyhow::anyhow!(error);
+                    return delegated_persistence_error(
+                        &delegated_run_id,
+                        artifact.payload,
+                        &error,
+                    );
+                }
+            }
             lease.disarm(&delegated_run_id);
             // The child's own terminal frame precedes artifact persistence and
             // is intentionally kept Running by the server until this durable
@@ -658,6 +1217,7 @@ impl AgentTool {
                 return ToolResult::error_with_code("invalid_project_workspace", error);
             }
         };
+        let plan_sandbox = PathBuf::from(&workspace_scope.path);
         let target_scope = vec![
             workspace_scope,
             DelegatedRunScope {
@@ -720,16 +1280,63 @@ impl AgentTool {
             );
         }
 
+        let durable_objective = params.prompt.clone();
+        let model = self.resolve_model(ctx, &client);
+        let executor_envelope = if background {
+            match build_detached_executor_envelope(
+                ctx,
+                &format!("{delegated_run_id}:task:0"),
+                "planner",
+                &durable_objective,
+                DelegationExecutorKind::Plan,
+                DelegatedRunRole::Planner,
+                &client.resolved_model().key,
+                &model,
+                &ctx.working_dir,
+                &plan_sandbox,
+            ) {
+                Ok(envelope) => Some(envelope),
+                Err(error) => {
+                    return ToolResult::error_with_code("agent_persistence_error", error);
+                }
+            }
+        } else {
+            None
+        };
+
+        let single_delegation = if durable_run_started {
+            match SingleTaskDelegation::create(
+                ctx,
+                &delegated_run_id,
+                "planner-0",
+                &durable_objective,
+                DelegatedRunRole::Planner,
+                &target_scope,
+                &delegation_policy,
+                background,
+                executor_envelope,
+            ) {
+                Ok(delegation) => Some(delegation),
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated plan was not started because its durable group could not be created: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         let mut task = SubAgentTask::new("planner-0", &params.prompt)
             .with_name("planner")
             .with_working_dir(ctx.working_dir.clone())
-            .with_sandbox_root(
-                ctx.sandbox_root
-                    .clone()
-                    .unwrap_or_else(|| ctx.working_dir.clone()),
-            )
+            .with_sandbox_root(plan_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -739,8 +1346,9 @@ impl AgentTool {
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
-
-        let model = self.resolve_model(ctx, &client);
+        if let Some(delegation) = single_delegation.as_ref() {
+            task = delegation.attach(task);
+        }
 
         // Fresh project context (no parent conversation)
         let project_context =
@@ -772,6 +1380,7 @@ impl AgentTool {
             let bg_workspace_root = ctx.filesystem_access_root();
             let bg_child_name = params.name.clone().unwrap_or_else(|| "plan".to_string());
             let bg_runtime = self.runtime.clone();
+            let bg_single_delegation = single_delegation.clone();
             let mut bg_run_lease = delegated_lease
                 .take()
                 .expect("background plan start has an armed durable lease");
@@ -800,16 +1409,57 @@ impl AgentTool {
                 let _bg_host_heartbeat = bg_host_heartbeat;
                 let config =
                     PlanConfig::new(registry, bg_delegation_policy.clone(), project_context).await;
-
-                let result = execute_single_agent(
-                    &client,
-                    task,
-                    config,
-                    &model,
-                    cancellation_token,
-                    progress_tx.clone(),
-                )
-                .await;
+                let (result, synthesis_permit) = if let Some(delegation) =
+                    bg_single_delegation.as_ref()
+                {
+                    match delegation.acquire(&task, &model, &cancellation_token).await {
+                        Ok(task_permit) => {
+                            let execution_cancellation = task_permit.cancellation();
+                            let result = execute_single_agent(
+                                &client,
+                                task,
+                                config,
+                                &model,
+                                execution_cancellation,
+                                progress_tx.clone(),
+                            )
+                            .await;
+                            let synthesis_permit = match delegation.settle(&result, task_permit) {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    tracing::error!(
+                                        delegated_run_id = %bg_delegated_run_id,
+                                        %error,
+                                        "Suppressing background plan completion because durable task settlement failed"
+                                    );
+                                    return;
+                                }
+                            };
+                            (result, synthesis_permit)
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                %error,
+                                "Suppressing background plan completion because scheduler admission failed"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    (
+                        execute_single_agent(
+                            &client,
+                            task,
+                            config,
+                            &model,
+                            cancellation_token,
+                            progress_tx.clone(),
+                        )
+                        .await,
+                        None,
+                    )
+                };
 
                 let artifact = build_single_agent_artifact(
                     &bg_delegated_run_id,
@@ -827,6 +1477,18 @@ impl AgentTool {
 
                 match finalization {
                     Ok(authoritative) => {
+                        if let Some(delegation) = bg_single_delegation.as_ref() {
+                            if let Err(error) =
+                                delegation.finalize(synthesis_permit, authoritative.stage)
+                            {
+                                tracing::error!(
+                                    delegated_run_id = %bg_delegated_run_id,
+                                    %error,
+                                    "Suppressing background plan completion because durable group finalization failed"
+                                );
+                                return;
+                            }
+                        }
                         bg_run_lease.disarm(&bg_delegated_run_id);
                         let authoritative_summary = authoritative
                             .human_review
@@ -882,15 +1544,62 @@ impl AgentTool {
         let config = PlanConfig::new(registry, delegation_policy.clone(), project_context).await;
 
         let completion_tx = progress_tx.clone();
-        let result = execute_single_agent(
-            &client,
-            task,
-            config,
-            &model,
-            cancellation_token,
-            progress_tx,
-        )
-        .await;
+        let (result, synthesis_permit) = if let Some(delegation) = single_delegation.as_ref() {
+            match delegation.acquire(&task, &model, &cancellation_token).await {
+                Ok(task_permit) => {
+                    let execution_cancellation = task_permit.cancellation();
+                    let result = execute_single_agent(
+                        &client,
+                        task,
+                        config,
+                        &model,
+                        execution_cancellation,
+                        progress_tx,
+                    )
+                    .await;
+                    let synthesis_permit = match delegation.settle(&result, task_permit) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let artifact = build_single_agent_artifact(
+                                &delegated_run_id,
+                                &result,
+                                &delegation_policy,
+                            );
+                            let error = anyhow::anyhow!(
+                                "durable single-agent task settlement failed: {error}"
+                            );
+                            return delegated_persistence_error(
+                                &delegated_run_id,
+                                artifact.payload,
+                                &error,
+                            );
+                        }
+                    };
+                    (result, synthesis_permit)
+                }
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated plan did not start because durable scheduler admission failed: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            (
+                execute_single_agent(
+                    &client,
+                    task,
+                    config,
+                    &model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await,
+                None,
+            )
+        };
 
         let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
@@ -914,6 +1623,16 @@ impl AgentTool {
                     );
                 }
             };
+            if let Some(delegation) = single_delegation.as_ref() {
+                if let Err(error) = delegation.finalize(synthesis_permit, authoritative.stage) {
+                    let error = anyhow::anyhow!(error);
+                    return delegated_persistence_error(
+                        &delegated_run_id,
+                        artifact.payload,
+                        &error,
+                    );
+                }
+            }
             lease.disarm(&delegated_run_id);
             // Publish the authoritative terminal stage only after durable
             // finalization; the child's earlier terminal frame is not the
@@ -980,6 +1699,7 @@ impl AgentTool {
                 return ToolResult::error_with_code("invalid_project_workspace", error);
             }
         };
+        let verify_sandbox = PathBuf::from(&workspace_scope.path);
         let target_scope = vec![
             workspace_scope,
             DelegatedRunScope {
@@ -1042,16 +1762,63 @@ impl AgentTool {
             );
         }
 
+        let durable_objective = params.prompt.clone();
+        let model = self.resolve_model(ctx, &client);
+        let executor_envelope = if background {
+            match build_detached_executor_envelope(
+                ctx,
+                &format!("{delegated_run_id}:task:0"),
+                "verifier",
+                &durable_objective,
+                DelegationExecutorKind::Verify,
+                DelegatedRunRole::Verifier,
+                &client.resolved_model().key,
+                &model,
+                &ctx.working_dir,
+                &verify_sandbox,
+            ) {
+                Ok(envelope) => Some(envelope),
+                Err(error) => {
+                    return ToolResult::error_with_code("agent_persistence_error", error);
+                }
+            }
+        } else {
+            None
+        };
+
+        let single_delegation = if durable_run_started {
+            match SingleTaskDelegation::create(
+                ctx,
+                &delegated_run_id,
+                "verifier-0",
+                &durable_objective,
+                DelegatedRunRole::Verifier,
+                &target_scope,
+                &delegation_policy,
+                background,
+                executor_envelope,
+            ) {
+                Ok(delegation) => Some(delegation),
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated verification was not started because its durable group could not be created: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         let mut task = SubAgentTask::new("verifier-0", &params.prompt)
             .with_name("verifier")
             .with_working_dir(ctx.working_dir.clone())
-            .with_sandbox_root(
-                ctx.sandbox_root
-                    .clone()
-                    .unwrap_or_else(|| ctx.working_dir.clone()),
-            )
+            .with_sandbox_root(verify_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone())
+            .with_reasoning_effort(ctx.delegated_reasoning_effort)
             .with_process_context(
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
@@ -1061,8 +1828,9 @@ impl AgentTool {
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
-
-        let model = self.resolve_model(ctx, &client);
+        if let Some(delegation) = single_delegation.as_ref() {
+            task = delegation.attach(task);
+        }
 
         // Fresh project context (no parent conversation)
         let project_context =
@@ -1094,6 +1862,7 @@ impl AgentTool {
             let bg_workspace_root = ctx.filesystem_access_root();
             let bg_child_name = params.name.clone().unwrap_or_else(|| "verify".to_string());
             let bg_runtime = self.runtime.clone();
+            let bg_single_delegation = single_delegation.clone();
             let mut bg_run_lease = delegated_lease
                 .take()
                 .expect("background verify start has an armed durable lease");
@@ -1123,16 +1892,57 @@ impl AgentTool {
                 let config =
                     VerifyConfig::new(registry, bg_delegation_policy.clone(), project_context)
                         .await;
-
-                let result = execute_single_agent(
-                    &client,
-                    task,
-                    config,
-                    &model,
-                    cancellation_token,
-                    progress_tx.clone(),
-                )
-                .await;
+                let (result, synthesis_permit) = if let Some(delegation) =
+                    bg_single_delegation.as_ref()
+                {
+                    match delegation.acquire(&task, &model, &cancellation_token).await {
+                        Ok(task_permit) => {
+                            let execution_cancellation = task_permit.cancellation();
+                            let result = execute_single_agent(
+                                &client,
+                                task,
+                                config,
+                                &model,
+                                execution_cancellation,
+                                progress_tx.clone(),
+                            )
+                            .await;
+                            let synthesis_permit = match delegation.settle(&result, task_permit) {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    tracing::error!(
+                                        delegated_run_id = %bg_delegated_run_id,
+                                        %error,
+                                        "Suppressing background verify completion because durable task settlement failed"
+                                    );
+                                    return;
+                                }
+                            };
+                            (result, synthesis_permit)
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                %error,
+                                "Suppressing background verify completion because scheduler admission failed"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    (
+                        execute_single_agent(
+                            &client,
+                            task,
+                            config,
+                            &model,
+                            cancellation_token,
+                            progress_tx.clone(),
+                        )
+                        .await,
+                        None,
+                    )
+                };
 
                 let artifact = build_single_agent_artifact(
                     &bg_delegated_run_id,
@@ -1150,6 +1960,18 @@ impl AgentTool {
 
                 match finalization {
                     Ok(authoritative) => {
+                        if let Some(delegation) = bg_single_delegation.as_ref() {
+                            if let Err(error) =
+                                delegation.finalize(synthesis_permit, authoritative.stage)
+                            {
+                                tracing::error!(
+                                    delegated_run_id = %bg_delegated_run_id,
+                                    %error,
+                                    "Suppressing background verify completion because durable group finalization failed"
+                                );
+                                return;
+                            }
+                        }
                         bg_run_lease.disarm(&bg_delegated_run_id);
                         let authoritative_summary = authoritative
                             .human_review
@@ -1205,15 +2027,62 @@ impl AgentTool {
         let config = VerifyConfig::new(registry, delegation_policy.clone(), project_context).await;
 
         let completion_tx = progress_tx.clone();
-        let result = execute_single_agent(
-            &client,
-            task,
-            config,
-            &model,
-            cancellation_token,
-            progress_tx,
-        )
-        .await;
+        let (result, synthesis_permit) = if let Some(delegation) = single_delegation.as_ref() {
+            match delegation.acquire(&task, &model, &cancellation_token).await {
+                Ok(task_permit) => {
+                    let execution_cancellation = task_permit.cancellation();
+                    let result = execute_single_agent(
+                        &client,
+                        task,
+                        config,
+                        &model,
+                        execution_cancellation,
+                        progress_tx,
+                    )
+                    .await;
+                    let synthesis_permit = match delegation.settle(&result, task_permit) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let artifact = build_single_agent_artifact(
+                                &delegated_run_id,
+                                &result,
+                                &delegation_policy,
+                            );
+                            let error = anyhow::anyhow!(
+                                "durable single-agent task settlement failed: {error}"
+                            );
+                            return delegated_persistence_error(
+                                &delegated_run_id,
+                                artifact.payload,
+                                &error,
+                            );
+                        }
+                    };
+                    (result, synthesis_permit)
+                }
+                Err(error) => {
+                    return ToolResult::error_with_code(
+                        "agent_persistence_error",
+                        format!(
+                            "Delegated verification did not start because durable scheduler admission failed: {error}"
+                        ),
+                    );
+                }
+            }
+        } else {
+            (
+                execute_single_agent(
+                    &client,
+                    task,
+                    config,
+                    &model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await,
+                None,
+            )
+        };
 
         let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
@@ -1237,6 +2106,16 @@ impl AgentTool {
                     );
                 }
             };
+            if let Some(delegation) = single_delegation.as_ref() {
+                if let Err(error) = delegation.finalize(synthesis_permit, authoritative.stage) {
+                    let error = anyhow::anyhow!(error);
+                    return delegated_persistence_error(
+                        &delegated_run_id,
+                        artifact.payload,
+                        &error,
+                    );
+                }
+            }
             lease.disarm(&delegated_run_id);
             // Publish the authoritative terminal stage only after durable
             // finalization; the child's earlier terminal frame is not the
@@ -1273,6 +2152,34 @@ mod child_scope_tests {
     use std::fs;
 
     use super::*;
+    use crate::storage::{Database, SessionManager};
+    use crate::tools::registry::PermissionMode;
+
+    fn durable_test_context(temp: &tempfile::TempDir) -> (ToolContext, Vec<DelegatedRunScope>) {
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let db_path = temp.path().join("single-delegation.db");
+        let session_id = SessionManager::new(Database::new(&db_path).expect("database"))
+            .create_session("single delegation", Some("test:model"), workspace.to_str())
+            .expect("session");
+        let ctx = ToolContext {
+            db_path: Some(db_path),
+            session_id: Some(session_id),
+            tool_use_id: Some("tool-single".to_string()),
+            working_dir: workspace.clone(),
+            project_dir: Some(workspace.clone()),
+            sandbox_root: Some(workspace.clone()),
+            permission_mode: PermissionMode::Autonomous,
+            ..ToolContext::default()
+        };
+        let scope = vec![DelegatedRunScope {
+            label: "workspace".to_string(),
+            path: workspace.display().to_string(),
+            kind: "workspace".to_string(),
+        }];
+        (ctx, scope)
+    }
 
     #[test]
     fn file_target_persists_the_file_not_its_working_directory() {
@@ -1348,5 +2255,235 @@ mod child_scope_tests {
         assert!(envelope["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("no durable parent session")));
+    }
+
+    #[test]
+    fn durable_task_text_is_utf8_safe_and_strictly_bounded() {
+        let bounded = bounded_text(&"worker-🐝".repeat(4_000), 8 * 1024);
+        assert!(bounded.len() <= 8 * 1024);
+        assert!(bounded.ends_with("..."));
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn durable_task_artifact_stays_below_store_limit() {
+        let result = SubAgentResult {
+            task_id: "task".repeat(100_000),
+            agent_name: "agent".repeat(100_000),
+            delegated_run_id: Some("run".to_string()),
+            success: false,
+            output: "finding".repeat(100_000),
+            files_examined: (0..100)
+                .map(|index| format!("{index}/{}", "path".repeat(100_000)))
+                .collect(),
+            duration_ms: 12,
+            turns_used: 3,
+            error: Some("provider failure".to_string()),
+            termination: SubAgentTermination::Failed,
+            policy_violations: Vec::new(),
+            evidence: Default::default(),
+            background_processes: Vec::new(),
+        };
+        let encoded = serde_json::to_vec(&bounded_task_artifact(&result)).expect("artifact json");
+        assert!(encoded.len() < 256 * 1024, "{} bytes", encoded.len());
+    }
+
+    #[test]
+    fn durable_task_artifact_keeps_luna_shaped_acceptance_evidence() {
+        let result = SubAgentResult {
+            task_id: "alpha".to_string(),
+            agent_name: "alpha".to_string(),
+            delegated_run_id: Some("run-alpha".to_string()),
+            success: true,
+            output: r#"Generic summary without the marker.
+<delegated_handoff>{"status":"complete","summary":"proof complete","acceptance_checks":[{"id":"marker","status":"passed","evidence":"alpha-live-proof"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string(),
+            files_examined: vec!["proof/alpha.txt".to_string()],
+            duration_ms: 12,
+            turns_used: 1,
+            error: None,
+            termination: SubAgentTermination::Completed,
+            policy_violations: Vec::new(),
+            evidence: Default::default(),
+            background_processes: Vec::new(),
+        };
+
+        let artifact = bounded_task_artifact(&result);
+        assert_eq!(artifact["objective_status"], "complete");
+        assert_eq!(
+            artifact["handoff"]["acceptance_checks"][0]["evidence"],
+            "alpha-live-proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_task_groups_preserve_role_governance_and_execution_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (ctx, scope) = durable_test_context(&temp);
+        let cases = [
+            (
+                "explore",
+                DelegatedRunRole::Explore,
+                DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(7)),
+                false,
+                Some(7),
+            ),
+            (
+                "build",
+                DelegatedRunRole::Build,
+                DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7)),
+                false,
+                Some(7),
+            ),
+            (
+                "plan",
+                DelegatedRunRole::Planner,
+                DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(7)),
+                true,
+                Some(7),
+            ),
+            (
+                "verify",
+                DelegatedRunRole::Verifier,
+                DelegationPolicy::for_subagent_verify(PermissionMode::Autonomous, Some(7)),
+                true,
+                Some(7),
+            ),
+            (
+                "default-budget",
+                DelegatedRunRole::Explore,
+                DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, None),
+                false,
+                None,
+            ),
+        ];
+
+        for (name, role, policy, background, expected_turn_budget) in cases {
+            let group_id = format!("single-{name}");
+            let delegation = SingleTaskDelegation::create(
+                &ctx,
+                &group_id,
+                name,
+                &format!("run {name}"),
+                role.clone(),
+                &scope,
+                &policy,
+                background,
+                None,
+            )
+            .expect("single-task group");
+            let group = delegation
+                .coordinator
+                .get_group(&group_id)
+                .expect("group lookup")
+                .expect("group");
+
+            assert_eq!(group.tasks.len(), 1);
+            assert_eq!(group.tasks[0].specification.role, role);
+            assert_eq!(
+                group.tasks[0].specification.writer_mode,
+                DelegationWriterMode::Shared
+            );
+            assert_eq!(
+                group.contract.governance.delegated_turn_budget,
+                expected_turn_budget
+            );
+            let attached = delegation.attach(
+                SubAgentTask::new(name, format!("run {name}"))
+                    .with_delegation_policy(policy.clone()),
+            );
+            assert_eq!(
+                attached.max_turns_override, expected_turn_budget,
+                "runtime task must apply the exact persisted budget"
+            );
+            assert_eq!(group.contract.governance.max_parallelism, 1);
+            assert_eq!(group.contract.governance.delegation_policy, policy);
+            assert_eq!(
+                group.contract.execution_mode,
+                if background {
+                    DelegationExecutionMode::Detached
+                } else {
+                    DelegationExecutionMode::Foreground
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_task_terminal_failure_finalizes_without_synthesis_lease() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (ctx, scope) = durable_test_context(&temp);
+        let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(3));
+        let mut delegation = SingleTaskDelegation::create(
+            &ctx,
+            "single-pipeline",
+            "explore",
+            "inspect the workspace",
+            DelegatedRunRole::Explore,
+            &scope,
+            &policy,
+            false,
+            None,
+        )
+        .expect("single-task group");
+        // This test exercises task settlement, not the process-wide adaptive
+        // scheduler. A shared scheduler can be hosted by another Tokio test
+        // runtime that is concurrently shutting down, making an uncancelled
+        // request look like a genuine pre-admission cancellation. Keep a live
+        // scheduler scoped to this test so `None` retains its real meaning.
+        delegation.coordinator = DelegationCoordinator::with_scheduler(
+            ctx.db_path.clone().expect("durable test database"),
+            crate::agent::subagent::AgentScheduler::new(Default::default()),
+        );
+        let task = delegation.attach(
+            SubAgentTask::new("explore", "inspect the workspace")
+                .with_working_dir(ctx.working_dir.clone())
+                .with_sandbox_root(ctx.working_dir.clone())
+                .with_delegation_policy(policy),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let task_permit = delegation
+            .acquire(&task, "test:model", &cancellation)
+            .await
+            .expect("task permit");
+        let result = SubAgentResult {
+            task_id: task.id.clone(),
+            agent_name: task.name.clone(),
+            delegated_run_id: task.delegated_run_id.clone(),
+            success: false,
+            output: String::new(),
+            files_examined: Vec::new(),
+            duration_ms: 0,
+            turns_used: 0,
+            error: Some("expected test failure".to_string()),
+            termination: SubAgentTermination::Failed,
+            policy_violations: Vec::new(),
+            evidence: Default::default(),
+            background_processes: Vec::new(),
+        };
+        let synthesis_permit = delegation
+            .settle(&result, task_permit)
+            .expect("task settlement");
+
+        assert_eq!(
+            delegation
+                .coordinator
+                .get_group("single-pipeline")
+                .expect("group lookup")
+                .expect("group")
+                .state,
+            DelegationGroupState::Failed
+        );
+        delegation
+            .finalize(synthesis_permit, DelegatedRunStage::Failed)
+            .expect("group finalization");
+        assert_eq!(
+            delegation
+                .coordinator
+                .get_group("single-pipeline")
+                .expect("group lookup")
+                .expect("group")
+                .state,
+            DelegationGroupState::Failed
+        );
     }
 }

@@ -222,6 +222,19 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
         mitsuro_core::workflow::GoalStatus::Draft
     );
 
+    // Model an already-running planning loop. Activation must wake that loop
+    // through the control plane instead of requiring a synthetic chat message.
+    let active_guard = state
+        .try_lock_session(&session_id)
+        .await
+        .expect("test should hold the session run lock");
+    let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), workflow_tx);
+
     let Json(activated) = execute_workflow_command(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
@@ -238,6 +251,17 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
         activated.snapshot.goal.status,
         mitsuro_core::workflow::GoalStatus::Active
     );
+    assert!(matches!(
+        workflow_rx.recv().await,
+        Some(LoopInput::WorkflowUpdated {
+            goal_id,
+            aggregate_revision,
+            operation_id,
+        }) if goal_id == activated.snapshot.goal.id
+            && aggregate_revision == activated.snapshot.aggregate_revision
+            && operation_id == "route-activate"
+    ));
+    drop(active_guard);
     assert_eq!(
         session_manager
             .get_session(&session_id)
@@ -261,7 +285,7 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
 }
 
 #[tokio::test]
-async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch() {
+async fn generic_session_routes_preserve_hive_ownership_but_allow_user_organization() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let create = create_session(
@@ -301,6 +325,30 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
         )
         .expect("test Mako session should create");
 
+    let Json(organized) = update_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
+        Path(session_id.clone()),
+        Json(UpdateSessionRequest {
+            title: None,
+            project_dir: None,
+            working_dir: None,
+            workspace_mode: None,
+            mode: None,
+            model: None,
+            model_key: None,
+            target_branch: None,
+            permission_mode: None,
+            pinned: Some(true),
+            archived: Some(true),
+        }),
+    )
+    .await
+    .expect("Hive organization metadata should update");
+    assert!(organized.pinned_at.is_some());
+    assert!(organized.archived_at.is_some());
+
     let update = update_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
@@ -316,6 +364,8 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await;
@@ -619,6 +669,13 @@ async fn session_cancel_signals_the_owned_active_run() {
         .write()
         .await
         .insert(session_id.clone(), input_tx);
+    let child_cancellation = AgentCancellation::new().child_token();
+    state.tool_registry.agent_runtime_manager().register(
+        "owned-active-child",
+        "active child",
+        Some(session_id.clone()),
+        child_cancellation.clone(),
+    );
 
     let Json(response) = cancel_session(
         State(state.clone()),
@@ -630,6 +687,7 @@ async fn session_cancel_signals_the_owned_active_run() {
 
     assert!(response.ok);
     assert!(matches!(input_rx.recv().await, Some(LoopInput::Cancel)));
+    assert!(child_cancellation.is_cancelled());
 }
 
 #[tokio::test]
@@ -649,6 +707,13 @@ async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
         .write()
         .await
         .insert(session_id.clone(), input_tx);
+    let child_cancellation = AgentCancellation::new().child_token();
+    state.tool_registry.agent_runtime_manager().register(
+        "foreign-owned-child",
+        "foreign child",
+        Some(session_id.clone()),
+        child_cancellation.clone(),
+    );
 
     let result = cancel_session(
         State(state.clone()),
@@ -659,6 +724,7 @@ async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
 
     assert!(matches!(result, Err(AppError::NotFound(_))));
     assert!(input_rx.try_recv().is_err());
+    assert!(!child_cancellation.is_cancelled());
 }
 
 #[tokio::test]
@@ -671,16 +737,73 @@ async fn session_cancel_is_idempotent_when_the_run_is_inactive() {
     let session_id = session_manager
         .create_session_for_user("Idle Session", None, None, Some("alice"))
         .expect("session creation should succeed");
+    let now = Utc::now().to_rfc3339();
+    let group_id = "idle-session-detached-group";
+    let pending_id = format!("child-wake-{group_id}");
+    let database = Database::new(&state.db_path).expect("database should open");
+    database
+        .conn()
+        .execute(
+            "INSERT INTO delegation_groups (
+                delegation_group_id, parent_session_id, state, contract_json,
+                parent_continuation_state, parent_continuation_id, created_at, updated_at
+             ) VALUES (?1, ?2, 'running', '{}', 'pending', ?3, ?4, ?4)",
+            (
+                group_id,
+                session_id.as_str(),
+                pending_id.as_str(),
+                now.as_str(),
+            ),
+        )
+        .expect("detached group should insert");
+    session_manager
+        .queue_pending_steering_once(
+            &session_id,
+            &pending_id,
+            r#"[{"type":"text","text":"late child wake"}]"#,
+        )
+        .expect("pending wake should queue");
+    let child_cancellation = AgentCancellation::new().child_token();
+    state.tool_registry.agent_runtime_manager().register(
+        "owned-idle-child",
+        "idle parent child",
+        Some(session_id.clone()),
+        child_cancellation.clone(),
+    );
 
-    let Json(response) = cancel_session(
+    let Json(first_response) = cancel_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        Path(session_id),
+        Path(session_id.clone()),
     )
     .await
     .unwrap_or_else(|_| panic!("idle cancellation should be idempotent"));
+    let Json(second_response) = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("repeated idle cancellation should be idempotent"));
 
-    assert!(response.ok);
+    assert!(first_response.ok);
+    assert!(second_response.ok);
+    assert!(child_cancellation.is_cancelled());
+    let database = Database::new(&state.db_path).expect("database should reopen");
+    let continuation_state: String = database
+        .conn()
+        .query_row(
+            "SELECT parent_continuation_state FROM delegation_groups
+              WHERE delegation_group_id = ?1",
+            [group_id],
+            |row| row.get(0),
+        )
+        .expect("continuation state should load");
+    assert_eq!(continuation_state, "not_requested");
+    assert!(SessionManager::new(database)
+        .load_pending_steering(&session_id, &pending_id)
+        .expect("pending wake lookup should succeed")
+        .is_none());
 }
 
 #[tokio::test]
@@ -726,7 +849,7 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
 
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
-    session_manager
+    let session_id = session_manager
         .create_session_for_user_with_config(
             "Scoped Session",
             None,
@@ -738,6 +861,9 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
             SessionType::Code,
         )
         .expect("session creation should succeed");
+    session_manager
+        .set_agent_state(&session_id, "tool_executing")
+        .expect("agent state should update");
 
     let Json(response) = list_sessions(
         State(state),
@@ -745,12 +871,14 @@ async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
         HeaderMap::new(),
         Query(ListSessionsQuery {
             working_dir: Some("repo".to_string()),
+            include_archived: false,
         }),
     )
     .await
     .unwrap_or_else(|_| panic!("session list should succeed"));
 
     assert_eq!(response.len(), 1);
+    assert_eq!(response[0].agent_state, "tool_executing");
     assert_eq!(
         response[0].working_dir.as_deref(),
         Some(repo_dir.to_string_lossy().as_ref())
@@ -861,6 +989,39 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         Some("partial answer")
     );
     assert_eq!(response.last_event_sequence, Some(42));
+}
+
+#[tokio::test]
+async fn session_state_projects_registered_run_across_durable_idle_launch_gap() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Continuation launch", None, None, Some("alice"))
+        .expect("session creation should succeed");
+    session_manager
+        .set_agent_state(&session_id, "idle")
+        .expect("durable state should model the launch gap");
+
+    let (input_tx, _input_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let Json(response) = get_session_state(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+        Query(state::GetSessionStateQuery::default()),
+    )
+    .await
+    .expect("session state should load");
+
+    assert_eq!(response.agent_state, "streaming");
 }
 
 fn seed_trace_snapshot(state: &AppState, session_id: &str) -> Vec<RuntimeTraceEvent> {
@@ -1144,6 +1305,7 @@ async fn get_session_state_evicts_stale_live_running_and_indexes_old_terminal_ru
         Path(session_id),
         Query(state::GetSessionStateQuery {
             include_delegated_history: true,
+            delegation_after_cursor: None,
         }),
     )
     .await
@@ -1676,6 +1838,8 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await
@@ -1698,6 +1862,8 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await
@@ -1747,6 +1913,8 @@ async fn session_routes_apply_workspace_updates() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await
@@ -1777,6 +1945,8 @@ async fn session_routes_apply_workspace_updates() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await
@@ -1826,6 +1996,8 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await;
@@ -1885,6 +2057,8 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             model_key: None,
             target_branch: None,
             permission_mode: None,
+            pinned: None,
+            archived: None,
         }),
     )
     .await;

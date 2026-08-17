@@ -5,6 +5,7 @@ use axum::{middleware, Router};
 use crate::{auth, AppState};
 
 mod apns;
+pub(crate) mod browser;
 pub(crate) mod chat;
 mod credentials;
 mod extensions;
@@ -41,6 +42,7 @@ pub fn api_router() -> Router<AppState> {
         ));
 
     Router::new()
+        .nest("/browser", browser::router())
         .nest("/sessions", sessions::router())
         .nest("/chat", chat::router())
         .nest("/models", models::router())

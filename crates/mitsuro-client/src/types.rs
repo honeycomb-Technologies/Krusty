@@ -2,6 +2,417 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileResponse {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileTreeEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    #[serde(default)]
+    pub children: Option<Vec<FileTreeEntry>>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FileTreeResponse {
+    pub root: String,
+    #[serde(default)]
+    pub entries: Vec<FileTreeEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub source: String,
+    pub origin: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionOverview {
+    #[serde(default)]
+    pub extensions: Vec<ExtensionStatus>,
+    #[serde(default)]
+    pub diagnostics: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ExtensionStatus {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub path: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub enabled: bool,
+    pub connected: bool,
+    pub status: String,
+    pub tool_count: usize,
+    #[serde(default)]
+    pub tools: Vec<Value>,
+    #[serde(default)]
+    pub server_info: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BackgroundProcess {
+    pub id: String,
+    pub command: String,
+    pub description: Option<String>,
+    pub pid: Option<u32>,
+    pub status_code: String,
+    pub elapsed_secs: u64,
+    pub error: Option<String>,
+    pub exit_code: Option<i32>,
+    pub working_dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveStatusSummary {
+    pub home_status: String,
+    pub total_count: usize,
+    pub running_count: usize,
+    pub sleeping_count: usize,
+    pub scheduled_count: usize,
+    pub paused_count: usize,
+    pub failed_count: usize,
+    pub idle_count: usize,
+    pub pending_approvals_count: usize,
+    pub next_wake_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveRunDiagnostic {
+    pub kind: String,
+    pub severity: String,
+    pub summary: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HiveCurrentRun {
+    pub session_id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub project_dir: Option<String>,
+    pub target_branch: Option<String>,
+    pub agent_state: String,
+    pub runtime: Option<HiveRuntimeState>,
+    pub pending_tasks: usize,
+    pub in_progress_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+    pub blocked_tasks: usize,
+    pub diagnostic: Option<HiveRunDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveRunPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveRuntimeState {
+    pub session_id: String,
+    pub status: String,
+    pub next_wake_at: Option<String>,
+    pub sleep_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub current_run_id: Option<String>,
+    pub last_wake_reason: Option<String>,
+    pub crew_slug: Option<String>,
+    #[serde(default)]
+    pub priority: HiveRunPriority,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveTask {
+    pub id: String,
+    pub session_id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveCadence {
+    pub tick_interval_secs: u64,
+    pub max_ticks: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveSessionStatus {
+    pub session_id: String,
+    pub session_type: String,
+    pub title: String,
+    #[serde(default)]
+    pub tasks: Vec<HiveTask>,
+    pub agent_state: String,
+    pub runtime: Option<HiveRuntimeState>,
+    pub cadence: HiveCadence,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveDispatchRequest {
+    pub task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<HiveRunPriority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crew_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveDispatchResponse {
+    pub session_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveMessageRequest {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HivePriorityRequest {
+    pub priority: HiveRunPriority,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HiveCrewRequest {
+    pub crew_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HiveCurrentResponse {
+    pub status: HiveStatusSummary,
+    pub diagnostics: Value,
+    #[serde(default)]
+    pub runs: Vec<HiveCurrentRun>,
+    #[serde(default)]
+    pub approvals: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveScheduleWeekday {
+    Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveMonthlyDayPolicy {
+    Skip,
+    LastDay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HiveScheduleRecurrence {
+    Once {
+        at: String,
+    },
+    Daily {
+        start_date: String,
+        time: String,
+    },
+    Weekdays {
+        start_date: String,
+        time: String,
+    },
+    Weekly {
+        start_date: String,
+        time: String,
+        weekdays: Vec<HiveScheduleWeekday>,
+    },
+    Monthly {
+        start_date: String,
+        time: String,
+        day: u8,
+        invalid_day_policy: HiveMonthlyDayPolicy,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveDstGapPolicy {
+    ShiftForward,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveDstFoldPolicy {
+    First,
+    Second,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveDstPolicy {
+    pub gap: HiveDstGapPolicy,
+    pub fold: HiveDstFoldPolicy,
+}
+
+impl Default for HiveDstPolicy {
+    fn default() -> Self {
+        Self {
+            gap: HiveDstGapPolicy::ShiftForward,
+            fold: HiveDstFoldPolicy::First,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveMisfirePolicy {
+    Skip,
+    FireOnce,
+    CatchUp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveMisfireConfig {
+    pub policy: HiveMisfirePolicy,
+    pub grace_secs: u64,
+    pub catch_up_limit: usize,
+}
+
+impl Default for HiveMisfireConfig {
+    fn default() -> Self {
+        Self {
+            policy: HiveMisfirePolicy::FireOnce,
+            grace_secs: 300,
+            catch_up_limit: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveOverlapPolicy {
+    Skip,
+    #[default]
+    QueueOne,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HiveRetryJitter {
+    None,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveRetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay_secs: u64,
+    pub max_delay_secs: u64,
+    pub jitter: HiveRetryJitter,
+}
+
+impl Default for HiveRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 15,
+            max_delay_secs: 900,
+            jitter: HiveRetryJitter::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleWriteRequest {
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub recurrence: HiveScheduleRecurrence,
+    pub timezone: String,
+    pub dst_policy: HiveDstPolicy,
+    pub priority: i32,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub model_key: Option<ModelKey>,
+    pub crew_slug: Option<String>,
+    pub misfire: HiveMisfireConfig,
+    pub overlap_policy: HiveOverlapPolicy,
+    pub retry: HiveRetryPolicy,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleSummary {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub recurrence: HiveScheduleRecurrence,
+    pub next_fire_at: Option<String>,
+    pub last_scheduled_for: Option<String>,
+    pub status: String,
+    pub timezone: String,
+    pub dst_policy: HiveDstPolicy,
+    pub priority: i32,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub model_key: Option<ModelKey>,
+    pub model_catalog_revision: Option<String>,
+    pub crew_slug: Option<String>,
+    pub misfire: HiveMisfireConfig,
+    pub overlap_policy: HiveOverlapPolicy,
+    pub retry: HiveRetryPolicy,
+    pub revision: u64,
+    pub controller_session_id: String,
+}
+
+/// Response returned by Hive schedule create/status mutation routes.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HiveScheduleMutationResponse {
+    pub schedule_id: String,
+    pub revision: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -517,11 +928,280 @@ pub struct SessionStateResponse {
     #[serde(default)]
     pub live_partial_assistant: Option<PartialAssistantState>,
     #[serde(default)]
-    pub delegated_tools: Vec<Value>,
+    pub delegated_tools: Vec<DelegatedToolStateResponse>,
     #[serde(default)]
-    pub recent_delegated_runs: Vec<Value>,
+    pub recent_delegated_runs: Vec<DelegatedRunResponse>,
+    #[serde(default)]
+    pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
+    #[serde(default)]
+    pub delegation_groups: Vec<DelegationGroupStateResponse>,
+    #[serde(default)]
+    pub delegation_events: Vec<DelegationEventResponse>,
+    #[serde(default)]
+    pub delegation_event_cursor: Option<i64>,
     #[serde(default)]
     pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationGroupState {
+    Created,
+    Queued,
+    Running,
+    ReadyForParent,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationTaskState {
+    Created,
+    Queued,
+    Leased,
+    Running,
+    Retrying,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationExecutionMode {
+    Foreground,
+    Detached,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationParentContinuationState {
+    NotRequested,
+    Pending,
+    Queued,
+    Promoted,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunRole {
+    Explore,
+    Build,
+    Planner,
+    Verifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationEventKind {
+    GroupCreated,
+    GroupQueued,
+    GroupStateChanged,
+    TaskClaimed,
+    TaskRunning,
+    TaskStateChanged,
+    ParentContinuationQueued,
+    ParentContinuationPromoted,
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for DelegationEventKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "group_created" => Self::GroupCreated,
+            "group_queued" => Self::GroupQueued,
+            "group_state_changed" => Self::GroupStateChanged,
+            "task_claimed" => Self::TaskClaimed,
+            "task_running" => Self::TaskRunning,
+            "task_state_changed" => Self::TaskStateChanged,
+            "parent_continuation_queued" => Self::ParentContinuationQueued,
+            "parent_continuation_promoted" => Self::ParentContinuationPromoted,
+            _ => Self::Other(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegationTaskStateResponse {
+    pub delegation_task_id: String,
+    pub task_key: String,
+    pub role: DelegatedRunRole,
+    pub state: DelegationTaskState,
+    pub attempt_count: usize,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegationGroupStateResponse {
+    pub delegation_group_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: Option<String>,
+    pub state: DelegationGroupState,
+    pub execution_mode: DelegationExecutionMode,
+    pub parent_continuation_state: DelegationParentContinuationState,
+    #[serde(default)]
+    pub tasks: Vec<DelegationTaskStateResponse>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DelegationEventResponse {
+    pub event_id: i64,
+    pub parent_session_id: String,
+    pub delegation_group_id: String,
+    #[serde(default)]
+    pub delegation_task_id: Option<String>,
+    pub event_type: DelegationEventKind,
+    #[serde(default)]
+    pub payload: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedToolKind {
+    Explore,
+    Plan,
+    Verify,
+    Build,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunStage {
+    Created,
+    Running,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedProgressStatus {
+    Created,
+    Queued,
+    Leased,
+    Running,
+    Retrying,
+    Complete,
+    Degraded,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedProgressEvent {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub parent_session_id: String,
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    #[serde(default)]
+    pub current_action: Option<String>,
+    #[serde(default)]
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    #[serde(default)]
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedAgentStateResponse {
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    #[serde(default)]
+    pub current_action: Option<String>,
+    #[serde(default)]
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    #[serde(default)]
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedToolStateResponse {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunScopeResponse {
+    pub label: String,
+    pub path: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DelegatedRunResponse {
+    pub delegated_run_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: Option<String>,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub resumable: bool,
+    #[serde(default)]
+    pub resumed_from_run_id: Option<String>,
+    #[serde(default)]
+    pub child_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub target_scope: Vec<DelegatedRunScopeResponse>,
+    #[serde(default)]
+    pub human_review: Option<String>,
+    #[serde(default)]
+    pub artifact: Option<Value>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunSummaryResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    #[serde(default)]
+    pub child_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionStateOptions {
+    pub include_delegated_history: bool,
+    pub delegation_after_cursor: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -697,6 +1377,20 @@ pub struct ChatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SteerRequest {
+    pub session_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SteerResponse {
+    pub status: String,
+    pub pending_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolApprovalRequest {
     pub session_id: String,
     pub tool_call_id: String,
@@ -773,7 +1467,10 @@ pub enum ChatStreamEvent {
         payload: Value,
     },
     DelegatedProgress {
-        payload: Value,
+        payload: DelegatedProgressEvent,
+    },
+    DelegationEvent {
+        event: DelegationEventResponse,
     },
     AwaitingInput {
         tool_call_id: String,
@@ -955,7 +1652,21 @@ impl ChatStreamEvent {
                 tool_use_id: string_field(&value, "tool_use_id"),
                 payload: value,
             },
-            "delegated_progress" => Self::DelegatedProgress { payload: value },
+            "delegated_progress" => serde_json::from_value(value.clone())
+                .map(|payload| Self::DelegatedProgress { payload })
+                .unwrap_or_else(|_| Self::Other {
+                    event_type: event_type.clone(),
+                    payload: value,
+                }),
+            "delegation_event" => value
+                .get("event")
+                .cloned()
+                .and_then(|event| serde_json::from_value(event).ok())
+                .map(|event| Self::DelegationEvent { event })
+                .unwrap_or_else(|| Self::Other {
+                    event_type: event_type.clone(),
+                    payload: value,
+                }),
             "awaiting_input" => Self::AwaitingInput {
                 tool_call_id: string_field(&value, "tool_call_id"),
                 tool_name: string_field(&value, "tool_name"),
@@ -1115,10 +1826,83 @@ fn u64_field(value: &Value, field: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatStreamEvent, FastMode, ModelInfo, ReasoningControl, ReasoningEffort, SessionType,
-        ThinkingLevel,
+        ChatStreamEvent, ContentBlock, DelegatedProgressStatus, DelegatedRunRole,
+        DelegationEventKind, DelegationExecutionMode, DelegationParentContinuationState, FastMode,
+        HiveCurrentResponse, HiveRunPriority, HiveScheduleRecurrence, HiveScheduleSummary,
+        ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse, SessionType,
+        SteerRequest, ThinkingLevel,
     };
     use serde_json::json;
+
+    #[test]
+    fn steer_request_uses_the_chat_steering_contract() {
+        let request = SteerRequest {
+            session_id: "session-1".to_owned(),
+            message: "focus on the failing test".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "extra context".to_owned(),
+            }],
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["message"], "focus on the failing test");
+        assert_eq!(value["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn hive_read_models_accept_the_server_control_plane_shape() {
+        let current: HiveCurrentResponse = serde_json::from_value(json!({
+            "status": {
+                "home_status": "idle", "total_count": 1, "running_count": 0,
+                "sleeping_count": 0, "scheduled_count": 0, "paused_count": 0,
+                "failed_count": 0, "idle_count": 1, "pending_approvals_count": 0,
+                "next_wake_at": null, "high_priority_count": 0, "waiting_count": 0
+            },
+            "diagnostics": {"health_state": "healthy"},
+            "runs": [{
+                "session_id": "hive-1", "title": "Audit", "updated_at": "now",
+                "project_dir": null, "target_branch": null, "agent_state": "idle",
+                "runtime": {
+                    "session_id": "hive-1", "status": "error", "next_wake_at": null,
+                    "sleep_reason": null, "last_error": "provider unavailable",
+                    "current_run_id": "run-1", "last_wake_reason": "dispatch",
+                    "crew_slug": "release", "priority": "high", "updated_at": "now"
+                }, "pending_tasks": 0, "in_progress_tasks": 0,
+                "completed_tasks": 2, "failed_tasks": 0, "blocked_tasks": 0,
+                "cadence": {"tick_interval_secs": 60, "max_ticks": 10},
+                "diagnostic": null
+            }],
+            "approvals": []
+        }))
+        .expect("Hive current response");
+        assert_eq!(current.runs[0].session_id, "hive-1");
+        let runtime = current.runs[0].runtime.as_ref().expect("typed runtime");
+        assert_eq!(runtime.status, "error");
+        assert_eq!(runtime.last_error.as_deref(), Some("provider unavailable"));
+        assert_eq!(runtime.priority, HiveRunPriority::High);
+
+        let schedules: Vec<HiveScheduleSummary> = serde_json::from_value(json!([{
+            "id": "schedule-1", "controller_id": "controller-1", "title": "Sweep",
+            "summary": "Nightly", "objective": "Inspect",
+            "recurrence": {"kind": "daily", "start_date": "2026-08-10", "time": "02:00:00"},
+            "timezone": "UTC", "dst_policy": {"gap": "shift_forward", "fold": "first"},
+            "next_fire_at": null, "last_scheduled_for": null, "status": "enabled", "priority": 0,
+            "project_dir": null, "model": null, "model_key": null,
+            "model_catalog_revision": null, "crew_slug": null,
+            "misfire": {"policy": "fire_once", "grace_secs": 300, "catch_up_limit": 3},
+            "overlap_policy": "skip",
+            "retry": {"max_attempts": 5, "base_delay_secs": 15, "max_delay_secs": 900, "jitter": "full"},
+            "revision": 1,
+            "created_by": "user", "created_at": "now", "updated_at": "now",
+            "controller_session_id": "hive-1"
+        }]))
+        .expect("Hive schedule list");
+        assert_eq!(schedules[0].controller_session_id, "hive-1");
+        assert!(matches!(
+            schedules[0].recurrence,
+            HiveScheduleRecurrence::Daily { .. }
+        ));
+    }
 
     #[test]
     fn session_type_accepts_deprecated_wire_value_and_emits_canonical_value() {
@@ -1174,6 +1958,130 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn session_state_parses_typed_durable_delegation_contracts() {
+        let state: SessionStateResponse = serde_json::from_value(json!({
+            "id": "session-1",
+            "agent_state": "idle",
+            "mode": "build",
+            "permission_mode": "supervised",
+            "delegated_tools": [],
+            "recent_delegated_runs": [],
+            "delegated_run_summaries": [{
+                "delegated_run_id": "run-1",
+                "parent_tool_call_id": "tool-1",
+                "kind": "plan",
+                "stage": "complete",
+                "child_name": "planner",
+                "capabilities": ["read"],
+                "updated_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_groups": [{
+                "delegation_group_id": "group-1",
+                "parent_tool_call_id": "tool-1",
+                "state": "running",
+                "execution_mode": "detached",
+                "parent_continuation_state": "pending",
+                "tasks": [{
+                    "delegation_task_id": "task-1",
+                    "task_key": "plan",
+                    "role": "planner",
+                    "state": "leased",
+                    "attempt_count": 1,
+                    "updated_at": "2026-08-08T00:00:00Z"
+                }],
+                "updated_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_events": [{
+                "event_id": 42,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "delegation_task_id": "task-1",
+                "event_type": "task_claimed",
+                "payload": {},
+                "created_at": "2026-08-08T00:00:00Z"
+            }],
+            "delegation_event_cursor": 42
+        }))
+        .expect("typed delegation session state");
+
+        assert_eq!(
+            state.delegation_groups[0].execution_mode,
+            DelegationExecutionMode::Detached
+        );
+        assert_eq!(
+            state.delegation_groups[0].parent_continuation_state,
+            DelegationParentContinuationState::Pending
+        );
+        assert_eq!(
+            state.delegation_groups[0].tasks[0].role,
+            DelegatedRunRole::Planner
+        );
+        assert_eq!(
+            state.delegation_events[0].event_type,
+            DelegationEventKind::TaskClaimed
+        );
+        assert_eq!(state.delegated_run_summaries[0].delegated_run_id, "run-1");
+    }
+
+    #[test]
+    fn delegated_progress_stream_event_is_fully_typed() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "delegated_progress",
+            "delegated_run_id": "run-1",
+            "tool_call_id": "tool-1",
+            "kind": "build",
+            "stage": "running",
+            "parent_session_id": "session-1",
+            "task_id": "task-1",
+            "agent_name": "builder",
+            "status": "retrying",
+            "tool_count": 3,
+            "tokens": 1200,
+            "current_action": "testing",
+            "completion_summary": null,
+            "lines_added": 10,
+            "lines_removed": 2,
+            "completed_plan_task": null
+        }));
+
+        match event {
+            ChatStreamEvent::DelegatedProgress { payload } => {
+                assert_eq!(payload.status, DelegatedProgressStatus::Retrying);
+                assert_eq!(payload.tool_count, 3);
+                assert_eq!(payload.current_action.as_deref(), Some("testing"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegation_event_stream_preserves_unknown_durable_event_kinds() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "delegation_event",
+            "event": {
+                "event_id": 43,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "delegation_task_id": null,
+                "event_type": "future_scheduler_event",
+                "payload": {"domain": "workspace"},
+                "created_at": "2026-08-08T00:00:01Z"
+            }
+        }));
+
+        match event {
+            ChatStreamEvent::DelegationEvent { event } => {
+                assert_eq!(
+                    event.event_type,
+                    DelegationEventKind::Other("future_scheduler_event".to_owned())
+                );
+                assert_eq!(event.payload["domain"], "workspace");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

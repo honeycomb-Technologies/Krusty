@@ -10,6 +10,7 @@ use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
 use crate::agent::ProviderCallTraceContext;
 use crate::agent::{DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind};
 use crate::ai::client::AiClient;
+use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::AiToolCall;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
@@ -41,7 +42,9 @@ pub(super) async fn execute_regular_tool(
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     provider_call_trace: Option<&ProviderCallTraceContext>,
     subagent_max_turns_override: Option<usize>,
+    delegated_reasoning_effort: Option<ReasoningEffort>,
     execution_tool_allowlist: Option<&HashSet<String>>,
+    hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
     extension_intercept_prepared: bool,
     execution_cancellation: Option<CancellationToken>,
@@ -103,7 +106,9 @@ pub(super) async fn execute_regular_tool(
     .with_permission_mode(permission_mode)
     .with_supervised_approval(supervised_approval_granted)
     .with_subagent_max_turns(subagent_max_turns_override)
+    .with_delegated_reasoning_effort(delegated_reasoning_effort)
     .with_execution_tool_allowlist(execution_tool_allowlist)
+    .with_hive_group_run(hive_group_run.cloned())
     .with_ai_client(ai_client.clone())
     .with_skills_manager(Arc::clone(skills_manager))
     .with_tool_registry(Arc::clone(tool_registry))
@@ -176,7 +181,7 @@ pub(super) async fn execute_regular_tool(
 
     drop(ctx);
     if let Some(handle) = delegated_forwarder_handle {
-        if should_detach_delegated_progress_bridge(call, &result) {
+        if successful_background_agent_start(call, &result) {
             // The spawned agent owns a progress sender until it completes. Awaiting the
             // forwarder here would turn an explicitly background launch back into a
             // synchronous tool call. Dropping a Tokio JoinHandle detaches the forwarder,
@@ -201,7 +206,7 @@ fn should_install_delegated_progress_bridge(call: &AiToolCall) -> bool {
     call.name == "agent" && agent_call_may_start_run(&call.arguments)
 }
 
-fn should_detach_delegated_progress_bridge(call: &AiToolCall, result: &ToolResult) -> bool {
+pub(super) fn successful_background_agent_start(call: &AiToolCall, result: &ToolResult) -> bool {
     if call.name != "agent" || result.is_error {
         return false;
     }
@@ -259,35 +264,14 @@ fn delegated_kind_from_durable_run(
 
 fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage {
     match progress.status {
-        AgentProgressStatus::Running => {
-            let action = progress
-                .current_action
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if action.contains("starting") {
-                DelegatedRunStage::Created
-            } else if action.contains("synthesizing") {
-                DelegatedRunStage::Synthesizing
-            } else {
-                DelegatedRunStage::Running
-            }
-        }
+        AgentProgressStatus::Created
+        | AgentProgressStatus::Queued
+        | AgentProgressStatus::Leased => DelegatedRunStage::Created,
+        AgentProgressStatus::Running | AgentProgressStatus::Retrying => DelegatedRunStage::Running,
         AgentProgressStatus::Complete => DelegatedRunStage::Complete,
-        AgentProgressStatus::Failed => {
-            let action = progress
-                .current_action
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if action.contains("cancel") {
-                DelegatedRunStage::Cancelled
-            } else if action.contains("degraded") {
-                DelegatedRunStage::Degraded
-            } else {
-                DelegatedRunStage::Failed
-            }
-        }
+        AgentProgressStatus::Degraded => DelegatedRunStage::Degraded,
+        AgentProgressStatus::Failed => DelegatedRunStage::Failed,
+        AgentProgressStatus::Cancelled => DelegatedRunStage::Cancelled,
     }
 }
 
@@ -295,7 +279,7 @@ fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage 
 mod tests {
     use super::{
         agent_runs_in_background, delegated_kind_from_agent_call, delegated_stage_from_progress,
-        should_detach_delegated_progress_bridge, should_install_delegated_progress_bridge,
+        should_install_delegated_progress_bridge, successful_background_agent_start,
     };
     use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
     use crate::agent::{DelegatedRunStage, DelegatedToolKind};
@@ -353,16 +337,13 @@ mod tests {
             "delivery": "accepted_by_live_mailbox",
             "delegated_run_id": "terminal-or-live"
         }));
-        assert!(!should_detach_delegated_progress_bridge(
-            &followup,
-            &live_result
-        ));
+        assert!(!successful_background_agent_start(&followup, &live_result));
 
         let resumed_result = ToolResult::success_data(json!({
             "status": "background_started",
             "delegated_run_id": "new-run"
         }));
-        assert!(should_detach_delegated_progress_bridge(
+        assert!(successful_background_agent_start(
             &followup,
             &resumed_result
         ));
@@ -381,30 +362,39 @@ mod tests {
             }),
         };
         assert!(should_install_delegated_progress_bridge(&spawn));
-        assert!(should_detach_delegated_progress_bridge(
+        assert!(successful_background_agent_start(
             &spawn,
             &ToolResult::success("legacy background response")
         ));
     }
 
     #[test]
-    fn terminal_progress_preserves_degraded_and_cancelled_stage_labels() {
-        let progress = |action: Option<&str>| AgentProgress {
-            status: AgentProgressStatus::Failed,
+    fn progress_stage_uses_canonical_status_not_action_prose() {
+        let progress = |status, action: Option<&str>| AgentProgress {
+            status,
             current_action: action.map(ToString::to_string),
             ..AgentProgress::default()
         };
 
         assert_eq!(
-            delegated_stage_from_progress(&progress(Some("degraded"))),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Degraded,
+                Some("ordinary summary")
+            )),
             DelegatedRunStage::Degraded
         );
         assert_eq!(
-            delegated_stage_from_progress(&progress(Some("cancelled"))),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Cancelled,
+                Some("ordinary summary")
+            )),
             DelegatedRunStage::Cancelled
         );
         assert_eq!(
-            delegated_stage_from_progress(&progress(None)),
+            delegated_stage_from_progress(&progress(
+                AgentProgressStatus::Failed,
+                Some("cancelled")
+            )),
             DelegatedRunStage::Failed
         );
     }

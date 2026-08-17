@@ -3,6 +3,7 @@ import {
 	applyDelegatedSessionState,
 	createDelegatedArtifactState,
 	formatToolOutputForDisplay,
+	mergeDelegatedArtifactState,
 	parseDelegatedArtifactState,
 	resolveDelegatedKind,
 } from "../src/session/delegated.ts";
@@ -10,6 +11,7 @@ import type {
 	DelegatedProgressEvent,
 	DelegatedRunResponse,
 	DelegatedRunSummaryResponse,
+	DelegationGroupStateResponse,
 } from "@mitsuro/api";
 import type { ChatMessage, ToolCall } from "../src/session/types.ts";
 
@@ -69,6 +71,95 @@ Deno.test("new Agent contract uses capabilities and parent name", () => {
 	assertEquals(artifact.name, "focused validator", "name must survive presentation seeding");
 	assertEquals(artifact.agents[0]?.name, "focused validator", "seed row must use parent name");
 	assertEquals(artifact.capabilities?.join(","), "execute", "execute-only must stay exact");
+});
+
+Deno.test("declared Agent tasks seed a distinct team before durable progress arrives", () => {
+	const artifact = createDelegatedArtifactState("build", {
+		name: "release-team",
+		tasks: [
+			{ id: "api", name: "API builder", instructions: "Implement the API" },
+			{ id: "ui", name: "UI builder", scope: "Build the interface" },
+		],
+	});
+
+	assertEquals(artifact.agents.length, 2, "every declared task should seed one table row");
+	assertEquals(artifact.agents[0]?.taskId, "declared:api", "declared ids should stay stable");
+	assertEquals(artifact.agents[0]?.name, "API builder", "task name should drive the row");
+	assertEquals(
+		artifact.agents[1]?.currentAction,
+		"Build the interface",
+		"scope should provide useful pre-admission activity copy",
+	);
+});
+
+Deno.test("canonical progress replaces optimistic rows without growing the team", () => {
+	const args = {
+		capabilities: ["read"],
+		tasks: [
+			{ id: "first", name: "First child" },
+			{ id: "second", name: "Second child" },
+		],
+	};
+	let call: ToolCall = {
+		id: "tool-team",
+		name: "agent",
+		arguments: args,
+		status: "running",
+		delegated: createDelegatedArtifactState("explore", args),
+	};
+	for (const ordinal of [1, 0]) {
+		call = applyDelegatedProgress(call, {
+			parent_session_id: "session-1",
+			tool_call_id: "tool-team",
+			delegated_run_id: "group-team",
+			task_id: `group-team:task:${ordinal}`,
+			agent_name: ordinal === 0 ? "First child" : "Second child",
+			kind: "explore",
+			stage: "running",
+			status: "running",
+			tool_count: 1,
+			tokens: 10,
+			current_action: "Reading",
+			completion_summary: null,
+			lines_added: 0,
+			lines_removed: 0,
+			completed_plan_task: null,
+		});
+		assertEquals(call.delegated?.agents.length, 2, "admission must not add a third row");
+	}
+	assertEquals(
+		call.delegated?.agents.map((agent) => agent.taskId).join(","),
+		"group-team:task:0,group-team:task:1",
+		"canonical rows must retain declared task order",
+	);
+});
+
+Deno.test("terminal report labels do not duplicate canonical live rows", () => {
+	const current = {
+		...createDelegatedArtifactState("explore", { capabilities: ["read"] }),
+		delegatedRunId: "group-team",
+		stage: "running" as const,
+		agents: [
+			{ taskId: "group-team:task:0", name: "First child", status: "running" as const, toolCount: 1, tokens: 10, linesAdded: 0, linesRemoved: 0 },
+			{ taskId: "group-team:task:1", name: "Second child", status: "running" as const, toolCount: 1, tokens: 10, linesAdded: 0, linesRemoved: 0 },
+		],
+	};
+	const terminal = parseDelegatedArtifactState(
+		"agent",
+		JSON.stringify({
+			outcome: "success",
+			delegated_run_id: "group-team",
+			agents: [
+				{ agent: "Hive Worker 01", success: true, usable_evidence: true },
+				{ agent: "Hive Worker 02", success: true, usable_evidence: true },
+			],
+		}),
+		{ capabilities: ["read"] },
+	);
+	if (!terminal) throw new Error("expected terminal artifact");
+	const merged = mergeDelegatedArtifactState(current, terminal);
+	assertEquals(merged.agents.length, 2, "terminal reports must not append duplicate rows");
+	assertEquals(merged.agents[0]?.taskId, "group-team:task:0", "canonical identity must survive");
 });
 
 Deno.test("legacy agent_type remains a delegated-kind fallback", () => {
@@ -405,6 +496,154 @@ Deno.test("compact durable summaries settle Agent cards outside the artifact win
 	assertEquals(restoredCall?.delegated?.stage, "failed", "summary must settle old card");
 	assertEquals(restoredCall?.delegated?.outcome, "failed", "summary must settle outcome");
 	assertEquals(restoredCall?.status, "error", "summary must settle outer status");
+});
+
+Deno.test("canonical delegation groups restore parallel task state after reconnect", () => {
+	const messages: ChatMessage[] = [{
+		id: "message-group",
+		role: "assistant",
+		content: "",
+		toolCalls: [{
+			id: "tool-group",
+			name: "agent",
+			arguments: { capabilities: ["write"], components: ["api", "ui"] },
+			status: "running",
+		}],
+	}];
+	const group: DelegationGroupStateResponse = {
+		delegation_group_id: "group-1",
+		parent_tool_call_id: "tool-group",
+		state: "running",
+		execution_mode: "detached",
+		parent_continuation_state: "pending",
+		updated_at: "2026-08-08T12:00:00Z",
+		tasks: [
+			{
+				delegation_task_id: "task-api",
+				task_key: "api",
+				role: "build",
+				state: "running",
+				attempt_count: 1,
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+			{
+				delegation_task_id: "task-ui",
+				task_key: "ui",
+				role: "build",
+				state: "leased",
+				attempt_count: 0,
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+			{
+				delegation_task_id: "task-verify",
+				task_key: "verify",
+				role: "verifier",
+				state: "queued",
+				attempt_count: 0,
+				depends_on: ["api", "ui"],
+				updated_at: "2026-08-08T12:00:00Z",
+			},
+		],
+	};
+
+	const live = applyDelegatedProgress(messages[0]!.toolCalls![0]!, {
+		parent_session_id: "session-1",
+		tool_call_id: "tool-group",
+		delegated_run_id: "group-1",
+		task_id: "task-api",
+		agent_name: "API Builder",
+		kind: "build",
+		stage: "running",
+		status: "running",
+		tool_count: 7,
+		tokens: 321,
+		current_action: "Running API tests",
+		completion_summary: null,
+		lines_added: 12,
+		lines_removed: 3,
+		completed_plan_task: null,
+	});
+	messages[0]!.toolCalls = [live];
+	const restored = applyDelegatedSessionState(messages, [], [], [], [group]);
+	const delegated = restored[0]?.toolCalls?.[0]?.delegated;
+	assertEquals(delegated?.delegatedRunId, "group-1", "group identity must win");
+	assertEquals(delegated?.groupState, "running", "exact group state must be retained");
+	assertEquals(delegated?.agents.length, 3, "all logical tasks must render");
+	assertEquals(delegated?.agents[0]?.status, "running", "active task must remain running");
+	assertEquals(delegated?.agents[0]?.name, "API Builder", "live display name must survive snapshot");
+	assertEquals(delegated?.agents[0]?.toolCount, 7, "live metrics must survive snapshot");
+	assertEquals(delegated?.agents[0]?.attemptCount, 1, "durable attempts must win");
+	assertEquals(
+		delegated?.agents[0]?.currentAction,
+		"Running API tests",
+		"live action must survive a running durable snapshot",
+	);
+	assertEquals(delegated?.agents[1]?.status, "pending", "leased task remains non-running");
+	assertEquals(delegated?.agents[1]?.taskState, "leased", "exact leased state must be retained");
+	assertEquals(
+		delegated?.agents[1]?.currentAction,
+		"Waiting for provider capacity",
+		"capacity wait must be distinct from running",
+	);
+	assertEquals(
+		delegated?.agents[2]?.currentAction,
+		"Waiting for api, ui",
+		"dependency wait must be visible",
+	);
+	assertEquals(delegated?.activeTargets, 1, "active count must come from group tasks");
+	assertEquals(delegated?.waitingTargets, 1, "leased tasks must not inflate running count");
+	assertEquals(delegated?.pendingTargets, 1, "pending count must come from group tasks");
+});
+
+Deno.test("canonical cancelled group replaces stale running UI state after reconnect", () => {
+	const messages: ChatMessage[] = [{
+		id: "message-cancelled-group",
+		role: "assistant",
+		content: "",
+		toolCalls: [{
+			id: "tool-cancelled-group",
+			name: "agent",
+			arguments: { capabilities: ["write", "execute"] },
+			status: "running",
+		}],
+	}];
+	const live = applyDelegatedProgress(messages[0]!.toolCalls![0]!, {
+		...progressEvent("running"),
+		tool_call_id: "tool-cancelled-group",
+		delegated_run_id: "group-cancelled",
+		task_id: "task-builder",
+		agent_name: "Builder",
+	});
+	messages[0]!.toolCalls = [live];
+	const group: DelegationGroupStateResponse = {
+		delegation_group_id: "group-cancelled",
+		parent_tool_call_id: "tool-cancelled-group",
+		state: "cancelled",
+		execution_mode: "foreground",
+		parent_continuation_state: "not_requested",
+		updated_at: "2026-08-11T12:00:00Z",
+		tasks: [{
+			delegation_task_id: "task-builder",
+			task_key: "builder",
+			role: "build",
+			state: "cancelled",
+			attempt_count: 1,
+			updated_at: "2026-08-11T12:00:00Z",
+		}],
+	};
+
+	const restored = applyDelegatedSessionState(messages, [], [], [], [group]);
+	const call = restored[0]?.toolCalls?.[0];
+
+	assertEquals(call?.delegated?.groupState, "cancelled", "durable group state must win");
+	assertEquals(call?.delegated?.outcome, "cancelled", "cancelled outcome must survive");
+	assertEquals(
+		call?.delegated?.agents[0]?.status,
+		"cancelled",
+		"durable task state must replace stale running progress",
+	);
+	assertEquals(call?.delegated?.cancelledAgents, 1, "cancelled task count must be canonical");
+	assertEquals(call?.status, "error", "cancelled work must not retain a running card");
 });
 
 Deno.test("late nonterminal progress cannot reopen a terminal delegated run", () => {

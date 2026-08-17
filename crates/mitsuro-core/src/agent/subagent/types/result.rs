@@ -3,6 +3,140 @@ use serde_json::{json, Value};
 
 use super::report::{parse_explore_report, summary_looks_non_substantive};
 
+const HANDOFF_OPEN: &str = "<delegated_handoff>";
+const HANDOFF_CLOSE: &str = "</delegated_handoff>";
+const ACCEPTANCE_CONTRACT_OPEN: &str = "<delegated_acceptance_contract>";
+const ACCEPTANCE_CONTRACT_CLOSE: &str = "</delegated_acceptance_contract>";
+const MAX_HANDOFF_SUMMARY_BYTES: usize = 1_200;
+const MAX_HANDOFF_ACCEPTANCE_CHECKS: usize = 8;
+const MAX_HANDOFF_CHECK_ID_BYTES: usize = 128;
+const MAX_HANDOFF_CHECK_STATUS_BYTES: usize = 32;
+const MAX_HANDOFF_CHECK_EVIDENCE_BYTES: usize = 1_200;
+const MAX_HANDOFF_REMAINING_ITEMS: usize = 8;
+const MAX_HANDOFF_REMAINING_ITEM_BYTES: usize = 600;
+const MAX_HANDOFF_BLOCKERS: usize = 8;
+const MAX_HANDOFF_BLOCKER_BYTES: usize = 600;
+const MAX_HANDOFF_GENERATED_ARTIFACTS: usize = 16;
+const MAX_HANDOFF_ARTIFACT_PATH_BYTES: usize = 512;
+const MAX_HANDOFF_ARTIFACT_PURPOSE_BYTES: usize = 600;
+
+pub(crate) fn parse_delegated_handoff(output: &str) -> Option<DelegatedTaskHandoff> {
+    let output = output.trim_end();
+    if !output.ends_with(HANDOFF_CLOSE)
+        || output.matches(HANDOFF_OPEN).count() != 1
+        || output.matches(HANDOFF_CLOSE).count() != 1
+    {
+        return None;
+    }
+    let start = output.find(HANDOFF_OPEN)? + HANDOFF_OPEN.len();
+    let end = output[start..].find(HANDOFF_CLOSE)? + start;
+    serde_json::from_str(output[start..end].trim()).ok()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskObjectiveStatus {
+    Complete,
+    #[default]
+    Degraded,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedAcceptanceCheck {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+/// A generated deliverable that must cross an isolated build boundary.
+///
+/// Paths are provider-authored claims until the isolation integrator validates
+/// them against the task worktree. Cache and dependency directories remain
+/// prohibited even when a provider declares them here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedGeneratedArtifact {
+    pub path: String,
+    #[serde(default)]
+    pub purpose: String,
+}
+
+/// Provider-authored handoff interpreted under canonical runtime evidence.
+/// The provider may truthfully declare incomplete work, but it cannot create
+/// tool evidence or promote a failed validation by prose alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskHandoff {
+    pub status: TaskObjectiveStatus,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub acceptance_checks: Vec<DelegatedAcceptanceCheck>,
+    #[serde(default)]
+    pub remaining_work: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub generated_artifacts: Vec<DelegatedGeneratedArtifact>,
+}
+
+impl DelegatedTaskHandoff {
+    fn is_complete(&self) -> bool {
+        self.status == TaskObjectiveStatus::Complete
+            && self.remaining_work.is_empty()
+            && self.blockers.is_empty()
+            && !self.acceptance_checks.is_empty()
+            && self.acceptance_checks.iter().all(|check| {
+                matches!(
+                    check.status.trim().to_ascii_lowercase().as_str(),
+                    "passed" | "pass" | "not_applicable" | "not-applicable"
+                ) && !check.evidence.trim().is_empty()
+            })
+    }
+
+    /// Keep the provider-authored handoff useful to the parent without
+    /// retaining an unbounded copy of delegated model output.
+    fn bounded(&self) -> Self {
+        Self {
+            status: self.status,
+            summary: truncate_preview(&self.summary, MAX_HANDOFF_SUMMARY_BYTES),
+            acceptance_checks: self
+                .acceptance_checks
+                .iter()
+                .take(MAX_HANDOFF_ACCEPTANCE_CHECKS)
+                .map(|check| DelegatedAcceptanceCheck {
+                    id: truncate_preview(&check.id, MAX_HANDOFF_CHECK_ID_BYTES),
+                    status: truncate_preview(&check.status, MAX_HANDOFF_CHECK_STATUS_BYTES),
+                    evidence: truncate_preview(&check.evidence, MAX_HANDOFF_CHECK_EVIDENCE_BYTES),
+                })
+                .collect(),
+            remaining_work: bounded_strings(
+                &self.remaining_work,
+                MAX_HANDOFF_REMAINING_ITEMS,
+                MAX_HANDOFF_REMAINING_ITEM_BYTES,
+            ),
+            blockers: bounded_strings(
+                &self.blockers,
+                MAX_HANDOFF_BLOCKERS,
+                MAX_HANDOFF_BLOCKER_BYTES,
+            ),
+            generated_artifacts: self
+                .generated_artifacts
+                .iter()
+                .take(MAX_HANDOFF_GENERATED_ARTIFACTS)
+                .map(|artifact| DelegatedGeneratedArtifact {
+                    path: truncate_preview(&artifact.path, MAX_HANDOFF_ARTIFACT_PATH_BYTES),
+                    purpose: truncate_preview(
+                        &artifact.purpose,
+                        MAX_HANDOFF_ARTIFACT_PURPOSE_BYTES,
+                    ),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Compact, provider-neutral proof that a delegated child actually exercised
 /// its governed capability surface. Raw tool output is intentionally excluded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +151,10 @@ pub struct DelegatedEvidenceSummary {
     pub mutations: usize,
     #[serde(default)]
     pub executions: usize,
+    /// Canonical acceptance capabilities proven by successful governed tools.
+    /// Provider-authored handoff prose cannot populate this field.
+    #[serde(default)]
+    pub acceptance_proofs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +212,17 @@ impl DelegatedEvidenceSummary {
     pub fn has_canonical_evidence(&self) -> bool {
         self.succeeded > 0
     }
+
+    pub fn record_acceptance_proof(&mut self, proof: &str) {
+        if !self.acceptance_proofs.iter().any(|item| item == proof) {
+            self.acceptance_proofs.push(proof.to_string());
+            self.acceptance_proofs.sort();
+        }
+    }
+
+    pub(crate) fn has_acceptance_proof(&self, proof: &str) -> bool {
+        self.acceptance_proofs.iter().any(|item| item == proof)
+    }
 }
 
 /// Canonical background process handoff produced by a delegated agent tool
@@ -82,6 +231,10 @@ impl DelegatedEvidenceSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegatedProcessArtifact {
     pub process_id: String,
+    /// Exact process-registry owner. New delegated tasks use a task-scoped
+    /// owner; older persisted artifacts deserialize without one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_id: String,
     pub status: String,
     pub command: String,
     pub working_dir: String,
@@ -99,6 +252,13 @@ pub struct ExploreEvidenceArtifact {
     pub usable_evidence: bool,
     pub degraded_success: bool,
     pub outcome_reason: String,
+    #[serde(default)]
+    pub objective_status: TaskObjectiveStatus,
+    /// Provider-authored claims remain distinct from canonical tool evidence.
+    /// This bounded projection exists so parent synthesis does not depend on a
+    /// model repeating acceptance evidence in its prose summary.
+    #[serde(default)]
+    pub handoff: Option<DelegatedTaskHandoff>,
     #[serde(default)]
     pub termination: SubAgentTermination,
     pub summary: String,
@@ -149,6 +309,94 @@ pub struct SubAgentResult {
 }
 
 impl SubAgentResult {
+    pub fn delegated_handoff(&self) -> Option<DelegatedTaskHandoff> {
+        parse_delegated_handoff(&self.output)
+    }
+
+    /// Downgrade provider-authored completion when it omits any immutable
+    /// acceptance requirement embedded in the durable task objective.
+    pub(crate) fn enforce_acceptance_contract(&mut self, task_prompt: &str) {
+        let Some(required) = parse_acceptance_contract(task_prompt) else {
+            return;
+        };
+        let Some(mut handoff) = self.delegated_handoff() else {
+            return;
+        };
+        let missing = required
+            .required
+            .iter()
+            .filter(|requirement| {
+                let required_id = normalize_check_id(&requirement.id);
+                let provider_passed = handoff.acceptance_checks.iter().any(|check| {
+                    normalize_check_id(&check.id) == required_id
+                        && matches!(
+                            check.status.trim().to_ascii_lowercase().as_str(),
+                            "passed" | "pass" | "not_applicable" | "not-applicable"
+                        )
+                        && !check.evidence.trim().is_empty()
+                });
+                let required_proofs = acceptance_requirement_proofs(requirement);
+                !provider_passed
+                    || required_proofs
+                        .iter()
+                        .any(|proof| !self.evidence.has_acceptance_proof(proof))
+            })
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return;
+        }
+
+        handoff.status = TaskObjectiveStatus::Degraded;
+        for requirement in &missing {
+            handoff.remaining_work.push(format!(
+                "Acceptance check '{}' was not passed with evidence: {}",
+                requirement.id, requirement.criterion
+            ));
+        }
+        handoff.remaining_work = bounded_strings(
+            &handoff.remaining_work,
+            MAX_HANDOFF_REMAINING_ITEMS,
+            MAX_HANDOFF_REMAINING_ITEM_BYTES,
+        );
+        let Some(start) = self.output.rfind(HANDOFF_OPEN) else {
+            return;
+        };
+        if let Ok(serialized) = serde_json::to_string(&handoff) {
+            self.output.truncate(start);
+            self.output.push_str(HANDOFF_OPEN);
+            self.output.push_str(&serialized);
+            self.output.push_str(HANDOFF_CLOSE);
+        }
+    }
+
+    /// Return the provider-authored handoff under the runtime's fixed bounds.
+    /// Durable replay and parent synthesis use this instead of raw child output.
+    pub fn bounded_delegated_handoff(&self) -> Option<DelegatedTaskHandoff> {
+        self.delegated_handoff().map(|handoff| handoff.bounded())
+    }
+
+    pub fn objective_status(&self) -> TaskObjectiveStatus {
+        if self.termination == SubAgentTermination::Cancelled {
+            return TaskObjectiveStatus::Blocked;
+        }
+        if self.termination == SubAgentTermination::Failed || self.error.is_some() {
+            return TaskObjectiveStatus::Failed;
+        }
+        let Some(handoff) = self.delegated_handoff() else {
+            return TaskObjectiveStatus::Degraded;
+        };
+        if handoff.is_complete() {
+            TaskObjectiveStatus::Complete
+        } else {
+            match handoff.status {
+                TaskObjectiveStatus::Complete | TaskObjectiveStatus::Degraded => {
+                    TaskObjectiveStatus::Degraded
+                }
+                other => other,
+            }
+        }
+    }
+
     pub fn brief_summary(&self) -> String {
         if let Some(report) = parse_explore_report(&self.output) {
             let mut parts = vec![report.summary.trim().to_string()];
@@ -224,6 +472,8 @@ impl SubAgentResult {
             usable_evidence: self.has_usable_evidence(),
             degraded_success: self.is_degraded_success(),
             outcome_reason: self.outcome_reason().to_string(),
+            objective_status: self.objective_status(),
+            handoff: self.bounded_delegated_handoff(),
             termination: self.termination,
             summary: self.brief_summary(),
             module_structure: report
@@ -293,6 +543,8 @@ impl SubAgentResult {
                 "usable_evidence": self.has_usable_evidence(),
                 "degraded_success": self.is_degraded_success(),
                 "outcome_reason": self.outcome_reason(),
+                "objective_status": self.objective_status(),
+                "handoff": self.bounded_delegated_handoff(),
                 "termination": self.termination,
                 "summary": self.brief_summary(),
                 "module_structure": Option::<String>::None,
@@ -355,12 +607,27 @@ impl SubAgentResult {
         if self.termination.is_degraded_interruption() {
             return self.has_partial_evidence();
         }
-        self.success && self.error.is_none() && self.has_retained_evidence()
+        self.success
+            && self.error.is_none()
+            && self.has_retained_evidence()
+            && self.objective_status() != TaskObjectiveStatus::Failed
+    }
+
+    /// Whether an isolated workspace is allowed to publish this result back to
+    /// the authoritative project. Clean completions remain publishable even
+    /// when they are legitimate no-ops. Interrupted results must prove an
+    /// actual mutation; read-only observations are useful to the parent but
+    /// cannot satisfy a downstream file dependency.
+    pub fn is_eligible_for_isolated_integration(&self) -> bool {
+        self.success
+            || (self.termination.is_degraded_interruption()
+                && self.has_partial_evidence()
+                && self.evidence.mutations > 0)
     }
 
     pub fn is_degraded_success(&self) -> bool {
         (self.termination.is_degraded_interruption() && self.has_partial_evidence())
-            || (self.success && !self.has_usable_evidence())
+            || (self.success && self.objective_status() != TaskObjectiveStatus::Complete)
     }
 
     pub fn outcome_reason(&self) -> &'static str {
@@ -414,6 +681,86 @@ impl SubAgentResult {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DelegatedAcceptanceContract {
+    required: Vec<DelegatedAcceptanceRequirement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DelegatedAcceptanceRequirement {
+    id: String,
+    criterion: String,
+    #[serde(default)]
+    evidence_kind: Option<String>,
+}
+
+fn parse_acceptance_contract(prompt: &str) -> Option<DelegatedAcceptanceContract> {
+    if prompt.matches(ACCEPTANCE_CONTRACT_OPEN).count() != 1
+        || prompt.matches(ACCEPTANCE_CONTRACT_CLOSE).count() != 1
+    {
+        return None;
+    }
+    let start = prompt.find(ACCEPTANCE_CONTRACT_OPEN)? + ACCEPTANCE_CONTRACT_OPEN.len();
+    let end = prompt[start..].find(ACCEPTANCE_CONTRACT_CLOSE)? + start;
+    serde_json::from_str(prompt[start..end].trim()).ok()
+}
+
+fn acceptance_requirement_proofs(
+    requirement: &DelegatedAcceptanceRequirement,
+) -> Vec<&'static str> {
+    let required_id = normalize_check_id(&requirement.id);
+    let criterion = requirement.criterion.to_ascii_lowercase();
+    let inferred_browser_required = required_id.contains("browser")
+        || criterion.contains("browser")
+        || criterion.contains("page-check")
+        || criterion.contains("page check")
+        || criterion.contains("live-page")
+        || criterion.contains("live page");
+    let requirement_text = format!("{required_id} {criterion}");
+    let mut proofs = Vec::new();
+    match requirement.evidence_kind.as_deref() {
+        Some("browser_keyboard") => proofs.push("browser_keyboard"),
+        Some("browser_touch") => proofs.push("browser_touch"),
+        Some("browser_runtime") => proofs.push("browser_runtime"),
+        Some("handoff") => {}
+        _ if inferred_browser_required => {
+            if requirement_text.contains("keyboard") {
+                proofs.push("browser_keyboard");
+            }
+            if requirement_text.contains("touch") {
+                proofs.push("browser_touch");
+            }
+            if proofs.is_empty() {
+                proofs.push("browser_runtime");
+            }
+        }
+        _ => {}
+    }
+    proofs
+}
+
+pub(crate) fn missing_required_browser_acceptance_proofs(
+    prompt: &str,
+    evidence: &DelegatedEvidenceSummary,
+) -> Vec<&'static str> {
+    let Some(contract) = parse_acceptance_contract(prompt) else {
+        return Vec::new();
+    };
+    let mut missing = contract
+        .required
+        .iter()
+        .flat_map(acceptance_requirement_proofs)
+        .filter(|proof| !evidence.has_acceptance_proof(proof))
+        .collect::<Vec<_>>();
+    missing.sort_unstable();
+    missing.dedup();
+    missing
+}
+
+fn normalize_check_id(id: &str) -> String {
+    id.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
 fn dedup_files(files: &[String], limit: usize) -> Vec<String> {
     let mut unique = Vec::new();
     for file in files {
@@ -425,6 +772,14 @@ fn dedup_files(files: &[String], limit: usize) -> Vec<String> {
         }
     }
     unique
+}
+
+fn bounded_strings(values: &[String], limit: usize, max_bytes: usize) -> Vec<String> {
+    values
+        .iter()
+        .take(limit)
+        .map(|value| truncate_preview(value, max_bytes))
+        .collect()
 }
 
 fn split_examined_paths(paths: &[String]) -> (Vec<String>, Vec<String>) {
@@ -460,8 +815,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult,
-        SubAgentTermination,
+        missing_required_browser_acceptance_proofs, parse_delegated_handoff, DelegatedEvidenceKind,
+        DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult, SubAgentTermination,
+        TaskObjectiveStatus,
     };
 
     fn base_result() -> SubAgentResult {
@@ -480,6 +836,231 @@ mod tests {
             evidence: DelegatedEvidenceSummary::default(),
             background_processes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn structured_handoff_distinguishes_objective_completion_from_loop_termination() {
+        let mut complete = base_result();
+        complete.output = r#"Implemented and verified the task.
+<delegated_handoff>{"status":"complete","summary":"done","acceptance_checks":[{"id":"tests","status":"passed","evidence":"focused tests passed"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        complete
+            .evidence
+            .record_success(DelegatedEvidenceKind::Mutation);
+        assert_eq!(complete.objective_status(), TaskObjectiveStatus::Complete);
+        assert_eq!(complete.evidence_json()["objective_status"], "complete");
+        assert_eq!(
+            complete.evidence_json()["handoff"]["acceptance_checks"][0]["evidence"],
+            "focused tests passed"
+        );
+
+        let mut incomplete = complete.clone();
+        incomplete.output = r#"Work remains.
+<delegated_handoff>{"status":"degraded","summary":"partial","acceptance_checks":[{"id":"build","status":"failed","evidence":"compile error"}],"remaining_work":["fix the build"],"blockers":[]}</delegated_handoff>"#.to_string();
+        assert_eq!(incomplete.objective_status(), TaskObjectiveStatus::Degraded);
+        assert!(incomplete.is_degraded_success());
+    }
+
+    #[test]
+    fn empty_acceptance_evidence_cannot_claim_complete() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"claimed done","acceptance_checks":[],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Degraded);
+    }
+
+    #[test]
+    fn required_acceptance_contract_downgrades_missing_runtime_proof() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"tests and build passed","acceptance_checks":[{"id":"tests","status":"passed","evidence":"7 tests"},{"id":"build","status":"passed","evidence":"dist emitted"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        let prompt = r#"Verify the product.
+<delegated_acceptance_contract>{"required":[{"id":"tests","criterion":"tests pass"},{"id":"browser_runtime","criterion":"primary interaction works in a browser without console errors"}]}</delegated_acceptance_contract>"#;
+
+        result.enforce_acceptance_contract(prompt);
+
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Degraded);
+        let handoff = result.delegated_handoff().expect("rewritten handoff");
+        assert!(handoff
+            .remaining_work
+            .iter()
+            .any(|item| item.contains("browser_runtime")));
+    }
+
+    #[test]
+    fn required_acceptance_contract_accepts_normalized_ids_with_evidence() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"runtime proved","acceptance_checks":[{"id":"Browser Runtime","status":"passed","evidence":"phone and desktop interaction passed with zero console errors"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"browser-runtime","criterion":"runtime works"}]}</delegated_acceptance_contract>"#;
+
+        result.evidence.record_acceptance_proof("browser_runtime");
+        result.enforce_acceptance_contract(prompt);
+
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Complete);
+    }
+
+    #[test]
+    fn browser_acceptance_claim_requires_canonical_browser_tool_proof() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"claimed browser pass","acceptance_checks":[{"id":"browser_runtime","status":"passed","evidence":"looked good"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"browser_runtime","criterion":"browser interaction works without errors"}]}</delegated_acceptance_contract>"#;
+
+        result.enforce_acceptance_contract(prompt);
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Degraded);
+
+        let mut proved = base_result();
+        proved.output = r#"<delegated_handoff>{"status":"complete","summary":"proved browser pass","acceptance_checks":[{"id":"browser_runtime","status":"passed","evidence":"browser_check passed phone and desktop with zero errors"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        proved.evidence.record_acceptance_proof("browser_runtime");
+        proved.enforce_acceptance_contract(prompt);
+        assert_eq!(proved.objective_status(), TaskObjectiveStatus::Complete);
+    }
+
+    #[test]
+    fn browser_modality_claims_require_matching_canonical_actions() {
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"interactive","criterion":"desktop keyboard and phone touch interactions work in a browser"}]}</delegated_acceptance_contract>"#;
+        let output = r#"<delegated_handoff>{"status":"complete","summary":"claimed interactions","acceptance_checks":[{"id":"interactive","status":"passed","evidence":"browser run passed"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#;
+
+        let mut click_only = base_result();
+        click_only.output = output.to_string();
+        click_only
+            .evidence
+            .record_acceptance_proof("browser_runtime");
+        click_only.evidence.record_acceptance_proof("browser_touch");
+        click_only.enforce_acceptance_contract(prompt);
+        assert_eq!(click_only.objective_status(), TaskObjectiveStatus::Degraded);
+
+        let mut complete = base_result();
+        complete.output = output.to_string();
+        complete.evidence.record_acceptance_proof("browser_runtime");
+        complete.evidence.record_acceptance_proof("browser_touch");
+        complete
+            .evidence
+            .record_acceptance_proof("browser_keyboard");
+        complete.enforce_acceptance_contract(prompt);
+        assert_eq!(complete.objective_status(), TaskObjectiveStatus::Complete);
+    }
+
+    #[test]
+    fn implementation_controls_do_not_imply_browser_execution() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"UI implemented","acceptance_checks":[{"id":"interface-playable","status":"passed","evidence":"keyboard and touch controls implemented in interface-owned files"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"interface-playable","criterion":"Keyboard and touch controls are implemented in interface-owned files."}]}</delegated_acceptance_contract>"#;
+
+        result.enforce_acceptance_contract(prompt);
+
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Complete);
+    }
+
+    #[test]
+    fn explicit_browser_evidence_kind_does_not_depend_on_wording() {
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"primary-journey","criterion":"The primary journey is proven.","evidence_kind":"browser_runtime"}]}</delegated_acceptance_contract>"#;
+        let output = r#"<delegated_handoff>{"status":"complete","summary":"journey passed","acceptance_checks":[{"id":"primary-journey","status":"passed","evidence":"governed check passed"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#;
+        let mut result = base_result();
+        result.output = output.to_string();
+        result.enforce_acceptance_contract(prompt);
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Degraded);
+
+        let mut proved = base_result();
+        proved.output = output.to_string();
+        proved.evidence.record_acceptance_proof("browser_runtime");
+        proved.enforce_acceptance_contract(prompt);
+        assert_eq!(proved.objective_status(), TaskObjectiveStatus::Complete);
+    }
+
+    #[test]
+    fn missing_browser_proofs_are_deduplicated_for_runtime_correction() {
+        let prompt = r#"<delegated_acceptance_contract>{"required":[{"id":"journey","criterion":"Works","evidence_kind":"browser_runtime"},{"id":"page","criterion":"Browser works"}]}</delegated_acceptance_contract>"#;
+        let evidence = DelegatedEvidenceSummary::default();
+
+        assert_eq!(
+            missing_required_browser_acceptance_proofs(prompt, &evidence),
+            vec!["browser_runtime"]
+        );
+
+        let mut proved = evidence;
+        proved.record_acceptance_proof("browser_runtime");
+        assert!(missing_required_browser_acceptance_proofs(prompt, &proved).is_empty());
+    }
+
+    #[test]
+    fn luna_shaped_acceptance_evidence_survives_without_summary_duplication() {
+        let mut result = base_result();
+        result.output = r#"<explore_report>
+{
+  "summary": "Marker read and environment status confirmed.",
+  "paths_examined": ["proof/alpha.txt"],
+  "files_examined": ["proof/alpha.txt"],
+  "key_findings": ["Environment status confirmed as ENV_ABSENT."],
+  "design_patterns": [],
+  "concerns": [],
+  "confidence": "medium"
+}
+</explore_report>
+<delegated_handoff>{"status":"complete","summary":"proof complete","acceptance_checks":[{"id":"marker","status":"passed","evidence":"alpha-live-proof"},{"id":"environment","status":"passed","evidence":"ENV_ABSENT"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+
+        let artifact = result.evidence_artifact();
+        assert!(!artifact.summary.contains("alpha-live-proof"));
+        let handoff = artifact.handoff.expect("bounded handoff");
+        assert_eq!(handoff.acceptance_checks[0].evidence, "alpha-live-proof");
+        assert_eq!(handoff.acceptance_checks[1].evidence, "ENV_ABSENT");
+    }
+
+    #[test]
+    fn provider_handoff_projection_is_utf8_safe_and_bounded() {
+        let mut result = base_result();
+        let checks = (0..12)
+            .map(|index| {
+                json!({
+                    "id": format!("check-{index}-{}", "i".repeat(500)),
+                    "status": "passed".repeat(100),
+                    "evidence": "🐝".repeat(1_000),
+                })
+            })
+            .collect::<Vec<_>>();
+        let handoff = json!({
+            "status": "complete",
+            "summary": "s".repeat(4_000),
+            "acceptance_checks": checks,
+            "remaining_work": (0..20).map(|_| "r".repeat(2_000)).collect::<Vec<_>>(),
+            "blockers": (0..20).map(|_| "b".repeat(2_000)).collect::<Vec<_>>(),
+            "generated_artifacts": (0..20).map(|index| json!({
+                "path": format!("artifact-{index}-{}", "p".repeat(2_000)),
+                "purpose": "purpose".repeat(1_000),
+            })).collect::<Vec<_>>(),
+        });
+        result.output = format!("<delegated_handoff>{handoff}</delegated_handoff>");
+
+        let bounded = result.bounded_delegated_handoff().expect("bounded handoff");
+        assert_eq!(bounded.acceptance_checks.len(), 8);
+        assert_eq!(bounded.remaining_work.len(), 8);
+        assert_eq!(bounded.blockers.len(), 8);
+        assert_eq!(bounded.generated_artifacts.len(), 16);
+        assert!(bounded.summary.len() <= 1_200);
+        assert!(bounded
+            .acceptance_checks
+            .iter()
+            .all(|check| check.id.len() <= 128
+                && check.status.len() <= 32
+                && check.evidence.len() <= 1_200
+                && std::str::from_utf8(check.evidence.as_bytes()).is_ok()));
+    }
+
+    #[test]
+    fn complete_claim_with_failed_check_is_canonically_degraded() {
+        let mut result = base_result();
+        result.output = r#"<delegated_handoff>{"status":"complete","summary":"claimed done","acceptance_checks":[{"id":"live","status":"failed","evidence":"no listener"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#.to_string();
+        result
+            .evidence
+            .record_success(DelegatedEvidenceKind::Execution);
+
+        assert_eq!(result.objective_status(), TaskObjectiveStatus::Degraded);
+    }
+
+    #[test]
+    fn handoff_must_be_one_final_machine_readable_block() {
+        let valid = r#"summary
+<delegated_handoff>{"status":"complete","summary":"done","acceptance_checks":[],"remaining_work":[],"blockers":[]}</delegated_handoff>"#;
+        assert!(parse_delegated_handoff(valid).is_some());
+        assert!(parse_delegated_handoff(&format!("{valid}\ntrailing claim")).is_none());
+        assert!(parse_delegated_handoff(&format!("{valid}\n{valid}")).is_none());
     }
 
     #[test]
@@ -549,6 +1130,24 @@ mod tests {
         assert!(result.is_degraded_success());
         assert_eq!(result.outcome_reason(), "provider_max_tokens");
         assert_eq!(result.evidence_json()["termination"], "provider_max_tokens");
+        assert!(
+            !result.is_eligible_for_isolated_integration(),
+            "read-only partial evidence cannot release a file dependency"
+        );
+    }
+
+    #[test]
+    fn interrupted_mutation_can_publish_its_partial_isolated_patch() {
+        let mut result = base_result();
+        result.success = false;
+        result.error = Some("Provider call timed out".to_string());
+        result.termination = SubAgentTermination::ProviderTimeout;
+        result
+            .evidence
+            .record_success(DelegatedEvidenceKind::Mutation);
+
+        assert!(result.has_partial_evidence());
+        assert!(result.is_eligible_for_isolated_integration());
     }
 
     #[test]
@@ -617,7 +1216,8 @@ mod tests {
   "concerns": [],
   "confidence": "high"
 }
-</explore_report>"#
+</explore_report>
+<delegated_handoff>{"status":"complete","summary":"Investigation complete.","acceptance_checks":[{"id":"report","status":"passed","evidence":"Structured explore report includes examined files and findings."}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#
             .to_string();
 
         assert!(result.has_usable_evidence());
@@ -716,6 +1316,7 @@ mod tests {
         result.output = "Server started successfully.".to_string();
         result.background_processes = vec![DelegatedProcessArtifact {
             process_id: "process-123".to_string(),
+            owner_id: "owner-a:hive:task".to_string(),
             status: "running".to_string(),
             command: "python3 server.py --host 127.0.0.1 --port 5940".to_string(),
             working_dir: "/workspace/demo".to_string(),

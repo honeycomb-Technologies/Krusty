@@ -10,7 +10,6 @@ import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { SessionList, type SessionListProps } from '../chat/SessionList';
-import { PlanTracker } from '../chat/PlanTracker';
 import { SettingsModal } from '../SettingsModal';
 import { MitsuroWordmark } from '../brand';
 
@@ -85,8 +84,6 @@ export function DesktopShell({
               showPicker={pickerVisible}
               onPickerDone={() => setPickerVisible(false)}
             />
-
-            <PlanTracker />
 
             {/* Bottom bar — matches mobile drawer */}
             <View style={[styles.bottomBar, { borderTopColor: t.border }]}>

@@ -7,7 +7,7 @@ use crate::agent::context_ledger::ContextLedger;
 use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
-    MemoryNamespace, MemoryStore, Report, ReportStore, TaskStatus,
+    HiveMemoryReader, MemoryStore, Report, ReportStore, TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
@@ -87,14 +87,15 @@ pub(super) fn build_hive_knowledge_context(
     db_path: &Path,
     project_dir: Option<&str>,
     user_id: Option<&str>,
-    hive_crew_slug: Option<&str>,
+    hive_memory_namespace: Option<&str>,
     session_id: &str,
+    group_id: Option<&str>,
     conversation: &[ModelMessage],
 ) -> String {
-    // The materialized snapshot is owner/project scoped rather than crew
-    // scoped. Only the primary Hive presence may consume it; named crew
-    // members receive their own explicit memory namespace below.
-    let generated_snapshot = if hive_crew_slug.is_none() {
+    // The materialized snapshot is owner/project scoped rather than crew or
+    // Worker scoped. Only the primary Hive presence may consume it; named crew
+    // members and Workers receive their own explicit memory namespace below.
+    let generated_snapshot = if hive_memory_namespace.is_none() {
         match refresh_current_snapshot(db_path, project_dir, user_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -109,20 +110,16 @@ pub(super) fn build_hive_knowledge_context(
     let mut memories =
         if let Some(memory_db) = open_context_database(db_path, "building hive memory context") {
             let memory_store = MemoryStore::new(memory_db);
-            memory_store.list_for_exact_owner(project_dir, user_id)
+            memory_store.list_for_hive_reader(&HiveMemoryReader {
+                user_id,
+                project_dir,
+                worker_namespace_id: hive_memory_namespace,
+                conversation_id: Some(session_id),
+                group_id,
+            })
         } else {
             Vec::new()
         };
-    memories.retain(|memory| match hive_crew_slug {
-        Some(crew_slug) => {
-            memory.namespace == MemoryNamespace::Shared
-                || (memory.namespace == MemoryNamespace::Crew
-                    && memory.namespace_id.as_deref() == Some(crew_slug))
-        }
-        None => {
-            memory.namespace == MemoryNamespace::Shared || memory.namespace == MemoryNamespace::Hive
-        }
-    });
     if let Some(project_dir) = project_dir {
         memories.sort_by(|left, right| {
             let left_project_match = left.project_dir.as_deref() == Some(project_dir);

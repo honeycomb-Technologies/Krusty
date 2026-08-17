@@ -68,6 +68,35 @@ const KNOWN_PROVIDER_CODES: &[&str] = &[
     "usage_limit_reached",
 ];
 
+/// A provider WebSocket failure whose user-visible message has already been
+/// reduced to fixed vocabulary and bounded fingerprints.
+///
+/// Keeping retryability typed avoids parsing display strings at transport
+/// call-sites and lets the shared retry owner make the decision before a tool
+/// result or local side effect is exposed.
+#[derive(Debug)]
+pub(crate) struct ProviderWebSocketError {
+    message: String,
+    retryable: bool,
+}
+
+impl ProviderWebSocketError {
+    pub(crate) fn new(message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            message: message.into(),
+            retryable,
+        }
+    }
+}
+
+impl fmt::Display for ProviderWebSocketError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProviderWebSocketError {}
+
 /// Structured provider HTTP failure retained across the transport boundary.
 ///
 /// Keeping the status and `Retry-After` value typed lets the shared streaming
@@ -549,9 +578,22 @@ impl IsRetryable for ProviderHttpError {
     }
 }
 
+impl IsRetryable for ProviderWebSocketError {
+    fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        None
+    }
+}
+
 impl IsRetryable for anyhow::Error {
     fn is_retryable(&self) -> bool {
         if let Some(error) = self.downcast_ref::<ProviderHttpError>() {
+            return error.is_retryable();
+        }
+        if let Some(error) = self.downcast_ref::<ProviderWebSocketError>() {
             return error.is_retryable();
         }
 
@@ -635,6 +677,8 @@ pub fn is_retryable_error_message(message: &str) -> bool {
         "timeout",
         "connection reset",
         "connection closed",
+        "websocket closed before completion",
+        "websocket ended before response completion",
         "network error",
         "temporarily at capacity",
         "temporarily unavailable",
@@ -710,6 +754,21 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+
+    #[test]
+    fn typed_websocket_errors_preserve_retryability_without_string_parsing() {
+        let retryable = anyhow::Error::new(ProviderWebSocketError::new(
+            "safe retryable websocket error",
+            true,
+        ));
+        let terminal = anyhow::Error::new(ProviderWebSocketError::new(
+            "safe terminal websocket error",
+            false,
+        ));
+
+        assert!(retryable.is_retryable());
+        assert!(!terminal.is_retryable());
+    }
 
     async fn serve_error_response(
         body: Vec<u8>,
@@ -843,6 +902,12 @@ mod tests {
         ));
         assert!(is_retryable_error_message(
             "AI stream ended without a finish signal"
+        ));
+        assert!(is_retryable_error_message(
+            "Codex websocket closed before completion"
+        ));
+        assert!(is_retryable_error_message(
+            "Sub-agent websocket ended before response completion"
         ));
         assert!(!is_retryable_error_message(
             "API error: 402 Payment Required - limit reached"

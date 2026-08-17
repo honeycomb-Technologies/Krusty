@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, timeout};
 
 #[cfg(unix)]
-use crate::process::signals::{process_group_exists, signal_process_group};
+use crate::process::signals::{
+    descendant_processes, process_group_exists, signal_process, signal_process_group,
+};
 use crate::tools::registry::ToolOutputChunk;
 use crate::tools::ToolResult;
 
@@ -271,6 +273,8 @@ impl Drop for ProcessGroupDropGuard {
             }
         }
 
+        let descendants = descendant_processes(self.leader_pid);
+
         if let Err(error) = signal_process_group(self.leader_pid, libc::SIGKILL, "SIGKILL") {
             // Exiting between the liveness probe and signal is harmless. Keep
             // this at debug level because Drop must remain best-effort.
@@ -280,14 +284,23 @@ impl Drop for ProcessGroupDropGuard {
                 "Could not kill foreground process group during drop cleanup"
             );
         }
+        for pid in descendants {
+            let _ = signal_process(pid, libc::SIGKILL, "SIGKILL");
+        }
     }
 }
 
 #[cfg(unix)]
 async fn terminate_unix_process_group(pid: u32) {
+    // Capture the full tree before signaling the outer group. Bubblewrap and
+    // similar wrappers may create a nested session; once the wrapper exits,
+    // those descendants are reparented and can no longer be discovered from
+    // the original leader.
+    let descendants = descendant_processes(pid);
     match process_group_exists(pid) {
-        Ok(false) => return,
+        Ok(false) if descendants.is_empty() => return,
         Ok(true) => {}
+        Ok(false) => {}
         Err(error) => {
             tracing::warn!(pid, %error, "Could not inspect foreground process group");
         }
@@ -295,6 +308,9 @@ async fn terminate_unix_process_group(pid: u32) {
 
     if let Err(error) = signal_process_group(pid, libc::SIGTERM, "SIGTERM") {
         tracing::debug!(pid, %error, "Could not gracefully terminate process group");
+    }
+    for descendant in &descendants {
+        let _ = signal_process(*descendant, libc::SIGTERM, "SIGTERM");
     }
 
     sleep(Duration::from_millis(PROCESS_GROUP_TERM_GRACE_MS)).await;
@@ -310,6 +326,9 @@ async fn terminate_unix_process_group(pid: u32) {
             tracing::warn!(pid, %error, "Could not verify foreground process-group termination");
             let _ = signal_process_group(pid, libc::SIGKILL, "SIGKILL");
         }
+    }
+    for descendant in descendants {
+        let _ = signal_process(descendant, libc::SIGKILL, "SIGKILL");
     }
 }
 

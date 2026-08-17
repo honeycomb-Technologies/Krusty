@@ -42,9 +42,13 @@ impl BashStateDeltaProbe {
             return None;
         }
 
-        let permit = std::sync::Arc::clone(&SNAPSHOT_SLOT)
-            .try_acquire_owned()
-            .ok()?;
+        let permit = tokio::time::timeout(
+            SNAPSHOT_WALL_BUDGET,
+            std::sync::Arc::clone(&SNAPSHOT_SLOT).acquire_owned(),
+        )
+        .await
+        .ok()?
+        .ok()?;
         let command = command.to_string();
         let working_dir = working_dir.to_path_buf();
         let sandbox_root = sandbox_root.map(Path::to_path_buf);
@@ -75,9 +79,13 @@ impl BashStateDeltaProbe {
     }
 
     pub(super) async fn changed(self) -> Option<String> {
-        let permit = std::sync::Arc::clone(&SNAPSHOT_SLOT)
-            .try_acquire_owned()
-            .ok()?;
+        let permit = tokio::time::timeout(
+            SNAPSHOT_WALL_BUDGET,
+            std::sync::Arc::clone(&SNAPSHOT_SLOT).acquire_owned(),
+        )
+        .await
+        .ok()?
+        .ok()?;
         let targets = self.targets;
         let capture = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -381,5 +389,34 @@ mod tests {
 
         fs::write(&path, "longer").expect("append-sized change");
         assert!(before.differs_from(&snapshot_path(&path)));
+    }
+
+    #[tokio::test]
+    async fn bounded_snapshot_contention_waits_instead_of_dropping_positive_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().canonicalize().expect("root");
+        let held = std::sync::Arc::clone(&SNAPSHOT_SLOT)
+            .acquire_owned()
+            .await
+            .expect("snapshot slot");
+        let capture_root = root.clone();
+        let capture = tokio::spawn(async move {
+            BashStateDeltaProbe::capture(
+                "printf evidence > result",
+                &capture_root,
+                Some(&capture_root),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        drop(held);
+
+        let probe = tokio::time::timeout(Duration::from_secs(2), capture)
+            .await
+            .expect("bounded capture")
+            .expect("capture task")
+            .expect("positive evidence probe");
+        fs::write(root.join("result"), "evidence").expect("mutate tracked target");
+        assert!(probe.changed().await.is_some());
     }
 }

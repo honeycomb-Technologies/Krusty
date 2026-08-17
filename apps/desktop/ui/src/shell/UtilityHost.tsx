@@ -35,7 +35,7 @@ const TABS: Record<DesktopPlane, Array<{ id: DesktopUtilityPane; label: string; 
     { id: 'browser', label: 'Browser', icon: Globe2 },
   ],
   hive: [
-    { id: 'schedule', label: 'Schedule', icon: CalendarClock },
+    { id: 'schedule', label: 'Calendar', icon: CalendarClock },
     { id: 'runs', label: 'Runs', icon: Workflow },
     { id: 'memory', label: 'Memory', icon: MemoryStick },
   ],

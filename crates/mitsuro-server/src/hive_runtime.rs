@@ -953,6 +953,46 @@ impl HiveRuntimeManager {
             .await
     }
 
+    /// Send one room message into a group as a durable turn. Group turns are
+    /// run-triggering mutations and therefore fail closed onto the daemon
+    /// control plane, exactly like chat turns.
+    pub async fn group_message_for_user(
+        &self,
+        group_id: &str,
+        message: &str,
+        mentions_override: Option<Vec<String>>,
+        user_id: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<mitsuro_hive_protocol::GroupTurnResponse> {
+        let daemon = self
+            .daemon
+            .as_ref()
+            .context("Hive group turns require the daemon control plane")?;
+        daemon
+            .group_message(
+                user_id,
+                group_id,
+                message,
+                mentions_override,
+                idempotency_key,
+            )
+            .await
+    }
+
+    /// Cancel the active turn's in-flight member runs through the daemon.
+    pub async fn group_stop_for_user(
+        &self,
+        group_id: &str,
+        user_id: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        let daemon = self
+            .daemon
+            .as_ref()
+            .context("Hive group turns require the daemon control plane")?;
+        daemon.group_stop(user_id, group_id, idempotency_key).await
+    }
+
     pub async fn set_priority_for_user(
         &self,
         state: &AppState,

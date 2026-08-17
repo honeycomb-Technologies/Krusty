@@ -14,7 +14,7 @@ use super::{
 };
 
 const RUN_COLUMNS: &str = "id, controller_id, session_id, schedule_id, occurrence_id, kind, objective, config_json, status, priority, concurrency_key, scheduled_for, available_at, wake_at, attempt_count, max_attempts, lease_owner, lease_token, lease_epoch, lease_expires_at, heartbeat_at, last_stop_reason, last_error, outcome_json, created_at, started_at, finished_at, updated_at";
-const ATTEMPT_COLUMNS: &str = "id, run_id, attempt_no, worker_id, lease_token, lease_epoch, started_at, finished_at, outcome, stop_reason, error, retry_at, trace_sequence_start, trace_sequence_end";
+const ATTEMPT_COLUMNS: &str = "id, run_id, attempt_no, executor_id, lease_token, lease_epoch, started_at, finished_at, outcome, stop_reason, error, retry_at, trace_sequence_start, trace_sequence_end";
 
 pub struct HiveRunStore {
     db: Database,
@@ -170,7 +170,7 @@ impl HiveRunStore {
                    AND c.session_id = r.session_id AND c.status = 'active'
                    AND c.user_id IS s.user_id AND s.session_type = 'hive'
                    AND a.run_id = r.id AND a.attempt_no = ?10
-                   AND a.worker_id = ?4 AND a.lease_token = ?5
+                   AND a.executor_id = ?4 AND a.lease_token = ?5
                    AND a.lease_epoch = ?6 AND a.finished_at IS NULL
                    AND d.owner_id = ?4 AND d.fencing_token = ?6
                    AND d.expires_at > ?9",
@@ -276,7 +276,10 @@ impl HiveRunStore {
         request: &ClaimRunRequest,
         daemon_fence: Option<&DaemonFence>,
     ) -> Result<Option<ClaimedHiveRun>> {
-        anyhow::ensure!(!request.worker_id.trim().is_empty(), "worker id is empty");
+        anyhow::ensure!(
+            !request.executor_id.trim().is_empty(),
+            "executor id is empty"
+        );
         anyhow::ensure!(
             request.lease_epoch <= i64::MAX as u64,
             "lease epoch exceeds SQLite integer range"
@@ -346,7 +349,7 @@ impl HiveRunStore {
              WHERE id = ?1 AND status = 'queued' AND available_at <= ?6",
             params![
                 candidate_id,
-                request.worker_id,
+                request.executor_id,
                 lease_token,
                 request.lease_epoch,
                 lease_expires_at,
@@ -365,7 +368,7 @@ impl HiveRunStore {
         )?;
         tx.execute(
             "INSERT INTO hive_run_attempts (
-                id, run_id, attempt_no, worker_id, lease_token, lease_epoch,
+                id, run_id, attempt_no, executor_id, lease_token, lease_epoch,
                 started_at, finished_at, outcome, stop_reason, error, retry_at,
                 trace_sequence_start, trace_sequence_end
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 'leased', NULL, NULL, NULL, NULL, NULL)",
@@ -373,7 +376,7 @@ impl HiveRunStore {
                 attempt_id,
                 candidate_id,
                 attempt_no,
-                request.worker_id,
+                request.executor_id,
                 lease_token,
                 request.lease_epoch,
                 now,
@@ -793,7 +796,7 @@ impl HiveRunStore {
             }
         }
         let mut statement = tx.prepare(
-            "SELECT id, status, attempt_count, lease_token
+            "SELECT id, status, attempt_count, lease_token, kind
              FROM hive_runs
              WHERE status IN ('leased', 'running') AND lease_expires_at <= ?1
              ORDER BY lease_expires_at ASC",
@@ -805,14 +808,17 @@ impl HiveRunStore {
                     row.get::<_, String>(1)?,
                     nonnegative_i64(row, 2)? as u32,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
 
         let mut result = LeaseReconciliation::default();
-        for (run_id, status, attempt_no, lease_token) in expired {
-            let (target, message) = if status == HiveRunStatus::Leased.as_str() {
+        for (run_id, status, attempt_no, lease_token, kind) in expired {
+            let replayable =
+                HiveRunKind::parse(&kind).is_some_and(HiveRunKind::replays_after_expired_running);
+            let (target, message) = if status == HiveRunStatus::Leased.as_str() || replayable {
                 result.requeued_unstarted += 1;
                 result.requeued_runs.push(ReconciledRun {
                     run_id: run_id.clone(),
@@ -820,7 +826,11 @@ impl HiveRunStore {
                 });
                 (
                     HiveRunStatus::Queued,
-                    "worker lease expired before execution; requeued",
+                    if status == HiveRunStatus::Leased.as_str() {
+                        "worker lease expired before execution; requeued"
+                    } else {
+                        "worker lease expired during replayable run; requeued"
+                    },
                 )
             } else {
                 result.recovery_required += 1;
@@ -1299,7 +1309,7 @@ fn map_attempt(row: &Row<'_>) -> rusqlite::Result<HiveRunAttempt> {
         id: row.get(0)?,
         run_id: row.get(1)?,
         attempt_no: nonnegative_i64(row, 2)? as u32,
-        worker_id: row.get(3)?,
+        executor_id: row.get(3)?,
         lease_token: row.get(4)?,
         lease_epoch: nonnegative_i64(row, 5)? as u64,
         started_at: row.get(6)?,

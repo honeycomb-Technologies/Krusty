@@ -86,8 +86,9 @@ impl Tool for ProcessesTool {
             return ToolResult::error("Process registry not available");
         };
 
-        // Use user_id for multi-tenant isolation when available
-        let user_id = ctx.user_id.as_deref();
+        // Delegated runtimes receive a task-scoped process owner while normal
+        // parent sessions retain user-scoped process isolation.
+        let user_id = ctx.effective_process_owner_id();
 
         match params.action.as_str() {
             "list" => {

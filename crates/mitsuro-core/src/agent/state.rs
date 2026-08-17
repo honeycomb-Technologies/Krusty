@@ -92,23 +92,15 @@ impl RunBudgetResolution {
         }
     }
 
-    /// Resolve an active Goal attempt. Explicit and project settings retain
-    /// precedence, but automatic continuation may never inherit the unlimited
-    /// interactive default.
+    /// Resolve the parent loop for an active Goal. Explicit and project
+    /// settings retain precedence. The default parent loop remains unlimited:
+    /// bounded Goal attempts are enforced by the workflow manager and may roll
+    /// over without terminating the approved plan.
     pub fn resolve_goal_attempt(
         explicit_run: Option<RunBudget>,
         project: Option<RunBudget>,
     ) -> Self {
-        let ordinary = Self::resolve(explicit_run, project);
-        if ordinary.source != RunBudgetSource::UnlimitedDefault {
-            return ordinary;
-        }
-        Self {
-            budget: RunBudget::with_max_turns(
-                crate::workflow::DEFAULT_GOAL_ATTEMPT_MAX_TURNS as usize,
-            ),
-            source: RunBudgetSource::GoalAttemptDefault,
-        }
+        Self::resolve(explicit_run, project)
     }
 }
 
@@ -263,12 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn active_goal_attempt_never_uses_unlimited_default() {
+    fn active_goal_parent_run_is_unlimited_without_an_explicit_ceiling() {
         let resolution = RunBudgetResolution::resolve_goal_attempt(None, None);
-        assert_eq!(resolution.source, RunBudgetSource::GoalAttemptDefault);
-        assert_eq!(
-            resolution.budget.max_turns,
-            Some(crate::workflow::DEFAULT_GOAL_ATTEMPT_MAX_TURNS as usize)
-        );
+        assert_eq!(resolution.source, RunBudgetSource::UnlimitedDefault);
+        assert_eq!(resolution.budget.max_turns, None);
     }
 }

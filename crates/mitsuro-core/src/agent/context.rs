@@ -25,7 +25,9 @@ use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::skills::SkillsManager;
-use crate::storage::{Database, DelegationMode, HiveProfileSnapshot, ProjectSettings, WorkMode};
+use crate::storage::{
+    Database, DelegationMode, HiveGroupRunContext, HiveProfileSnapshot, ProjectSettings, WorkMode,
+};
 
 pub use plan::build_plan_context;
 pub use project::build_project_context;
@@ -55,7 +57,7 @@ pub fn inject_context(
     hive_crew_slug: Option<&str>,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    inject_context_with_hive_profile(
+    inject_context_with_hive_profile_and_group(
         conversation,
         db_path,
         session_id,
@@ -68,11 +70,12 @@ pub fn inject_context(
         hive_crew_slug,
         user_id,
         None,
+        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn inject_context_with_hive_profile(
+pub fn inject_context_with_hive_profile_and_group(
     conversation: &[ModelMessage],
     db_path: &Path,
     session_id: &str,
@@ -85,6 +88,7 @@ pub fn inject_context_with_hive_profile(
     hive_crew_slug: Option<&str>,
     user_id: Option<&str>,
     hive_profile: Option<&HiveProfileSnapshot>,
+    hive_group_run: Option<&HiveGroupRunContext>,
 ) -> Vec<ModelMessage> {
     let is_chat = session_type == Some("chat");
 
@@ -109,6 +113,30 @@ pub fn inject_context_with_hive_profile(
     let env_ctx = workspace::build_environment_context(working_dir, model_id);
     let context_project_dir = project_dir.map(|p| p.to_string_lossy().to_string());
     let is_hive = session_type == Some("hive");
+    // When the hive session is a Worker's private DM lane, the Worker's own
+    // persona replaces the generic crew treatment and its memory namespace
+    // scopes retrieval. Sessions without a Worker binding keep the primary
+    // companion behavior unchanged.
+    let worker_persona = if is_hive {
+        hive::load_worker_persona(db_path, session_id, user_id)
+    } else {
+        None
+    };
+    let group_worker_namespace = if is_hive {
+        hive_group_run
+            .and_then(|run| hive::load_worker_memory_namespace(db_path, &run.worker_id, user_id))
+    } else {
+        None
+    };
+    let hive_memory_namespace = worker_persona
+        .as_ref()
+        .map(|persona| persona.memory_namespace_id.as_str())
+        .or(group_worker_namespace.as_deref())
+        .or(hive_crew_slug);
+    let worker_persona_sections = worker_persona
+        .as_ref()
+        .map(|persona| persona.sections.as_slice())
+        .unwrap_or_default();
     let memory_ctx = if is_hive {
         String::new()
     } else {
@@ -132,8 +160,9 @@ pub fn inject_context_with_hive_profile(
             db_path,
             context_project_dir.as_deref(),
             user_id,
-            hive_crew_slug,
+            hive_memory_namespace,
             session_id,
+            hive_group_run.map(|run| run.group_id.as_str()),
             conversation,
         )
     } else {
@@ -158,9 +187,14 @@ pub fn inject_context_with_hive_profile(
                 project_dir.unwrap_or(working_dir),
                 profile,
                 hive_crew_slug,
+                worker_persona_sections,
             )
         } else {
-            hive::build_hive_context_sections(project_dir.unwrap_or(working_dir), hive_crew_slug)
+            hive::build_hive_context_sections(
+                project_dir.unwrap_or(working_dir),
+                hive_crew_slug,
+                worker_persona_sections,
+            )
         }
     } else {
         Vec::new()
@@ -170,6 +204,16 @@ pub fn inject_context_with_hive_profile(
             0,
             crate::agent::autonomy::coordinator_prompt::hive_coordinator_system_prompt(),
         );
+    }
+    // A group member run sees the room right after its persona: title,
+    // roster, and the bounded recent timeline. Rebuilt per provider call so
+    // parallel members observe each other's posts as they land.
+    if is_hive {
+        if let Some(group_run) = hive_group_run {
+            if let Some(section) = hive::build_group_room_section(db_path, group_run) {
+                hive_ctx_sections.push(section);
+            }
+        }
     }
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
@@ -383,6 +427,9 @@ fn dynamic_context_priority(text: &str) -> u8 {
         || text.starts_with("[WORKSPACE MODE:")
         || text.starts_with("[ENVIRONMENT]")
         || text.starts_with("[DELEGATION MODE:")
+        // The room block is the behavioral contract of a group turn: without
+        // it a member cannot know who is speaking or how to post.
+        || text.starts_with("[GROUP ROOM")
     {
         120
     } else if text.starts_with("[PROJECT INSTRUCTIONS")
@@ -410,6 +457,7 @@ fn is_stable_hive_identity_context(text: &str) -> bool {
         "[HIVE USER",
         "[HIVE CREW IDENTITY",
         "[HIVE CREW SOUL",
+        "[HIVE WORKER",
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))

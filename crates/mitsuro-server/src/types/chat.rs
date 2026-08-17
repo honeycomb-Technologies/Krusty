@@ -54,6 +54,20 @@ impl ThinkingLevel {
             ReasoningEffort::Ultra => Self::Ultra,
         }
     }
+
+    pub fn to_reasoning_effort(self) -> mitsuro_core::ai::providers::ReasoningEffort {
+        use mitsuro_core::ai::providers::ReasoningEffort;
+        match self {
+            Self::Off => ReasoningEffort::None,
+            Self::Minimal => ReasoningEffort::Minimal,
+            Self::Low => ReasoningEffort::Low,
+            Self::Medium => ReasoningEffort::Medium,
+            Self::High => ReasoningEffort::High,
+            Self::XHigh => ReasoningEffort::XHigh,
+            Self::Max => ReasoningEffort::Max,
+            Self::Ultra => ReasoningEffort::Ultra,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,5 +1,6 @@
 use tokio::process::Command;
 
+use crate::process::CommandEnvironment;
 use crate::tools::ToolContext;
 
 /// Strip ANSI escape sequences from text.
@@ -53,6 +54,48 @@ pub(super) fn strip_shell_background_suffix(command: &str) -> Option<String> {
     }
 
     Some(prefix.to_string())
+}
+
+/// Detect an unquoted shell background operator that is not the normalized
+/// final suffix owned by `run_in_background`. Redirect forms such as `2>&1`,
+/// `&>`, `|&`, and logical `&&` are not background jobs.
+pub(super) fn contains_embedded_background_operator(command: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let characters = command.char_indices().collect::<Vec<_>>();
+    for (position, (_, character)) in characters.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match *character {
+            '\\' if !in_single => {
+                escaped = true;
+                continue;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                continue;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                continue;
+            }
+            '&' if !in_single && !in_double => {}
+            _ => continue,
+        }
+
+        let previous = position.checked_sub(1).map(|index| characters[index].1);
+        let next = characters
+            .get(position + 1)
+            .map(|(_, character)| *character);
+        if matches!(previous, Some('&' | '>' | '<' | '|')) || matches!(next, Some('&' | '>')) {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn shell_index_is_unquoted(command: &str, target_index: usize) -> bool {
@@ -150,7 +193,7 @@ pub(super) fn build_shell_command(command: &str, ctx: &ToolContext) -> Command {
         c
     };
 
-    cmd.env("NO_COLOR", "1");
+    command_environment(ctx).apply(&mut cmd);
 
     if let Some(ref identity) = ctx.git_identity {
         for (key, val) in identity.env_vars() {
@@ -160,6 +203,13 @@ pub(super) fn build_shell_command(command: &str, ctx: &ToolContext) -> Command {
 
     cmd.current_dir(&ctx.working_dir);
     cmd
+}
+
+pub(super) fn command_environment(ctx: &ToolContext) -> CommandEnvironment {
+    let mut overrides = ctx.command_environment.clone();
+    overrides.insert("NO_COLOR".to_string(), "1".to_string());
+    CommandEnvironment::new(ctx.command_environment_policy, overrides)
+        .with_project_cache_defaults(ctx.project_dir.as_deref())
 }
 
 pub(super) fn configure_foreground_process_group(cmd: &mut Command) {

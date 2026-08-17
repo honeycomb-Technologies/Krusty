@@ -124,6 +124,14 @@ pub enum LoopEvent {
     /// AI is starting to stream a tool call (arguments not yet complete).
     ToolCallStart { id: String, name: String },
 
+    /// Bounded progress while the provider is still composing a large tool
+    /// argument payload. Raw arguments remain private until completion.
+    ToolCallPreparing {
+        id: String,
+        name: String,
+        received_bytes: usize,
+    },
+
     /// Tool call arguments fully received from AI.
     ToolCallComplete {
         id: String,
@@ -405,6 +413,14 @@ pub enum LoopInput {
     /// conversation history a second time.
     PersistedUserMessage { content: Vec<Content> },
 
+    /// A durable workflow command changed the active Goal while this loop was
+    /// running. This is a control-plane wake, not a synthetic user message.
+    WorkflowUpdated {
+        goal_id: String,
+        aggregate_revision: u64,
+        operation_id: String,
+    },
+
     /// User requested cancellation.
     Cancel,
 }
@@ -418,6 +434,7 @@ pub(crate) struct LoopInputInbox {
     receiver: mpsc::UnboundedReceiver<LoopInput>,
     controls: VecDeque<LoopInput>,
     steering: VecDeque<PendingSteering>,
+    workflow_updates: VecDeque<(String, u64, String)>,
 }
 
 #[derive(Debug)]
@@ -440,6 +457,7 @@ impl LoopInputInbox {
             receiver,
             controls: VecDeque::new(),
             steering: VecDeque::new(),
+            workflow_updates: VecDeque::new(),
         }
     }
 
@@ -468,6 +486,13 @@ impl LoopInputInbox {
                         already_persisted: true,
                     })
                 }
+                Some(LoopInput::WorkflowUpdated {
+                    goal_id,
+                    aggregate_revision,
+                    operation_id,
+                }) => self
+                    .workflow_updates
+                    .push_back((goal_id, aggregate_revision, operation_id)),
                 input => return input,
             }
         }
@@ -499,6 +524,13 @@ impl LoopInputInbox {
                         already_persisted: true,
                     })
                 }
+                Some(LoopInput::WorkflowUpdated {
+                    goal_id,
+                    aggregate_revision,
+                    operation_id,
+                }) => self
+                    .workflow_updates
+                    .push_back((goal_id, aggregate_revision, operation_id)),
                 Some(input) => self.controls.push_back(input),
                 None => return None,
             }
@@ -552,6 +584,13 @@ impl LoopInputInbox {
                         already_persisted: true,
                     })
                 }
+                Some(LoopInput::WorkflowUpdated {
+                    goal_id,
+                    aggregate_revision,
+                    operation_id,
+                }) => self
+                    .workflow_updates
+                    .push_back((goal_id, aggregate_revision, operation_id)),
                 Some(input) => self.controls.push_back(input),
                 None => return ToolApprovalInput::Closed,
             }
@@ -578,6 +617,13 @@ impl LoopInputInbox {
                         already_persisted: true,
                     })
                 }
+                Ok(LoopInput::WorkflowUpdated {
+                    goal_id,
+                    aggregate_revision,
+                    operation_id,
+                }) => self
+                    .workflow_updates
+                    .push_back((goal_id, aggregate_revision, operation_id)),
                 Ok(input) => self.controls.push_back(input),
                 Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                     break;
@@ -602,6 +648,10 @@ impl LoopInputInbox {
 
     pub(crate) fn take_steering(&mut self) -> Vec<PendingSteering> {
         self.steering.drain(..).collect()
+    }
+
+    pub(crate) fn take_workflow_updates(&mut self) -> Vec<(String, u64, String)> {
+        self.workflow_updates.drain(..).collect()
     }
 
     #[cfg(test)]
@@ -651,6 +701,26 @@ mod input_tests {
             &steering[1].content[0],
             Content::Text { text } if text == "second"
         ));
+    }
+
+    #[test]
+    fn workflow_updates_are_control_plane_wakes_not_user_steering() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopInput::WorkflowUpdated {
+            goal_id: "goal-1".into(),
+            aggregate_revision: 7,
+            operation_id: "activate-1".into(),
+        })
+        .expect("workflow update should enqueue");
+
+        let mut inbox = LoopInputInbox::new(rx);
+        inbox.collect_ready();
+
+        assert!(inbox.take_steering().is_empty());
+        assert_eq!(
+            inbox.take_workflow_updates(),
+            vec![("goal-1".into(), 7, "activate-1".into())]
+        );
     }
 
     #[tokio::test]

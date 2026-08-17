@@ -13,6 +13,13 @@ pub enum HiveRunKind {
     Scheduled,
     ControllerChild,
     LegacyResume,
+    /// One member run of a Hive group turn, executing on the member Worker's
+    /// own controller lane.
+    GroupTurn,
+    /// A Worker-to-Worker delivery that woke the recipient's private DM lane.
+    WorkerMessage,
+    /// Periodic wake for an always-on Worker on its private DM lane.
+    WorkerHeartbeat,
 }
 
 impl HiveRunKind {
@@ -22,6 +29,9 @@ impl HiveRunKind {
             Self::Scheduled => "scheduled",
             Self::ControllerChild => "controller_child",
             Self::LegacyResume => "legacy_resume",
+            Self::GroupTurn => "group_turn",
+            Self::WorkerMessage => "worker_message",
+            Self::WorkerHeartbeat => "worker_heartbeat",
         }
     }
 
@@ -31,8 +41,22 @@ impl HiveRunKind {
             "scheduled" => Some(Self::Scheduled),
             "controller_child" => Some(Self::ControllerChild),
             "legacy_resume" => Some(Self::LegacyResume),
+            "group_turn" => Some(Self::GroupTurn),
+            "worker_message" => Some(Self::WorkerMessage),
+            "worker_heartbeat" => Some(Self::WorkerHeartbeat),
             _ => None,
         }
+    }
+
+    /// Group turns, peer deliveries, and heartbeats are idempotent enough to
+    /// requeue after a crashed `running` lease. User-facing dispatch and
+    /// calendar occurrences stay in `recovery_required` so side effects are
+    /// not silently replayed.
+    pub fn replays_after_expired_running(self) -> bool {
+        matches!(
+            self,
+            Self::GroupTurn | Self::WorkerMessage | Self::WorkerHeartbeat
+        )
     }
 }
 
@@ -127,7 +151,10 @@ pub struct HiveRunAttempt {
     pub id: String,
     pub run_id: String,
     pub attempt_no: u32,
-    pub worker_id: String,
+    /// Daemon instance that claimed this attempt. This is execution-plane
+    /// identity; "worker" is reserved for the Hive Worker product concept.
+    #[serde(alias = "worker_id")]
+    pub executor_id: String,
     pub lease_token: String,
     pub lease_epoch: u64,
     pub started_at: String,
@@ -142,16 +169,18 @@ pub struct HiveRunAttempt {
 
 #[derive(Debug, Clone)]
 pub struct ClaimRunRequest {
-    pub worker_id: String,
+    /// Claiming daemon instance id, persisted as the attempt's executor.
+    pub executor_id: String,
     pub lease_epoch: u64,
     pub now: DateTime<Utc>,
     pub lease_duration: Duration,
     pub global_concurrency_limit: u32,
 }
 
-/// The scheduler-level lease that fences a worker mutation. Run leases stop
-/// duplicate workers for one run; this additional fence stops an entire stale
-/// daemon generation after another process takes over the scheduler lease.
+/// The scheduler-level lease that fences an executor mutation. Run leases
+/// stop duplicate executors for one run; this additional fence stops an
+/// entire stale daemon generation after another process takes over the
+/// scheduler lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonFence {
     pub lease_name: String,

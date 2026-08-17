@@ -10,6 +10,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use mitsuro_core::agent::{DelegatedProgressEvent, LoopEvent, LoopInput};
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{wrappers::UnboundedReceiverStream, StreamMap};
 
 use self::{
     effect::{
@@ -61,6 +62,8 @@ enum Redraw {
     Full,
 }
 
+type DelegatedProgressReceivers = StreamMap<u64, UnboundedReceiverStream<DelegatedProgressEvent>>;
+
 impl Redraw {
     fn handled(self) -> bool {
         !matches!(self, Self::None)
@@ -80,8 +83,10 @@ pub struct PreviewApp {
     runtime: Option<RuntimeServices>,
     loop_events: Option<mpsc::UnboundedReceiver<LoopEvent>>,
     loop_input: Option<mpsc::UnboundedSender<LoopInput>>,
-    /// Live explore/build/plan child progress for openable agent streams.
-    delegated_progress: Option<mpsc::UnboundedReceiver<DelegatedProgressEvent>>,
+    /// Live explore/build/plan child progress. Detached streams outlive their
+    /// parent turn and remain attached until their senders close.
+    delegated_progress: DelegatedProgressReceivers,
+    next_delegated_progress_id: u64,
     compaction: Option<oneshot::Receiver<Result<(), String>>>,
     extension_command: Option<(String, oneshot::Receiver<Result<String, String>>)>,
     extension_toggle: Option<oneshot::Receiver<Result<(), String>>>,
@@ -119,7 +124,8 @@ impl PreviewApp {
             runtime: None,
             loop_events: None,
             loop_input: None,
-            delegated_progress: None,
+            delegated_progress: DelegatedProgressReceivers::new(),
+            next_delegated_progress_id: 1,
             compaction: None,
             extension_command: None,
             extension_toggle: None,
@@ -612,7 +618,7 @@ impl PreviewApp {
                     });
                     self.loop_events = Some(started.events);
                     self.loop_input = Some(started.input);
-                    self.delegated_progress = Some(started.delegated_progress);
+                    self.attach_delegated_progress(started.delegated_progress);
                     let _ = reduce(
                         &mut self.state,
                         UiAction::AgentRunChanged(state::AgentRunState::Running),
@@ -942,6 +948,8 @@ impl PreviewApp {
         if let Some(recovery) = &loaded.recovery {
             self.conversation.merge_recovery(recovery);
         }
+        self.conversation
+            .restore_delegation_groups(&loaded.delegation_groups);
         self.conversation.set_title(Some(loaded.title));
         // Context-used bar is driven by metadata.usage; rebuild from sessions.token_count
         // since history load does not re-emit Usage loop events.
@@ -2483,7 +2491,7 @@ impl PreviewApp {
                     );
                     self.loop_events = Some(started.events);
                     self.loop_input = Some(started.input);
-                    self.delegated_progress = Some(started.delegated_progress);
+                    self.attach_delegated_progress(started.delegated_progress);
                     let _ = reduce(
                         &mut self.state,
                         UiAction::AgentRunChanged(state::AgentRunState::Running),
@@ -2652,7 +2660,6 @@ impl PreviewApp {
         }
         if finished {
             self.loop_input = None;
-            self.delegated_progress = None;
             let _ = reduce(
                 &mut self.state,
                 UiAction::AgentRunChanged(state::AgentRunState::Idle),
@@ -2661,6 +2668,9 @@ impl PreviewApp {
     }
 
     fn handle_delegated_progress(&mut self, event: DelegatedProgressEvent) {
+        if event.parent_session_id != self.conversation.presentation().metadata.session_id {
+            return;
+        }
         self.conversation.apply_delegated_progress(&event);
         // Keep spinners / edge alive while children report.
         if matches!(self.state.agent_run, state::AgentRunState::Running) {
@@ -2691,6 +2701,16 @@ impl PreviewApp {
                 }
             }
         }
+    }
+
+    fn attach_delegated_progress(
+        &mut self,
+        receiver: mpsc::UnboundedReceiver<DelegatedProgressEvent>,
+    ) {
+        let stream_id = self.next_delegated_progress_id;
+        self.next_delegated_progress_id = self.next_delegated_progress_id.saturating_add(1);
+        self.delegated_progress
+            .insert(stream_id, UnboundedReceiverStream::new(receiver));
     }
 
     async fn handle_oauth_update(&mut self, update: crate::tui_support::utils::OAuthStatusUpdate) {
@@ -3393,7 +3413,7 @@ pub async fn run() -> Result<()> {
         enum NextEvent {
             Terminal(Option<std::io::Result<Event>>),
             Loop(Option<LoopEvent>),
-            Delegated(Option<DelegatedProgressEvent>),
+            Delegated(Option<Box<DelegatedProgressEvent>>),
             Auth(Option<crate::tui_support::utils::OAuthStatusUpdate>),
             Setup(Option<SetupServiceUpdate>),
             Compaction(Option<Result<(), String>>),
@@ -3439,11 +3459,12 @@ pub async fn run() -> Result<()> {
                     }
                 } => NextEvent::Loop(event),
                 event = async {
-                    match delegated_progress.as_mut() {
-                        Some(receiver) => receiver.recv().await,
-                        None => std::future::pending::<Option<DelegatedProgressEvent>>().await,
+                    if delegated_progress.is_empty() {
+                        std::future::pending::<Option<DelegatedProgressEvent>>().await
+                    } else {
+                        delegated_progress.next().await.map(|(_, event)| event)
                     }
-                } => NextEvent::Delegated(event),
+                } => NextEvent::Delegated(event.map(Box::new)),
                 event = async {
                     match auth_events.as_mut() {
                         Some(receiver) => receiver.recv().await,
@@ -3492,7 +3513,6 @@ pub async fn run() -> Result<()> {
             NextEvent::Loop(None) => {
                 app.loop_events = None;
                 app.loop_input = None;
-                app.delegated_progress = None;
                 let _ = reduce(
                     &mut app.state,
                     UiAction::AgentRunChanged(state::AgentRunState::Idle),
@@ -3500,13 +3520,10 @@ pub async fn run() -> Result<()> {
                 Redraw::Full
             }
             NextEvent::Delegated(Some(event)) => {
-                app.handle_delegated_progress(event);
+                app.handle_delegated_progress(*event);
                 Redraw::Full
             }
-            NextEvent::Delegated(None) => {
-                app.delegated_progress = None;
-                Redraw::None
-            }
+            NextEvent::Delegated(None) => Redraw::None,
             NextEvent::Auth(Some(update)) => {
                 app.handle_oauth_update(update).await;
                 Redraw::Full
@@ -4019,8 +4036,8 @@ mod tests {
             providers::ProviderId,
         },
         storage::{
-            PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
-            RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState,
+            DelegationGroupRecord, PartialAssistantState, PendingInteractionSnapshot,
+            RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState,
         },
     };
     use ratatui::{backend::TestBackend, Terminal};
@@ -4055,7 +4072,8 @@ mod tests {
             runtime: None,
             loop_events: None,
             loop_input: None,
-            delegated_progress: None,
+            delegated_progress: DelegatedProgressReceivers::new(),
+            next_delegated_progress_id: 1,
             compaction: None,
             extension_command: None,
             extension_toggle: None,
@@ -5167,6 +5185,7 @@ mod tests {
             messages: Vec::new(),
             recovery: Some(recovery),
             token_count: Some(12_000),
+            delegation_groups: Vec::new(),
         });
         assert_eq!(
             app.conversation
@@ -5196,6 +5215,103 @@ mod tests {
             Some(PendingInteraction::Questions(questions))
                 if questions.tool_call_id == "ask-recovered"
                     && questions.questions[0].options[1].label == "Complete"
+        ));
+    }
+
+    #[tokio::test]
+    async fn detached_progress_receiver_survives_parent_finish_until_sender_closes() {
+        let mut app = PreviewApp::preview();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        app.attach_delegated_progress(receiver);
+
+        app.handle_loop_event(LoopEvent::Finished {
+            session_id: "preview-session".to_owned(),
+            stop_reason: LoopStopReason::Completed,
+        });
+
+        assert_eq!(app.delegated_progress.len(), 1);
+        drop(sender);
+        assert!(app.delegated_progress.next().await.is_none());
+        assert!(app.delegated_progress.is_empty());
+    }
+
+    #[test]
+    fn opening_session_projects_its_durable_delegation_group() {
+        let group: DelegationGroupRecord = serde_json::from_value(json!({
+            "delegation_group_id": "group-reopen",
+            "parent_session_id": "delegated-session",
+            "parent_tool_call_id": null,
+            "contract": {
+                "execution_mode": "detached",
+                "completion_policy": {"kind": "all_settled"},
+                "failure_policy": "continue",
+                "governance": {
+                    "permission_mode": "supervised",
+                    "delegated_turn_budget": 8,
+                    "max_parallelism": 1,
+                    "execution_tool_allowlist": null,
+                    "delegation_policy": {
+                        "surface": "subagent_build",
+                        "inherited_permission_mode": "supervised",
+                        "supervised_approval_granted": false,
+                        "max_turns": 8,
+                        "read_only_only": false,
+                        "bash_allowed": false
+                    }
+                }
+            },
+            "state": "running",
+            "parent_continuation_state": "not_requested",
+            "parent_continuation_id": null,
+            "synthesis_owner_id": null,
+            "synthesis_lease_expires_at_ms": null,
+            "synthesis_attempt_count": 0,
+            "tasks": [{
+                "delegation_group_id": "group-reopen",
+                "ordinal": 0,
+                "specification": {
+                    "delegation_task_id": "task-reopen",
+                    "task_key": "builder-a",
+                    "objective": "Continue the durable build",
+                    "role": "build",
+                    "target_scope": [],
+                    "max_attempts": 2,
+                    "writer_mode": "isolated",
+                    "attempt_workspace": null,
+                    "workspace_baseline": null
+                },
+                "state": "leased",
+                "attempt_count": 1,
+                "result": null,
+                "error_summary": null,
+                "created_at": "2026-08-08T12:00:00Z",
+                "updated_at": "2026-08-08T12:00:01Z",
+                "completed_at": null
+            }],
+            "created_at": "2026-08-08T12:00:00Z",
+            "updated_at": "2026-08-08T12:00:01Z",
+            "completed_at": null
+        }))
+        .expect("delegation fixture");
+        let mut app = PreviewApp::preview();
+
+        app.apply_loaded_session(LoadedSession {
+            session_id: "delegated-session".to_owned(),
+            title: "Delegated work".to_owned(),
+            messages: Vec::new(),
+            recovery: None,
+            token_count: None,
+            delegation_groups: vec![group],
+        });
+
+        assert!(matches!(
+            &app.conversation.presentation().turns[0].parts[0],
+            TimelinePart::Tool(tool)
+                if tool.status == crate::tui_v2::model::conversation::ToolStatus::Running
+                    && matches!(&tool.artifact.content,
+                        crate::tui_v2::model::artifact::ArtifactContent::Text(text)
+                            if text.text.contains("· status  waiting for provider")
+                                && text.text.contains("· group  running"))
         ));
     }
 

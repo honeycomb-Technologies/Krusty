@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use crate::ai::client::CallOptions;
 use crate::ai::types::{Content, Role};
 use crate::skills::SkillsManager;
 use crate::storage::SessionType;
+use crate::storage::{Database, DelegationStore};
 
 use super::content::convert_acp_content;
 use super::PromptProcessor;
@@ -27,6 +29,74 @@ use crate::acp::tools::{
 };
 
 impl PromptProcessor {
+    /// Project canonical durable delegation state/events through standard ACP
+    /// tool calls. The session-scoped cursor fences reconnect and polling
+    /// duplicates while the storage query enforces parent-session ownership.
+    pub(crate) async fn replay_delegation_state<C: AcpClient>(
+        &self,
+        session: &SessionState,
+        connection: &C,
+    ) -> Result<(), AcpError> {
+        let store = DelegationStore::new(
+            Database::new(&self.db_path)
+                .map_err(|error| AcpError::InternalError(error.to_string()))?,
+        );
+        let (initialized, cursor) = {
+            let projection = session.delegation_projection.lock().map_err(|_| {
+                AcpError::InternalError("ACP delegation projection poisoned".into())
+            })?;
+            (projection.is_initialized(), projection.cursor())
+        };
+
+        let updates = if !initialized {
+            // Fence the snapshot before reading group state. Events committed
+            // after this cursor remain eligible for the next replay instead of
+            // being skipped behind a newer cursor paired with stale groups.
+            let latest_cursor = store
+                .list_latest_session_events(&session.id.to_string(), 1)
+                .map_err(|error| AcpError::InternalError(error.to_string()))?
+                .last()
+                .map(|event| event.event_id)
+                .unwrap_or(0);
+            let groups = store
+                .list_groups_for_session(&session.id.to_string(), 1000)
+                .map_err(|error| AcpError::InternalError(error.to_string()))?;
+            session
+                .delegation_projection
+                .lock()
+                .map_err(|_| AcpError::InternalError("ACP delegation projection poisoned".into()))?
+                .hydrate(&groups, latest_cursor)
+        } else {
+            let events = store
+                .list_session_events_after(&session.id.to_string(), cursor, 1000)
+                .map_err(|error| AcpError::InternalError(error.to_string()))?;
+            let mut projection = session.delegation_projection.lock().map_err(|_| {
+                AcpError::InternalError("ACP delegation projection poisoned".into())
+            })?;
+            let mut updates = Vec::new();
+            for event in events {
+                // Resolve only through the event's session-filtered group id;
+                // projection never accepts an event queried for another owner.
+                let group = store
+                    .get_group(&event.delegation_group_id)
+                    .map_err(|error| AcpError::InternalError(error.to_string()))?;
+                if group
+                    .as_ref()
+                    .is_some_and(|group| group.parent_session_id != session.id.to_string())
+                {
+                    continue;
+                }
+                updates.extend(projection.apply_event(&event, group.as_ref()));
+            }
+            updates
+        };
+
+        for update in updates {
+            send_update(session, connection, update).await?;
+        }
+        Ok(())
+    }
+
     /// Process an ACP prompt through Mitsuro's canonical agentic orchestrator.
     pub async fn process_prompt<C: AcpClient>(
         &self,
@@ -138,9 +208,28 @@ impl PromptProcessor {
         input_tx: &tokio::sync::mpsc::UnboundedSender<LoopInput>,
     ) -> Result<StopReason, AcpError> {
         let mut tool_output = HashMap::<String, String>::new();
+        let mut delegated_tools = AcpDelegatedToolProjection::default();
         let mut last_error = None::<String>;
 
-        while let Some(event) = event_rx.recv().await {
+        self.replay_delegation_state(session, connection).await?;
+        // ACP has no delegation push extension. A 400ms storage cadence keeps
+        // live lifecycle updates responsive without opening/querying SQLite at
+        // token-stream frequency; tool-result and finish boundaries replay
+        // immediately below.
+        let mut delegation_tick = tokio::time::interval(std::time::Duration::from_millis(400));
+        delegation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            let event = tokio::select! {
+                event = event_rx.recv() => event,
+                _ = delegation_tick.tick() => {
+                    self.replay_delegation_state(session, connection).await?;
+                    continue;
+                }
+            };
+            let Some(event) = event else {
+                break;
+            };
             match event {
                 LoopEvent::TextDelta { delta }
                 | LoopEvent::TextDeltaWithCitations { delta, .. } => {
@@ -202,6 +291,7 @@ impl PromptProcessor {
                         create_tool_call_complete(&id, vec![text_to_tool_content(&output)])
                     };
                     send_update(session, connection, SessionUpdate::ToolCallUpdate(update)).await?;
+                    self.replay_delegation_state(session, connection).await?;
                 }
                 LoopEvent::ToolApprovalRequired {
                     id,
@@ -298,9 +388,43 @@ impl PromptProcessor {
                     last_error = Some(error);
                 }
                 LoopEvent::Finished { stop_reason, .. } => {
+                    self.replay_delegation_state(session, connection).await?;
                     return convert_loop_stop_reason(stop_reason, last_error);
                 }
-                LoopEvent::AwaitingInput { .. }
+                LoopEvent::AgentBackgroundStarted {
+                    delegated_run_id,
+                    agent_type,
+                    description,
+                } => {
+                    self.replay_delegation_state(session, connection).await?;
+                    if !canonical_delegation_group_projected(session, &delegated_run_id) {
+                        if let Some(update) =
+                            delegated_tools.started(delegated_run_id, agent_type, description)
+                        {
+                            send_update(session, connection, update).await?;
+                        }
+                    }
+                }
+                LoopEvent::AgentBackgroundCompleted {
+                    delegated_run_id,
+                    agent_type,
+                    success,
+                    summary,
+                } => {
+                    self.replay_delegation_state(session, connection).await?;
+                    if !canonical_delegation_group_projected(session, &delegated_run_id) {
+                        if let Some(update) = delegated_tools.completed(
+                            delegated_run_id,
+                            agent_type,
+                            success,
+                            summary,
+                        ) {
+                            send_update(session, connection, update).await?;
+                        }
+                    }
+                }
+                LoopEvent::ToolCallPreparing { .. }
+                | LoopEvent::AwaitingInput { .. }
                 | LoopEvent::SteeringInjected { .. }
                 | LoopEvent::PlanComplete { .. }
                 | LoopEvent::Usage { .. }
@@ -318,8 +442,6 @@ impl PromptProcessor {
                 | LoopEvent::TitleGenerated { .. }
                 | LoopEvent::WebSearchResults { .. }
                 | LoopEvent::WebFetchResult { .. }
-                | LoopEvent::AgentBackgroundStarted { .. }
-                | LoopEvent::AgentBackgroundCompleted { .. }
                 | LoopEvent::ClassifierDecision { .. }
                 | LoopEvent::TeammateSpawned { .. }
                 | LoopEvent::TeammateTaskCompleted { .. }
@@ -332,6 +454,126 @@ impl PromptProcessor {
             "canonical agent loop ended without a terminal event".to_string(),
         ))
     }
+}
+
+fn canonical_delegation_group_projected(session: &SessionState, group_id: &str) -> bool {
+    session
+        .delegation_projection
+        .lock()
+        .map(|projection| projection.contains_group(group_id))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpDelegatedToolState {
+    Running,
+    Terminal,
+}
+
+/// ACP projection of the canonical aggregate background-agent lifecycle.
+///
+/// The core loop remains the event authority. This adapter only translates its
+/// existing start/completion pair into standard ACP tool-call notifications and
+/// fences duplicate or reordered delivery so each aggregate has one terminal
+/// presentation update.
+#[derive(Default)]
+struct AcpDelegatedToolProjection {
+    runs: HashMap<String, AcpDelegatedToolState>,
+}
+
+impl AcpDelegatedToolProjection {
+    fn started(
+        &mut self,
+        delegated_run_id: String,
+        agent_type: String,
+        description: String,
+    ) -> Option<SessionUpdate> {
+        match self.runs.entry(delegated_run_id.clone()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(entry) => {
+                entry.insert(AcpDelegatedToolState::Running);
+                Some(SessionUpdate::ToolCall(
+                    ToolCall::new(
+                        delegated_tool_call_id(&delegated_run_id),
+                        delegated_tool_title(&agent_type),
+                    )
+                    .kind(tool_name_to_kind("agent"))
+                    .status(ToolCallStatus::InProgress)
+                    .content(vec![text_to_tool_content(&format!(
+                        "Running in background: {description}"
+                    ))]),
+                ))
+            }
+        }
+    }
+
+    fn completed(
+        &mut self,
+        delegated_run_id: String,
+        agent_type: String,
+        success: bool,
+        summary: String,
+    ) -> Option<SessionUpdate> {
+        let tool_call_id = delegated_tool_call_id(&delegated_run_id);
+        match self.runs.entry(delegated_run_id) {
+            Entry::Occupied(mut entry) => {
+                if *entry.get() == AcpDelegatedToolState::Terminal {
+                    return None;
+                }
+                entry.insert(AcpDelegatedToolState::Terminal);
+                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    tool_call_id,
+                    delegated_terminal_fields(&agent_type, success, summary),
+                )))
+            }
+            Entry::Vacant(entry) => {
+                // A reconnect or bounded transport may observe completion after
+                // losing the start. A terminal ToolCall is valid ACP and avoids
+                // sending a synthetic start followed by a second terminal event.
+                entry.insert(AcpDelegatedToolState::Terminal);
+                Some(SessionUpdate::ToolCall(
+                    ToolCall::new(tool_call_id, delegated_terminal_title(&agent_type, success))
+                        .kind(tool_name_to_kind("agent"))
+                        .status(if success {
+                            ToolCallStatus::Completed
+                        } else {
+                            ToolCallStatus::Failed
+                        })
+                        .content(vec![text_to_tool_content(&summary)]),
+                ))
+            }
+        }
+    }
+}
+
+fn delegated_tool_call_id(delegated_run_id: &str) -> ToolCallId {
+    ToolCallId::from(format!("delegated:{delegated_run_id}"))
+}
+
+fn delegated_tool_title(agent_type: &str) -> String {
+    format!("Agent {agent_type}")
+}
+
+fn delegated_terminal_title(agent_type: &str, success: bool) -> String {
+    format!(
+        "Agent {agent_type} {}",
+        if success { "completed" } else { "failed" }
+    )
+}
+
+fn delegated_terminal_fields(
+    agent_type: &str,
+    success: bool,
+    summary: String,
+) -> ToolCallUpdateFields {
+    ToolCallUpdateFields::new()
+        .title(delegated_terminal_title(agent_type, success))
+        .status(if success {
+            ToolCallStatus::Completed
+        } else {
+            ToolCallStatus::Failed
+        })
+        .content(vec![text_to_tool_content(&summary)])
 }
 
 async fn send_update<C: AcpClient>(
@@ -457,6 +699,20 @@ pub(super) fn convert_loop_stop_reason(
 mod tests {
     use super::*;
 
+    fn expect_tool_call(update: SessionUpdate) -> ToolCall {
+        match update {
+            SessionUpdate::ToolCall(tool_call) => tool_call,
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    fn expect_tool_call_update(update: SessionUpdate) -> ToolCallUpdate {
+        match update {
+            SessionUpdate::ToolCallUpdate(tool_call) => tool_call,
+            other => panic!("expected tool call update, got {other:?}"),
+        }
+    }
+
     #[test]
     fn canonical_stop_reasons_preserve_acp_semantics() {
         assert_eq!(
@@ -476,5 +732,91 @@ mod tests {
             Some("provider failed".to_string())
         )
         .is_err());
+    }
+
+    #[test]
+    fn background_delegation_projects_one_running_call_and_one_terminal_update() {
+        let mut projection = AcpDelegatedToolProjection::default();
+
+        let started = expect_tool_call(
+            projection
+                .started(
+                    "run-1".to_string(),
+                    "build".to_string(),
+                    "Repair API and UI in parallel".to_string(),
+                )
+                .expect("first start should be visible"),
+        );
+        assert_eq!(started.tool_call_id.0.as_ref(), "delegated:run-1");
+        assert_eq!(started.title, "Agent build");
+        assert_eq!(started.status, ToolCallStatus::InProgress);
+        assert_eq!(started.content.len(), 1);
+        assert!(projection
+            .started(
+                "run-1".to_string(),
+                "build".to_string(),
+                "duplicate".to_string(),
+            )
+            .is_none());
+
+        let completed = expect_tool_call_update(
+            projection
+                .completed(
+                    "run-1".to_string(),
+                    "build".to_string(),
+                    true,
+                    "Both components passed validation".to_string(),
+                )
+                .expect("first completion should be visible"),
+        );
+        assert_eq!(completed.tool_call_id.0.as_ref(), "delegated:run-1");
+        assert_eq!(completed.fields.status, Some(ToolCallStatus::Completed));
+        assert_eq!(
+            completed.fields.title.as_deref(),
+            Some("Agent build completed")
+        );
+        assert!(projection
+            .completed(
+                "run-1".to_string(),
+                "build".to_string(),
+                true,
+                "duplicate".to_string(),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn orphan_background_completion_is_one_terminal_tool_call() {
+        let mut projection = AcpDelegatedToolProjection::default();
+
+        let failed = expect_tool_call(
+            projection
+                .completed(
+                    "run-late".to_string(),
+                    "verify".to_string(),
+                    false,
+                    "Validation failed".to_string(),
+                )
+                .expect("orphan completion should remain visible"),
+        );
+        assert_eq!(failed.tool_call_id.0.as_ref(), "delegated:run-late");
+        assert_eq!(failed.title, "Agent verify failed");
+        assert_eq!(failed.status, ToolCallStatus::Failed);
+        assert_eq!(failed.content.len(), 1);
+        assert!(projection
+            .completed(
+                "run-late".to_string(),
+                "verify".to_string(),
+                false,
+                "duplicate".to_string(),
+            )
+            .is_none());
+        assert!(projection
+            .started(
+                "run-late".to_string(),
+                "verify".to_string(),
+                "late start".to_string(),
+            )
+            .is_none());
     }
 }

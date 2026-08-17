@@ -19,6 +19,7 @@ mod database;
 #[cfg(test)]
 mod database_tests;
 mod delegated_runs;
+mod delegation;
 mod episodes;
 pub mod expo_push_devices;
 mod file_activity;
@@ -26,12 +27,15 @@ mod hive_attention_state;
 mod hive_controller_events;
 mod hive_controllers;
 mod hive_daemon_leases;
+mod hive_deliveries;
+pub mod hive_groups;
 mod hive_home;
 mod hive_idempotency;
 mod hive_profiles;
 mod hive_runs;
 mod hive_runtime_state;
 mod hive_schedules;
+mod hive_workers;
 mod knowledge;
 mod learning_candidates;
 pub mod live_activity_tokens;
@@ -61,6 +65,18 @@ pub use delegated_runs::{
     DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSnapshot,
     DelegatedRunStartInput, DelegatedRunStore, DelegatedRunSummary,
 };
+pub use delegation::{
+    DelegationCapacityClass, DelegationCapacityFeedback, DelegationCapacityPolicy,
+    DelegationCapacityRequest, DelegationCompletionPolicy, DelegationEventRecord,
+    DelegationEventType, DelegationExecutionMode, DelegationExecutorEnvelopeV1,
+    DelegationExecutorKind, DelegationExecutorSessionType, DelegationFailurePolicy,
+    DelegationGovernance, DelegationGroupContract, DelegationGroupRecord,
+    DelegationGroupStartInput, DelegationGroupState, DelegationLeaseRenewalBatchResult,
+    DelegationParentContinuationState, DelegationStore, DelegationSynthesisLease,
+    DelegationSynthesisLeaseRenewal, DelegationTaskActivity, DelegationTaskLease,
+    DelegationTaskLeaseRenewal, DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState,
+    DelegationWriterMode, DELEGATION_EXECUTOR_ENVELOPE_VERSION,
+};
 pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
 pub use expo_push_devices::{ExpoPushDevice, ExpoPushDeviceRegistration, ExpoPushDeviceStore};
 pub use file_activity::{FileActivityTracker, RankedFile};
@@ -70,6 +86,19 @@ pub use hive_controller_events::{
 };
 pub use hive_controllers::{HiveController, HiveControllerStatus, HiveControllerStore};
 pub use hive_daemon_leases::{DaemonLease, DaemonLeaseAcquire, HiveDaemonLeaseStore};
+pub use hive_deliveries::{
+    ack_for_terminal_runs_with_conn, claim_due_with_conn, enqueue_with_conn,
+    fail_attempt_with_conn, hive_delivery_retry_backoff, load_delivery, mark_delivered_with_conn,
+    revert_wait_with_conn, HiveDelivery, HiveDeliveryEnqueue, HiveDeliveryKind,
+    HiveDeliveryPriority, HiveDeliveryStatus, HiveDeliveryStore, NewHiveDelivery,
+    DEFAULT_HIVE_DELIVERY_MAX_ATTEMPTS, MAX_HIVE_DELIVERY_BODY_BYTES,
+};
+pub use hive_groups::{
+    parse_group_mentions, GroupMentionTarget, HiveGroup, HiveGroupExecutionMode, HiveGroupMember,
+    HiveGroupMessage, HiveGroupRunContext, HiveGroupSenderKind, HiveGroupStatus, HiveGroupStore,
+    HiveGroupTurn, HiveGroupTurnPolicy, HiveGroupTurnStatus, HiveGroupUpdate, HiveMemberCursor,
+    MentionResolution, NewHiveGroup, NewHiveGroupMessage, MAX_HIVE_GROUP_MESSAGE_BYTES,
+};
 pub use hive_home::{
     bootstrap_hive_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
     write_hive_crew_document, write_hive_home_document, HiveBootstrapResult, HiveChannelBinding,
@@ -97,6 +126,12 @@ pub use hive_schedules::{
     HiveSchedule, HiveScheduleOccurrence, HiveScheduleOccurrenceStatus, HiveScheduleStatus,
     HiveScheduleStore, OverlapPolicy, OwnedHiveSchedule,
 };
+pub use hive_workers::{
+    display_name_from_slug, load_worker_with_conn, resolve_worker_for_crew_slug_with_conn,
+    HiveWorker, HiveWorkerAutonomy, HiveWorkerDocument, HiveWorkerDocumentKind,
+    HiveWorkerProfileUpdate, HiveWorkerStatus, HiveWorkerStore, NewHiveWorker,
+    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECS,
+};
 pub use knowledge::{
     get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
     KnowledgeSnapshot, CURRENT_SNAPSHOT_TITLE,
@@ -111,8 +146,8 @@ pub use live_activity_tokens::{
 };
 pub use memories::{
     is_compaction_flush_memory, AgentMemory, AgentMemoryRevision, CanonicalMemoryInput,
-    MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource, MemoryStatus,
-    MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+    HiveMemoryReader, MemoryAclScope, MemoryNamespace, MemoryRevisionEvent, MemorySensitivity,
+    MemorySource, MemoryStatus, MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
 };
 pub(crate) use memories::{
     load_canonical_for_provenance_from_connection, save_canonical_in_transaction,

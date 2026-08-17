@@ -85,8 +85,11 @@ apps/
   mobile/          Expo/React Native app. Serves as both the mobile app (iOS/Android)
                    and the web frontend that gets embedded into the server binary.
 
-  desktop/         Tauri wrapper. Takes the Expo web build and wraps it in a native
-                   desktop window for Linux, macOS, and Windows.
+  desktop/gpui/    Native GPUI desktop. Renders product state from the normalized
+                   Mitsuro HTTP/SSE or Codex app-server backend.
+
+  desktop/shell/   Legacy Tauri/Expo host retained during desktop migration; it is
+                   not the canonical tagged Linux desktop artifact.
 
 packages/
   api/             TypeScript API client shared between mobile and desktop.

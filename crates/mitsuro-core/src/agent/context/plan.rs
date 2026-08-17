@@ -127,7 +127,7 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
              Progress: {}/{} tasks completed\n\n\
              Ready or active:\n{}\n\n\
              Blocked:\n{}{}\n\n\
-             Work one ready task at a time. Call `task_start` before work and `task_complete` with a concrete result afterward.",
+             Own one canonical plan task at a time. Within that task, delegate substantial independent subtasks as one structured Agent graph when it improves throughput; keep shared-file work dependency-ordered. Call `task_start` before work and `task_complete` only after integration and concrete verification.",
             title, completed, total, ready_list, blocked_list, omitted
         )
     }
@@ -248,13 +248,17 @@ fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> S
                 if step.status == WorkflowStepStatus::InProgress {
                     format!(
                         "Continue only Step {}: {}. Complete it with `task_complete` and concrete \
-                         evidence. Do not start another step.",
+                         evidence. Do not start another canonical step. You may delegate bounded, \
+                         independent work inside this step as one structured Agent graph, then \
+                         integrate and verify it before completion.",
                         step.display_key, step.description
                     )
                 } else {
                     format!(
                         "Next Step {}: {}. Call `task_start` once before implementation, then \
-                         complete it with concrete evidence.",
+                         complete it with concrete evidence. If the step contains substantial \
+                         separable work, use one structured Agent graph with explicit write intent \
+                         and dependency-order any shared files.",
                         step.display_key, step.description
                     )
                 }

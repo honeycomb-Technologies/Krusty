@@ -43,9 +43,6 @@ content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	13	co
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	183	        "window.__MITSURO_SERVER_URL='http://localhost:{0}';window.__MITSURO_SERVER_TOKEN='local';window.__KRUSTY_SERVER_URL='http://localhost:{0}';window.__KRUSTY_SERVER_TOKEN='local';",
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	954	        assert!(script.contains("__KRUSTY_SERVER_URL='http://localhost:4321'"));
 content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	955	        assert!(script.contains("__KRUSTY_SERVER_TOKEN='local'"));
-content	apps/desktop/ui/BROWSER_OS.md	6	- **krusty-server**: session registry + remote plane so desktop and phone share one browser control plane.
-content	apps/desktop/ui/BROWSER_OS.md	35	export KRUSTY_BROWSER_USE_MODEL=gpt-4.1-mini
-content	apps/desktop/ui/BROWSER_OS.md	36	export KRUSTY_BROWSER_USE_PYTHON=/path/to/services/browser-use-bridge/.venv/bin/python
 content	apps/desktop/ui/app/onboarding.tsx	20	  const injected = (window as any).__KRUSTY_SERVER_URL;
 content	apps/desktop/ui/app/onboarding.tsx	30	    typeof window !== 'undefined' && (window as any).__KRUSTY_SERVER_TOKEN
 content	apps/desktop/ui/app/onboarding.tsx	31	      ? String((window as any).__KRUSTY_SERVER_TOKEN)
@@ -498,7 +495,6 @@ content	crates/mitsuro-server/src/routes/chat/tests.rs	721	    std::fs::create_d
 content	crates/mitsuro-server/src/routes/chat/tests.rs	756	        project_dir.join(".krusty/settings.json"),
 content	crates/mitsuro-server/src/routes/hive/tests.rs	176	    assert_eq!(legacy.session_type, "mako");
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	50	    let db_path = temp_dir.join("krusty.db");
-content	crates/mitsuro-server/src/routes/sessions/tests.rs	264	async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch() {
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	272	            title: Some("Orphan Mako".into()),
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	293	            "Daemon Mako",
 content	crates/mitsuro-server/src/routes/sessions/tests.rs	302	        .expect("test Mako session should create");

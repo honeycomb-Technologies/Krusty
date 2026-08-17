@@ -1,6 +1,5 @@
 import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { X } from "lucide-react-native";
-import { BlurView } from "../../platform/blur";
 import { useThemeContext } from "../../hooks/useTheme";
 
 export interface ImagePreviewCandidate {
@@ -38,7 +37,6 @@ export function ImagePreviewModal({
 }: ImagePreviewModalProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const isDark = theme.scheme === "dark";
   const previewVisible = visible && Boolean(uri);
 
   return (
@@ -50,21 +48,12 @@ export function ImagePreviewModal({
     >
       <View style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={[styles.card, { borderColor: t.border }]}>
-          <BlurView
-            intensity={theme.colors.glassBlurIntense ?? 36}
-            tint={isDark ? "systemChromeMaterialDark" : "systemChromeMaterialLight"}
-            style={StyleSheet.absoluteFill}
-          />
-          <View
-            style={[
-              StyleSheet.absoluteFill,
-              {
-                backgroundColor: t.surfaceOverlayStrong,
-              },
-            ]}
-          />
-
+        <View
+          style={[
+            styles.card,
+            { backgroundColor: t.background, borderColor: t.border },
+          ]}
+        >
           <View style={[styles.header, { borderBottomColor: t.border }]}>
             <Text
               style={[styles.title, { color: t.foreground }]}
@@ -79,8 +68,8 @@ export function ImagePreviewModal({
                 styles.closeButton,
                 {
                   backgroundColor: pressed
-                    ? "rgba(255,255,255,0.14)"
-                    : "rgba(255,255,255,0.08)",
+                    ? t.surfaceElevated
+                    : t.surface,
                 },
               ]}
             >

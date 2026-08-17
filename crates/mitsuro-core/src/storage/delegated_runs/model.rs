@@ -16,7 +16,7 @@ pub enum DelegatedRunRole {
 }
 
 impl DelegatedRunRole {
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Explore => "explore",
             Self::Build => "build",
@@ -221,6 +221,10 @@ pub enum DelegatedRunCreateOutcome {
     ExistingContinuation {
         delegated_run_id: String,
         resumed_from_run_id: String,
+    },
+    ExistingActiveWorkspaceWriter {
+        delegated_run_id: String,
+        workspace_path: String,
     },
 }
 

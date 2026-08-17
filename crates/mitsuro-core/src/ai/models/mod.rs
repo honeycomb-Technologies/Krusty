@@ -98,11 +98,22 @@ mod tests {
     }
 
     #[test]
-    fn resolves_grok_4_5_fallback_when_dynamic_catalog_is_unavailable() {
+    fn retired_grok_4_5_is_not_a_curated_fallback() {
         let metadata =
             resolve_model_metadata(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
 
-        assert_eq!(metadata.display_name, "Grok 4.5");
+        assert_eq!(metadata.display_name, "grok-4.5");
+        assert!(!metadata.supports_tools);
+        assert!(!metadata.supports_thinking);
+        assert_ne!(metadata.context_window, 500_000);
+    }
+
+    #[test]
+    fn resolves_grok_4_6_fallback_when_dynamic_catalog_is_unavailable() {
+        let metadata =
+            resolve_model_metadata(ProviderId::Grok, "grok-4.6", ApiFormat::OpenAIResponses);
+
+        assert_eq!(metadata.display_name, "Grok 4.6");
         assert_eq!(metadata.api_format, ApiFormat::OpenAIResponses);
         assert_eq!(metadata.reasoning_format, Some(ReasoningFormat::OpenAI));
         assert!(metadata.supports_thinking);
@@ -120,6 +131,7 @@ mod tests {
                 crate::ai::providers::ReasoningEffort::Low,
                 crate::ai::providers::ReasoningEffort::Medium,
                 crate::ai::providers::ReasoningEffort::High,
+                crate::ai::providers::ReasoningEffort::XHigh,
             ]
         );
         assert!(metadata.reasoning_is_mandatory);

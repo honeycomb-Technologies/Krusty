@@ -5,6 +5,7 @@
 //! - Emits `LoopEvent`s for each meaningful state change
 //! - Handles stream timeout (configurable idle timeout)
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -16,6 +17,7 @@ use serde_json::Value;
 use super::loop_events::{LoopEvent, LoopStopReason};
 
 const RECOVERY_CHECKPOINT_CHAR_INTERVAL: usize = 256;
+const TOOL_ARGUMENT_PROGRESS_INTERVAL_BYTES: usize = 4 * 1024;
 
 /// Accumulated thinking block from the AI response.
 pub(crate) struct ThinkingBlock {
@@ -86,6 +88,7 @@ pub(crate) async fn process_stream(
     let mut produced_output = false;
     let mut had_server_tool_activity = false;
     let mut last_checkpoint_text_len = 0usize;
+    let mut tool_argument_progress = HashMap::<String, (String, usize, usize)>::new();
 
     loop {
         let receive_timeout = if received_finish {
@@ -199,6 +202,10 @@ pub(crate) async fn process_stream(
                     id: id.clone(),
                     name: name.clone(),
                 });
+                tool_argument_progress.insert(
+                    id.clone(),
+                    (name.clone(), 0, TOOL_ARGUMENT_PROGRESS_INTERVAL_BYTES),
+                );
                 maybe_checkpoint(
                     &text_buffer,
                     &thinking_buffer,
@@ -229,6 +236,7 @@ pub(crate) async fn process_stream(
                     name: tool_call.name.clone(),
                     arguments: tool_call.arguments.clone(),
                 });
+                tool_argument_progress.remove(&tool_call.id);
                 maybe_checkpoint(
                     &text_buffer,
                     &thinking_buffer,
@@ -373,9 +381,24 @@ pub(crate) async fn process_stream(
                 produced_output = true;
                 had_server_tool_activity = true;
             }
-            StreamPart::ToolCallDelta { .. }
-            | StreamPart::SignatureDelta { .. }
-            | StreamPart::ContextEdited { .. } => {
+            StreamPart::ToolCallDelta { id, delta } => {
+                produced_output = true;
+                let entry = tool_argument_progress.entry(id.clone()).or_insert_with(|| {
+                    ("tool".to_string(), 0, TOOL_ARGUMENT_PROGRESS_INTERVAL_BYTES)
+                });
+                entry.1 = entry.1.saturating_add(delta.len());
+                if entry.1 >= entry.2 {
+                    let _ = event_tx.send(LoopEvent::ToolCallPreparing {
+                        id: id.clone(),
+                        name: entry.0.clone(),
+                        received_bytes: entry.1,
+                    });
+                    entry.2 = entry
+                        .1
+                        .saturating_add(TOOL_ARGUMENT_PROGRESS_INTERVAL_BYTES);
+                }
+            }
+            StreamPart::SignatureDelta { .. } | StreamPart::ContextEdited { .. } => {
                 produced_output = true;
             }
             StreamPart::Start { .. } => {}
@@ -436,7 +459,7 @@ mod tests {
     use super::process_stream;
     use crate::agent::loop_events::{LoopEvent, LoopStopReason};
     use crate::ai::streaming::StreamPart;
-    use crate::ai::types::Usage;
+    use crate::ai::types::{AiToolCall, Usage};
 
     #[tokio::test]
     async fn usage_event_preserves_prompt_completion_split() {
@@ -765,6 +788,65 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|error| error.contains("output-token limit")));
+    }
+
+    #[tokio::test]
+    async fn large_tool_arguments_emit_bounded_preparation_progress() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::ToolCallStart {
+                id: "large-patch".to_string(),
+                name: "apply_patch".to_string(),
+            })
+            .expect("tool start");
+        api_tx
+            .send(StreamPart::ToolCallDelta {
+                id: "large-patch".to_string(),
+                delta: "x".repeat(3_000),
+            })
+            .expect("first delta");
+        api_tx
+            .send(StreamPart::ToolCallDelta {
+                id: "large-patch".to_string(),
+                delta: "x".repeat(2_000),
+            })
+            .expect("second delta");
+        api_tx
+            .send(StreamPart::ToolCallComplete {
+                tool_call: AiToolCall {
+                    id: "large-patch".to_string(),
+                    name: "apply_patch".to_string(),
+                    arguments: serde_json::json!({"patch": "bounded"}),
+                },
+            })
+            .expect("tool complete");
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::ToolCalls,
+            })
+            .expect("finish");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+        assert_eq!(result.tool_calls.len(), 1);
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        let preparation = events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::ToolCallPreparing {
+                    id,
+                    name,
+                    received_bytes,
+                } => Some((id, name, *received_bytes)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preparation.len(), 1, "progress must be threshold-bounded");
+        assert_eq!(preparation[0].0, "large-patch");
+        assert_eq!(preparation[0].1, "apply_patch");
+        assert_eq!(preparation[0].2, 5_000);
     }
 
     #[tokio::test]

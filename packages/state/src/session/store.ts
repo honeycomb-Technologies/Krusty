@@ -45,6 +45,7 @@ import {
 import { applyDelegatedSessionState } from './delegated';
 import {
   applySessionSnapshot,
+  hasActiveDelegationGroups,
   isActionableSessionAgentState,
   isActiveSessionAgentState,
   isTerminalSessionAgentState,
@@ -141,6 +142,7 @@ export function createSessionStore(
   planStore: ReturnType<typeof createPlanStore>,
 ) {
   let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
+  let delegationRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let statePollingGeneration = 0;
   let streamAttachmentGeneration = 0;
   let sessionSelectionGeneration = 0;
@@ -319,9 +321,9 @@ export function createSessionStore(
   function attachLiveStreamLifecycle(callbacks: StreamCallbacks): StreamCallbacks {
     return {
       ...callbacks,
-      onFinish: (sessionId) => {
+      onFinish: (sessionId, stopReason) => {
         localStreamLive = false;
-        callbacks.onFinish?.(sessionId);
+        callbacks.onFinish?.(sessionId, stopReason);
       },
       onError: (error) => {
         localStreamLive = false;
@@ -370,6 +372,7 @@ export function createSessionStore(
     | "stopStreaming"
     | "startStatePolling"
     | "stopStatePolling"
+    | "refreshDelegationState"
     | "startPresenceHeartbeat"
     | "stopPresenceHeartbeat"
     | "cleanup"
@@ -391,6 +394,7 @@ export function createSessionStore(
     tokenCount: 0,
     tokenUsage: null,
     lastEventSequence: null,
+    delegationEventCursor: null,
     error: null,
     model: null,
     modelKey: null,
@@ -429,7 +433,10 @@ export function createSessionStore(
         // Recovery runs only when SSE is unavailable; always remap transcript.
         applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
-        if (isActiveSessionAgentState(serverState.agent_state)) {
+        if (
+          isActiveSessionAgentState(serverState.agent_state)
+          || hasActiveDelegationGroups(serverState.delegation_groups)
+        ) {
           set({ isLoading: false, error: null });
           get().startStatePolling(sessionId);
           return true;
@@ -715,6 +722,9 @@ export function createSessionStore(
               persistSessionMode: persistMode,
               isActive: isStreamAttached,
               onFirstEvent: finishConnectSpan,
+              onDelegationEvent: () => {
+                if (pollingSessionId) get().refreshDelegationState(pollingSessionId);
+              },
             }),
             pollingSessionId,
             streamRecovery,
@@ -1019,6 +1029,8 @@ export function createSessionStore(
               thinkingContent:
                 cachedServerState?.live_partial_assistant?.thinking || "",
               lastEventSequence: cachedServerState?.last_event_sequence ?? null,
+              delegationEventCursor:
+                cachedServerState?.delegation_event_cursor ?? null,
               error: null,
             });
             try {
@@ -1040,7 +1052,10 @@ export function createSessionStore(
                 optimistic.targetBranch,
               );
             startPresenceTransport(optimistic.sessionId);
-            if (cachedIsStreaming) {
+            if (
+              cachedIsStreaming
+              || hasActiveDelegationGroups(cachedServerState?.delegation_groups)
+            ) {
               get().startStatePolling(optimistic.sessionId);
             }
           } else if (!get().messages.length) {
@@ -1085,7 +1100,10 @@ export function createSessionStore(
                     metadataOnly: isLocalStreamAttached(),
                   },
                 );
-                if (isActiveSessionAgentState(softState.agent_state)) {
+                if (
+                  isActiveSessionAgentState(softState.agent_state)
+                  || hasActiveDelegationGroups(softState.delegation_groups)
+                ) {
                   get().startStatePolling(sessionId);
                 }
                 if (isLocalStreamAttached()) {
@@ -1188,6 +1206,7 @@ export function createSessionStore(
                   serverState?.delegated_tools,
                   serverState?.recent_delegated_runs,
                   serverState?.delegated_run_summaries,
+                  serverState?.delegation_groups,
                 );
 
                 set((s) => {
@@ -1247,6 +1266,8 @@ export function createSessionStore(
                     thinkingContent:
                       serverState?.live_partial_assistant?.thinking || "",
                     lastEventSequence: serverState?.last_event_sequence ?? null,
+                    delegationEventCursor:
+                      serverState?.delegation_event_cursor ?? null,
                   };
                 });
                 return nextSnapshot;
@@ -1282,7 +1303,10 @@ export function createSessionStore(
 
             if (
               serverState
-              && isActiveSessionAgentState(serverState.agent_state)
+              && (
+                isActiveSessionAgentState(serverState.agent_state)
+                || hasActiveDelegationGroups(serverState.delegation_groups)
+              )
               && get().sessionId === sessionId
             ) {
               get().startStatePolling(sessionId);
@@ -1651,6 +1675,9 @@ export function createSessionStore(
               persistSessionMode: persistMode,
               isActive: isStreamAttached,
               onFirstEvent: finishConnectSpan,
+              onDelegationEvent: () => {
+                if (state.sessionId) get().refreshDelegationState(state.sessionId);
+              },
             }),
             state.sessionId,
             streamRecovery,
@@ -1787,7 +1814,10 @@ export function createSessionStore(
       const poll = async () => {
         if (generation !== statePollingGeneration) return;
         try {
-          const serverState = await client.getSessionState(sessionId);
+          const delegationEventCursor = get().delegationEventCursor;
+          const serverState = await client.getSessionState(sessionId, {
+            delegationAfterCursor: delegationEventCursor ?? undefined,
+          });
           if (generation !== statePollingGeneration) return;
           consecutiveFailures = 0;
           rememberServerState(sessionId, serverState);
@@ -1801,7 +1831,10 @@ export function createSessionStore(
             set({ error: null });
           }
 
-          if (shouldStopSessionStatePolling(serverState.agent_state)) {
+          if (shouldStopSessionStatePolling(
+            serverState.agent_state,
+            serverState.delegation_groups,
+          )) {
             const terminalError = sessionAgentErrorMessage(serverState);
             get().stopStatePolling();
             set({
@@ -1858,6 +1891,36 @@ export function createSessionStore(
       releaseStatePollingResource = null;
     },
 
+    refreshDelegationState(sessionId: string) {
+      if (get().sessionId !== sessionId || delegationRefreshTimer) return;
+      const selectionGeneration = sessionSelectionGeneration;
+      // Coalesce lifecycle bursts while keeping the UI event-driven. The
+      // canonical snapshot remains authoritative; SSE is the prompt trigger.
+      delegationRefreshTimer = setTimeout(() => {
+        delegationRefreshTimer = null;
+        const delegationEventCursor = get().delegationEventCursor;
+        void client
+          .getSessionState(sessionId, {
+            delegationAfterCursor: delegationEventCursor ?? undefined,
+          })
+          .then((serverState) => {
+            if (
+              selectionGeneration !== sessionSelectionGeneration
+              || get().sessionId !== sessionId
+            ) {
+              return;
+            }
+            rememberServerState(sessionId, serverState);
+            applySessionSnapshot(sessionId, serverState, true, set, get, planStore, {
+              metadataOnly: isLocalStreamAttached(),
+            });
+          })
+          .catch(() => {
+            // The ordinary bounded state poll retains retry/backoff ownership.
+          });
+      }, 50);
+    },
+
     // -- presence heartbeat -------------------------------------------------
 
     startPresenceHeartbeat(sessionId: string) {
@@ -1887,6 +1950,10 @@ export function createSessionStore(
       abortController = null;
       localStreamLive = false;
       get().stopStatePolling();
+      if (delegationRefreshTimer) {
+        clearTimeout(delegationRefreshTimer);
+        delegationRefreshTimer = null;
+      }
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
       // Dispose heavy in-memory retention so mode/store teardown cannot sludge RAM.

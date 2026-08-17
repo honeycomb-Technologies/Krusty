@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Modal,
@@ -158,7 +159,7 @@ function buildScheduledItems(runs: HiveCurrentRunSummary[]): ScheduledRunItem[] 
         detailParts.push(`branch ${run.target_branch}`);
       }
       if (run.runtime?.crew_slug) {
-        detailParts.push(`${run.runtime.crew_slug} agent`);
+        detailParts.push(`${run.runtime.crew_slug} Worker`);
       }
 
       return [
@@ -1266,7 +1267,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   primaryActionLabel: {
-    color: "#ffffff",
+    color: colors.onAccent,
     fontSize: 13,
     fontWeight: "600",
   },

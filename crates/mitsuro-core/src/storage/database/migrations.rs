@@ -94,43 +94,55 @@ impl Database {
         tx.execute_batch(&create_tmp)
             .with_context(|| format!("create rewritten table {tmp}"))?;
 
-        let insert_sql = if value_rewrites.is_empty() {
-            format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";")
-        } else {
-            let mut columns: Vec<String> = Vec::new();
-            {
-                let mut stmt = tx
-                    .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-                    .with_context(|| format!("inspect columns for {table}"))?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                for row in rows {
-                    columns.push(row?);
-                }
-            }
-            ensure!(
-                !columns.is_empty(),
-                "cannot rewrite values for empty table definition {table}"
-            );
-            let select_list = columns
-                .iter()
-                .map(|column| {
-                    if let Some((_, from_value, to_value)) = value_rewrites
-                        .iter()
-                        .find(|(name, _, _)| *name == column.as_str())
-                    {
-                        format!(
-                            "CASE WHEN \"{column}\" = '{from_value}' THEN '{to_value}' ELSE \"{column}\" END AS \"{column}\""
-                        )
-                    } else {
-                        format!("\"{column}\"")
+        let has_rows = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)"),
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        // Some migration tests intentionally model only the table being
+        // rewritten and omit its referenced parent tables. SQLite resolves
+        // those references when an INSERT executes, even if its SELECT would
+        // return no rows. Skipping a provably empty copy keeps those synthetic
+        // schemas migratable without disabling or weakening production FKs.
+        if has_rows {
+            let insert_sql = if value_rewrites.is_empty() {
+                format!("INSERT INTO \"{tmp}\" SELECT * FROM \"{table}\";")
+            } else {
+                let mut columns: Vec<String> = Vec::new();
+                {
+                    let mut stmt = tx
+                        .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                        .with_context(|| format!("inspect columns for {table}"))?;
+                    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                    for row in rows {
+                        columns.push(row?);
                     }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("INSERT INTO \"{tmp}\" SELECT {select_list} FROM \"{table}\";")
-        };
-        tx.execute_batch(&insert_sql)
-            .with_context(|| format!("copy rows into {tmp}"))?;
+                }
+                ensure!(
+                    !columns.is_empty(),
+                    "cannot rewrite values for empty table definition {table}"
+                );
+                let select_list = columns
+                    .iter()
+                    .map(|column| {
+                        if let Some((_, from_value, to_value)) = value_rewrites
+                            .iter()
+                            .find(|(name, _, _)| *name == column.as_str())
+                        {
+                            format!(
+                                "CASE WHEN \"{column}\" = '{from_value}' THEN '{to_value}' ELSE \"{column}\" END AS \"{column}\""
+                            )
+                        } else {
+                            format!("\"{column}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("INSERT INTO \"{tmp}\" SELECT {select_list} FROM \"{table}\";")
+            };
+            tx.execute_batch(&insert_sql)
+                .with_context(|| format!("copy rows into {tmp}"))?;
+        }
 
         let mut index_sqls: Vec<String> = Vec::new();
         {
@@ -2966,6 +2978,1223 @@ impl Database {
                 .context("re-enabling foreign_keys after hive identity rewrite")?;
         }
 
+        // Migration 56: add the session-level delegation authority. Groups
+        // own completion/failure policy, tasks own logical objectives, and an
+        // append-preserved attempt ledger owns each execution epoch. The
+        // existing delegated_runs row remains the compatibility aggregate.
+        if current_version < 56 {
+            info!("Running migration 56: delegation groups and tasks");
+            let delegation_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation coordinator migration lock")?;
+            delegation_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS delegation_groups (
+                    delegation_group_id TEXT PRIMARY KEY,
+                    parent_session_id TEXT NOT NULL,
+                    parent_tool_call_id TEXT,
+                    state TEXT NOT NULL
+                        CHECK (state IN (
+                            'created', 'queued', 'running', 'ready_for_parent',
+                            'synthesizing', 'complete', 'degraded', 'failed', 'cancelled'
+                        )),
+                    contract_json TEXT NOT NULL CHECK (json_valid(contract_json)),
+                    parent_continuation_state TEXT NOT NULL
+                        CHECK (parent_continuation_state IN (
+                            'not_requested', 'pending', 'queued', 'promoted'
+                        )),
+                    parent_continuation_id TEXT UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_tasks (
+                    delegation_task_id TEXT PRIMARY KEY,
+                    delegation_group_id TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+                    role TEXT NOT NULL
+                        CHECK (role IN ('explore', 'build', 'planner', 'verifier')),
+                    state TEXT NOT NULL
+                        CHECK (state IN (
+                            'created', 'queued', 'leased', 'running', 'retrying',
+                            'complete', 'degraded', 'failed', 'cancelled'
+                        )),
+                    specification_json TEXT NOT NULL CHECK (json_valid(specification_json)),
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                    result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+                    error_summary TEXT,
+                    lease_owner_id TEXT,
+                    lease_expires_at_ms INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    UNIQUE (delegation_group_id, task_key),
+                    UNIQUE (delegation_group_id, ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+                    lease_owner_id TEXT NOT NULL,
+                    runtime_key TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN (
+                        'running', 'complete', 'degraded', 'failed',
+                        'cancelled', 'expired'
+                    )),
+                    artifact_json TEXT CHECK (
+                        artifact_json IS NULL OR json_valid(artifact_json)
+                    ),
+                    error_summary TEXT,
+                    started_at TEXT NOT NULL,
+                    last_heartbeat_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    UNIQUE (delegation_task_id, attempt_number)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_session_updated
+                    ON delegation_groups(parent_session_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_parent_tool
+                    ON delegation_groups(parent_tool_call_id);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_state
+                    ON delegation_groups(state, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_groups_continuation
+                    ON delegation_groups(parent_continuation_state, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_tasks_group_ordinal
+                    ON delegation_tasks(delegation_group_id, ordinal ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_tasks_schedulable
+                    ON delegation_tasks(state, lease_expires_at_ms, updated_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_events_session_cursor
+                    ON delegation_events(parent_session_id, event_id ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_events_group_cursor
+                    ON delegation_events(delegation_group_id, event_id ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_attempts_task_number
+                    ON delegation_attempts(delegation_task_id, attempt_number ASC);
+                CREATE INDEX IF NOT EXISTS idx_delegation_attempts_group_state
+                    ON delegation_attempts(delegation_group_id, state, started_at ASC);
+                "#,
+            )?;
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "delegation_group_id") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN delegation_group_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "delegation_task_id") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN delegation_task_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&delegation_tx, "delegated_runs", "attempt_number") {
+                delegation_tx.execute(
+                    "ALTER TABLE delegated_runs ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1 CHECK (attempt_number >= 1)",
+                    [],
+                )?;
+            }
+            delegation_tx.execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_group_updated
+                    ON delegated_runs(delegation_group_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_task_attempt
+                    ON delegated_runs(delegation_task_id, attempt_number DESC);
+                "#,
+            )?;
+            delegation_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (56)",
+                [],
+            )?;
+            delegation_tx.commit()?;
+        }
+
+        // Migration 57: fence aggregate synthesis with the same durable lease
+        // discipline as task execution. A process crash in ReadyForParent or
+        // Synthesizing can now be reclaimed without allowing two parents to
+        // integrate patches or publish the aggregate result concurrently.
+        if current_version < 57 {
+            info!("Running migration 57: delegation synthesis leases");
+            let synthesis_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation synthesis migration lock")?;
+            if !Self::column_exists(&synthesis_tx, "delegation_groups", "synthesis_owner_id") {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &synthesis_tx,
+                "delegation_groups",
+                "synthesis_lease_expires_at_ms",
+            ) {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &synthesis_tx,
+                "delegation_groups",
+                "synthesis_attempt_count",
+            ) {
+                synthesis_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN synthesis_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (synthesis_attempt_count >= 0)",
+                    [],
+                )?;
+            }
+            synthesis_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_groups_synthesis_lease
+                    ON delegation_groups(state, synthesis_lease_expires_at_ms);",
+            )?;
+            synthesis_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (57)",
+                [],
+            )?;
+            synthesis_tx.commit()?;
+        }
+
+        // Migration 58: make capacity admission a database authority rather
+        // than a process-local assumption. The in-process scheduler remains
+        // the fast fairness layer, while these leases provide the hard host,
+        // provider-domain, and writer-contention ceiling across every process
+        // sharing this database.
+        if current_version < 58 {
+            info!("Running migration 58: durable delegation capacity authority");
+            let capacity_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation capacity migration lock")?;
+            capacity_tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS delegation_capacity_hosts (
+                    authority_key TEXT PRIMARY KEY,
+                    target_limit INTEGER NOT NULL CHECK (target_limit > 0),
+                    minimum_limit INTEGER NOT NULL CHECK (minimum_limit > 0),
+                    maximum_limit INTEGER NOT NULL CHECK (maximum_limit >= minimum_limit),
+                    ramp_step INTEGER NOT NULL CHECK (ramp_step > 0),
+                    healthy_threshold INTEGER NOT NULL CHECK (healthy_threshold > 0),
+                    healthy_streak INTEGER NOT NULL DEFAULT 0 CHECK (healthy_streak >= 0),
+                    demand_observed INTEGER NOT NULL DEFAULT 0 CHECK (demand_observed IN (0, 1)),
+                    default_cooldown_ms INTEGER NOT NULL CHECK (default_cooldown_ms > 0),
+                    updated_at_ms INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_domains (
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    target_limit INTEGER NOT NULL CHECK (target_limit > 0),
+                    healthy_streak INTEGER NOT NULL DEFAULT 0 CHECK (healthy_streak >= 0),
+                    demand_observed INTEGER NOT NULL DEFAULT 0 CHECK (demand_observed IN (0, 1)),
+                    cooldown_until_ms INTEGER,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (authority_key, domain_key),
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_waiters (
+                    waiter_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    delegation_task_id TEXT NOT NULL UNIQUE,
+                    lease_owner_id TEXT NOT NULL,
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    partition_key TEXT NOT NULL,
+                    scheduling_class TEXT NOT NULL CHECK (scheduling_class IN (
+                        'read_only', 'write_shared', 'write_isolated', 'verification'
+                    )),
+                    isolation_group TEXT,
+                    lease_expires_at_ms INTEGER NOT NULL,
+                    enqueued_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS delegation_capacity_leases (
+                    delegation_task_id TEXT PRIMARY KEY,
+                    lease_owner_id TEXT NOT NULL,
+                    authority_key TEXT NOT NULL,
+                    domain_key TEXT NOT NULL,
+                    partition_key TEXT NOT NULL,
+                    scheduling_class TEXT NOT NULL CHECK (scheduling_class IN (
+                        'read_only', 'write_shared', 'write_isolated', 'verification'
+                    )),
+                    isolation_group TEXT,
+                    waiter_sequence INTEGER NOT NULL,
+                    lease_expires_at_ms INTEGER NOT NULL,
+                    admitted_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE,
+                    FOREIGN KEY (authority_key)
+                        REFERENCES delegation_capacity_hosts(authority_key) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_waiters_order
+                    ON delegation_capacity_waiters(authority_key, domain_key, waiter_sequence);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_waiters_expiry
+                    ON delegation_capacity_waiters(lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_host
+                    ON delegation_capacity_leases(authority_key, lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_domain
+                    ON delegation_capacity_leases(authority_key, domain_key, lease_expires_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_delegation_capacity_leases_writer
+                    ON delegation_capacity_leases(authority_key, partition_key, scheduling_class);
+                ",
+            )?;
+            capacity_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (58)",
+                [],
+            )?;
+            capacity_tx.commit()?;
+        }
+
+        // Migration 59: persist an immutable, versioned executor envelope for
+        // detached Chat/Code tasks. The envelope contains only reconstruction
+        // metadata and a digest of the already-bounded task objective; it does
+        // not duplicate parent transcripts, raw prompts, or tool outputs.
+        if current_version < 59 {
+            info!("Running migration 59: detached delegation executor envelopes");
+            let envelope_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring delegation executor envelope migration lock")?;
+            if !Self::column_exists(
+                &envelope_tx,
+                "delegation_tasks",
+                "executor_envelope_version",
+            ) {
+                envelope_tx.execute(
+                    "ALTER TABLE delegation_tasks ADD COLUMN executor_envelope_version INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&envelope_tx, "delegation_tasks", "executor_envelope_json") {
+                envelope_tx.execute(
+                    "ALTER TABLE delegation_tasks ADD COLUMN executor_envelope_json TEXT",
+                    [],
+                )?;
+            }
+            envelope_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_tasks_replayable
+                    ON delegation_tasks(executor_envelope_version, state, delegation_group_id);",
+            )?;
+            envelope_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (59)",
+                [],
+            )?;
+            envelope_tx.commit()?;
+        }
+
+        // Migration 60: elect exactly one recovery host for a replayable
+        // detached group across startup and periodic reconciliation scans.
+        if current_version < 60 {
+            info!("Running migration 60: delegation replay owner leases");
+            let replay_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegation replay lease migration lock")?;
+            if !Self::column_exists(&replay_tx, "delegation_groups", "replay_owner_id") {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_owner_id TEXT",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(
+                &replay_tx,
+                "delegation_groups",
+                "replay_lease_expires_at_ms",
+            ) {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_lease_expires_at_ms INTEGER",
+                    [],
+                )?;
+            }
+            if !Self::column_exists(&replay_tx, "delegation_groups", "replay_attempt_count") {
+                replay_tx.execute(
+                    "ALTER TABLE delegation_groups ADD COLUMN replay_attempt_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+            replay_tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_delegation_groups_replay_lease
+                    ON delegation_groups(state, replay_lease_expires_at_ms, delegation_group_id);",
+            )?;
+            replay_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (60)",
+                [],
+            )?;
+            replay_tx.commit()?;
+        }
+
+        // Migration 61: event kinds are an append-only protocol surface, not a
+        // closed lifecycle state machine. Keep group/task state CHECKs closed,
+        // but allow newer servers to persist event kinds that older clients
+        // safely project as `Other`/an opaque string.
+        if current_version < 61 {
+            info!("Running migration 61: extensible delegation event kinds");
+            let event_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring delegation event compatibility migration lock")?;
+            if Self::table_exists(&event_tx, "delegation_events") {
+                Self::rebuild_table_with_sql_rewrite_and_values(
+                    &event_tx,
+                    "delegation_events",
+                    &[r#"event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    ))"#],
+                    &["event_type TEXT NOT NULL"],
+                    &[],
+                )
+                .context("Migration 61: remove delegation event kind CHECK")?;
+
+                let create_sql: String = event_tx.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delegation_events'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    !create_sql.contains("event_type IN"),
+                    "Migration 61 could not remove the delegation event kind CHECK"
+                );
+            }
+            event_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (61)",
+                [],
+            )?;
+            event_tx.commit()?;
+        }
+
+        // Migration 62: durable conversation-list organization. Pinning is an
+        // ordering preference, while archiving is a reversible visibility
+        // state; neither mutates conversation history or project files.
+        if current_version < 62 {
+            info!("Running migration 62: session pin and archive metadata");
+            let session_list_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring session list metadata migration lock")?;
+            if Self::table_exists(&session_list_tx, "sessions") {
+                if !Self::column_exists(&session_list_tx, "sessions", "pinned_at") {
+                    session_list_tx
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN pinned_at TEXT;")?;
+                }
+                if !Self::column_exists(&session_list_tx, "sessions", "archived_at") {
+                    session_list_tx
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN archived_at TEXT;")?;
+                }
+                if Self::column_exists(&session_list_tx, "sessions", "updated_at") {
+                    session_list_tx.execute_batch(
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_archive_pin_updated
+                            ON sessions(archived_at, pinned_at, updated_at DESC);",
+                    )?;
+                }
+            }
+            session_list_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (62)",
+                [],
+            )?;
+            session_list_tx.commit()?;
+        }
+
+        // Migration 63: first-class Hive Worker identities.
+        //
+        // A Worker is a durable product identity (persona documents, frozen
+        // provider/model choice, autonomy policy, private DM session) layered
+        // over the existing controller/run machinery. Existing crew profiles
+        // and the durable Hive companion session are backfilled as Workers,
+        // and the daemon lease claimant on hive_run_attempts is renamed to
+        // executor_id so "worker" refers only to the product concept.
+        if current_version < 63 {
+            info!("Running migration 63: Hive Worker identities");
+            let worker_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring Hive worker identity migration lock")?;
+
+            worker_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_workers (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        slug TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        avatar_color TEXT,
+                        model TEXT,
+                        model_key_json TEXT
+                            CHECK (model_key_json IS NULL OR json_valid(model_key_json)),
+                        model_catalog_revision TEXT,
+                        permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+                            CHECK (permission_mode IN ('supervised', 'autonomous')),
+                        autonomy TEXT NOT NULL DEFAULT 'manual'
+                            CHECK (autonomy IN ('manual', 'scheduled', 'always_on')),
+                        heartbeat_interval_secs INTEGER
+                            CHECK (
+                                heartbeat_interval_secs IS NULL
+                                OR heartbeat_interval_secs > 0
+                            ),
+                        status TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'paused', 'archived')),
+                        dm_session_id TEXT UNIQUE
+                            REFERENCES sessions(id) ON DELETE SET NULL,
+                        memory_namespace_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_workers_active_slug
+                        ON hive_workers(COALESCE(user_id, ''), slug)
+                        WHERE status <> 'archived';
+                    CREATE INDEX IF NOT EXISTS idx_hive_workers_owner_status
+                        ON hive_workers(user_id, status);
+
+                    CREATE TABLE IF NOT EXISTS hive_worker_documents (
+                        worker_id TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('identity', 'soul')),
+                        content TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (worker_id, kind),
+                        FOREIGN KEY (worker_id)
+                            REFERENCES hive_workers(id) ON DELETE CASCADE
+                    );
+                    "#,
+                )
+                .context("Migration 63: create Hive worker tables")?;
+
+            // Nullable linkage columns. Existing rows keep crew_slug as the
+            // transitional identity; new call sites write worker_id.
+            for table in [
+                "hive_controllers",
+                "hive_runs",
+                "hive_runtime_state",
+                "hive_schedules",
+            ] {
+                if Self::table_exists(&worker_tx, table)
+                    && !Self::column_exists(&worker_tx, table, "worker_id")
+                {
+                    worker_tx
+                        .execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN worker_id TEXT
+                             REFERENCES hive_workers(id) ON DELETE SET NULL;"
+                        ))
+                        .with_context(|| format!("Migration 63: add {table}.worker_id"))?;
+                }
+                if Self::table_exists(&worker_tx, table) {
+                    worker_tx.execute_batch(&format!(
+                        "CREATE INDEX IF NOT EXISTS idx_{table}_worker
+                            ON {table}(worker_id) WHERE worker_id IS NOT NULL;"
+                    ))?;
+                }
+            }
+
+            // Free "worker" for the product concept: the run-attempt claimant
+            // is the daemon executor instance, not a Hive Worker.
+            if Self::table_exists(&worker_tx, "hive_run_attempts")
+                && Self::column_exists(&worker_tx, "hive_run_attempts", "worker_id")
+                && !Self::column_exists(&worker_tx, "hive_run_attempts", "executor_id")
+            {
+                worker_tx
+                    .execute_batch(
+                        "ALTER TABLE hive_run_attempts RENAME COLUMN worker_id TO executor_id;",
+                    )
+                    .context("Migration 63: rename attempt claimant to executor_id")?;
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Backfill: every crew profile becomes a Worker owned by the
+            // profile's user (NULL user_id = local), keeping the crew slug as
+            // the memory namespace so existing crew memories stay reachable.
+            if Self::table_exists(&worker_tx, "hive_crew_profiles")
+                && Self::table_exists(&worker_tx, "hive_profiles")
+            {
+                let mut crew_rows: Vec<(Option<String>, String)> = Vec::new();
+                {
+                    let mut statement = worker_tx.prepare(
+                        "SELECT p.user_id, cp.slug
+                         FROM hive_crew_profiles cp
+                         JOIN hive_profiles p ON p.id = cp.profile_id
+                         ORDER BY cp.slug",
+                    )?;
+                    let rows = statement.query_map([], |row| {
+                        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    for row in rows {
+                        crew_rows.push(row?);
+                    }
+                }
+                for (user_id, slug) in &crew_rows {
+                    worker_tx.execute(
+                        "INSERT OR IGNORE INTO hive_workers (
+                             id, user_id, slug, display_name, permission_mode,
+                             autonomy, status, memory_namespace_id,
+                             created_at, updated_at
+                         ) VALUES (
+                             ?1, ?2, ?3, ?4, 'autonomous',
+                             'manual', 'active', ?3, ?5, ?5
+                         )",
+                        rusqlite::params![
+                            uuid::Uuid::new_v4().to_string(),
+                            user_id,
+                            slug,
+                            crate::storage::hive_workers::display_name_from_slug(slug),
+                            now,
+                        ],
+                    )?;
+                }
+                if Self::table_exists(&worker_tx, "hive_crew_documents") {
+                    worker_tx
+                        .execute(
+                            "INSERT OR IGNORE INTO hive_worker_documents
+                                 (worker_id, kind, content, updated_at)
+                             SELECT w.id, cd.kind, cd.content, cd.updated_at
+                             FROM hive_crew_documents cd
+                             JOIN hive_profiles p ON p.id = cd.profile_id
+                             JOIN hive_workers w
+                               ON w.slug = cd.slug
+                              AND COALESCE(w.user_id, '') = COALESCE(p.user_id, '')
+                              AND w.status <> 'archived'
+                             WHERE cd.kind IN ('identity', 'soul')",
+                            [],
+                        )
+                        .context("Migration 63: copy crew documents to workers")?;
+                }
+            }
+
+            // Backfill: the durable Hive companion chat becomes the default
+            // "assistant" Worker with the companion as its DM session.
+            let sessions_ready = Self::table_exists(&worker_tx, "sessions")
+                && [
+                    "title",
+                    "session_type",
+                    "parent_session_id",
+                    "project_dir",
+                    "user_id",
+                    "updated_at",
+                ]
+                .iter()
+                .all(|column| Self::column_exists(&worker_tx, "sessions", column));
+            if sessions_ready {
+                let mut companions: Vec<(String, Option<String>)> = Vec::new();
+                {
+                    let mut statement = worker_tx.prepare(
+                        "SELECT id, user_id FROM sessions
+                         WHERE title = 'Hive' AND session_type = 'hive'
+                           AND parent_session_id IS NULL AND project_dir IS NULL
+                         ORDER BY updated_at ASC",
+                    )?;
+                    let rows = statement.query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?;
+                    for row in rows {
+                        companions.push(row?);
+                    }
+                }
+                let mut seen_owners = std::collections::HashSet::new();
+                for (session_id, user_id) in &companions {
+                    // Mirror ensure_hive_main_session: one companion per
+                    // owner, preferring the oldest matching session.
+                    if !seen_owners.insert(user_id.clone().unwrap_or_default()) {
+                        continue;
+                    }
+                    worker_tx.execute(
+                        "INSERT OR IGNORE INTO hive_workers (
+                             id, user_id, slug, display_name, permission_mode,
+                             autonomy, status, dm_session_id,
+                             memory_namespace_id, created_at, updated_at
+                         ) VALUES (
+                             ?1, ?2, 'assistant', 'Assistant', 'autonomous',
+                             'manual', 'active', ?3,
+                             'assistant', ?4, ?4
+                         )",
+                        rusqlite::params![
+                            uuid::Uuid::new_v4().to_string(),
+                            user_id,
+                            session_id,
+                            now,
+                        ],
+                    )?;
+                    // If an "assistant" Worker already existed for this owner
+                    // (e.g. a crew member with that slug), bind the companion
+                    // as its DM session instead of leaving it dangling.
+                    worker_tx.execute(
+                        "UPDATE hive_workers
+                         SET dm_session_id = ?1, updated_at = ?2
+                         WHERE slug = 'assistant'
+                           AND COALESCE(user_id, '') = COALESCE(?3, '')
+                           AND status <> 'archived'
+                           AND dm_session_id IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1 FROM hive_workers bound
+                               WHERE bound.dm_session_id = ?1
+                           )",
+                        rusqlite::params![session_id, now, user_id],
+                    )?;
+                }
+            }
+
+            // Link controllers whose session is a Worker's DM session (the
+            // Worker's serialized execution lane).
+            if Self::table_exists(&worker_tx, "hive_controllers")
+                && Self::column_exists(&worker_tx, "hive_controllers", "worker_id")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_controllers
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         WHERE w.dm_session_id = hive_controllers.session_id
+                           AND w.status <> 'archived'
+                     )
+                     WHERE worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           WHERE w.dm_session_id = hive_controllers.session_id
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+
+            // Dual-read transition: map persisted crew assignments onto the
+            // backfilled Workers where the slugs match within one owner.
+            if Self::table_exists(&worker_tx, "hive_runtime_state")
+                && Self::column_exists(&worker_tx, "hive_runtime_state", "crew_slug")
+                && Self::column_exists(&worker_tx, "hive_runtime_state", "worker_id")
+                && Self::table_exists(&worker_tx, "sessions")
+                && Self::column_exists(&worker_tx, "sessions", "user_id")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_runtime_state
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         JOIN sessions s ON s.id = hive_runtime_state.session_id
+                         WHERE w.slug = hive_runtime_state.crew_slug
+                           AND COALESCE(w.user_id, '') = COALESCE(s.user_id, '')
+                           AND w.status <> 'archived'
+                     )
+                     WHERE crew_slug IS NOT NULL
+                       AND worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           JOIN sessions s ON s.id = hive_runtime_state.session_id
+                           WHERE w.slug = hive_runtime_state.crew_slug
+                             AND COALESCE(w.user_id, '') = COALESCE(s.user_id, '')
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+            if Self::table_exists(&worker_tx, "hive_schedules")
+                && Self::column_exists(&worker_tx, "hive_schedules", "crew_slug")
+                && Self::column_exists(&worker_tx, "hive_schedules", "worker_id")
+                && Self::table_exists(&worker_tx, "hive_controllers")
+            {
+                worker_tx.execute(
+                    "UPDATE hive_schedules
+                     SET worker_id = (
+                         SELECT w.id FROM hive_workers w
+                         JOIN hive_controllers c ON c.id = hive_schedules.controller_id
+                         WHERE w.slug = hive_schedules.crew_slug
+                           AND COALESCE(w.user_id, '') = COALESCE(c.user_id, '')
+                           AND w.status <> 'archived'
+                     )
+                     WHERE crew_slug IS NOT NULL
+                       AND worker_id IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM hive_workers w
+                           JOIN hive_controllers c ON c.id = hive_schedules.controller_id
+                           WHERE w.slug = hive_schedules.crew_slug
+                             AND COALESCE(w.user_id, '') = COALESCE(c.user_id, '')
+                             AND w.status <> 'archived'
+                       )",
+                    [],
+                )?;
+            }
+
+            worker_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (63)",
+                [],
+            )?;
+            worker_tx.commit()?;
+        }
+
+        // Migration 64: Group rooms where Workers collaborate.
+        //
+        // A group references Workers (never owns them; deleting a group
+        // cascades membership but leaves Workers intact), stores an
+        // append-only per-group-sequenced message timeline, and records each
+        // user-triggered fan-out as a durable hive_group_turns aggregate with
+        // per-member outcomes. hive_runs gains nullable group linkage so one
+        // member run can be traced back to its turn and trigger message.
+        if current_version < 64 {
+            info!("Running migration 64: Hive group rooms");
+
+            // hive_runs.kind gains 'group_turn'. The table is a cascade
+            // parent (attempts, occurrences, control outbox), so a
+            // drop-and-rebuild would destroy child rows; edit the CHECK in
+            // place instead. Any DDL later in this migration bumps the schema
+            // cookie, so other connections reparse the edited definition.
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 64: checking for hive_runs")?;
+            if runs_table_exists {
+                const LEGACY_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume')";
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 64: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [LEGACY_KINDS, GROUP_KINDS],
+                    )
+                    .context("Migration 64: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 64: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("group_turn") || !runs_sql.contains("kind IN"),
+                    "Migration 64 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let group_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring Hive group migration lock")?;
+
+            group_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_groups (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        title TEXT NOT NULL,
+                        execution_mode TEXT NOT NULL DEFAULT 'workbench'
+                            CHECK (execution_mode IN ('workbench', 'roundtable', 'direct')),
+                        max_rounds INTEGER NOT NULL DEFAULT 3
+                            CHECK (max_rounds > 0),
+                        max_member_messages_per_turn INTEGER NOT NULL DEFAULT 2
+                            CHECK (max_member_messages_per_turn > 0),
+                        parallelism INTEGER NOT NULL DEFAULT 3
+                            CHECK (parallelism > 0),
+                        context_window_messages INTEGER NOT NULL DEFAULT 24
+                            CHECK (context_window_messages > 0),
+                        status TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'archived')),
+                        default_assignee_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_groups_owner_status
+                        ON hive_groups(user_id, status);
+
+                    CREATE TABLE IF NOT EXISTS hive_group_members (
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id),
+                        position INTEGER NOT NULL,
+                        added_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, worker_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_members_worker
+                        ON hive_group_members(worker_id);
+
+                    -- Append-only room timeline. seq is allocated
+                    -- transactionally per group (like hive_controller_events
+                    -- sequences); message rows are never updated or deleted.
+                    -- turn_id has no FK because the trigger message and its
+                    -- turn reference each other and are inserted in one
+                    -- transaction, message first.
+                    CREATE TABLE IF NOT EXISTS hive_group_messages (
+                        id TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        seq INTEGER NOT NULL,
+                        sender_kind TEXT NOT NULL
+                            CHECK (sender_kind IN ('user', 'worker', 'system')),
+                        sender_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        sender_run_id TEXT,
+                        content TEXT NOT NULL,
+                        -- SET NULL keeps whole-group cascade deletes safe under
+                        -- enforced foreign keys; the store API itself never
+                        -- updates or deletes message rows.
+                        reply_to_message_id TEXT
+                            REFERENCES hive_group_messages(id) ON DELETE SET NULL,
+                        turn_id TEXT,
+                        idempotency_key TEXT,
+                        created_at TEXT NOT NULL,
+                        UNIQUE (group_id, seq),
+                        UNIQUE (group_id, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_messages_turn
+                        ON hive_group_messages(turn_id)
+                        WHERE turn_id IS NOT NULL;
+
+                    CREATE TABLE IF NOT EXISTS hive_group_turns (
+                        id TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        trigger_message_id TEXT NOT NULL
+                            REFERENCES hive_group_messages(id) ON DELETE CASCADE,
+                        execution_mode TEXT NOT NULL
+                            CHECK (execution_mode IN ('workbench', 'roundtable', 'direct')),
+                        policy_json TEXT NOT NULL
+                            CHECK (json_valid(policy_json)),
+                        speaker_plan_json TEXT NOT NULL
+                            CHECK (json_valid(speaker_plan_json)),
+                        next_speaker_index INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN (
+                                'running', 'completed', 'partial', 'failed', 'cancelled'
+                            )),
+                        member_outcomes_json TEXT
+                            CHECK (
+                                member_outcomes_json IS NULL
+                                OR json_valid(member_outcomes_json)
+                            ),
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_turns_group
+                        ON hive_group_turns(group_id, started_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_hive_group_turns_running
+                        ON hive_group_turns(group_id)
+                        WHERE status = 'running';
+
+                    CREATE TABLE IF NOT EXISTS hive_member_cursors (
+                        group_id TEXT NOT NULL
+                            REFERENCES hive_groups(id) ON DELETE CASCADE,
+                        worker_id TEXT NOT NULL,
+                        last_seen_seq INTEGER NOT NULL DEFAULT 0,
+                        last_spoke_seq INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, worker_id)
+                    );
+                    "#,
+                )
+                .context("Migration 64: create Hive group tables")?;
+
+            // Nullable group linkage for member runs of a group turn.
+            if Self::table_exists(&group_tx, "hive_runs") {
+                for column in ["group_id", "group_turn_id", "trigger_message_id"] {
+                    if !Self::column_exists(&group_tx, "hive_runs", column) {
+                        group_tx
+                            .execute_batch(&format!(
+                                "ALTER TABLE hive_runs ADD COLUMN {column} TEXT;"
+                            ))
+                            .with_context(|| format!("Migration 64: add hive_runs.{column}"))?;
+                    }
+                }
+                group_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_hive_runs_group_turn
+                        ON hive_runs(group_turn_id) WHERE group_turn_id IS NOT NULL;",
+                )?;
+            }
+
+            group_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (64)",
+                [],
+            )?;
+            group_tx.commit()?;
+        }
+
+        // Migration 65: Durable Worker-to-Worker delivery ledger.
+        //
+        // hive_deliveries generalizes hive_control_outbox (dedupe key, status,
+        // attempts, available_at) into one row per message-per-recipient. The
+        // daemon pump claims due rows and delivers by enqueueing a run on the
+        // recipient Worker's DM lane or by steering its active run. hive_runs
+        // gains kind 'worker_message' for those wake runs.
+        if current_version < 65 {
+            info!("Running migration 65: Hive delivery ledger");
+
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 65: checking for hive_runs")?;
+            if runs_table_exists {
+                const GROUP_KINDS: &str =
+                    "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn')";
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 65: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [GROUP_KINDS, DELIVERY_KINDS],
+                    )
+                    .context("Migration 65: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 65: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_message") || !runs_sql.contains("kind IN"),
+                    "Migration 65 could not extend the hive_runs kind CHECK"
+                );
+            }
+
+            let delivery_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive delivery migration lock")?;
+            delivery_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS hive_deliveries (
+                        id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL DEFAULT 'worker_message'
+                            CHECK (kind IN ('worker_message')),
+                        from_worker_id TEXT
+                            REFERENCES hive_workers(id) ON DELETE SET NULL,
+                        to_worker_id TEXT NOT NULL
+                            REFERENCES hive_workers(id),
+                        group_id TEXT
+                            REFERENCES hive_groups(id) ON DELETE SET NULL,
+                        body TEXT NOT NULL,
+                        priority TEXT NOT NULL DEFAULT 'normal'
+                            CHECK (priority IN ('normal', 'high')),
+                        dedupe_key TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'delivering', 'delivered', 'acked', 'dead_letter'
+                            )),
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        max_attempts INTEGER NOT NULL DEFAULT 5
+                            CHECK (max_attempts > 0),
+                        available_at TEXT NOT NULL,
+                        delivered_at TEXT,
+                        acked_at TEXT,
+                        last_error TEXT,
+                        run_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE (dedupe_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_due
+                        ON hive_deliveries(status, available_at)
+                        WHERE status IN ('pending', 'delivering');
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_to_worker
+                        ON hive_deliveries(to_worker_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_from_worker
+                        ON hive_deliveries(from_worker_id, created_at)
+                        WHERE from_worker_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_hive_deliveries_run
+                        ON hive_deliveries(run_id)
+                        WHERE run_id IS NOT NULL;
+                    "#,
+                )
+                .context("Migration 65: create hive_deliveries")?;
+            delivery_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (65)",
+                [],
+            )?;
+            delivery_tx.commit()?;
+        }
+
+        // Migration 66: Memory ACL scopes and conversation isolation.
+        //
+        // Worker-private facts stay on acl_scope='worker' so a group member
+        // run cannot inherit another Worker's crew namespace. conversation_id
+        // is the opt-in key for group-shared and conversation-private rows.
+        if current_version < 66 {
+            info!("Running migration 66: Hive memory ACL scopes");
+            let memory_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring memory ACL migration lock")?;
+            if Self::table_exists(&memory_tx, "agent_memories") {
+                if !Self::column_exists(&memory_tx, "agent_memories", "acl_scope") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN acl_scope TEXT NOT NULL DEFAULT 'owner';",
+                        )
+                        .context("Migration 66: add agent_memories.acl_scope")?;
+                }
+                if !Self::column_exists(&memory_tx, "agent_memories", "conversation_id") {
+                    memory_tx
+                        .execute_batch(
+                            "ALTER TABLE agent_memories ADD COLUMN conversation_id TEXT;",
+                        )
+                        .context("Migration 66: add agent_memories.conversation_id")?;
+                }
+                memory_tx.execute(
+                    "UPDATE agent_memories SET acl_scope = 'worker'
+                     WHERE namespace = 'crew' AND (acl_scope IS NULL OR acl_scope = 'owner')",
+                    [],
+                )?;
+                memory_tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_memories_acl
+                        ON agent_memories(status, user_id, namespace, namespace_id, acl_scope, conversation_id);",
+                )?;
+            }
+            memory_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (66)",
+                [],
+            )?;
+            memory_tx.commit()?;
+        }
+
+        // Migration 67: Always-on Worker heartbeat run kind.
+        //
+        // hive_runs.kind gains worker_heartbeat so the pump can wake an
+        // AlwaysOn Worker's DM on its interval without colliding with
+        // scheduled or worker_message rows.
+        if current_version < 67 {
+            info!("Running migration 67: Hive worker heartbeat run kind");
+            let runs_table_exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 67: checking for hive_runs")?;
+            if runs_table_exists {
+                const DELIVERY_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message')";
+                const HEARTBEAT_KINDS: &str = "('dispatch', 'scheduled', 'controller_child', 'legacy_resume', 'group_turn', 'worker_message', 'worker_heartbeat')";
+                self.conn
+                    .pragma_update(None, "writable_schema", "ON")
+                    .context("Migration 67: enabling writable_schema")?;
+                let rewrite = self
+                    .conn
+                    .execute(
+                        "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                         WHERE type = 'table' AND name = 'hive_runs'
+                           AND instr(sql, ?1) > 0",
+                        [DELIVERY_KINDS, HEARTBEAT_KINDS],
+                    )
+                    .context("Migration 67: extend hive_runs kind CHECK");
+                let restore = self
+                    .conn
+                    .pragma_update(None, "writable_schema", "RESET")
+                    .context("Migration 67: reloading schema after CHECK edit");
+                rewrite?;
+                restore?;
+                let runs_sql: String = self.conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hive_runs'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    runs_sql.contains("worker_heartbeat") || !runs_sql.contains("kind IN"),
+                    "Migration 67 could not extend the hive_runs kind CHECK"
+                );
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (67)",
+                [],
+            )?;
+        }
+
+        // Migration 68: Calendar schedules may target a Group room.
+        //
+        // hive_schedules.group_id is optional and exclusive with worker_id.
+        // Occurrences enqueue a group turn through the same delivery path
+        // as a user room message.
+        if current_version < 68 {
+            info!("Running migration 68: Hive schedule group targeting");
+            let schedules_exist: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_schedules'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Migration 68: checking for hive_schedules")?;
+            if schedules_exist {
+                let has_group_id: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM pragma_table_info('hive_schedules')
+                             WHERE name = 'group_id'
+                         )",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .context("Migration 68: checking hive_schedules.group_id")?;
+                if !has_group_id {
+                    self.conn
+                        .execute_batch(
+                            "ALTER TABLE hive_schedules ADD COLUMN group_id TEXT
+                                 REFERENCES hive_groups(id) ON DELETE SET NULL;
+                             CREATE INDEX IF NOT EXISTS idx_hive_schedules_group
+                                 ON hive_schedules(group_id) WHERE group_id IS NOT NULL;",
+                        )
+                        .context("Migration 68: adding hive_schedules.group_id")?;
+                }
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (68)",
+                [],
+            )?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -3023,5 +4252,173 @@ mod privacy_checkpoint_tests {
         database
             .checkpoint_wal_without_busy_readers("released-reader")
             .expect("checkpoint should succeed after reader release");
+    }
+}
+
+#[cfg(test)]
+mod delegation_event_migration_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use tempfile::TempDir;
+
+    #[test]
+    fn migration_61_preserves_preview_events_and_accepts_future_kinds() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("delegation-event-compatibility.db");
+        let fixture = Connection::open(&db_path).expect("open preview fixture");
+        fixture
+            .execute_batch(
+                r#"
+                CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO schema_version (version) VALUES (60);
+
+                CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                CREATE TABLE delegation_groups (delegation_group_id TEXT PRIMARY KEY);
+                CREATE TABLE delegation_tasks (delegation_task_id TEXT PRIMARY KEY);
+                INSERT INTO sessions (id) VALUES ('session-1');
+                INSERT INTO delegation_groups (delegation_group_id) VALUES ('group-1');
+                INSERT INTO delegation_tasks (delegation_task_id) VALUES ('task-1');
+
+                CREATE TABLE delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_delegation_events_session_cursor
+                    ON delegation_events(parent_session_id, event_id ASC);
+                CREATE INDEX idx_delegation_events_group_cursor
+                    ON delegation_events(delegation_group_id, event_id ASC);
+                INSERT INTO delegation_events (
+                    parent_session_id, delegation_group_id, delegation_task_id,
+                    event_type, payload_json, created_at
+                ) VALUES (
+                    'session-1', 'group-1', 'task-1', 'task_running', '{}',
+                    '2026-08-08T00:00:00Z'
+                );
+                "#,
+            )
+            .expect("seed schema-60 preview database");
+        drop(fixture);
+
+        let database = Database::new(&db_path).expect("migrate preview database");
+        assert_eq!(database.get_schema_version(), 68);
+        database
+            .conn()
+            .execute(
+                "INSERT INTO delegation_events (
+                    parent_session_id, delegation_group_id, delegation_task_id,
+                    event_type, payload_json, created_at
+                 ) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                params![
+                    "session-1",
+                    "group-1",
+                    "future_scheduler_event",
+                    r#"{"domain":"workspace"}"#,
+                    "2026-08-08T00:00:01Z"
+                ],
+            )
+            .expect("persist a future event kind");
+
+        let event_kinds = database
+            .conn()
+            .prepare("SELECT event_type FROM delegation_events ORDER BY event_id ASC")
+            .expect("prepare event query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query event kinds")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect event kinds");
+        assert_eq!(event_kinds, ["task_running", "future_scheduler_event"]);
+
+        let index_count: i64 = database
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                       'idx_delegation_events_session_cursor',
+                       'idx_delegation_events_group_cursor'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count restored event indexes");
+        assert_eq!(index_count, 2);
+    }
+
+    #[test]
+    fn migration_61_handles_an_empty_synthetic_event_table_without_parent_tables() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("synthetic-delegation-events.db");
+        let fixture = Connection::open(&db_path).expect("open synthetic fixture");
+        fixture
+            .execute_batch(
+                r#"
+                CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO schema_version (version) VALUES (60);
+                CREATE TABLE delegation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_session_id TEXT NOT NULL,
+                    delegation_group_id TEXT NOT NULL,
+                    delegation_task_id TEXT,
+                    event_type TEXT NOT NULL CHECK (event_type IN (
+                        'group_created', 'group_queued', 'group_state_changed',
+                        'task_claimed', 'task_running', 'task_state_changed',
+                        'parent_continuation_queued', 'parent_continuation_promoted'
+                    )),
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_group_id)
+                        REFERENCES delegation_groups(delegation_group_id) ON DELETE CASCADE,
+                    FOREIGN KEY (delegation_task_id)
+                        REFERENCES delegation_tasks(delegation_task_id) ON DELETE CASCADE
+                );
+                "#,
+            )
+            .expect("seed synthetic schema-60 database");
+        drop(fixture);
+
+        let database = Database::new(&db_path).expect("migrate synthetic database");
+        assert_eq!(database.get_schema_version(), 68);
+        let create_sql: String = database
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'delegation_events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated event schema");
+        assert!(!create_sql.contains("event_type IN"));
+        let foreign_key_count: i64 = database
+            .conn()
+            .prepare("PRAGMA foreign_key_list(delegation_events)")
+            .expect("prepare event foreign keys")
+            .query_map([], |_| Ok(()))
+            .expect("query event foreign keys")
+            .count() as i64;
+        assert_eq!(
+            foreign_key_count, 3,
+            "migration must preserve production FKs"
+        );
     }
 }

@@ -1,8 +1,9 @@
 //! WebSocket terminal handler with PTY support.
 
 use std::{
+    path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -15,6 +16,7 @@ use axum::{
     },
     response::IntoResponse,
 };
+use base64ct::{Base64, Encoding};
 use futures::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
@@ -31,10 +33,47 @@ const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(4);
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Hello { binary_output: Option<bool> },
-    Input { data: String },
-    Resize { cols: u16, rows: u16 },
+    Hello {
+        binary_output: Option<bool>,
+        output_encoding: Option<OutputEncoding>,
+    },
+    Input {
+        data: String,
+    },
+    InputBase64 {
+        data: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Ping,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OutputEncoding {
+    Text,
+    Binary,
+    Base64,
+}
+
+impl OutputEncoding {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Binary => 1,
+            Self::Base64 => 2,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Binary,
+            2 => Self::Base64,
+            _ => Self::Text,
+        }
+    }
 }
 
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -55,6 +94,14 @@ fn clamp_terminal_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+fn terminal_command(shell: &str, working_dir: &Path) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.cwd(working_dir);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd
+}
+
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let pty_system = native_pty_system();
@@ -69,8 +116,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(&*state.working_dir);
+    let cmd = terminal_command(&shell, &state.working_dir);
 
     let child = match pair.slave.spawn_command(cmd) {
         Ok(child) => child,
@@ -138,10 +184,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
-    let binary_output = Arc::new(AtomicBool::new(false));
+    let output_encoding = Arc::new(AtomicU8::new(OutputEncoding::Text.as_u8()));
     let ws_sender_handle = {
         let ws_sink = Arc::clone(&ws_sink);
-        let binary_output = Arc::clone(&binary_output);
+        let output_encoding = Arc::clone(&output_encoding);
         tokio::spawn(async move {
             let mut pending_output: Option<Vec<u8>> = None;
             loop {
@@ -173,19 +219,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 }
 
-                let send_result = if binary_output.load(Ordering::Relaxed) {
-                    ws_sink.lock().await.send(Message::Binary(batch)).await
-                } else {
-                    let msg = serde_json::json!({
-                        "type": "output",
-                        "data": String::from_utf8_lossy(&batch),
-                    });
-                    ws_sink
-                        .lock()
-                        .await
-                        .send(Message::Text(msg.to_string()))
-                        .await
-                };
+                let send_result =
+                    match OutputEncoding::from_u8(output_encoding.load(Ordering::Relaxed)) {
+                        OutputEncoding::Binary => {
+                            ws_sink.lock().await.send(Message::Binary(batch)).await
+                        }
+                        OutputEncoding::Base64 => {
+                            let msg = serde_json::json!({
+                                "type": "output_base64",
+                                "data": Base64::encode_string(&batch),
+                            });
+                            ws_sink
+                                .lock()
+                                .await
+                                .send(Message::Text(msg.to_string()))
+                                .await
+                        }
+                        OutputEncoding::Text => {
+                            let msg = serde_json::json!({
+                                "type": "output",
+                                "data": String::from_utf8_lossy(&batch),
+                            });
+                            ws_sink
+                                .lock()
+                                .await
+                                .send(Message::Text(msg.to_string()))
+                                .await
+                        }
+                    };
 
                 if send_result.is_err() {
                     break;
@@ -198,7 +259,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     {
         let master = Arc::clone(&master);
         let ws_sink = Arc::clone(&ws_sink);
-        let binary_output = Arc::clone(&binary_output);
+        let output_encoding = Arc::clone(&output_encoding);
         let mut writer = writer;
         while let Some(Ok(msg)) = ws_stream.next().await {
             match msg {
@@ -213,10 +274,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         match client_msg {
                             ClientMessage::Hello {
                                 binary_output: flag,
+                                output_encoding: requested_encoding,
                             } => {
-                                if let Some(enabled) = flag {
-                                    binary_output.store(enabled, Ordering::Relaxed);
-                                }
+                                let encoding = requested_encoding.unwrap_or_else(|| {
+                                    if flag.unwrap_or(false) {
+                                        OutputEncoding::Binary
+                                    } else {
+                                        OutputEncoding::Text
+                                    }
+                                });
+                                output_encoding.store(encoding.as_u8(), Ordering::Relaxed);
                             }
                             ClientMessage::Input { data } => {
                                 if data.len() > MAX_INPUT_SIZE {
@@ -228,6 +295,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 }
                                 use std::io::Write;
                                 let _ = writer.write_all(data.as_bytes());
+                                let _ = writer.flush();
+                            }
+                            ClientMessage::InputBase64 { data } => {
+                                if data.len() > MAX_INPUT_SIZE * 2 {
+                                    tracing::warn!(
+                                        "Rejected oversized base64 terminal input ({} bytes)",
+                                        data.len()
+                                    );
+                                    continue;
+                                }
+                                let Ok(decoded) = Base64::decode_vec(&data) else {
+                                    tracing::warn!("Rejected malformed base64 terminal input");
+                                    continue;
+                                };
+                                if decoded.len() > MAX_INPUT_SIZE {
+                                    tracing::warn!(
+                                        "Rejected oversized decoded terminal input ({} bytes)",
+                                        decoded.len()
+                                    );
+                                    continue;
+                                }
+                                use std::io::Write;
+                                let _ = writer.write_all(&decoded);
                                 let _ = writer.flush();
                             }
                             ClientMessage::Resize { cols, rows } => {
@@ -296,11 +386,35 @@ mod tests {
         assert!(matches!(
             hello,
             ClientMessage::Hello {
-                binary_output: Some(true)
+                binary_output: Some(true),
+                output_encoding: None,
+            }
+        ));
+
+        let base64_hello: ClientMessage =
+            serde_json::from_str(r#"{"type":"hello","output_encoding":"base64"}"#).unwrap();
+        assert!(matches!(
+            base64_hello,
+            ClientMessage::Hello {
+                output_encoding: Some(OutputEncoding::Base64),
+                ..
             }
         ));
 
         let ping: ClientMessage = serde_json::from_str(r#"{"type":"ping"}"#).unwrap();
         assert!(matches!(ping, ClientMessage::Ping));
+    }
+
+    #[test]
+    fn terminal_command_advertises_color_capabilities() {
+        let command = terminal_command("/bin/sh", Path::new("/tmp"));
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
     }
 }

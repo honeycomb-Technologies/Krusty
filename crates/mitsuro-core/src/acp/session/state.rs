@@ -16,6 +16,7 @@ use crate::tools::registry::PermissionMode;
 use crate::tools::{FileObservationTracker, ToolContext};
 
 use super::super::error::AcpError;
+use crate::acp::delegation::AcpDelegationProjection;
 
 /// Thread-safe wrapper for storage session manager.
 pub type StorageHandle = Arc<Mutex<StorageSessionManager>>;
@@ -60,6 +61,8 @@ pub struct SessionState {
     storage: Option<StorageHandle>,
     /// Interrupted-turn recovery state loaded from storage.
     recovery_state: RwLock<Option<SessionRecoveryState>>,
+    /// ACP presentation cursor/state for canonical durable delegation events.
+    pub(crate) delegation_projection: StdMutex<AcpDelegationProjection>,
 }
 
 impl SessionState {
@@ -96,6 +99,7 @@ impl SessionState {
             storage_session_id: RwLock::new(None),
             storage,
             recovery_state: RwLock::new(None),
+            delegation_projection: StdMutex::new(AcpDelegationProjection::default()),
         }
     }
 

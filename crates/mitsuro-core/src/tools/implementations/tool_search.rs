@@ -48,12 +48,12 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search, inspect, or execute tools not present in the direct tool list; target permissions still apply."
+        "Search for deferred tools, inspect any registered tool, or execute deferred tools; target permissions still apply."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Use search to discover a recommended tool that is not directly available, describe to inspect its schema, and execute to call it. When a policy error recommends a hidden specialist, route through this tool instead of retrying the blocked command.",
+            "Use search to discover a recommended tool that is not directly available, describe to inspect any registered tool, and execute to call a deferred tool. A direct-only description tells you to call that named tool directly. When a policy error recommends a hidden specialist, route through this tool instead of retrying the blocked command.",
         )
     }
 
@@ -141,7 +141,7 @@ impl Tool for ToolSearchTool {
                 }))
             }
             "describe" => {
-                let target = match required_target(&params, &disabled) {
+                let target = match required_tool_name(&params, &disabled) {
                     Ok(target) => target,
                     Err(error) => return error,
                 };
@@ -155,6 +155,7 @@ impl Tool for ToolSearchTool {
                     return error;
                 }
                 let policy = tool_policy(&target);
+                let deferred = is_deferred_tool(&target);
                 let mut description = json!({
                     "name": tool.name(),
                     "description": tool.description(),
@@ -162,7 +163,13 @@ impl Tool for ToolSearchTool {
                     "category": category_name(policy.category),
                     "requires_supervised_approval": policy.requires_supervised_approval,
                     "allowed_in_plan_mode": policy.allowed_in_plan_mode,
+                    "dispatch": if deferred { "tool_search_execute" } else { "direct" },
                 });
+                if !deferred {
+                    description["instruction"] = Value::String(format!(
+                        "Call the '{target}' tool directly. Do not route it through tool_search execute."
+                    ));
+                }
                 if let Some(guidance) = tool.prompt().map(str::trim).filter(|text| !text.is_empty())
                 {
                     description["guidance"] =
@@ -171,7 +178,7 @@ impl Tool for ToolSearchTool {
                 ToolResult::success_data(description)
             }
             "execute" => {
-                let target = match required_target(&params, &disabled) {
+                let target = match required_deferred_target(&params, &disabled) {
                     Ok(target) => target,
                     Err(error) => return error,
                 };
@@ -179,7 +186,13 @@ impl Tool for ToolSearchTool {
                 if let Err(error) = enforce_delegated_policy(ctx, &target, &arguments) {
                     return error;
                 }
-                registry
+                let Some(tool) = registry.get(&target).await else {
+                    return ToolResult::error_with_code(
+                        "tool_not_found",
+                        format!("Deferred tool '{target}' is not registered"),
+                    );
+                };
+                let result = registry
                     .execute(&target, arguments, ctx)
                     .await
                     .unwrap_or_else(|| {
@@ -187,7 +200,8 @@ impl Tool for ToolSearchTool {
                             "tool_not_found",
                             format!("Deferred tool '{target}' is not registered"),
                         )
-                    })
+                    });
+                enrich_invalid_parameters(result, tool.as_ref())
             }
             _ => ToolResult::invalid_parameters(
                 "Unknown action. Use 'search', 'describe', or 'execute'",
@@ -196,7 +210,7 @@ impl Tool for ToolSearchTool {
     }
 }
 
-fn required_target(params: &Params, disabled: &[String]) -> Result<String, ToolResult> {
+fn required_tool_name(params: &Params, disabled: &[String]) -> Result<String, ToolResult> {
     let Some(target) = params
         .tool
         .as_deref()
@@ -207,12 +221,6 @@ fn required_target(params: &Params, disabled: &[String]) -> Result<String, ToolR
             "tool is required for describe and execute",
         ));
     };
-    if !is_deferred_tool(target) {
-        return Err(ToolResult::error_with_code(
-            "tool_not_deferred",
-            format!("Tool '{target}' is not available through deferred dispatch"),
-        ));
-    }
     if disabled.iter().any(|name| name == target) {
         return Err(ToolResult::error_with_code(
             "disabled_by_project",
@@ -220,6 +228,19 @@ fn required_target(params: &Params, disabled: &[String]) -> Result<String, ToolR
         ));
     }
     Ok(target.to_string())
+}
+
+fn required_deferred_target(params: &Params, disabled: &[String]) -> Result<String, ToolResult> {
+    let target = required_tool_name(params, disabled)?;
+    if !is_deferred_tool(&target) {
+        return Err(ToolResult::error_with_code(
+            "tool_not_deferred",
+            format!(
+                "Tool '{target}' is direct-only. Call the '{target}' tool directly instead of routing it through tool_search execute."
+            ),
+        ));
+    }
+    Ok(target)
 }
 
 fn project_disabled_tools(ctx: &ToolContext) -> Vec<String> {
@@ -302,6 +323,42 @@ fn truncate_guidance(guidance: &str, max_chars: usize) -> String {
     truncated
 }
 
+fn enrich_invalid_parameters(mut result: ToolResult, tool: &dyn Tool) -> ToolResult {
+    if !result.is_error {
+        return result;
+    }
+    let Ok(mut envelope) = serde_json::from_str::<Value>(&result.output) else {
+        return result;
+    };
+    if envelope.pointer("/error/code").and_then(Value::as_str) != Some("invalid_parameters") {
+        return result;
+    }
+
+    let mut recovery = json!({
+        "tool": tool.name(),
+        "input_schema": tool.parameters_schema(),
+        "next_action": format!(
+            "Correct the arguments to match the '{}' input_schema, then retry tool_search execute once.",
+            tool.name()
+        ),
+    });
+    if let Some(guidance) = tool.prompt().map(str::trim).filter(|text| !text.is_empty()) {
+        recovery["guidance"] = Value::String(truncate_guidance(guidance, MAX_GUIDANCE_CHARS));
+    }
+    let Some(root) = envelope.as_object_mut() else {
+        return result;
+    };
+    let metadata = root
+        .entry("metadata")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(metadata) = metadata.as_object_mut() else {
+        return result;
+    };
+    metadata.insert("argument_recovery".to_string(), recovery);
+    result.output = envelope.to_string();
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -328,6 +385,29 @@ mod tests {
 
     struct SpecialistTool;
 
+    struct InvalidArgumentsTool;
+
+    struct DirectAgentTool;
+
+    #[async_trait]
+    impl Tool for DirectAgentTool {
+        fn name(&self) -> &str {
+            "agent"
+        }
+
+        fn description(&self) -> &str {
+            "Run a governed delegated task graph"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object", "required": ["tasks"]})
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success_data(json!({"unexpected": true}))
+        }
+    }
+
     #[async_trait]
     impl Tool for SpecialistTool {
         fn name(&self) -> &str {
@@ -348,6 +428,34 @@ mod tests {
 
         async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
             ToolResult::success_data(json!({"executed": true}))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for InvalidArgumentsTool {
+        fn name(&self) -> &str {
+            "invalid_arguments_demo"
+        }
+
+        fn description(&self) -> &str {
+            "Exercise deferred argument recovery"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+                "required": ["selector"],
+                "additionalProperties": false
+            })
+        }
+
+        fn prompt(&self) -> Option<&str> {
+            Some("Pass a CSS selector, for example #status.")
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::invalid_parameters("selector is required")
         }
     }
 
@@ -402,6 +510,71 @@ mod tests {
             .unwrap();
         assert!(!execute.is_error);
         assert!(execute.output.contains("executed"));
+    }
+
+    #[tokio::test]
+    async fn invalid_deferred_arguments_include_bounded_recovery_contract() {
+        let (registry, context) = context_with_registry().await;
+        registry.register(Arc::new(InvalidArgumentsTool)).await;
+
+        let result = registry
+            .execute(
+                "tool_search",
+                json!({
+                    "action": "execute",
+                    "tool": "invalid_arguments_demo",
+                    "arguments": {}
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_str(&result.output).unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(envelope["error"]["code"], "invalid_parameters");
+        assert_eq!(
+            envelope["metadata"]["argument_recovery"]["tool"],
+            "invalid_arguments_demo"
+        );
+        assert_eq!(
+            envelope["metadata"]["argument_recovery"]["input_schema"]["required"],
+            json!(["selector"])
+        );
+        assert!(envelope["metadata"]["argument_recovery"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("#status"));
+    }
+
+    #[tokio::test]
+    async fn describes_direct_agent_with_actionable_dispatch_without_executing_it() {
+        let (registry, context) = context_with_registry().await;
+        registry.register(Arc::new(DirectAgentTool)).await;
+
+        let describe = registry
+            .execute(
+                "tool_search",
+                json!({"action": "describe", "tool": "agent"}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(!describe.is_error);
+        assert!(describe.output.contains(r#""dispatch":"direct""#));
+        assert!(describe.output.contains("Call the 'agent' tool directly"));
+
+        let execute = registry
+            .execute(
+                "tool_search",
+                json!({"action": "execute", "tool": "agent", "arguments": {}}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(execute.is_error);
+        assert!(execute.output.contains("tool_not_deferred"));
+        assert!(execute.output.contains("directly"));
     }
 
     #[tokio::test]

@@ -1,19 +1,12 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  useState,
-  useRef,
-  useCallback,
-  useEffect,
-  useMemo,
-  startTransition,
-} from "react";
-import {
-  View,
-  Text,
-  Pressable,
   Alert,
   Modal,
+  Pressable,
+  Text,
   TextInput,
   useWindowDimensions,
+  View,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -24,16 +17,16 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { useConnection } from "../../hooks/useConnection";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import {
-  useSessionStore,
   useSessionsStore,
+  useSessionStore,
   useStores,
   useWorkspaceStore,
 } from "../../hooks/useStores";
 import { useShallow } from "zustand/react/shallow";
 import { HiveIcon } from "../../components/brand";
 import {
-  ChatBar,
   type Attachment as ChatBarAttachment,
+  ChatBar,
 } from "../../components/chat/ChatBar";
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
@@ -43,16 +36,14 @@ import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
 import { StreamSideEffectsCoordinator } from "../../components/chat/StreamSideEffectsCoordinator";
 import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
 import { createLatestIntentScheduler } from "../../components/navigation/latestIntentScheduler";
+import { resolveRouteNavigationIntent } from "../../components/navigation/routeNavigationIntent";
 import { displayThreadTitle } from "../../components/navigation/threadTitle";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useMobileDiagnosticMode } from "../../diagnostics/MobileDiagnosticsProvider";
 import Animated, { runOnJS } from "react-native-reanimated";
 
-import type {
-  SessionResponse,
-  SessionType,
-} from "@mitsuro/api";
+import type { SessionResponse, SessionType } from "@mitsuro/api";
 import type { HiveTopLevelView } from "../../components/hive/types";
 import type { HiveChatContext } from "../../components/hive/types";
 import type {
@@ -66,21 +57,21 @@ import {
   supportsFastMode,
 } from "@mitsuro/state";
 
-import { ChatBootScreen } from "./chat-screen/BootScreen";
+import { ChatBootScreen } from "../../components/chat-screen/BootScreen";
 import {
   CHAT_BAR_ZONE,
   sessionTypeForTab,
   tabForSessionType,
-} from "./chat-screen/helpers";
+} from "../../components/chat-screen/helpers";
 import {
   DESKTOP_CHAT_MAX_WIDTH,
-  TOOLBOX_DOCK_WIDTH,
   resolveDesktopChatMaxWidth,
   styles,
-} from "./chat-screen/styles";
-import { useSessionActions } from "./chat-screen/useSessionActions";
-import { useSessionController } from "./chat-screen/useSessionController";
-import { ActiveConversationSurface } from "./chat-screen/ActiveConversationSurface";
+  TOOLBOX_DOCK_WIDTH,
+} from "../../components/chat-screen/styles";
+import { useSessionActions } from "../../components/chat-screen/useSessionActions";
+import { useSessionController } from "../../components/chat-screen/useSessionController";
+import { ActiveConversationSurface } from "../../components/chat-screen/ActiveConversationSurface";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type MobileSheet = "threads" | "toolbox" | null;
@@ -137,10 +128,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // Header selection responds immediately; heavy surface/store work waits for
   // a short quiet window and commits only the latest requested mode. A hard
   // deadline here admitted another expensive surface every 80ms during
-  // sustained stress input, allowing React transitions to accumulate.
-  const modeIntentSchedulerRef = useRef<ReturnType<
+  // sustained stress input, allowing surface activations to accumulate.
+  const modeIntentSchedulerRef = useRef<
+    ReturnType<
     typeof createLatestIntentScheduler<SessionType>
-  > | null>(null);
+    > | null
+  >(null);
   if (!modeIntentSchedulerRef.current) {
     modeIntentSchedulerRef.current = createLatestIntentScheduler({
       quietDelayMs: 72,
@@ -150,7 +143,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           finishModeSwitchSpanRef.current = null;
           return;
         }
-        startTransition(() => setActiveMode(mode));
+        // The scheduler has already coalesced bursty input. Commit the winner
+        // synchronously so continuous transcript updates cannot starve the
+        // actual surface change behind an immediately-updated header pill.
+        setActiveMode(mode);
       },
     });
   }
@@ -232,10 +228,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     setActiveSheet(open ? "threads" : null);
   }, []);
   const [hiveTopLevel, setHiveTopLevel] = useState<HiveTopLevelView>("hive");
-  const [hiveNotificationTarget, setHiveNotificationTarget] = useState<{
+  const [hiveNotificationTarget, setHiveNotificationTarget] = useState<
+    {
     messageId?: string;
     reportId?: string;
-  } | null>(null);
+    } | null
+  >(null);
   const toolboxOpen = isDesktop
     ? desktopToolboxOpen
     : activeSheet === "toolbox";
@@ -262,8 +260,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [activeMode],
   );
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
-  const [composerReserveHeight, setComposerReserveHeight] =
-    useState(CHAT_BAR_ZONE);
+  const [composerReserveHeight, setComposerReserveHeight] = useState(
+    CHAT_BAR_ZONE,
+  );
+  const [mobileHeaderHeight, setMobileHeaderHeight] = useState(88);
   const [errorBannerHeight, setErrorBannerHeight] = useState(0);
   /** Measured desktop chat pane width (split host, before soft-cap). */
   const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
@@ -300,10 +300,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
     const current = sessionStore.getState();
     if (
-      current.model === model
-      && modelKeysEqual(current.modelKey, selectedModelInfo.key ?? null)
-      && current.modelProvider === (selectedModelInfo.provider ?? null)
-      && JSON.stringify(current.modelInfo) === JSON.stringify(selectedModelInfo)
+      current.model === model &&
+      modelKeysEqual(current.modelKey, selectedModelInfo.key ?? null) &&
+      current.modelProvider === (selectedModelInfo.provider ?? null) &&
+      JSON.stringify(current.modelInfo) === JSON.stringify(selectedModelInfo)
     ) {
       return;
     }
@@ -311,6 +311,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [model, selectedModelInfo, sessionStore]);
 
   const suppressCompletionRef = useRef(false);
+  const handledRouteIntentKeyRef = useRef<string | null>(null);
 
   const handleToolApprovalAction = useCallback(
     async (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -326,9 +327,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       setActiveToolCallId(toolCallId);
       try {
         if (currentSessionId === targetSessionId) {
-          await sessionStore.getState().submitToolApproval(toolCallId, approved);
+          await sessionStore.getState().submitToolApproval(
+            toolCallId,
+            approved,
+          );
         } else if (client) {
-          await client.submitToolApproval(targetSessionId, toolCallId, approved);
+          await client.submitToolApproval(
+            targetSessionId,
+            toolCallId,
+            approved,
+          );
         }
       } catch {
         if (currentSessionId === targetSessionId) {
@@ -348,8 +356,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       const targetSession = targetSessionId
         ? sessions.find((candidate) => candidate.id === targetSessionId)
         : null;
-      const targetType =
-        targetSession?.session_type ?? (focus === "hive" ? "hive" : activeMode);
+      const focusedSessionType =
+        focus === "chat" || focus === "code" || focus === "hive" ? focus : null;
+      const targetType = targetSession?.session_type ?? focusedSessionType ??
+        activeMode;
 
       if (focus === "hive") {
         setHiveTopLevel("hive");
@@ -378,33 +388,21 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   );
 
   useEffect(() => {
-    const targetSessionId = Array.isArray(routeParams.sessionId)
-      ? routeParams.sessionId[0]
-      : routeParams.sessionId;
-    const focus = Array.isArray(routeParams.focus)
-      ? routeParams.focus[0]
-      : routeParams.focus;
-    const messageId = Array.isArray(routeParams.messageId)
-      ? routeParams.messageId[0]
-      : routeParams.messageId;
-    const reportId = Array.isArray(routeParams.reportId)
-      ? routeParams.reportId[0]
-      : routeParams.reportId;
-    if ((targetSessionId && targetSessionId !== sessionId) || focus === "hive") {
-      void handleNotificationNavigate("/(tabs)", {
-        ...(targetSessionId ? { sessionId: targetSessionId } : {}),
-        ...(focus ? { focus } : {}),
-        ...(messageId ? { messageId } : {}),
-        ...(reportId ? { reportId } : {}),
-      });
+    const intent = resolveRouteNavigationIntent(routeParams);
+    if (!intent) {
+      handledRouteIntentKeyRef.current = null;
+      return;
     }
+    if (handledRouteIntentKeyRef.current === intent.key) return;
+
+    handledRouteIntentKeyRef.current = intent.key;
+    void handleNotificationNavigate("/(tabs)", intent.params);
   }, [
     handleNotificationNavigate,
     routeParams.focus,
     routeParams.messageId,
     routeParams.reportId,
     routeParams.sessionId,
-    sessionId,
   ]);
 
   const t = theme.colors;
@@ -417,6 +415,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     handleNewSession,
     handleDirectorySelected,
     handleDeleteSession,
+    handleSetSessionPinned,
+    handleSetSessionArchived,
+    handleSetProjectPinned,
+    handleSetProjectArchived,
+    handleDeleteProjectSessions,
     handleInteractiveToolResult,
     handlePlanConfirm,
     handleSend,
@@ -490,7 +493,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         }
         if (normalizedAttachments.length > 0) {
           sessionStore.setState({
-            error: "Start the Hive thread with text, then attach files in the conversation.",
+            error:
+              "Start the Hive thread with text, then attach files in the conversation.",
           });
           return;
         }
@@ -514,8 +518,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           );
         } catch (dispatchError) {
           sessionStore.setState({
-            error:
-              dispatchError instanceof Error
+            error: dispatchError instanceof Error
                 ? dispatchError.message
                 : "Failed to start the Hive thread.",
           });
@@ -570,7 +573,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     } catch (error) {
       Alert.alert(
         "Rename failed",
-        error instanceof Error ? error.message : "Could not update session title.",
+        error instanceof Error
+          ? error.message
+          : "Could not update session title.",
       );
     } finally {
       setRenameSaving(false);
@@ -615,8 +620,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   // already-known title during that short gap so Code never appears above the
   // previous mode's title. The committed selector resumes ownership once both
   // modes agree.
-  const requestedModeDisplayTitle =
-    requestedMode === activeMode
+  const requestedModeDisplayTitle = requestedMode === activeMode
       ? displayTitle
       : displayThreadTitle(
           stores.modes[requestedMode].session.getState().title,
@@ -662,8 +666,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     },
     [handleModeChange],
   );
-  const modeSwipeBlocked =
-    isDesktop || drawerOpen || toolboxOpen || bottomControlsOpen;
+  const modeSwipeBlocked = isDesktop || drawerOpen || toolboxOpen ||
+    bottomControlsOpen;
   const modeSwipeBlockedRef = useRef(modeSwipeBlocked);
   modeSwipeBlockedRef.current = modeSwipeBlocked;
   const handleModeSwipe = useCallback(
@@ -700,7 +704,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     ],
   );
 
-  const topBar = isDesktop ? (
+  const topBar = isDesktop
+    ? (
     <Animated.View
       style={[styles.topBar, styles.topBarDesktop, entrance.topBarStyle]}
     >
@@ -769,22 +774,27 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         </Pressable>
       </View>
     </Animated.View>
-  ) : (
-    <Animated.View style={entrance.topBarStyle}>
+    )
+    : (
+      <Animated.View
+        style={[styles.mobileTopBarOverlay, entrance.topBarStyle]}
+      >
       <MobileAppHeader
         mode={requestedMode}
         title={requestedModeDisplayTitle}
         onModeChange={handleModeChange}
         onOpenThreads={() => setActiveSheet("threads")}
         onOpenToolbox={handleToolboxOpen}
-        onTitlePress={
-          requestedMode === activeMode
-            && sessionId
-            && requestedModeDisplayTitle
-            && activeMode !== "hive"
+          onHeightChange={(nextHeight) =>
+            setMobileHeaderHeight((current) =>
+              current === nextHeight ? current : nextHeight
+            )}
+          onTitlePress={requestedMode === activeMode &&
+              sessionId &&
+              requestedModeDisplayTitle &&
+              activeMode !== "hive"
             ? handleRenameSession
-            : undefined
-        }
+            : undefined}
       />
     </Animated.View>
   );
@@ -800,12 +810,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           sessionType={activeMode}
           activeToolCallId={activeToolCallId}
           bottomPadding={composerReserveHeight}
+        topFadeHeight={isDesktop ? undefined : mobileHeaderHeight + 128}
+        topFadeOffset={isDesktop ? undefined : 0}
+        topContentPadding={isDesktop ? undefined : mobileHeaderHeight + 16}
           hideJumpToLatest={bottomControlsOpen}
           showPlanTracker={activeMode !== "hive"}
+        hidePlanTracker={bottomControlsOpen}
           errorBannerHeight={errorBannerHeight}
           onErrorBannerHeightChange={(nextHeight) => {
             setErrorBannerHeight((current) =>
-              current === nextHeight ? current : nextHeight,
+            current === nextHeight ? current : nextHeight
             );
           }}
           onApproveTool={handleApproveTranscriptTool}
@@ -832,12 +846,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           disabled={!isConnected}
           thinkingLevel={thinkingLevel as ThinkingLevel}
           onThinkingChange={(level) =>
-            sessionStore.getState().setThinkingLevel(level)
-          }
+          sessionStore.getState().setThinkingLevel(level)}
           permissionMode={permissionMode as PermissionMode}
           onPermissionModeToggle={() =>
-            sessionStore.getState().togglePermissionMode()
-          }
+          sessionStore.getState().togglePermissionMode()}
           fastModeEnabled={fastModeEnabled}
           fastModeSupported={fastModeSupported}
           onFastModeToggle={handleFastModeToggle}
@@ -845,8 +857,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onModeToggle={() =>
             sessionStore
               .getState()
-              .setMode(mode === "build" ? "plan" : "build")
-          }
+            .setMode(mode === "build" ? "plan" : "build")}
           onModelSelect={handleModelSelect}
           model={model}
           models={models}
@@ -869,7 +880,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const chatMain = (
     <View style={styles.flex}>
-      {isDesktop ? (
+      {isDesktop
+        ? (
         <View
           style={styles.desktopChatColumnHost}
           onLayout={(event) => {
@@ -892,7 +904,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             {transcriptAndComposer}
           </View>
         </View>
-      ) : (
+        )
+        : (
         <>
           {topBar}
           {transcriptAndComposer}
@@ -906,11 +919,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       style={[styles.container, { backgroundColor: t.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      {isDesktop ? (
+      {isDesktop
+        ? (
         // Desktop: chat fills remaining width; toolbox is a fixed-width rail.
         <View style={styles.desktopSplit}>
           <View style={styles.desktopSplitChat}>{chatMain}</View>
-          {toolboxOpen ? (
+            {toolboxOpen
+              ? (
             <ToolboxPanel
               variant="dock"
               visible={toolboxOpen}
@@ -922,12 +937,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               onOpenSettings={() => router.navigate("/(tabs)/settings")}
               onOpenHiveRun={(id) => void loadSessionById(id)}
               onOpenProject={(path, branch) =>
-                void openProjectInCode(path, branch)
-              }
+                    void openProjectInCode(path, branch)}
             />
-          ) : null}
+              )
+              : null}
         </View>
-      ) : (
+        )
+        : (
         <>
           {chatMain}
           <ToolboxPanel
@@ -944,8 +960,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             }}
             onOpenHiveRun={(id) => void loadSessionById(id)}
             onOpenProject={(path, branch) =>
-              void openProjectInCode(path, branch)
-            }
+                void openProjectInCode(path, branch)}
           />
         </>
       )}
@@ -1023,9 +1038,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             backgroundColor: t.background,
           }}
         >
-          {/* One stable native transcript tree for every mobile mode. Parallel
+          {
+            /* One stable native transcript tree for every mobile mode. Parallel
               FlatLists crashed under New Architecture, while swapping the
-              Hive tree forced expensive Fabric unmount/mount transactions. */}
+              Hive tree forced expensive Fabric unmount/mount transactions. */
+          }
           {chatTranscriptSurface}
         </View>
       </View>
@@ -1053,9 +1070,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           router.navigate("/(tabs)/settings");
         }}
         onOpenHiveRun={(id) => void loadSessionById(id)}
-        onOpenProject={(path, branch) =>
-          void openProjectInCode(path, branch)
-        }
+        onOpenProject={(path, branch) => void openProjectInCode(path, branch)}
       />
     </SafeAreaView>
   );
@@ -1078,7 +1093,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           ]}
           onPress={(event) => event.stopPropagation()}
         >
-          <Text style={[styles.renameTitle, { color: t.foreground }]}>Rename session</Text>
+          <Text style={[styles.renameTitle, { color: t.foreground }]}>
+            Rename session
+          </Text>
           <TextInput
             value={renameDraft}
             onChangeText={setRenameDraft}
@@ -1104,7 +1121,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               disabled={renameSaving}
               style={[styles.renameButton, { borderColor: t.border }]}
             >
-              <Text style={[styles.renameButtonText, { color: t.mutedForeground }]}>Cancel</Text>
+              <Text
+                style={[styles.renameButtonText, { color: t.mutedForeground }]}
+              >
+                Cancel
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => {
@@ -1117,7 +1138,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
                 { backgroundColor: t.userMessage },
               ]}
             >
-              <Text style={[styles.renameButtonText, { color: "#fff" }]}>
+              <Text style={[styles.renameButtonText, { color: t.onAccent }]}>
                 {renameSaving ? "Saving…" : "Save"}
               </Text>
             </Pressable>
@@ -1146,11 +1167,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         suppressCompletionRef={suppressCompletionRef}
       />
       {renameModal}
-      {isDesktop ? (
+      {isDesktop
+        ? (
         activeTab === 2 ? hiveContent : chatContent
-      ) : (
-        mobileContent
-      )}
+        )
+        : mobileContent}
 
       {!isDesktop && (
         <SessionDrawer
@@ -1164,6 +1185,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onNewHiveSession={handleNewHiveSession}
           onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
           onDeleteSession={handleDeleteSession}
+          onSetSessionPinned={handleSetSessionPinned}
+          onSetSessionArchived={handleSetSessionArchived}
+          onSetProjectPinned={handleSetProjectPinned}
+          onSetProjectArchived={handleSetProjectArchived}
+          onDeleteProjectSessions={handleDeleteProjectSessions}
           onOpenSettings={() => {
             setDrawerOpen(false);
             router.navigate("/(tabs)/settings");

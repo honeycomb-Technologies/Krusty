@@ -1,16 +1,13 @@
 import { useMemo, useState } from 'react';
 import {
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
-import { Copy, ExternalLink, RefreshCw } from 'lucide-react-native';
-import { useConnection } from '@mobile/hooks/useConnection';
+import { Copy, ExternalLink } from 'lucide-react-native';
 import { useThemeContext } from '@mobile/hooks/useTheme';
-import { buildTerminalWebSocketUrl } from '@mobile/components/terminalUrl';
-import { getTerminalHtml } from '@mobile/components/toolbox/terminalHtml';
+import { Terminal } from '@mobile/components/desktop/Terminal';
 import * as Clipboard from '@mobile/platform/clipboard';
 import {
   buildGhosttyOpenCommand,
@@ -25,32 +22,16 @@ export function DesktopTerminalPane({
   projectDirectory?: string | null;
 }) {
   const { theme } = useThemeContext();
-  const { serverUrl, serverToken, isConnected } = useConnection();
   const t = theme.colors;
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showEmbedded, setShowEmbedded] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
   const [copied, setCopied] = useState(false);
 
   const command = useMemo(
     () => buildGhosttyOpenCommand(projectDirectory),
     [projectDirectory],
   );
-
-  const wsUrl = useMemo(() => {
-    if (!serverUrl) return null;
-    return buildTerminalWebSocketUrl(serverUrl, serverToken);
-  }, [serverToken, serverUrl]);
-
-  const html = useMemo(() => {
-    if (!wsUrl) return null;
-    return getTerminalHtml(wsUrl, {
-      background: t.background,
-      foreground: t.foreground,
-      cursor: t.userMessage,
-    });
-  }, [t.background, t.foreground, t.userMessage, wsUrl]);
 
   if (!visible) return null;
 
@@ -113,43 +94,13 @@ export function DesktopTerminalPane({
 
         <Pressable onPress={() => setShowEmbedded((value) => !value)} hitSlop={8}>
           <Text style={{ color: t.mutedForeground, fontSize: 11 }}>
-            {showEmbedded ? 'Hide fallback' : 'Fallback'}
+            {showEmbedded ? 'Hide embedded Ghostty' : 'Embedded Ghostty'}
           </Text>
         </Pressable>
 
         {showEmbedded ? (
           <View style={[styles.embedded, { borderColor: t.border }]}>
-            <View style={[styles.embeddedHeader, { borderBottomColor: t.border }]}>
-              <Text style={{ color: t.mutedForeground, fontSize: 11, fontWeight: '700' }}>
-                FALLBACK
-              </Text>
-              <Pressable onPress={() => setReloadKey((value) => value + 1)}>
-                <RefreshCw size={13} color={t.mutedForeground} />
-              </Pressable>
-            </View>
-            <View style={styles.embeddedStage}>
-              {!isConnected || !html ? (
-                <Text style={{ color: t.mutedForeground, fontSize: 12 }}>
-                  Connect a server to use fallback terminal.
-                </Text>
-              ) : Platform.OS === 'web' ? (
-                // @ts-expect-error iframe is web-only
-                <iframe
-                  key={reloadKey}
-                  title="Embedded terminal fallback"
-                  srcDoc={html}
-                  style={{
-                    border: '0',
-                    width: '100%',
-                    height: '100%',
-                    background: t.background,
-                  }}
-                  sandbox="allow-scripts allow-same-origin"
-                />
-              ) : (
-                <Text style={{ color: t.mutedForeground }}>Fallback is web-only.</Text>
-              )}
-            </View>
+            <Terminal visible style={styles.embeddedTerminal} />
           </View>
         ) : null}
       </View>
@@ -193,13 +144,5 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
   },
-  embeddedHeader: {
-    minHeight: 32,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  embeddedStage: { flex: 1 },
+  embeddedTerminal: { flex: 1, height: undefined, borderTopWidth: 0 },
 });

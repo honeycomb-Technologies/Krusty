@@ -6,8 +6,7 @@ use serde_json::Value;
 
 use mitsuro_core::storage::{
     AutonomousTaskStore, Database, HiveControllerEventStore, HiveControllerStore, HiveRunPriority,
-    HiveRuntimeState, HiveRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore,
-    SessionType,
+    HiveRuntimeState, HiveRuntimeStateStore, ProjectSettings, ReportStore, SessionType,
 };
 
 use self::diagnostics::{
@@ -177,7 +176,6 @@ pub(super) async fn build_hive_current_response(
     let session_manager = open_session_manager(state)?;
     let runtime_store = HiveRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
-    let memory_store = MemoryStore::new(Database::new(&state.db_path)?);
     let report_store = ReportStore::new(Database::new(&state.db_path)?);
     let trace_db = Database::new(&state.db_path)?;
     let trace_store = mitsuro_core::storage::RuntimeTraceStore::new(&trace_db);
@@ -320,7 +318,7 @@ pub(super) async fn build_hive_current_response(
         });
     }
 
-    let knowledge = summarize_knowledge_health(&memory_store, &report_store, &sessions, user_id)?;
+    let knowledge = summarize_knowledge_health(&state.db_path, &report_store, &sessions, user_id)?;
     runs.sort_by(compare_run_summaries);
     approvals.sort_by(compare_pending_approvals);
 

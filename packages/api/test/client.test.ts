@@ -72,11 +72,14 @@ describe("KrustyClient content-free request diagnostics", () => {
 		await client.getSessionState("session-id");
 		await client.getSessionState("session-id", {
 			includeDelegatedHistory: true,
+			delegationAfterCursor: 41.9,
 		});
 
 		expect(new URL(urls[0] as string).search).toBe("");
 		expect(new URL(urls[1] as string).searchParams.get("include_delegated_history"))
 			.toBe("true");
+		expect(new URL(urls[1] as string).searchParams.get("delegation_after_cursor"))
+			.toBe("41");
 	});
 
 	it("reports a sanitized route family and terminal timing", async () => {

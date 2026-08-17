@@ -18,7 +18,7 @@ export function SettingsModal({ visible, onClose }: SettingsModalProps) {
           style={[
             styles.panel,
             {
-              backgroundColor: theme.colors.surfaceOverlayStrong,
+              backgroundColor: theme.colors.background,
               borderColor: theme.colors.border,
             },
           ]}

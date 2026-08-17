@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::agent::subagent::AgentCapability;
 use crate::agent::DelegatedRunStage;
 use crate::storage::database::Database;
+use crate::storage::delegation::cancel_foreground_group_on_caller_abort;
 
 use super::codec::{delegated_stage_str, row_to_delegated_run, row_to_delegated_run_summary};
 use super::model::{
@@ -268,6 +269,23 @@ impl DelegatedRunLease {
     pub fn disarm(&mut self, delegated_run_id: &str) -> bool {
         self.armed_runs.remove(delegated_run_id).is_some()
     }
+
+    /// Remove a compatibility row that was prepared but never admitted into
+    /// its canonical delegation group. This is intentionally restricted to
+    /// the exact still-created row owned by this lease; once execution or any
+    /// other lifecycle transition begins, ordinary terminal recovery applies.
+    pub fn discard_unadmitted_run(&mut self, delegated_run_id: &str) -> Result<bool> {
+        let Some(armed) = self.armed_runs.get(delegated_run_id) else {
+            return Ok(false);
+        };
+        let discarded = self
+            .store
+            .discard_unadmitted_run(delegated_run_id, armed.host_owner_id.as_deref())?;
+        if discarded {
+            self.armed_runs.remove(delegated_run_id);
+        }
+        Ok(discarded)
+    }
 }
 
 impl Deref for DelegatedRunLease {
@@ -305,6 +323,24 @@ impl Drop for DelegatedRunLease {
 impl DelegatedRunStore {
     pub fn new(db: Database) -> Self {
         Self { db }
+    }
+
+    fn discard_unadmitted_run(
+        &self,
+        delegated_run_id: &str,
+        host_owner_id: Option<&str>,
+    ) -> Result<bool> {
+        let deleted = self.db.conn().execute(
+            "DELETE FROM delegated_runs
+              WHERE delegated_run_id = ?1
+                AND stage = 'created'
+                AND host_owner_id IS ?2
+                AND snapshot_json IS NULL
+                AND artifact_json IS NULL
+                AND completed_at IS NULL",
+            params![delegated_run_id, host_owner_id],
+        )?;
+        Ok(deleted == 1)
     }
 
     fn database_path(&self) -> Result<PathBuf> {
@@ -394,6 +430,56 @@ impl DelegatedRunStore {
                     delegated_run_id,
                     resumed_from_run_id: resumed_from_run_id.to_string(),
                 });
+            }
+        }
+
+        // One parent may coordinate many read-only teams, but two live writer
+        // graphs against the same canonical workspace are ambiguous. A new
+        // tool-call id is not sufficient ownership: models can accidentally
+        // restate the same graph, and allowing both wastes provider capacity
+        // while creating competing publication paths. The durable fence is
+        // checked in the same transaction as insertion so reconnects and
+        // multiple server processes observe one authority.
+        if input.role == DelegatedRunRole::Build && capabilities.contains(&AgentCapability::Write) {
+            let workspace_paths = input
+                .target_scope
+                .iter()
+                .filter(|scope| scope.kind.trim() == "workspace")
+                .map(|scope| scope.path.trim())
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>();
+            for workspace_path in workspace_paths {
+                let existing = tx
+                    .query_row(
+                        "SELECT active.delegated_run_id
+                           FROM delegated_runs AS active
+                          WHERE active.parent_session_id = ?1
+                            AND active.role = 'build'
+                            AND active.stage IN ('created', 'running', 'synthesizing')
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM json_each(active.capabilities_json) AS capability
+                                 WHERE capability.value = 'write'
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM json_each(active.target_scope_json) AS scope
+                                 WHERE json_extract(scope.value, '$.kind') = 'workspace'
+                                   AND json_extract(scope.value, '$.path') = ?2
+                            )
+                          ORDER BY active.created_at ASC, active.delegated_run_id ASC
+                          LIMIT 1",
+                        params![input.parent_session_id, workspace_path],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if let Some(delegated_run_id) = existing {
+                    tx.commit()?;
+                    return Ok(DelegatedRunCreateOutcome::ExistingActiveWorkspaceWriter {
+                        delegated_run_id,
+                        workspace_path: workspace_path.to_string(),
+                    });
+                }
             }
         }
 
@@ -497,6 +583,12 @@ impl DelegatedRunStore {
                    FROM delegated_runs
                   WHERE wake_parent = 1
                     AND stage IN ('created', 'running', 'synthesizing')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM delegation_tasks AS replay_tasks
+                         WHERE replay_tasks.delegation_group_id = delegated_runs.delegated_run_id
+                           AND replay_tasks.executor_envelope_version = 1
+                           AND replay_tasks.executor_envelope_json IS NOT NULL
+                    )
                     AND host_owner_id IS NOT NULL
                     AND host_lease_expires_at_ms IS NOT NULL
                     AND host_lease_expires_at_ms
@@ -542,7 +634,13 @@ impl DelegatedRunStore {
                     AND host_lease_expires_at_ms
                         <= (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
                     AND wake_parent = 1
-                    AND stage IN ('created', 'running', 'synthesizing')",
+                    AND stage IN ('created', 'running', 'synthesizing')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM delegation_tasks AS replay_tasks
+                         WHERE replay_tasks.delegation_group_id = delegated_runs.delegated_run_id
+                           AND replay_tasks.executor_envelope_version = 1
+                           AND replay_tasks.executor_envelope_json IS NOT NULL
+                    )",
                 params![
                     delegated_run_id,
                     host_owner_id,
@@ -773,13 +871,54 @@ impl DelegatedRunStore {
                 "Inspect the workspace before starting a replacement; the caller disappeared before quiescence was proven, so side effects may have occurred."
             },
         });
-        self.finalize_run(
-            delegated_run_id,
-            DelegatedRunStage::Cancelled,
-            &artifact,
-            Some("Delegated run cancelled because its caller stopped before terminal persistence."),
-            resumable,
-        )
+        let updated_at = Utc::now().to_rfc3339();
+        let artifact_json = serde_json::to_string(&artifact)?;
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE delegated_runs
+                SET stage = 'cancelled',
+                    artifact_json = ?2,
+                    human_review = ?3,
+                    resumable = ?4,
+                    updated_at = ?5,
+                    completed_at = ?5,
+                    host_lease_expires_at_ms = NULL
+              WHERE delegated_run_id = ?1
+                AND stage IN ('created', 'running', 'synthesizing')",
+            params![
+                delegated_run_id,
+                artifact_json,
+                "Delegated run cancelled because its caller stopped before terminal persistence.",
+                if resumable { 1 } else { 0 },
+                updated_at,
+            ],
+        )?;
+        if updated == 1 {
+            cancel_foreground_group_on_caller_abort(&tx, delegated_run_id, &updated_at)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.commit()?;
+
+        // A terminal writer that won before this guard is authoritative. Never
+        // let a late Drop cancel its already-complete canonical group.
+        match self.get_run(delegated_run_id)? {
+            Some(record)
+                if matches!(
+                    record.stage,
+                    DelegatedRunStage::Complete
+                        | DelegatedRunStage::Degraded
+                        | DelegatedRunStage::Failed
+                        | DelegatedRunStage::Cancelled
+                ) =>
+            {
+                Ok(())
+            }
+            Some(_) => anyhow::bail!(
+                "delegated run '{delegated_run_id}' was not cancelled because its state changed"
+            ),
+            None => anyhow::bail!("delegated run '{delegated_run_id}' does not exist"),
+        }
     }
 
     fn finalize_owned_background_caller_aborted_run(

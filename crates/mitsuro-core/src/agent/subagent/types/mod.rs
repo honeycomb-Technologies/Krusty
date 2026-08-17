@@ -12,14 +12,21 @@ mod report;
 mod result;
 
 pub use self::api_error::SubAgentApiError;
-pub use self::models::{AgentProgress, AgentProgressStatus, SubAgentTask};
+pub use self::models::{
+    AgentConversationEvent, AgentConversationToolCall, AgentProgress, AgentProgressStatus,
+    SubAgentTask,
+};
 pub(crate) use self::report::{
     parse_explore_report, render_explore_report, summary_looks_non_substantive,
     synthesize_explore_report, synthesize_explore_report_from_paths,
 };
+pub(crate) use self::result::{
+    missing_required_browser_acceptance_proofs, parse_delegated_handoff,
+};
 pub use self::result::{
-    DelegatedEvidenceKind, DelegatedEvidenceSummary, DelegatedProcessArtifact, SubAgentResult,
-    SubAgentTermination,
+    DelegatedAcceptanceCheck, DelegatedEvidenceKind, DelegatedEvidenceSummary,
+    DelegatedProcessArtifact, DelegatedTaskHandoff, SubAgentResult, SubAgentTermination,
+    TaskObjectiveStatus,
 };
 
 /// Parsed tool call from a sub-agent API response.

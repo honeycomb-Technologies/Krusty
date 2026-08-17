@@ -7,6 +7,23 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+Deno.test("native Ghostty keeps its required iOS deployment target", async () => {
+  const appConfig = JSON.parse(
+    await Deno.readTextFile(
+      new URL("../app.json", import.meta.url).pathname,
+    ),
+  );
+  const deploymentTarget = appConfig.expo?.plugins
+    ?.find((plugin: unknown) =>
+      Array.isArray(plugin) && plugin[0] === "expo-build-properties"
+    )?.[1]?.ios?.deploymentTarget;
+
+  assert(
+    deploymentTarget === "16.4",
+    "expo-libghostty requires the generated iOS project to target iOS 16.4 or newer",
+  );
+});
+
 Deno.test("Live Activity replacement keeps an owned handle until exact end", async () => {
   const source = await Deno.readTextFile(
     new URL("../hooks/useLiveActivity.ts", import.meta.url).pathname,
@@ -41,36 +58,52 @@ Deno.test("Live Activity replacement keeps an owned handle until exact end", asy
 });
 
 Deno.test("native WebView recovery is visible-only and bounded", async () => {
-  for (
-    const relativePath of [
-      "../components/toolbox/ToolboxBrowser.tsx",
-      "../components/toolbox/ToolboxTerminal.tsx",
-    ]
-  ) {
-    const source = await Deno.readTextFile(
-      new URL(relativePath, import.meta.url).pathname,
-    );
-    assert(
-      source.includes("MAX_AUTOMATIC_RECOVERIES = 1"),
-      `${relativePath} must cap automatic recovery`,
-    );
-    assert(
-      source.includes("!visibleRef.current"),
-      `${relativePath} must not recover while hidden`,
-    );
-    assert(
-      source.includes("WEBVIEW_RECOVERY_COOLDOWN_MS"),
-      `${relativePath} must cool down before native recreation`,
-    );
-    assert(
-      source.includes("retryWebView"),
-      `${relativePath} must provide explicit manual recovery`,
-    );
-    assert(
-      source.includes("WEBVIEW_MOUNT_SETTLE_MS"),
-      `${relativePath} must coalesce frantic tab changes`,
-    );
-  }
+  const source = await Deno.readTextFile(
+    new URL("../components/toolbox/ToolboxBrowser.tsx", import.meta.url).pathname,
+  );
+  assert(
+    source.includes("MAX_AUTOMATIC_RECOVERIES = 1"),
+    "the browser must cap automatic WebView recovery",
+  );
+  assert(
+    source.includes("!visibleRef.current"),
+    "the browser must not recover while hidden",
+  );
+  assert(
+    source.includes("WEBVIEW_RECOVERY_COOLDOWN_MS"),
+    "the browser must cool down before native recreation",
+  );
+  assert(
+    source.includes("retryWebView"),
+    "the browser must provide explicit manual WebView recovery",
+  );
+  assert(
+    source.includes("WEBVIEW_MOUNT_SETTLE_MS"),
+    "the browser must coalesce frantic tab changes",
+  );
+});
+
+Deno.test("native Ghostty reconnect and mounting stay bounded", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../components/toolbox/ToolboxTerminal.tsx", import.meta.url).pathname,
+  );
+  assert(
+    source.includes("MAX_RECONNECT_ATTEMPTS = 8"),
+    "the native terminal must cap socket reconnects",
+  );
+  assert(
+    source.includes("RECONNECT_MAX_DELAY_MS"),
+    "the native terminal must cap reconnect backoff",
+  );
+  assert(
+    source.includes("visible && renderedTabId") &&
+      source.includes("setRenderedTabId(null)"),
+    "the native Ghostty surface must unmount while hidden",
+  );
+  assert(
+    source.includes("TAB_MOUNT_SETTLE_MS"),
+    "the native terminal must coalesce frantic tab changes",
+  );
 });
 
 Deno.test("browser close does not release an unsettled single-flight request", async () => {
@@ -99,18 +132,19 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
     new URL("../app/(tabs)/index.tsx", import.meta.url).pathname,
   );
   const actions = await Deno.readTextFile(
-    new URL("../app/(tabs)/chat-screen/useSessionActions.ts", import.meta.url).pathname,
+    new URL("../components/chat-screen/useSessionActions.ts", import.meta.url).pathname,
   );
   const controller = await Deno.readTextFile(
-    new URL("../app/(tabs)/chat-screen/useSessionController.ts", import.meta.url).pathname,
+    new URL("../components/chat-screen/useSessionController.ts", import.meta.url).pathname,
   );
 
   assert(
     screen.includes("createLatestIntentScheduler")
       && screen.includes("quietDelayMs: 72")
       && !screen.includes("maxDelayMs: 80")
-      && screen.includes("startTransition(() => setActiveMode(mode))"),
-    "heavy mode activation must remain quiet-only and admit only the latest intent",
+      && screen.includes("setActiveMode(mode)")
+      && !screen.includes("startTransition(() => setActiveMode(mode))"),
+    "the quiet-window winner must commit directly instead of starving behind transcript work",
   );
   assert(
     screen.includes("modeForHorizontalSwipe(\n        requestedMode,"),
@@ -124,7 +158,7 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
     screen.includes("const requestedModeDisplayTitle =")
       && screen.includes("stores.modes[requestedMode].session.getState().title")
       && screen.includes("title={requestedModeDisplayTitle}")
-      && screen.includes("requestedMode === activeMode\n            && sessionId"),
+      && /requestedMode === activeMode\s*&&\s*sessionId/.test(screen),
     "the immediate mode selection must never retain or rename the previous mode's title",
   );
   assert(
@@ -173,6 +207,12 @@ Deno.test("rapid mode input defers heavy activation to the latest requested mode
       && screen.includes("finishModeSwitchSpanRef.current = null"),
     "a burst that settles back on the active mode must close its measurement span",
   );
+  assert(
+    screen.includes("handledRouteIntentKeyRef")
+      && screen.includes("resolveRouteNavigationIntent(routeParams)")
+      && !screen.includes("routeParams.sessionId,\n    sessionId,"),
+    "a deep-link arrival must be consumed once instead of reclaiming later in-app navigation",
+  );
 });
 
 Deno.test("settings and transcript secondary surfaces stay bounded", async () => {
@@ -196,9 +236,10 @@ Deno.test("settings and transcript secondary surfaces stay bounded", async () =>
   );
   assert(
     transcript.match(/contentHeightRef\.current = 0;/g)?.length === 2
-      && transcript.includes("initialNumToRender={1}")
-      && transcript.includes("maxToRenderPerBatch={1}")
-      && transcript.includes("windowSize={3}")
+      && transcript.includes("initialNumToRender={8}")
+      && transcript.includes("maxToRenderPerBatch={6}")
+      && transcript.includes("windowSize={7}")
+      && transcript.includes("updateCellsBatchingPeriod={32}")
       && transcript.includes("historicalTurns.slice(hiddenHistoricalTurnCount)")
       && transcript.includes("revealOlderHistory")
       && transcript.includes("sourceLength: historicalTurns.length")
@@ -269,6 +310,12 @@ Deno.test("stress controls remain native automation targets", async () => {
       && !header.includes("exiting="),
     "mode text must swap in one native layout transaction instead of cross-fading competing labels",
   );
+  assert(
+    header.includes('maxWidth: "100%"')
+      && header.includes("flexShrink: 1")
+      && header.includes("numberOfLines={1}"),
+    "the mobile mode island must shrink cleanly instead of pushing edge controls off-screen",
+  );
   for (
     const label of [
       "Start diagnostic capture",
@@ -286,5 +333,45 @@ Deno.test("stress controls remain native automation targets", async () => {
       && bottomSheet.includes("onPress={close}")
       && !bottomSheet.includes('accessibilityRole="adjustable"'),
     "the visible sheet grabber must expose a working tap action in addition to its pan gesture",
+  );
+});
+
+Deno.test("mobile header owns the top safe-area inset", async () => {
+  const header = await Deno.readTextFile(
+    new URL("../components/navigation/MobileAppHeader.tsx", import.meta.url).pathname,
+  );
+  const chatScreen = await Deno.readTextFile(
+    new URL("../app/(tabs)/index.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    header.includes("useSafeAreaInsets")
+      && header.includes("paddingTop: topInset")
+      && header.includes("styles.statusBarFill")
+      && header.includes("event.nativeEvent.layout.height) - topInset"),
+    "header chrome must sit below the status bar and report height without that inset",
+  );
+  assert(
+    chatScreen.includes("const mobileContent =")
+      && chatScreen.includes('edges={["top"]}'),
+    "the mobile transcript must keep the system status bar as a safe edge",
+  );
+});
+
+Deno.test("connect deep links have a real route", async () => {
+  const connect = await Deno.readTextFile(
+    new URL("../app/connect.tsx", import.meta.url).pathname,
+  );
+  const layout = await Deno.readTextFile(
+    new URL("../app/_layout.tsx", import.meta.url).pathname,
+  );
+
+  assert(
+    connect.includes('router.replace("/")'),
+    "the connect host must hand off to chat after useDeepLink applies credentials",
+  );
+  assert(
+    layout.includes('name="connect"'),
+    "the root stack must register the connect landing screen",
   );
 });

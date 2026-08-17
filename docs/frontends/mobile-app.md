@@ -85,7 +85,7 @@ Components are organized into six directories under `components/`:
 
 **`desktop/`** -- Desktop-specific panels:
 
-- `Terminal` -- An xterm.js-based terminal emulator available in the desktop layout.
+- `Terminal` -- A Ghostty-powered terminal: native libghostty on iOS/Android and Ghostty WASM on web.
 - `WorkspacePreview` -- Shows a preview of the current project workspace.
 
 **`settings/`** -- The settings UI:

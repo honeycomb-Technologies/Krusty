@@ -1209,6 +1209,39 @@ def wait_for_session_idle(
     )
 
 
+def wait_for_session_settled(
+    api: MitsuroApi, session_id: str, timeout: float = 120.0
+) -> dict[str, Any]:
+    """Wait until the parent and every durable delegated graph have settled.
+
+    A detached delegation intentionally lets the parent become idle while Hive
+    Agents continue. Proofs that only wait for ``agent_state == idle`` can
+    therefore score an in-flight graph as a terminal failure. A requested
+    parent continuation is also part of the turn: pending/queued means the
+    final parent synthesis has not happened yet.
+    """
+    terminal_group_states = {"complete", "degraded", "failed", "cancelled"}
+    terminal_continuation_states = {"not_requested", "promoted"}
+    deadline = time.monotonic() + timeout
+    latest: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        latest = api.json_request("GET", f"/api/sessions/{session_id}/state")
+        groups = latest.get("delegation_groups") or []
+        groups_settled = all(
+            group.get("state") in terminal_group_states
+            and group.get("parent_continuation_state")
+            in terminal_continuation_states
+            for group in groups
+        )
+        if latest.get("agent_state") == "idle" and groups_settled:
+            return latest
+        time.sleep(0.5)
+    raise AcceptanceFailure(
+        f"session {session_id} did not fully settle within {timeout:.1f}s; "
+        f"latest={latest}"
+    )
+
+
 def require_clean_idle_state(state: dict[str, Any], label: str) -> None:
     require(state.get("agent_state") == "idle", f"{label}: session not idle: {state}")
     require(

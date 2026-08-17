@@ -17,6 +17,7 @@ pub(crate) const APNS_CATEGORY_HIVE_SESSION: &str = "HIVE_SESSION";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotificationTerminalDisposition {
     Complete,
+    Partial,
     Attention,
     Skip,
 }
@@ -26,10 +27,11 @@ pub(crate) fn notification_terminal_disposition(
 ) -> NotificationTerminalDisposition {
     match stop_reason {
         Some(LoopStopReason::Completed) => NotificationTerminalDisposition::Complete,
+        Some(LoopStopReason::BudgetExhausted | LoopStopReason::LoopGuardTriggered) => {
+            NotificationTerminalDisposition::Partial
+        }
         Some(
-            LoopStopReason::BudgetExhausted
-            | LoopStopReason::ProviderError
-            | LoopStopReason::LoopGuardTriggered
+            LoopStopReason::ProviderError
             | LoopStopReason::StreamIdleTimeout
             | LoopStopReason::PinchFailed,
         )
@@ -116,6 +118,48 @@ pub(crate) fn hive_session_notification_data(
     data
 }
 
+pub(crate) fn with_hive_focus_ids(
+    mut data: Value,
+    worker_id: Option<&str>,
+    group_id: Option<&str>,
+) -> Value {
+    if let Some(id) = worker_id.map(str::trim).filter(|value| !value.is_empty()) {
+        data["workerId"] = Value::String(id.to_string());
+    }
+    if let Some(id) = group_id.map(str::trim).filter(|value| !value.is_empty()) {
+        data["groupId"] = Value::String(id.to_string());
+    }
+    data
+}
+
+pub(crate) fn resolve_hive_focus(
+    db_path: &Path,
+    session_id: &str,
+) -> (Option<String>, Option<String>) {
+    let Ok(db) = Database::new(db_path) else {
+        return (None, None);
+    };
+    let worker_id = db
+        .conn()
+        .query_row(
+            "SELECT id FROM hive_workers WHERE dm_session_id = ?1 LIMIT 1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    let group_id = db
+        .conn()
+        .query_row(
+            "SELECT group_id FROM hive_runs
+             WHERE session_id = ?1 AND group_id IS NOT NULL
+             ORDER BY created_at DESC LIMIT 1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    (worker_id, group_id)
+}
+
 pub(crate) fn tool_approval_notification_data(
     request_id: &str,
     session_id: &str,
@@ -188,7 +232,7 @@ pub(crate) fn fire_apns(
 mod tests {
     use super::{
         chat_session_notification_data, hive_session_notification_data,
-        notification_terminal_disposition, tool_approval_notification_data,
+        notification_terminal_disposition, tool_approval_notification_data, with_hive_focus_ids,
         NotificationTerminalDisposition,
     };
     use mitsuro_core::agent::loop_events::LoopStopReason;
@@ -228,6 +272,20 @@ mod tests {
     }
 
     #[test]
+    fn hive_notification_data_can_carry_worker_and_group_ids() {
+        let data = with_hive_focus_ids(
+            hive_session_notification_data("user_message", "session-2", Some("info"), Some("Crew")),
+            Some("worker-9"),
+            Some("group-3"),
+        );
+
+        assert_eq!(data["workerId"], "worker-9");
+        assert_eq!(data["groupId"], "group-3");
+        assert_eq!(data["sessionId"], "session-2");
+        assert_eq!(data["focus"], "hive");
+    }
+
+    #[test]
     fn only_completed_runs_are_reported_as_complete() {
         assert_eq!(
             notification_terminal_disposition(Some(&LoopStopReason::Completed)),
@@ -236,15 +294,23 @@ mod tests {
 
         for reason in [
             None,
-            Some(LoopStopReason::BudgetExhausted),
             Some(LoopStopReason::ProviderError),
-            Some(LoopStopReason::LoopGuardTriggered),
             Some(LoopStopReason::StreamIdleTimeout),
             Some(LoopStopReason::PinchFailed),
         ] {
             assert_eq!(
                 notification_terminal_disposition(reason.as_ref()),
                 NotificationTerminalDisposition::Attention
+            );
+        }
+
+        for reason in [
+            LoopStopReason::BudgetExhausted,
+            LoopStopReason::LoopGuardTriggered,
+        ] {
+            assert_eq!(
+                notification_terminal_disposition(Some(&reason)),
+                NotificationTerminalDisposition::Partial
             );
         }
 

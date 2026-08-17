@@ -15,12 +15,11 @@ import {
   Platform,
   Text,
   Keyboard,
-  LayoutAnimation,
   Image,
   Alert,
   useWindowDimensions,
 } from 'react-native';
-import { BlurView } from '../../platform/blur';
+import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
 import { Maximize2, X } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
@@ -37,7 +36,6 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
-  withTiming,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
@@ -47,16 +45,11 @@ import { ChatBarExpandedEditor } from './ChatBarExpandedEditor';
 import { ChatBarMetaRow } from './ChatBarMetaRow';
 import { ChatBarModelPopover } from './ChatBarModelPopover';
 import { ChatBarRunningLine, RUN_LINE_CORNER_CLIMB } from './ChatBarRunningLine';
+import { shouldAnimateComposerPulse } from './composerPulsePolicy';
 import {
   COMPOSER_MAX_HEIGHT as SHARED_COMPOSER_MAX_HEIGHT,
-  INPUT_EXPANDED_VERTICAL_PADDING as SHARED_INPUT_EXPANDED_VERTICAL_PADDING,
   INPUT_LINE_HEIGHT as SHARED_INPUT_LINE_HEIGHT,
-  estimateCompactInputHeight,
-  resolveComposerBarHeight,
-  resolveComposerInputHeight,
-  resolveMeasuredInputContentHeight,
-  resolveNextInputContentHeight,
-  shouldExpandComposerHeight,
+  resolveComposerLayout,
 } from './composerGrowth';
 import { resolveComposerSendPayload } from './composerSend';
 import { Waveform } from './Waveform';
@@ -146,7 +139,6 @@ const ROOT_HORIZONTAL_PADDING = 10;
 const COMPOSER_MAX_HEIGHT = SHARED_COMPOSER_MAX_HEIGHT;
 const INPUT_SIDE_PADDING = 10;
 const INPUT_LINE_HEIGHT = SHARED_INPUT_LINE_HEIGHT;
-const INPUT_EXPANDED_VERTICAL_PADDING = SHARED_INPUT_EXPANDED_VERTICAL_PADDING;
 const CLOSED_COMPOSER_BOTTOM_GAP = 16;
 /** Extra lift on desktop so the bar doesn't hug the window chrome. */
 const CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP = 28;
@@ -483,6 +475,55 @@ async function prepareImageAttachment(
   }
 }
 
+/**
+ * KeyboardAvoidingView cannot lift this bar. The composer is `position:
+ * absolute` inside a zero-height host, so KAV compares a parent-relative
+ * onLayout frame to the keyboard's screenY and computes a 0pt move.
+ * Track the keyboard directly and raise the mounted chrome with `bottom`.
+ * Transcript reserve stays on closed-screen chrome height only.
+ */
+function useComposerKeyboardLift(enabled: boolean): number {
+  const [lift, setLift] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) {
+      setLift(0);
+      return;
+    }
+
+    const showEvent = Platform.OS === 'ios'
+      ? 'keyboardWillShow'
+      : 'keyboardDidShow';
+    const changeEvent = Platform.OS === 'ios'
+      ? 'keyboardWillChangeFrame'
+      : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios'
+      ? 'keyboardWillHide'
+      : 'keyboardDidHide';
+
+    const applyLift = (height: number) => {
+      setLift(Math.max(0, Math.round(height)));
+    };
+
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      applyLift(event.endCoordinates.height);
+    });
+    const changeSubscription = Keyboard.addListener(changeEvent, (event) => {
+      applyLift(event.endCoordinates.height);
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      applyLift(0);
+    });
+    return () => {
+      showSubscription.remove();
+      changeSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [enabled]);
+
+  return enabled ? lift : 0;
+}
+
 function ChatBarComponent(props: ChatBarProps) {
   const {
     draftKey = 'chat',
@@ -519,19 +560,12 @@ function ChatBarComponent(props: ChatBarProps) {
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [expandedEditorOpen, setExpandedEditorOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
-  const [inputContentHeight, setInputContentHeight] = useState(0);
-  const [composerExpanded, setComposerExpanded] = useState(false);
   const modelPopoverScale = useSharedValue(0);
-  const modelPopoverOpacity = useSharedValue(0);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const transcriptRef = useRef('');
   const textRef = useRef(text);
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
-  const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
-  /** True after native contentSize has reported for the current draft. */
-  const hasMeasuredContentHeightRef = useRef(false);
   /** Actual laid-out text-field width (preferred over estimate width). */
   const [measuredInputWidth, setMeasuredInputWidth] = useState(0);
   /** Actual laid-out band width (after parent maxWidth / split). */
@@ -574,9 +608,6 @@ function ChatBarComponent(props: ChatBarProps) {
     setText(nextDraft.text);
     setAttachments(nextDraft.attachments);
     setPreviewAttachment(null);
-    hasMeasuredContentHeightRef.current = false;
-    setComposerExpanded(false);
-    setInputContentHeight(0);
     setExpandedEditorOpen(false);
   }, [draftKey]);
 
@@ -626,7 +657,7 @@ function ChatBarComponent(props: ChatBarProps) {
   }, []);
 
   const bottomOverlayOpen =
-    accordionVisible ||
+    accordionOpen ||
     modelPickerOpen ||
     attachPickerOpen ||
     expandedEditorOpen;
@@ -646,6 +677,10 @@ function ChatBarComponent(props: ChatBarProps) {
     }
 
     if (!accordionVisible) return;
+    // Recreating a group of CSS backdrop-filter nodes eventually corrupts the
+    // mobile-web compositor. Retain the already-bounded controls after first
+    // use; their closed animation disables interaction and paints opacity 0.
+    if (Platform.OS === 'web') return;
     const timer = setTimeout(() => setAccordionVisible(false), 420);
     return () => clearTimeout(timer);
   }, [accordionOpen, accordionVisible]);
@@ -691,15 +726,10 @@ function ChatBarComponent(props: ChatBarProps) {
   }, [disabled, inputFocused, isRecording]);
 
   const t = theme.colors;
-  const isDark = theme.scheme === 'dark';
   const isHive = sessionType === 'hive';
   const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
-  const bgOverlay = t.surfaceOverlay;
-  const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
-  const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
-  const composerBlur = Math.max(theme.colors.glassBlur ?? 20, isDesktop ? 48 : 40);
   const providerFilters = useMemo<ProviderFilter[]>(() => {
     const seen = new Set<string>();
     const filters: ProviderFilter[] = [];
@@ -765,12 +795,12 @@ function ChatBarComponent(props: ChatBarProps) {
         <ProviderLogo
           providerId={provider.id}
           label={provider.label}
-          color="#fff"
+          color={t.foreground}
           size={24}
         />
       ),
     })),
-    [visualProviderFilters],
+    [t.foreground, visualProviderFilters],
   );
   const filteredModels = useMemo(
     () => selectedProviderFilter
@@ -797,36 +827,20 @@ function ChatBarComponent(props: ChatBarProps) {
   );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
-  // ── Keyboard tracking with LayoutAnimation ──
+  const composerKeyboardLift = useComposerKeyboardLift(
+    !isDesktop && Platform.OS !== 'web',
+  );
+
+  // Close transient controls when the keyboard leaves. Lift is visual-only
+  // (`bottom: composerKeyboardLift`) and must not resize transcript reserve.
   useEffect(() => {
-    const showSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      (e) => {
-        LayoutAnimation.configureNext(
-          LayoutAnimation.create(
-            e.duration || 250,
-            LayoutAnimation.Types.keyboard,
-            LayoutAnimation.Properties.opacity,
-          ),
-        );
-        setKeyboardHeight(e.endCoordinates.height);
-      },
-    );
     const hideSub = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      (e) => {
-        LayoutAnimation.configureNext(
-          LayoutAnimation.create(
-            e.duration || 250,
-            LayoutAnimation.Types.keyboard,
-            LayoutAnimation.Properties.opacity,
-          ),
-        );
-        setKeyboardHeight(0);
+      () => {
         if (accordionOpenRef.current) setAccordionOpen(false);
       },
     );
-    return () => { showSub.remove(); hideSub.remove(); };
+    return () => hideSub.remove();
   }, []);
 
   // ── Speech recognition ──
@@ -891,9 +905,6 @@ function ChatBarComponent(props: ChatBarProps) {
     draftRef.current = { text: '', attachments: [] };
     setDraftCache(activeDraftKeyRef.current, draftRef.current);
     setText('');
-    hasMeasuredContentHeightRef.current = false;
-    setComposerExpanded(false);
-    setInputContentHeight(0);
     setAttachments([]);
     setPreviewAttachment(null);
     setHoveredAttachmentIndex(null);
@@ -982,11 +993,6 @@ function ChatBarComponent(props: ChatBarProps) {
   const handleTextChange = useCallback((value: string) => {
     textRef.current = value;
     setText(value);
-    if (!value) {
-      hasMeasuredContentHeightRef.current = false;
-      setComposerExpanded(false);
-      setInputContentHeight(0);
-    }
   }, []);
 
   const toggleAccordion = () => {
@@ -1012,26 +1018,22 @@ function ChatBarComponent(props: ChatBarProps) {
     }));
     setSelectedProviderFilter(null);
     modelPopoverScale.value = 0;
-    modelPopoverOpacity.value = 0;
     setModelRailOpen(true);
     setModelPickerOpen(true);
     modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
-    modelPopoverOpacity.value = withTiming(1, { duration: 140 });
   };
   const closeModelPicker = useCallback(() => {
     clearModelCloseTimer();
     setModelRailOpen(false);
     modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
-    modelPopoverOpacity.value = withTiming(0, { duration: 120 });
     modelCloseTimerRef.current = setTimeout(() => {
       setModelPickerOpen(false);
       setSelectedProviderFilter(null);
       modelCloseTimerRef.current = null;
     }, 180);
-  }, [clearModelCloseTimer, modelPopoverOpacity, modelPopoverScale]);
+  }, [clearModelCloseTimer, modelPopoverScale]);
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
-    opacity: modelPopoverOpacity.value,
     transform: [{ translateX: (1 - modelPopoverScale.value) * (PILL + GAP) }],
   }));
 
@@ -1049,7 +1051,6 @@ function ChatBarComponent(props: ChatBarProps) {
     if (modelPickerOpen) {
       setModelRailOpen(false);
       modelPopoverScale.value = 0;
-      modelPopoverOpacity.value = 0;
       setModelPickerOpen(false);
       setSelectedProviderFilter(null);
     }
@@ -1067,30 +1068,27 @@ function ChatBarComponent(props: ChatBarProps) {
   }, [accordionOpen]);
 
   const canSend = !disabled && (isStreaming || text.trim().length > 0 || attachments.length > 0);
-  const beamActive =
-    isStreaming ||
-    inputFocused ||
-    expandedEditorOpen ||
-    text.trim().length > 0 ||
-    attachments.length > 0;
-  const kActive = accordionOpen || accordionVisible;
+  const beamActive = shouldAnimateComposerPulse({
+    isStreaming,
+    inputFocused,
+    expandedEditorOpen,
+    hasDraft: text.trim().length > 0,
+    hasAttachments: attachments.length > 0,
+  });
+  const kActive = accordionOpen;
   const kColor = kActive ? t.thinking : t.mutedForeground;
-  const kBorder = kActive ? t.thinking + '40' : borderColor;
+  const kBorder = kActive ? t.thinking + '40' : t.glass.borderLight;
 
-  // Bottom offset: keyboard height, or a safe-area gap when keyboard is closed.
-  // Desktop gets extra padding so the bar sits above the window edge cleanly.
+  // The composer keeps one stable closed-screen inset. Keyboard lift moves
+  // this mounted surface with `bottom` and never changes transcript padding.
+  // Native phones must clear the full home-indicator inset (typically 34pt);
+  // capping below it parks the meta row inside the gesture band.
   const closedGap = isDesktop
     ? CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP
     : CLOSED_COMPOSER_BOTTOM_GAP;
   const closedBottomOffset = isDesktop
     ? Math.max(closedGap, insets.bottom + 12)
-    : Platform.OS === 'web'
-      ? Math.max(closedGap, insets.bottom)
-      : Math.max(10, Math.min(insets.bottom, closedGap));
-  // On iOS/Android, endCoordinates.height is distance from window bottom to keyboard top.
-  // Use that directly so the absolute composer sits flush above the keyboard.
-  // Avoid subtracting safe-area here or the bar can land in the keyboard.
-  const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
+    : Math.max(closedGap, insets.bottom);
   const gaugeTokens = tokenCount ?? 0;
   // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
   // only when the catalog has not loaded or the model is unknown.
@@ -1115,37 +1113,9 @@ function ChatBarComponent(props: ChatBarProps) {
   const gaugeRadius = (GAUGE_SIZE - gaugeStroke) / 2;
   const gaugeCircumference = 2 * Math.PI * gaugeRadius;
   const gaugeOffset = gaugeCircumference - (gaugePct / 100) * gaugeCircumference;
-  const shouldGrowComposer = shouldExpandComposerHeight(
-    inputContentHeight,
-    composerExpanded,
-  );
-  // Input height follows content + expanded padding. RN counts paddingVertical
-  // inside the explicit height box, so expanded rows must add pad here or the
-  // first multi-line heights clip until more lines force the field taller.
-  const composerInputHeight = resolveComposerInputHeight(
-    inputContentHeight,
-    composerExpanded,
-  );
-  const composerBarHeight = resolveComposerBarHeight(
-    inputContentHeight,
-    isRecording,
-    PILL,
-    composerExpanded,
-  );
-  const metaReserveHeight = showComposerChrome
-    ? META_ROW_HEIGHT + GAUGE_TOP_GAP
-    : 0;
-  // Distance from root bottom to the top of the input/Agent row.
-  const inputRowBottom = bottomOffset + metaReserveHeight;
-  // Accordion sits just above the Agent FAB.
-  const controlsLayerBottom = showComposerChrome
-    ? inputRowBottom + PILL + GAP
-    : inputRowBottom;
-  // Space above the input row where the model list may sit.
-  const overlayBottom = inputRowBottom + composerBarHeight + GAP;
-  // The activity line is a screen-edge indicator, independent of the composer
-  // safe-area inset. Keep it flush with the bottom edge on every platform.
-  // Prefer measured column width over viewport so split/toolbox/resize stay in-bounds.
+
+  // Prefer the measured content band and text-field width once available so
+  // deterministic soft-wrap estimates match the actual composer geometry.
   const bandWidth =
     measuredRootWidth > 0
       ? measuredRootWidth
@@ -1162,10 +1132,36 @@ function ChatBarComponent(props: ChatBarProps) {
       36 -
       INPUT_SIDE_PADDING * 2,
   );
-  // Prefer the real TextInput width once laid out so wrap estimates match
-  // proportional fonts instead of thrashing around a synthetic band width.
   const compactInputWidth =
     measuredInputWidth > 0 ? measuredInputWidth : estimatedInputWidth;
+  const composerLayout = useMemo(
+    () => resolveComposerLayout(text, compactInputWidth, isRecording),
+    [compactInputWidth, isRecording, text],
+  );
+  const shouldGrowComposer = composerLayout.expanded;
+  const composerInputHeight = composerLayout.inputHeight;
+  const composerBarHeight = composerLayout.barHeight;
+
+  const metaReserveHeight = showComposerChrome
+    ? META_ROW_HEIGHT + GAUGE_TOP_GAP
+    : 0;
+  // The meta row already lives in the home-indicator band. Padding the root
+  // by the full inset *and* stacking the meta row on top of it lifted the
+  // composer, FABs, and plan chips and left a dead strip above the home
+  // indicator.
+  const paddingBottom = showComposerChrome
+    ? Math.max(0, closedBottomOffset - metaReserveHeight)
+    : closedBottomOffset;
+  // Distance from root bottom to the top of the input/Agent row.
+  const inputRowBottom = paddingBottom + metaReserveHeight;
+  // Accordion sits just above the Agent FAB.
+  const controlsLayerBottom = showComposerChrome
+    ? inputRowBottom + PILL + GAP
+    : inputRowBottom;
+  // Space above the input row where the model list may sit.
+  const overlayBottom = inputRowBottom + composerBarHeight + GAP;
+  // The activity line is a screen-edge indicator, independent of the composer
+  // safe-area inset. Keep it flush with the bottom edge on every platform.
   const controlsLayerWidth = Math.max(
     PILL,
     bandWidth - ROOT_HORIZONTAL_PADDING * 2,
@@ -1211,70 +1207,22 @@ function ChatBarComponent(props: ChatBarProps) {
   const providerDockWidth =
     providerCount * 56 + Math.max(0, providerCount - 1) * 8;
   const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
-  // Align under the filter strip (same right edge as filters).
-  // controlsLayer is already right-aligned at ROOT_HORIZONTAL_PADDING; bot is the
-  // rightmost control, filters sit 8px left of Agent — do NOT add FAB width again.
+  // Accordion and model list share the pre-plan composer band: root padding
+  // on the left, Agent FAB + gap on the right. That is the same right edge
+  // as the input bar.
   const FILTER_TO_BOT_GAP = 8;
   const dockRightInset = isDesktop
     ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
     : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
-  // Soft wrap never inserts `\n`. Keep the character-wrap estimate live so it
-  // can *open* the field when iOS contentSize is still capped to one line.
-  // After a real multi-line measure, measured owns grow/shrink — estimates must
-  // not keep a tall ratchet that only clears when the draft is emptied.
-  useEffect(() => {
-    if (!text) {
-      hasMeasuredContentHeightRef.current = false;
-      setComposerExpanded(false);
-      setInputContentHeight(0);
-      return;
-    }
-    const nextHeight = estimateCompactInputHeight(text, compactInputWidth);
-    setInputContentHeight((current) => {
-      const measuredAuthoritative =
-        hasMeasuredContentHeightRef.current &&
-        current > INPUT_LINE_HEIGHT + 1;
-      return resolveNextInputContentHeight({
-        current,
-        next: nextHeight,
-        source: 'estimate',
-        hasMeasured: hasMeasuredContentHeightRef.current,
-        measuredAuthoritative,
-      });
-    });
-  }, [compactInputWidth, text]);
-
-  // Hysteresis: expand and collapse at different thresholds so wrap-boundary
-  // characters cannot flip expanded/collapsed every keystroke.
-  useEffect(() => {
-    const nextExpanded = shouldExpandComposerHeight(
-      inputContentHeight,
-      composerExpanded,
-    );
-    if (nextExpanded !== composerExpanded) {
-      setComposerExpanded(nextExpanded);
-    }
-  }, [composerExpanded, inputContentHeight]);
-
-  useEffect(() => {
-    const measuredRootHeight = measuredRootHeightRef.current;
-    if (!measuredRootHeight || !onHeightChange) return;
-    // Reserve the full mounted height, including keyboard lift. Transcript
-    // content must clear both the composer chrome and the open keyboard.
-    const reservedHeight = Math.max(PILL, Math.ceil(measuredRootHeight));
-    if (reportedComposerHeightRef.current === reservedHeight) return;
-    reportedComposerHeightRef.current = reservedHeight;
-    onHeightChange(reservedHeight);
-  }, [keyboardHeight, onHeightChange]);
-
   return (
     <View
-      pointerEvents="box-none"
       style={[
         styles.root,
+        styles.pointerBoxNone,
         {
-          paddingBottom: bottomOffset,
+          paddingBottom,
+          bottom: composerKeyboardLift,
           // Parent desktop column already caps width; fill that band only.
           // Avoid left+right+maxWidth fights on web that ignore the soft-cap.
           ...(contentMaxWidth != null
@@ -1290,11 +1238,11 @@ function ChatBarComponent(props: ChatBarProps) {
       ]}
       onLayout={(event) => {
         const { height, width } = event.nativeEvent.layout;
-        measuredRootHeightRef.current = height;
         const nextWidth = Math.round(width);
         setMeasuredRootWidth((prev) => (prev === nextWidth ? prev : nextWidth));
         if (!onHeightChange) return;
-        // Include keyboard paddingBottom so chat content is never covered.
+        // This is composer chrome only. Keyboard lift stays visual and never
+        // resizes the transcript or feeds its auto-follow geometry.
         const reservedHeight = Math.max(PILL, Math.ceil(height));
         if (reportedComposerHeightRef.current === reservedHeight) return;
         reportedComposerHeightRef.current = reservedHeight;
@@ -1333,9 +1281,9 @@ function ChatBarComponent(props: ChatBarProps) {
                   >
                     <Image source={{ uri: previewUri }} style={styles.attachImg} />
                     <View
-                      pointerEvents="none"
                       style={[
                         styles.attachHoverOverlay,
+                        styles.ignorePointerEvents,
                         {
                           borderColor: t.userMessage,
                           backgroundColor: `${t.userMessage}22`,
@@ -1357,7 +1305,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 }}
                 style={styles.attachX}
               >
-                <X size={12} color="#fff" strokeWidth={3} />
+                <X size={12} color={t.onAccent} strokeWidth={3} />
               </Pressable>
             </View>
           );
@@ -1379,8 +1327,10 @@ function ChatBarComponent(props: ChatBarProps) {
             },
           ]}
         >
-          <BlurView intensity={composerBlur} tint={blurTint} style={StyleSheet.absoluteFill} />
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
+          <AdaptiveMaterial
+            borderRadius={RADIUS}
+            tone="regular"
+          />
           <View style={styles.barInner}>
             {!isRecording ? (
               <Pressable
@@ -1395,7 +1345,7 @@ function ChatBarComponent(props: ChatBarProps) {
                 }}
                 style={({ pressed }) => [
                   styles.expandEditorButton,
-                  pressed && styles.expandEditorButtonPressed,
+                  pressed && { backgroundColor: t.glass.backgroundElevated },
                 ]}
               >
                 <Maximize2
@@ -1417,9 +1367,8 @@ function ChatBarComponent(props: ChatBarProps) {
                     WEB_INPUT_STYLE,
                     {
                       color: t.foreground,
-                      // Explicit height from measured text — never stretch to
-                      // fill the bar. Filling the bar made contentSize track
-                      // the view and thrash bar height (the jitter loop).
+                      // Pure text height from deterministic text/width layout.
+                      // Never feed native contentSize back into this value.
                       height: composerInputHeight,
                     },
                   ]}
@@ -1432,37 +1381,12 @@ function ChatBarComponent(props: ChatBarProps) {
                       current === width ? current : width,
                     );
                   }}
-                  onContentSizeChange={(event) => {
-                    if (!textRef.current) {
-                      hasMeasuredContentHeightRef.current = false;
-                      setComposerExpanded(false);
-                      setInputContentHeight(0);
-                      return;
-                    }
-                    // Normalize padding/view-inflated contentSize, floor at the
-                    // soft-wrap estimate, then merge. Raw measured height alone
-                    // double-counts expanded padding and thrash-steps the bar
-                    // between visual lines 2 and 3.
-                    const estimated = estimateCompactInputHeight(
-                      textRef.current,
-                      compactInputWidth,
-                    );
-                    hasMeasuredContentHeightRef.current = true;
-                    setInputContentHeight((current) =>
-                      resolveMeasuredInputContentHeight({
-                        current,
-                        measuredHeight: event.nativeEvent.contentSize.height,
-                        estimatedHeight: estimated,
-                        currentlyExpanded: composerExpanded,
-                      }),
-                    );
-                  }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
                   onBlur={() => setInputFocused(false)}
                   placeholder={isHive ? "Message Hive..." : "Message Agent..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
-                  scrollEnabled={composerBarHeight >= COMPOSER_MAX_HEIGHT}
+                  scrollEnabled={composerLayout.scrollEnabled}
                   maxLength={500000}
                   editable={!disabled}
                   keyboardAppearance={theme.scheme}
@@ -1483,18 +1407,24 @@ function ChatBarComponent(props: ChatBarProps) {
         {showComposerChrome ? (
           <View style={styles.kCol}>
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                accordionOpen ? 'Close agent controls' : 'Open agent controls'
+              }
+              accessibilityState={{ expanded: accordionOpen }}
               onPress={toggleAccordion}
               style={[
                 styles.kWrap,
                 {
                   borderColor: kBorder,
                   borderRadius: RADIUS,
-                  backgroundColor: kActive ? t.thinking + '14' : undefined,
                 },
               ]}
             >
-              <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
-              <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
+              <AdaptiveMaterial
+                borderRadius={RADIUS}
+                tone="regular"
+              />
               <View style={styles.kInner}>
                 <MitsuroMark size={26} color={kColor} strokeWidth={62} />
               </View>
@@ -1507,9 +1437,9 @@ function ChatBarComponent(props: ChatBarProps) {
           56px Agent column (WebKit clips overflow from that narrow column). */}
       {showComposerChrome && accordionVisible ? (
         <View
-          pointerEvents="box-none"
           style={[
             styles.controlsLayer,
+            styles.pointerBoxNone,
             {
               bottom: controlsLayerBottom,
               width: controlsLayerWidth,
@@ -1565,14 +1495,11 @@ function ChatBarComponent(props: ChatBarProps) {
           overlayBottom={overlayBottom}
           modelPopoverStyle={modelPopoverStyle}
           borderColor={t.glass.border}
-          composerBlur={composerBlur}
-          pillTint={pillTint}
           foreground={t.foreground}
           mutedForeground={t.mutedForeground}
           thinking={t.thinking}
           backgroundElevated={t.glass.backgroundElevated}
           backgroundPressed={t.glass.backgroundPressed}
-          surfaceOverlayElevated={t.surfaceOverlayElevated}
           filteredModels={filteredModels}
           model={model}
           onSelectModel={handleModelSelectFromPicker}
@@ -1618,6 +1545,7 @@ function ChatBarComponent(props: ChatBarProps) {
         mutedForeground={t.mutedForeground}
         foreground={t.foreground}
         userMessage={t.userMessage}
+        onAccent={t.onAccent}
         border={t.border}
         keyboardAppearance={theme.scheme}
       />
@@ -1634,6 +1562,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: ROOT_HORIZONTAL_PADDING,
     paddingTop: 6,
   },
+  pointerBoxNone: { pointerEvents: 'box-none' },
+  ignorePointerEvents: { pointerEvents: 'none' },
   attachRow: { flexDirection: 'row', gap: 8, marginBottom: 8, paddingLeft: 4 },
   attachThumb: { width: 52, height: 52, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', justifyContent: 'center', alignItems: 'center' },
   attachPreviewButton: { width: '100%', height: '100%' },
@@ -1652,6 +1582,7 @@ const styles = StyleSheet.create({
   },
   lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP, minHeight: PILL },
   bar: {
+    position: 'relative',
     flex: 1,
     height: PILL,
     maxHeight: COMPOSER_MAX_HEIGHT,
@@ -1659,11 +1590,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     // Subtle depth so the composer reads as a FAB dock, not a grey slab.
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.22,
-    shadowRadius: 18,
-    elevation: 8,
+    boxShadow: '0 8px 18px rgba(0,0,0,0.22)',
   },
   barInner: {
     flexDirection: 'row',
@@ -1680,14 +1607,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  expandEditorButtonPressed: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-  },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   input: {
     flex: 1,
-    // Height is set inline from measured content (composerInputHeight).
-    // Never use height: '100%' — that creates a contentSize feedback loop.
+    // Height is set inline from deterministic text/width layout.
+    // Never use height: '100%' or feed contentSize back into it.
     fontSize: 16,
     lineHeight: INPUT_LINE_HEIGHT,
     paddingVertical: 0,
@@ -1698,9 +1622,7 @@ const styles = StyleSheet.create({
     textAlignVertical: 'center',
   },
   inputExpanded: {
-    // Padding is outside the measured text box; bar height accounts for it.
-    paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
-    paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
+    // The outer bar owns expanded vertical inset; the input is text-only.
     textAlignVertical: 'top',
   },
   kCol: {
@@ -1719,20 +1641,20 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   kWrap: {
+    position: 'relative',
     width: PILL,
     height: PILL,
     // Rounded square — matches accordion FAB pills (not a circle).
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.2,
-    shadowRadius: 14,
-    elevation: 8,
+    boxShadow: '0 6px 14px rgba(0,0,0,0.20)',
   },
-  kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-
+  kInner: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   providerInitials: {
     fontSize: 11,
     fontWeight: '800',

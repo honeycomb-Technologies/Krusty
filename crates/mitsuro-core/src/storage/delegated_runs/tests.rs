@@ -32,6 +32,148 @@ fn scope(label: &str, path: &str, kind: &str) -> DelegatedRunScope {
 }
 
 #[test]
+fn active_workspace_writer_fences_duplicate_graph_until_terminal() {
+    let (store, _tmp) = create_store();
+    let capabilities = std::collections::BTreeSet::from([
+        AgentCapability::Read,
+        AgentCapability::Write,
+        AgentCapability::Execute,
+    ]);
+    let start = |run_id: &str, tool_id: &str, task_label: &str| DelegatedRunStartInput {
+        delegated_run_id: run_id.to_string(),
+        parent_session_id: "session-1".to_string(),
+        parent_tool_call_id: Some(tool_id.to_string()),
+        role: DelegatedRunRole::Build,
+        stage: DelegatedRunStage::Created,
+        provider: Some("test".to_string()),
+        model: Some("test-model".to_string()),
+        resumable: true,
+        resumed_from_run_id: None,
+        target_scope: vec![
+            scope("workspace", "/tmp/project", "workspace"),
+            scope(task_label, ".", "task"),
+        ],
+    };
+
+    assert_eq!(
+        store
+            .create_run_with_child_contract(
+                &start("writer-1", "tool-1", "first graph"),
+                Some("first"),
+                &capabilities,
+            )
+            .expect("create first writer"),
+        DelegatedRunCreateOutcome::Created
+    );
+    assert_eq!(
+        store
+            .create_run_with_child_contract(
+                &start("writer-2", "tool-2", "restated graph"),
+                Some("second"),
+                &capabilities,
+            )
+            .expect("fence duplicate writer"),
+        DelegatedRunCreateOutcome::ExistingActiveWorkspaceWriter {
+            delegated_run_id: "writer-1".to_string(),
+            workspace_path: "/tmp/project".to_string(),
+        }
+    );
+    assert!(store
+        .get_run("writer-2")
+        .expect("read rejected writer")
+        .is_none());
+
+    let read_only = DelegatedRunStartInput {
+        delegated_run_id: "reader-1".to_string(),
+        role: DelegatedRunRole::Explore,
+        ..start("unused-reader-template", "tool-reader", "reader")
+    };
+    assert_eq!(
+        store
+            .create_run_with_child_contract(
+                &read_only,
+                Some("reader"),
+                &std::collections::BTreeSet::from([AgentCapability::Read]),
+            )
+            .expect("allow concurrent reader"),
+        DelegatedRunCreateOutcome::Created
+    );
+    assert_eq!(
+        store
+            .create_run_with_child_contract(
+                &DelegatedRunStartInput {
+                    delegated_run_id: "writer-other-workspace".to_string(),
+                    target_scope: vec![scope("workspace", "/tmp/other", "workspace")],
+                    ..start("unused-writer-template", "tool-other", "other workspace")
+                },
+                Some("other workspace"),
+                &capabilities,
+            )
+            .expect("allow a writer for a distinct workspace"),
+        DelegatedRunCreateOutcome::Created
+    );
+
+    store
+        .finalize_run(
+            "writer-1",
+            DelegatedRunStage::Complete,
+            &serde_json::json!({"summary": "done"}),
+            None,
+            false,
+        )
+        .expect("finish first writer");
+    assert_eq!(
+        store
+            .create_run_with_child_contract(
+                &start("writer-3", "tool-3", "follow-up graph"),
+                Some("follow-up"),
+                &capabilities,
+            )
+            .expect("create terminal follow-up writer"),
+        DelegatedRunCreateOutcome::Created
+    );
+}
+
+#[test]
+fn unadmitted_compatibility_run_is_deleted_without_emitting_a_cancelled_wake() {
+    let (store, _tmp) = create_store();
+    let mut lease = DelegatedRunLease::new(store);
+    let run_id = "unadmitted-background";
+    let outcome = lease
+        .create_background_run(&DelegatedRunStartInput {
+            delegated_run_id: run_id.to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-unadmitted".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Created,
+            provider: Some("test".to_string()),
+            model: Some("test-model".to_string()),
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("workspace", ".", "workspace")],
+        })
+        .expect("prepare compatibility run");
+    assert_eq!(outcome, DelegatedRunCreateOutcome::Created);
+
+    assert!(lease
+        .discard_unadmitted_run(run_id)
+        .expect("discard unadmitted run"));
+    assert!(lease.get_run(run_id).expect("read discarded run").is_none());
+    drop(lease);
+
+    let db = Database::new(&_tmp.path().join("delegated-runs.db")).expect("reopen db");
+    let pending_wakes: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM delegated_runs WHERE wake_parent = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count pending wakes");
+    assert_eq!(pending_wakes, 0);
+}
+
+#[test]
 fn round_trip_persisted_delegated_run() {
     let (store, _tmp) = create_store();
     let delegated_run_id = "run-1".to_string();
@@ -261,6 +403,9 @@ fn concurrent_continuation_creation_launches_exactly_one_descendant() {
                 delegated_run_id, ..
             } => Some(delegated_run_id.as_str()),
             DelegatedRunCreateOutcome::Created => None,
+            DelegatedRunCreateOutcome::ExistingActiveWorkspaceWriter { .. } => {
+                panic!("read-only continuation unexpectedly hit the writer fence")
+            }
         })
         .expect("one caller should observe the winner");
     let descendants = store

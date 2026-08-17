@@ -46,26 +46,27 @@ Deno.test('Mitsuro line palette stays within the violet spectrum', () => {
   );
 });
 
-Deno.test('web beam uses the violet SVG fallback path', async () => {
-  const source = await Deno.readTextFile(
-    new URL('../components/chat/ChatBarRunningLine.tsx', import.meta.url),
+Deno.test('web beam lazily loads the native Skia renderer', async () => {
+  const wrapperSource = await Deno.readTextFile(
+    new URL('../components/chat/ChatBarRunningLine.web.tsx', import.meta.url),
+  );
+  const skiaSource = await Deno.readTextFile(
+    new URL('../components/chat/ChatBarRunningLineSkia.web.tsx', import.meta.url),
   );
 
   assert(
-    source.includes('mitsuroVioletBeam'),
-    'web beam should use the violet gradient id',
+    wrapperSource.includes("lazy(")
+      && wrapperSource.includes("import('./ChatBarRunningLineSkia')"),
+    'idle web sessions should code-split the entire Skia loader',
   );
   assert(
-    source.includes('hue-rotate(210deg)'),
-    'web beam should retain the violet hue-rotate filter',
+    skiaSource.includes('WithSkiaWeb')
+      && skiaSource.includes("import('./ChatBarRunningLine.native')"),
+    'web beam should reuse the production Skia renderer',
   );
   assert(
-    !source.includes('#b89a61') && !source.toLowerCase().includes('gold'),
-    'web beam should not reintroduce brass/gold stops',
-  );
-  assert(
-    !source.includes("import { BorderBeam } from 'border-beam'"),
-    'web beam should stay on the in-tree SVG path without border-beam',
+    wrapperSource.includes('if (!props.active) return null'),
+    'idle sessions must not download or mount CanvasKit',
   );
 });
 

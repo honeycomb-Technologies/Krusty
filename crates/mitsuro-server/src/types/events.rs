@@ -5,7 +5,7 @@ use mitsuro_core::agent::{
     RunBudgetSource,
 };
 use mitsuro_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
-use mitsuro_core::storage::RuntimeTraceEvent;
+use mitsuro_core::storage::{DelegationEventRecord, RuntimeTraceEvent};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -41,7 +41,11 @@ impl From<CoreDelegatedToolKind> for DelegatedToolKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedProgressStatus {
+    Created,
+    Queued,
+    Leased,
     Running,
+    Retrying,
     Complete,
     Degraded,
     Cancelled,
@@ -51,9 +55,15 @@ pub enum DelegatedProgressStatus {
 impl From<&AgentProgressStatus> for DelegatedProgressStatus {
     fn from(value: &AgentProgressStatus) -> Self {
         match value {
+            AgentProgressStatus::Created => Self::Created,
+            AgentProgressStatus::Queued => Self::Queued,
+            AgentProgressStatus::Leased => Self::Leased,
             AgentProgressStatus::Running => Self::Running,
+            AgentProgressStatus::Retrying => Self::Retrying,
             AgentProgressStatus::Complete => Self::Complete,
+            AgentProgressStatus::Degraded => Self::Degraded,
             AgentProgressStatus::Failed => Self::Failed,
+            AgentProgressStatus::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -118,6 +128,12 @@ pub enum AgenticEvent {
     ThinkingComplete { thinking: String, signature: String },
     /// AI is starting a tool call
     ToolCallStart { id: String, name: String },
+    /// AI is still streaming a large tool input. Arguments remain redacted.
+    ToolCallPreparing {
+        id: String,
+        name: String,
+        received_bytes: usize,
+    },
     /// Tool call complete with arguments
     ToolCallComplete {
         id: String,
@@ -146,6 +162,10 @@ pub enum AgenticEvent {
         lines_removed: usize,
         completed_plan_task: Option<String>,
     },
+    /// One append-only, durable delegation lifecycle event. This is an
+    /// immediate delivery optimization; reconnecting clients replay the same
+    /// event IDs from the session-state endpoint.
+    DelegationEvent { event: DelegationEventRecord },
     /// Tool execution result
     ToolResult {
         id: String,
@@ -452,6 +472,15 @@ impl From<mitsuro_core::agent::LoopEvent> for AgenticEvent {
                 signature,
             },
             LoopEvent::ToolCallStart { id, name } => Self::ToolCallStart { id, name },
+            LoopEvent::ToolCallPreparing {
+                id,
+                name,
+                received_bytes,
+            } => Self::ToolCallPreparing {
+                id,
+                name,
+                received_bytes,
+            },
             LoopEvent::ToolCallComplete {
                 id,
                 name,

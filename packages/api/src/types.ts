@@ -5,6 +5,8 @@
 export interface SessionResponse {
 	id: string;
 	title: string;
+	/** Latest durable execution state. Present on session-list responses. */
+	agent_state?: string | null;
 	token_count?: number | null;
 	working_dir: string | null;
 	project_dir: string | null;
@@ -20,6 +22,8 @@ export interface SessionResponse {
 	model_catalog_revision?: string | null;
 	target_branch?: string | null;
 	permission_mode: PermissionMode;
+	pinned_at?: string | null;
+	archived_at?: string | null;
 }
 
 export interface SessionWithMessagesResponse {
@@ -103,7 +107,94 @@ export interface SessionStateResponse {
 	delegated_tools?: DelegatedToolStateResponse[];
 	recent_delegated_runs?: DelegatedRunResponse[];
 	delegated_run_summaries?: DelegatedRunSummaryResponse[];
+	delegation_groups?: DelegationGroupStateResponse[];
+	delegation_events?: DelegationEventResponse[];
+	delegation_event_cursor?: number | null;
 	last_event_sequence?: number | null;
+}
+
+export type DelegationGroupState =
+	| "created"
+	| "queued"
+	| "running"
+	| "ready_for_parent"
+	| "synthesizing"
+	| "complete"
+	| "degraded"
+	| "failed"
+	| "cancelled";
+
+export type DelegationTaskState =
+	| "created"
+	| "queued"
+	| "leased"
+	| "running"
+	| "retrying"
+	| "complete"
+	| "degraded"
+	| "failed"
+	| "cancelled";
+
+export interface DelegationTaskStateResponse {
+	delegation_task_id: string;
+	task_key: string;
+	role: "explore" | "build" | "planner" | "verifier";
+	objective?: string;
+	provider?: string | null;
+	model?: string | null;
+	working_dir?: string | null;
+	state: DelegationTaskState;
+	attempt_count: number;
+	integration_state?: "pending" | "ready" | "failed" | null;
+	depends_on?: string[];
+	write_intent?: string[];
+	created_at?: string;
+	updated_at: string;
+	completed_at?: string | null;
+}
+
+export interface DelegationGroupStateResponse {
+	delegation_group_id: string;
+	parent_tool_call_id?: string | null;
+	state: DelegationGroupState;
+	execution_mode: "foreground" | "detached";
+	max_parallelism?: number;
+	effective_parallelism?: number;
+	parent_continuation_state: "not_requested" | "pending" | "queued" | "promoted";
+	tasks: DelegationTaskStateResponse[];
+	created_at?: string;
+	updated_at: string;
+	completed_at?: string | null;
+}
+
+export type KnownDelegationEventType =
+	| "group_created"
+	| "group_queued"
+	| "group_state_changed"
+	| "task_claimed"
+	| "task_running"
+	| "task_activity"
+	| "task_conversation"
+	| "task_state_changed"
+	| "parent_continuation_queued"
+	| "parent_continuation_promoted";
+
+/**
+ * Event kinds are forward-compatible protocol strings. Known values retain
+ * literal completion while newer values remain visible to older clients.
+ */
+export type DelegationEventType =
+	| KnownDelegationEventType
+	| (string & Record<never, never>);
+
+export interface DelegationEventResponse {
+	event_id: number;
+	parent_session_id: string;
+	delegation_group_id: string;
+	delegation_task_id?: string | null;
+	event_type: DelegationEventType;
+	payload: Record<string, unknown>;
+	created_at: string;
 }
 
 export type GoalStatus =
@@ -528,7 +619,11 @@ export interface ImageContent {
 
 export type DelegatedToolKind = "explore" | "plan" | "verify" | "build";
 export type DelegatedProgressStatus =
+	| "created"
+	| "queued"
+	| "leased"
 	| "running"
+	| "retrying"
 	| "complete"
 	| "degraded"
 	| "cancelled"
@@ -582,6 +677,10 @@ export interface DelegatedAgentState {
 	linesAdded: number;
 	linesRemoved: number;
 	completedPlanTask?: string;
+	/** Exact durable task state; `status` remains the compatibility projection. */
+	taskState?: DelegationTaskState;
+	/** Number of execution attempts already started for this logical task. */
+	attemptCount?: number;
 }
 
 export interface DelegatedArtifactState {
@@ -590,6 +689,10 @@ export interface DelegatedArtifactState {
 	capabilities?: Array<"read" | "write" | "execute">;
 	delegatedRunId?: string;
 	stage?: DelegatedRunStage;
+	/** Exact durable group state; `stage` remains the compatibility projection. */
+	groupState?: DelegationGroupState;
+	maxParallelism?: number;
+	effectiveParallelism?: number;
 	thinking?: string;
 	message?: string;
 	investigationSummary?: string;
@@ -619,6 +722,8 @@ export interface DelegatedArtifactState {
 	totalLockWaitMs?: number;
 	totalTargets?: number;
 	activeTargets?: number;
+	waitingTargets?: number;
+	integratingTargets?: number;
 	completedTargets?: number;
 	pendingTargets?: number;
 }
@@ -818,6 +923,7 @@ export interface HiveSchedule {
 	model_key?: ModelKey | null;
 	model_catalog_revision?: string | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire: HiveMisfireConfig;
 	overlap_policy: HiveScheduleOverlapPolicy;
 	retry: HiveRetryPolicy;
@@ -851,6 +957,7 @@ export interface HiveScheduleWriteRequest {
 	model?: string | null;
 	model_key?: ModelKey | null;
 	crew_slug?: string | null;
+	worker_id?: string | null;
 	misfire?: HiveMisfireConfig;
 	overlap_policy?: HiveScheduleOverlapPolicy;
 	retry?: HiveRetryPolicy;
@@ -1189,6 +1296,239 @@ export interface HiveRecoverDaemonResponse {
 	recovered_count: number;
 }
 
+export type HiveWorkerStatus = "active" | "paused" | "archived";
+export type HiveWorkerAutonomy = "manual" | "scheduled" | "always_on";
+
+/** A durable Hive Worker identity with its own persona, model, and DM lane. */
+export interface HiveWorker {
+	id: string;
+	slug: string;
+	display_name: string;
+	avatar_color?: string | null;
+	model?: string | null;
+	model_key?: ModelKey | null;
+	permission_mode: string;
+	autonomy: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number | null;
+	status: HiveWorkerStatus;
+	dm_session_id?: string | null;
+	/** Agent state of the bound DM session ("idle", "running", ...), when bound. */
+	dm_agent_state?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface HiveWorkersResponse {
+	workers: HiveWorker[];
+}
+
+/** Worker plus its persona documents. */
+export interface HiveWorkerDetail extends HiveWorker {
+	identity?: string | null;
+	soul?: string | null;
+}
+
+export interface CreateHiveWorkerRequest {
+	slug: string;
+	display_name?: string;
+	avatar_color?: string;
+	model?: string;
+	model_key?: ModelKey;
+	permission_mode?: string;
+	autonomy?: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number;
+	identity?: string;
+	soul?: string;
+}
+
+/** Partial update: absent fields keep their current value. */
+export interface UpdateHiveWorkerRequest {
+	display_name?: string;
+	avatar_color?: string;
+	model?: string;
+	model_key?: ModelKey;
+	permission_mode?: string;
+	autonomy?: HiveWorkerAutonomy;
+	heartbeat_interval_secs?: number;
+	identity?: string;
+	soul?: string;
+}
+
+export interface HiveWorkerDmResponse {
+	worker_id: string;
+	session_id: string;
+	title: string;
+	session_type: string;
+	permission_mode: string;
+	created: boolean;
+	agent_state: string;
+}
+
+export type HiveDeliveryStatus =
+	| "pending"
+	| "delivering"
+	| "delivered"
+	| "acked"
+	| "dead_letter";
+
+export type HiveDeliveryPriority = "normal" | "high";
+
+export interface HiveWorkerDelivery {
+	id: string;
+	kind: string;
+	from_worker_id?: string | null;
+	to_worker_id: string;
+	group_id?: string | null;
+	body: string;
+	priority: HiveDeliveryPriority;
+	status: HiveDeliveryStatus;
+	attempt_count: number;
+	max_attempts: number;
+	available_at: string;
+	delivered_at?: string | null;
+	acked_at?: string | null;
+	last_error?: string | null;
+	run_id?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface HiveWorkerDeliveriesResponse {
+	deliveries: HiveWorkerDelivery[];
+}
+
+export type HiveGroupExecutionMode = "workbench" | "roundtable" | "direct";
+export type HiveGroupStatus = "active" | "archived";
+export type HiveGroupTurnStatus =
+	| "running"
+	| "completed"
+	| "partial"
+	| "failed"
+	| "cancelled";
+export type HiveGroupSenderKind = "user" | "worker" | "system";
+
+/** One member of a group, with roster display data. */
+export interface HiveGroupMember {
+	worker_id: string;
+	slug: string;
+	display_name: string;
+	avatar_color?: string | null;
+	model?: string | null;
+	provider?: string | null;
+	status: string;
+}
+
+/** A group room referencing Workers, with its turn execution policy. */
+export interface HiveGroup {
+	id: string;
+	title: string;
+	execution_mode: HiveGroupExecutionMode;
+	max_rounds: number;
+	max_member_messages_per_turn: number;
+	parallelism: number;
+	context_window_messages: number;
+	status: HiveGroupStatus;
+	default_assignee_worker_id?: string | null;
+	members: HiveGroupMember[];
+	active_turn_id?: string | null;
+	latest_seq: number;
+	created_at: string;
+	updated_at: string;
+}
+
+/** The durable aggregate of one group turn with per-member outcomes. */
+export interface HiveGroupTurn {
+	id: string;
+	group_id: string;
+	trigger_message_id: string;
+	execution_mode: HiveGroupExecutionMode;
+	status: HiveGroupTurnStatus;
+	speaker_plan: string[];
+	next_speaker_index: number;
+	/** Worker-id keyed outcome summaries ({status, run_id?, error?}). */
+	member_outcomes?: Record<
+		string,
+		{ status: string; run_id?: string; error?: string }
+	> | null;
+	started_at: string;
+	finished_at?: string | null;
+}
+
+export interface HiveGroupDetail extends HiveGroup {
+	active_turn?: HiveGroupTurn | null;
+}
+
+export interface HiveGroupsResponse {
+	groups: HiveGroup[];
+}
+
+/** One append-only room message with a per-group monotonic sequence. */
+export interface HiveGroupMessage {
+	id: string;
+	group_id: string;
+	seq: number;
+	sender_kind: HiveGroupSenderKind;
+	sender_worker_id?: string | null;
+	sender_run_id?: string | null;
+	content: string;
+	reply_to_message_id?: string | null;
+	turn_id?: string | null;
+	created_at: string;
+}
+
+export interface HiveGroupMessagesResponse {
+	messages: HiveGroupMessage[];
+	latest_seq: number;
+}
+
+export interface CreateHiveGroupRequest {
+	title: string;
+	execution_mode?: HiveGroupExecutionMode;
+	max_rounds?: number;
+	max_member_messages_per_turn?: number;
+	parallelism?: number;
+	context_window_messages?: number;
+	default_assignee_worker_id?: string;
+	member_worker_ids: string[];
+}
+
+/**
+ * Partial update: absent fields keep their value. An empty
+ * default_assignee_worker_id clears the assignment; member_worker_ids
+ * replaces the ordered membership (add/remove/reorder).
+ */
+export interface UpdateHiveGroupRequest {
+	title?: string;
+	execution_mode?: HiveGroupExecutionMode;
+	max_rounds?: number;
+	max_member_messages_per_turn?: number;
+	parallelism?: number;
+	context_window_messages?: number;
+	default_assignee_worker_id?: string;
+	member_worker_ids?: string[];
+}
+
+export interface SendHiveGroupMessageRequest {
+	message: string;
+	/** Explicit target slugs; omitted = server-side mention parsing. */
+	mentions_override?: string[];
+}
+
+/** Durable acceptance of one group turn. */
+export interface SendHiveGroupMessageResponse {
+	group_id: string;
+	turn_id: string;
+	message_id: string;
+	message_seq: number;
+	status: string;
+	target_worker_ids: string[];
+}
+
+/** Room event stream payloads: message appends and turn transitions. */
+export type HiveGroupEvent =
+	| { type: "message"; message: HiveGroupMessage }
+	| { type: "turn"; turn: HiveGroupTurn };
+
 // Content-free mobile diagnostics. Keep this contract operational and bounded:
 // never add prompts, responses, credentials, terminal/file contents, or raw URLs.
 export interface MobileDiagnosticUploadBatch {
@@ -1298,6 +1638,7 @@ export type StreamEvent =
 	| { type: "thinking_delta"; thinking: string }
 	| { type: "thinking_complete"; thinking: string; signature: string }
 	| { type: "tool_call_start"; id: string; name: string }
+	| { type: "tool_call_preparing"; id: string; name: string; received_bytes: number }
 	| {
 			type: "tool_call_complete";
 			id: string;
@@ -1307,6 +1648,7 @@ export type StreamEvent =
 	| { type: "tool_executing"; id: string; name: string }
 	| { type: "tool_output_delta"; id: string; delta: string }
 	| ({ type: "delegated_progress" } & DelegatedProgressEvent)
+	| { type: "delegation_event"; event: DelegationEventResponse }
 	| { type: "tool_result"; id: string; output: string; is_error: boolean }
 	| { type: "server_tool_start"; id: string; name: string }
 	| { type: "server_tool_complete"; id: string; name: string }
@@ -1388,6 +1730,7 @@ export interface StreamCallbacks {
 	onTextDelta: (delta: string) => void;
 	onThinkingDelta: (thinking: string) => void;
 	onToolCallStart: (id: string, name: string) => void;
+	onToolCallPreparing?: (id: string, name: string, receivedBytes: number) => void;
 	onToolCallComplete: (
 		id: string,
 		name: string,
@@ -1396,6 +1739,7 @@ export interface StreamCallbacks {
 	onToolResult: (id: string, output: string, isError: boolean) => void;
 	onToolOutputDelta: (id: string, delta: string) => void;
 	onDelegatedProgress?: (event: DelegatedProgressEvent) => void;
+	onDelegationEvent?: (event: DelegationEventResponse) => void;
 	onToolApprovalRequired?: (
 		id: string,
 		name: string,
@@ -1426,7 +1770,7 @@ export interface StreamCallbacks {
 	onContextCompactionStarted?: (event: ContextCompactionStartedEvent) => void;
 	onSessionPinched?: (event: SessionContinuationEvent) => void;
 	onTitleUpdate: (title: string) => void;
-	onFinish: (sessionId: string) => void;
+	onFinish: (sessionId: string, stopReason?: string) => void;
 	onError: (error: string) => void;
 	// Hive autonomous agent callbacks
 	onUserMessage?: (
@@ -1673,6 +2017,91 @@ export interface TreeEntry {
 // ============================================================================
 // Preview / MCP / Skills Types
 // ============================================================================
+
+export type BrowserSessionKind = "interactive" | "agent";
+export type BrowserSessionStatus =
+	| "starting"
+	| "ready"
+	| "running"
+	| "stopped"
+	| "error";
+
+export interface BrowserCapability {
+	available: boolean;
+	runtime: "agent-browser";
+	version: string;
+	executable?: string | null;
+	live_stream: boolean;
+	semantic_actions: boolean;
+	agent_chat: boolean;
+	reason?: string | null;
+}
+
+export interface BrowserSession {
+	id: string;
+	title: string;
+	kind: BrowserSessionKind;
+	status: BrowserSessionStatus;
+	url?: string | null;
+	/** Raw CDP is intentionally never exposed by Honey. */
+	cdp_url?: null;
+	debug_port?: null;
+	stream_url?: string | null;
+	viewers: number;
+	controllers: number;
+	last_error?: string | null;
+	created_at: string;
+	updated_at: string;
+	viewport_mode: "mobile" | "desktop";
+}
+
+export interface BrowserSessionListResponse {
+	sessions: BrowserSession[];
+	capability: BrowserCapability;
+}
+
+export interface CreateBrowserSessionRequest {
+	title?: string;
+	kind?: BrowserSessionKind;
+	url?: string;
+	launch_local?: boolean;
+}
+
+export type BrowserAction =
+	| { type: "navigate"; url: string }
+	| { type: "snapshot"; interactive?: boolean; compact?: boolean; depth?: number }
+	| { type: "click"; target: string }
+	| { type: "fill" | "type"; target: string; value: string }
+	| { type: "press"; key: string }
+	| { type: "hover"; target: string }
+	| { type: "select"; target: string; values: string[] }
+	| { type: "scroll"; direction: "up" | "down" | "left" | "right"; amount?: number }
+	| { type: "back" | "forward" | "reload" }
+	| { type: "wait"; ms: number }
+	| {
+			type: "get";
+			property: "text" | "html" | "value" | "title" | "url" | "count";
+			target?: string;
+	  }
+	| { type: "attribute"; target: string; name: string }
+	| { type: "viewport"; mode: "mobile" | "desktop" };
+
+export interface BrowserActionResponse {
+	ok: boolean;
+	results: unknown;
+}
+
+export interface BrowserAgentRequest {
+	task: string;
+	model?: string;
+	max_steps?: number;
+}
+
+export interface BrowserAgentResponse {
+	ok: boolean;
+	result?: string | null;
+	error?: string | null;
+}
 
 export interface PreviewSettings {
 	enabled: boolean;

@@ -6,7 +6,10 @@ use super::{
 };
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
-use crate::storage::{CompactionStore, Database, MessageStore, SessionManager};
+use crate::storage::{
+    CompactionStore, Database, MemoryStore, MessageStore, SessionManager,
+    COMPACTION_FLUSH_TITLE_PREFIX,
+};
 
 fn text_message(role: Role, text: &str) -> ModelMessage {
     ModelMessage {
@@ -276,6 +279,18 @@ async fn compaction_without_ai_uses_deterministic_summary() {
         .work_summary
         .contains("deterministic compaction summary"));
     assert_ne!(result.summary.work_summary, "No summary available.");
+
+    let flush = MemoryStore::new(Database::new(&db_path).expect("memory db"))
+        .list(None, None)
+        .into_iter()
+        .find(|memory| memory.title.starts_with(COMPACTION_FLUSH_TITLE_PREFIX))
+        .expect("compaction flush memory");
+    assert_eq!(flush.source, crate::storage::MemorySource::Compaction);
+    assert!(flush.content.contains("start task"));
+    assert_eq!(
+        flush.source_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
 }
 
 #[tokio::test]

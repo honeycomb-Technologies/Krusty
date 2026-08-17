@@ -1,6 +1,5 @@
 import { type ReactNode } from 'react';
 import { View, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
-import { BlurView } from '../../platform/blur';
 import { useThemeContext } from '../../hooks/useTheme';
 
 interface GlassCardProps {
@@ -11,31 +10,28 @@ interface GlassCardProps {
   compact?: boolean;
 }
 
-export function GlassCard({ children, style, elevated, intensity, compact = false }: GlassCardProps) {
+export function GlassCard({
+  children,
+  style,
+  elevated,
+  compact = false,
+}: GlassCardProps) {
   const { theme } = useThemeContext();
-  const g = theme.colors.glass;
-  const bg = elevated ? g.backgroundElevated : g.background;
+  const t = theme.colors;
+  const radius = compact ? 8 : theme.radii.xl;
 
   return (
-    <View style={[styles.wrapper, compact && styles.compactWrapper, style]}>
-      {compact ? null : (
-        <BlurView
-          intensity={intensity ?? theme.colors.glassBlur}
-          tint={theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'}
-          style={StyleSheet.absoluteFill}
-        />
-      )}
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            backgroundColor: compact ? theme.colors.background : bg,
-            borderRadius: compact ? 8 : theme.radii.xl,
-            borderWidth: compact ? 0 : StyleSheet.hairlineWidth,
-            borderColor: compact ? 'transparent' : g.border,
-          },
-        ]}
-      />
+    <View
+      style={[
+        styles.wrapper,
+        {
+          borderRadius: radius,
+          backgroundColor: elevated ? t.surfaceElevated : t.surface,
+          borderColor: t.border,
+        },
+        style,
+      ]}
+    >
       <View style={[styles.content, compact && styles.compactContent]}>{children}</View>
     </View>
   );
@@ -43,14 +39,12 @@ export function GlassCard({ children, style, elevated, intensity, compact = fals
 
 const styles = StyleSheet.create({
   wrapper: {
-    borderRadius: 22,
+    position: 'relative',
     overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
   },
   content: {
     padding: 16,
-  },
-  compactWrapper: {
-    borderRadius: 8,
   },
   compactContent: {
     padding: 0,

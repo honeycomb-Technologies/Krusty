@@ -271,7 +271,7 @@ fn default_code_request_surface_is_small_and_deterministic() {
         .collect::<Vec<_>>();
 
     assert!(filtered.len() <= DEFAULT_CODE_TOOL_LIMIT);
-    assert_eq!(filtered.len(), 9);
+    assert_eq!(filtered.len(), 8);
     assert_eq!(
         filtered_names,
         vec![
@@ -279,13 +279,28 @@ fn default_code_request_surface_is_small_and_deterministic() {
             "agent",
             "apply_patch",
             "bash",
-            "enter_plan_mode",
             "glob",
             "grep",
             "read",
             "tool_search",
         ]
     );
+}
+
+#[test]
+fn autonomous_build_cannot_turn_authorized_work_into_plan_approval_stop() {
+    let tools = vec![
+        ai_tool("enter_plan_mode"),
+        ai_tool("agent"),
+        ai_tool("read"),
+    ];
+    let autonomous = ToolRequestPolicy::code(PermissionMode::Autonomous, false, false, true, &[])
+        .filter(tools.clone());
+    let supervised =
+        ToolRequestPolicy::code(PermissionMode::Supervised, false, false, true, &[]).filter(tools);
+
+    assert!(!autonomous.iter().any(|tool| tool.name == "enter_plan_mode"));
+    assert!(supervised.iter().any(|tool| tool.name == "enter_plan_mode"));
 }
 
 #[test]
@@ -359,11 +374,12 @@ fn non_gpt_models_receive_edit_and_write_instead_of_apply_patch() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), DEFAULT_CODE_TOOL_LIMIT);
+    assert_eq!(names.len(), DEFAULT_CODE_TOOL_LIMIT - 1);
     assert!(names.iter().any(|name| name == "edit"));
     assert!(names.iter().any(|name| name == "write"));
     assert!(names.iter().any(|name| name == "glob"));
     assert!(!names.iter().any(|name| name == "apply_patch"));
+    assert!(!names.iter().any(|name| name == "enter_plan_mode"));
 }
 
 #[test]
@@ -421,6 +437,35 @@ fn delegated_explore_policy_blocks_write_tools() {
             false,
         )
         .is_err());
+}
+
+#[test]
+fn delegated_execute_policy_routes_browser_qa_to_governed_tool() {
+    let scope = std::collections::HashSet::from(["bash".to_string(), "browser_check".to_string()]);
+    let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, None)
+        .with_execution_tool_allowlist(Some(&scope));
+    let install = json!({
+        "command": "PLAYWRIGHT_BROWSERS_PATH=.pw-browsers npx --yes playwright@1.55.0 install chromium"
+    });
+
+    let error = policy
+        .authorize_tool_call("bash", &install, false)
+        .expect_err("delegated browser download must be blocked");
+    assert!(error.contains("browser_check"));
+    assert!(policy
+        .authorize_tool_call(
+            "bash",
+            &json!({"command": "npm test && npm run build"}),
+            false,
+        )
+        .is_ok());
+    assert!(policy
+        .authorize_tool_call(
+            "browser_check",
+            &json!({"url": "http://127.0.0.1:4173/"}),
+            false,
+        )
+        .is_ok());
 }
 
 #[test]
@@ -521,6 +566,7 @@ fn execute_only_child_keeps_an_exact_capability_surface() {
     );
 
     assert!(policy.authorize_tool("bash", false).is_ok());
+    assert!(policy.authorize_tool("browser_check", false).is_ok());
     for forbidden in ["read", "grep", "write", "edit", "apply_patch"] {
         assert!(
             policy.authorize_tool(forbidden, false).is_err(),
@@ -529,8 +575,32 @@ fn execute_only_child_keeps_an_exact_capability_surface() {
     }
     assert_eq!(
         policy.execution_tool_allowlist,
-        Some(BTreeSet::from(["bash".to_string()]))
+        Some(BTreeSet::from([
+            "bash".to_string(),
+            "browser_check".to_string(),
+        ]))
     );
+}
+
+#[test]
+fn mixed_write_execute_group_is_a_valid_ceiling_for_disjoint_child_policies() {
+    let group =
+        DelegationPolicy::for_subagent_child(PermissionMode::Autonomous, None, true, true, true);
+    let engine =
+        DelegationPolicy::for_subagent_child(PermissionMode::Autonomous, None, true, true, true);
+    let pwa =
+        DelegationPolicy::for_subagent_child(PermissionMode::Autonomous, None, true, true, false);
+    let verifier =
+        DelegationPolicy::for_subagent_child(PermissionMode::Autonomous, None, true, false, true);
+
+    assert!(group.bash_allowed);
+    assert!(group
+        .execution_tool_allowlist
+        .as_ref()
+        .is_some_and(|tools| tools.contains("bash")));
+    assert!(engine.is_within(&group));
+    assert!(pwa.is_within(&group));
+    assert!(verifier.is_within(&group));
 }
 
 #[test]
@@ -592,6 +662,45 @@ fn execution_profile_prefers_exact_capabilities_over_legacy_labels() {
     });
     assert_eq!(agent_call_execution_profile(&execute_only), "explore");
     assert!(agent_call_requests_write(&execute_only));
+}
+
+#[test]
+fn structured_task_capabilities_are_resolved_before_tool_execution() {
+    let graph = json!({
+        "name": "build proof",
+        "instructions": "build and verify the proof",
+        "tasks": [
+            {
+                "id": "core",
+                "instructions": "implement the core",
+                "capabilities": ["read", "write"],
+                "write_intent": ["src"]
+            },
+            {
+                "id": "verify",
+                "instructions": "run verification",
+                "capabilities": ["read", "execute"],
+                "depends_on": ["core"]
+            }
+        ]
+    });
+
+    assert!(agent_call_requests_write(&graph));
+    assert_eq!(agent_call_execution_profile(&graph), "build");
+    assert!(!agent_call_is_research(&graph));
+}
+
+#[test]
+fn structured_read_graph_keeps_the_executor_default_in_policy_resolution() {
+    let graph = json!({
+        "name": "audit proof",
+        "instructions": "inspect the proof",
+        "tasks": [{"id": "audit", "instructions": "inspect files"}]
+    });
+
+    assert!(!agent_call_requests_write(&graph));
+    assert_eq!(agent_call_execution_profile(&graph), "explore");
+    assert!(agent_call_is_research(&graph));
 }
 
 #[test]
@@ -857,7 +966,10 @@ impl Tool for LeaseHoldingTool {
         use crate::agent::DelegatedRunStage;
         use crate::storage::{
             Database, DelegatedRunLease, DelegatedRunRole, DelegatedRunScope,
-            DelegatedRunStartInput, DelegatedRunStore,
+            DelegatedRunStartInput, DelegatedRunStore, DelegationCompletionPolicy,
+            DelegationExecutionMode, DelegationFailurePolicy, DelegationGovernance,
+            DelegationGroupContract, DelegationGroupStartInput, DelegationStore,
+            DelegationTaskSpec, DelegationWriterMode,
         };
 
         let store = DelegatedRunStore::new(Database::new(&self.db_path).expect("lease database"));
@@ -880,6 +992,56 @@ impl Tool for LeaseHoldingTool {
                 }],
             })
             .expect("create timeout run");
+
+        let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, None);
+        let group_store = DelegationStore::new(
+            Database::new(&self.db_path).expect("timeout delegation-group database"),
+        );
+        group_store
+            .create_group(&DelegationGroupStartInput {
+                delegation_group_id: "registry-timeout-run".to_string(),
+                parent_session_id: "registry-timeout-session".to_string(),
+                parent_tool_call_id: Some("registry-timeout-call".to_string()),
+                contract: DelegationGroupContract {
+                    execution_mode: DelegationExecutionMode::Foreground,
+                    completion_policy: DelegationCompletionPolicy::AllSettled,
+                    failure_policy: DelegationFailurePolicy::Continue,
+                    governance: DelegationGovernance {
+                        permission_mode: PermissionMode::Autonomous,
+                        reasoning_effort: None,
+                        delegated_turn_budget: None,
+                        max_parallelism: 1,
+                        execution_tool_allowlist: policy.execution_tool_allowlist.clone(),
+                        delegation_policy: policy.clone(),
+                    },
+                },
+                tasks: vec![DelegationTaskSpec {
+                    delegation_task_id: "registry-timeout-task".to_string(),
+                    task_key: "timeout".to_string(),
+                    objective: "remain active until the registry timeout".to_string(),
+                    role: DelegatedRunRole::Explore,
+                    target_scope: vec![],
+                    max_attempts: 2,
+                    depends_on: vec![],
+                    write_intent: vec![],
+                    task_policy: Some(policy),
+                    writer_mode: DelegationWriterMode::Shared,
+                    attempt_workspace: None,
+                    workspace_baseline: None,
+                    executor_envelope: None,
+                }],
+            })
+            .expect("create timeout group");
+        group_store
+            .queue_group("registry-timeout-run")
+            .expect("queue timeout group");
+        group_store
+            .claim_task("registry-timeout-task", "timeout-owner", 60_000)
+            .expect("claim timeout task")
+            .expect("timeout task lease");
+        assert!(group_store
+            .mark_task_running("registry-timeout-task", "timeout-owner", "provider/model",)
+            .expect("start timeout task"));
         std::future::pending::<()>().await;
         ToolResult::success("unreachable")
     }
@@ -954,6 +1116,30 @@ async fn test_pre_hook_block_returns_structured_json_error() {
     let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
     assert_eq!(parsed["error"]["code"], "blocked_by_policy");
     assert_eq!(parsed["error"]["message"], "blocked for test");
+    assert_eq!(parsed["error"]["retryable"], false);
+    assert!(parsed["error"]["next_action"]
+        .as_str()
+        .is_some_and(|value| value.contains("satisfy the reported policy boundary")));
+}
+
+#[test]
+fn public_preview_policy_error_provides_one_safe_recovery_path() {
+    let result = super::runtime::policy_block_result(
+        "bash",
+        &json!({"command": "python -m http.server --bind 0.0.0.0"}),
+        "preview servers must bind explicitly to 127.0.0.1 or localhost".to_string(),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(parsed["error"]["retryable"], false);
+    assert_eq!(
+        parsed["error"]["safe_alternative"]["bind_address"],
+        "127.0.0.1"
+    );
+    assert_eq!(
+        parsed["error"]["safe_alternative"]["exposure"],
+        "tailscale_serve"
+    );
 }
 
 #[test]
@@ -967,6 +1153,37 @@ fn bash_requested_timeout_extends_registry_guard_through_cleanup() {
     );
 
     assert_eq!(timeout, std::time::Duration::from_secs(625));
+}
+
+#[test]
+fn foreground_agent_run_uses_lifecycle_instead_of_generic_outer_timeout() {
+    use super::runtime::should_apply_outer_timeout;
+
+    assert!(!should_apply_outer_timeout(
+        "agent",
+        &json!({"tasks": [{"id": "build", "instructions": "work"}]}),
+        None,
+    ));
+    assert!(!should_apply_outer_timeout(
+        "agent",
+        &json!({"action": "resume", "delegated_run_id": "run-1"}),
+        None,
+    ));
+    assert!(should_apply_outer_timeout(
+        "agent",
+        &json!({"run_in_background": true, "prompt": "work"}),
+        None,
+    ));
+    assert!(should_apply_outer_timeout(
+        "agent",
+        &json!({"action": "wait", "delegated_run_id": "run-1"}),
+        None,
+    ));
+    assert!(should_apply_outer_timeout(
+        "agent",
+        &json!({"prompt": "bounded work"}),
+        Some(std::time::Duration::from_secs(30)),
+    ));
 }
 
 #[test]
@@ -1005,7 +1222,9 @@ async fn registry_short_bash_timeout_leaves_room_for_inner_cleanup() {
 #[tokio::test]
 async fn registry_timeout_drops_lease_and_cancels_durable_run() {
     use crate::agent::DelegatedRunStage;
-    use crate::storage::{Database, DelegatedRunStore};
+    use crate::storage::{
+        Database, DelegatedRunStore, DelegationGroupState, DelegationStore, DelegationTaskState,
+    };
     use rusqlite::params;
     use tempfile::TempDir;
 
@@ -1048,6 +1267,37 @@ async fn registry_timeout_drops_lease_and_cancels_durable_run() {
         record.artifact.unwrap()["outcome_reason"],
         "caller_aborted_before_terminal"
     );
+
+    let group_store =
+        DelegationStore::new(Database::new(&db_path).expect("reopen timeout group database"));
+    let group = group_store
+        .get_group("registry-timeout-run")
+        .expect("load timed-out group")
+        .expect("timed-out group exists");
+    assert_eq!(group.state, DelegationGroupState::Cancelled);
+    assert_eq!(group.tasks[0].state, DelegationTaskState::Cancelled);
+    assert!(group_store
+        .claim_task("registry-timeout-task", "late-owner", 60_000)
+        .expect("cancelled task remains readable")
+        .is_none());
+
+    let attempt_db = Database::new(&db_path).expect("reopen timeout attempt database");
+    let (task_owner, task_expiry, attempt_state): (Option<String>, Option<i64>, String) =
+        attempt_db
+            .conn()
+            .query_row(
+                "SELECT tasks.lease_owner_id, tasks.lease_expires_at_ms, attempts.state
+               FROM delegation_tasks AS tasks
+               JOIN delegation_attempts AS attempts
+                 ON attempts.delegation_task_id = tasks.delegation_task_id
+              WHERE tasks.delegation_task_id = ?1",
+                params!["registry-timeout-task"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load timed-out task and attempt");
+    assert!(task_owner.is_none());
+    assert!(task_expiry.is_none());
+    assert_eq!(attempt_state, "cancelled");
 }
 
 #[test]

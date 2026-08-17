@@ -3,9 +3,39 @@ use std::sync::Arc;
 
 use crate::apns::{ApnsEventType, ApnsPayload};
 use crate::notifications::{
-    fire_apns, fire_push, hive_session_notification_data, session_title,
-    tool_approval_notification_data, APNS_CATEGORY_HIVE_SESSION, APNS_CATEGORY_TOOL_APPROVAL,
+    fire_apns, fire_push, hive_session_notification_data, resolve_hive_focus, session_title,
+    tool_approval_notification_data, with_hive_focus_ids, APNS_CATEGORY_HIVE_SESSION,
+    APNS_CATEGORY_TOOL_APPROVAL,
 };
+
+fn hive_update_data(
+    db_path: &Path,
+    kind: &str,
+    session_id: &str,
+    level: Option<&str>,
+    title: Option<&str>,
+) -> serde_json::Value {
+    let (worker_id, group_id) = resolve_hive_focus(db_path, session_id);
+    with_hive_focus_ids(
+        hive_session_notification_data(kind, session_id, level, title),
+        worker_id.as_deref(),
+        group_id.as_deref(),
+    )
+}
+
+fn hive_approval_data(
+    db_path: &Path,
+    request_id: &str,
+    session_id: &str,
+    tool_name: &str,
+) -> serde_json::Value {
+    let (worker_id, group_id) = resolve_hive_focus(db_path, session_id);
+    with_hive_focus_ids(
+        tool_approval_notification_data(request_id, session_id, tool_name, "hive"),
+        worker_id.as_deref(),
+        group_id.as_deref(),
+    )
+}
 use crate::push::{PushEventType, PushPayload};
 
 pub(super) fn hive_notification_title(title: Option<&str>, session_label: &str) -> String {
@@ -37,7 +67,8 @@ pub(super) fn notify_hive_user_message(
             session_id: Some(session_id.to_string()),
             tag: Some(format!("hive-{session_id}")),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "user_message",
                 session_id,
                 Some(level),
@@ -54,7 +85,8 @@ pub(super) fn notify_hive_user_message(
             body: message.to_string(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "user_message",
                 session_id,
                 Some(level),
@@ -66,6 +98,7 @@ pub(super) fn notify_hive_user_message(
 }
 
 pub(super) fn notify_hive_awaiting_input(
+    db_path: &Path,
     push_service: &Option<Arc<crate::push::PushService>>,
     apns_service: &Option<Arc<crate::apns::ApnsService>>,
     user_id: Option<&str>,
@@ -80,7 +113,8 @@ pub(super) fn notify_hive_awaiting_input(
             session_id: Some(session_id.to_string()),
             tag: Some(format!("hive-{session_id}")),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "awaiting_input",
                 session_id,
                 Some("warning"),
@@ -97,7 +131,8 @@ pub(super) fn notify_hive_awaiting_input(
             body: "Hive needs your input".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "awaiting_input",
                 session_id,
                 Some("warning"),
@@ -109,6 +144,7 @@ pub(super) fn notify_hive_awaiting_input(
 }
 
 pub(super) fn notify_hive_tool_approval(
+    db_path: &Path,
     push_service: &Option<Arc<crate::push::PushService>>,
     apns_service: &Option<Arc<crate::apns::ApnsService>>,
     user_id: Option<&str>,
@@ -116,7 +152,7 @@ pub(super) fn notify_hive_tool_approval(
     request_id: &str,
     tool_name: &str,
 ) {
-    let data = tool_approval_notification_data(request_id, session_id, tool_name, "hive");
+    let data = hive_approval_data(db_path, request_id, session_id, tool_name);
     fire_push(
         push_service,
         user_id,
@@ -161,7 +197,8 @@ pub(super) fn notify_hive_error(
             session_id: Some(session_id.to_string()),
             tag: Some(format!("hive-{session_id}")),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "error",
                 session_id,
                 Some("error"),
@@ -181,7 +218,8 @@ pub(super) fn notify_hive_error(
             body: "Run encountered an error".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "error",
                 session_id,
                 Some("error"),
@@ -213,7 +251,8 @@ pub(super) fn notify_hive_completion(
             session_id: Some(session_id.to_string()),
             tag: Some(format!("hive-{session_id}")),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "completion",
                 session_id,
                 Some("success"),
@@ -230,12 +269,52 @@ pub(super) fn notify_hive_completion(
             body: "Run finished".into(),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
-            data: Some(hive_session_notification_data(
+            data: Some(hive_update_data(
+                db_path,
                 "completion",
                 session_id,
                 Some("success"),
                 None,
             )),
+        },
+        ApnsEventType::HiveUpdate,
+    );
+}
+
+pub(super) fn notify_hive_partial(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let data = hive_update_data(db_path, "partial", session_id, Some("warning"), None);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Hive".into(),
+            body: format!("{session_label} finished with partial results"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("hive-{session_id}")),
+            category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
+            data: Some(data.clone()),
+        },
+        PushEventType::HiveUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: format!(
+                "{} — Partial",
+                hive_notification_title(None, &session_label)
+            ),
+            body: "Review the remaining work".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some(APNS_CATEGORY_HIVE_SESSION.into()),
+            data: Some(data),
         },
         ApnsEventType::HiveUpdate,
     );

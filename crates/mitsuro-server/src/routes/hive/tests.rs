@@ -21,17 +21,22 @@ use mitsuro_core::skills::SkillsManager;
 use mitsuro_core::storage::credentials::CredentialStore;
 use mitsuro_core::storage::reports::CreateReportInput;
 use mitsuro_core::storage::{
-    bootstrap_hive_home, AutonomousTaskStore, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, HiveProfileDocumentKind, HiveProfileOwner,
-    HiveProfileStore, HiveRunPriority, HiveRuntimeStateStatus, HiveRuntimeStateStore, MemoryStore,
-    MemoryType, Preferences, ReportStore, RuntimeTraceEvent, RuntimeTraceStore, SessionType,
-    WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    bootstrap_hive_home, refresh_current_snapshot, AutonomousTaskStore, Database, DelegatedRunRole,
+    DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore, HiveProfileDocumentKind,
+    HiveProfileOwner, HiveProfileStore, HiveRunPriority, HiveRuntimeStateStatus,
+    HiveRuntimeStateStore, MemoryStore, MemoryType, Preferences, ReportStore, RuntimeTraceEvent,
+    RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use mitsuro_core::tools::registry::ToolRegistry;
 use mitsuro_core::SessionManager;
 
 use super::attention::{attention, AttentionQuery};
 use super::current::current;
+use super::groups::{
+    archive_group, create_group, get_group, get_group_turn, list_group_messages, list_groups,
+    send_group_message, stop_group, update_group, CreateGroupRequest, ListGroupMessagesQuery,
+    SendGroupMessageRequest, UpdateGroupRequest,
+};
 use super::hive_home_dir_for_user;
 use super::home::{
     build_hive_bootstrap_response_from_dir, build_hive_channels_response_from_dir,
@@ -42,6 +47,10 @@ use super::sessions::{
     dispatch, legacy_main_session, list_sessions, main_session, map_runtime_trace_event,
     recover_daemon, schedule_session, session_status, set_priority, DispatchRequest,
     PriorityRequest, ScheduleRequest,
+};
+use super::workers::{
+    archive_worker, create_worker, ensure_worker_dm, get_worker, list_workers, pause_worker,
+    resume_worker, update_worker, CreateWorkerRequest, UpdateWorkerRequest,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -1325,24 +1334,80 @@ async fn current_summarizes_knowledge_snapshot_health() {
         0
     );
 
+    // A legacy snapshot-titled row in `agent_memories` must not satisfy
+    // knowledge health: migration 39 moved generated snapshots into the
+    // dedicated `knowledge_snapshots` store.
     let memory_store =
         MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
-    let snapshot = memory_store
+    memory_store
         .save(
             MemoryType::Project,
             CURRENT_SNAPSHOT_TITLE,
-            "Initial knowledge snapshot",
+            "Legacy snapshot location",
             Some(project_dir.to_string_lossy().as_ref()),
             Some("alice"),
         )
-        .expect("snapshot should persist");
+        .expect("legacy memory should persist");
 
+    let Json(legacy_summary) = current(
+        State(state.clone()),
+        Some(current_user("alice", &user_root)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("current should succeed"));
+    assert_eq!(
+        legacy_summary.diagnostics.knowledge.missing_snapshot_count, 1,
+        "agent_memories rows must not count as knowledge snapshots"
+    );
+
+    // A real snapshot produced by the canonical refresh path is healthy.
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Build notes",
+            "Use the staging branch for release work",
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("memory should persist");
+    let snapshot = refresh_current_snapshot(
+        &state.db_path,
+        Some(project_dir.to_string_lossy().as_ref()),
+        Some("alice"),
+    )
+    .expect("refresh should succeed")
+    .expect("snapshot should materialize");
+
+    let Json(fresh_summary) = current(
+        State(state.clone()),
+        Some(current_user("alice", &user_root)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("current should succeed"));
+    assert_eq!(fresh_summary.diagnostics.knowledge.scope_count, 1);
+    assert_eq!(
+        fresh_summary.diagnostics.knowledge.missing_snapshot_count,
+        0
+    );
+    assert_eq!(fresh_summary.diagnostics.knowledge.stale_snapshot_count, 0);
+    let latest_snapshot_at = fresh_summary
+        .diagnostics
+        .knowledge
+        .latest_snapshot_at
+        .expect("snapshot timestamp should be reported");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&latest_snapshot_at).is_ok(),
+        "latest_snapshot_at should be RFC 3339, got {latest_snapshot_at}"
+    );
+
+    // Backdate the stored snapshot using the store's native SQLite timestamp
+    // format; newer session/report signals must mark the scope stale.
     Database::new(&state.db_path)
         .expect("database should open")
         .conn()
         .execute(
-            "UPDATE agent_memories SET updated_at = ?1 WHERE id = ?2",
-            ("2025-01-01T00:00:00Z", snapshot.id.as_str()),
+            "UPDATE knowledge_snapshots SET updated_at = '2025-01-01 00:00:00' WHERE id = ?1",
+            [snapshot.id.as_str()],
         )
         .expect("snapshot should backdate");
 
@@ -1621,4 +1686,816 @@ fn map_runtime_trace_event_skips_malformed_payload() {
     };
 
     assert!(map_runtime_trace_event(event).is_none());
+}
+
+fn create_group_request(title: &str, member_worker_ids: Vec<String>) -> CreateGroupRequest {
+    CreateGroupRequest {
+        title: title.to_string(),
+        execution_mode: None,
+        max_rounds: None,
+        max_member_messages_per_turn: None,
+        parallelism: None,
+        context_window_messages: None,
+        default_assignee_worker_id: None,
+        member_worker_ids,
+    }
+}
+
+fn empty_update_group_request() -> UpdateGroupRequest {
+    UpdateGroupRequest {
+        title: None,
+        execution_mode: None,
+        max_rounds: None,
+        max_member_messages_per_turn: None,
+        parallelism: None,
+        context_window_messages: None,
+        default_assignee_worker_id: None,
+        member_worker_ids: None,
+    }
+}
+
+/// Two Workers owned by the given user, returning their ids.
+async fn seed_two_workers(state: &AppState, user_id: &str) -> Vec<String> {
+    let mut worker_ids = Vec::new();
+    for slug in ["researcher", "builder"] {
+        let (_, Json(created)) = create_worker(
+            State(state.clone()),
+            Some(current_user(user_id, state.working_dir.as_ref())),
+            Json(create_worker_request(slug)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "worker create should succeed: {}",
+                app_error_description(error)
+            )
+        });
+        worker_ids.push(created.worker.id.clone());
+    }
+    worker_ids
+}
+
+#[tokio::test]
+async fn groups_crud_lifecycle_is_exact_owner_scoped() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+    let worker_ids = seed_two_workers(&state, "alice").await;
+
+    // Creation validates members: empty and cross-owner picks fail closed.
+    assert!(matches!(
+        create_group(
+            State(state.clone()),
+            alice(),
+            Json(create_group_request("Empty", Vec::new())),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+    assert!(matches!(
+        create_group(
+            State(state.clone()),
+            bob(),
+            Json(create_group_request("Stolen", worker_ids.clone())),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+
+    let (created_status, Json(created)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(CreateGroupRequest {
+            parallelism: Some(2),
+            ..create_group_request("Release Room", worker_ids.clone())
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "group create should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(created_status, axum::http::StatusCode::CREATED);
+    assert_eq!(created.group.title, "Release Room");
+    assert_eq!(created.group.execution_mode, "workbench");
+    assert_eq!(created.group.parallelism, 2);
+    assert_eq!(created.group.members.len(), 2);
+    assert_eq!(created.group.members[0].slug, "researcher");
+    assert!(created.active_turn.is_none());
+    let group_id = created.group.id.clone();
+
+    // Reads and mutations are exact-owner scoped.
+    assert!(matches!(
+        get_group(State(state.clone()), bob(), Path(group_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        update_group(
+            State(state.clone()),
+            bob(),
+            Path(group_id.clone()),
+            Json(empty_update_group_request()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        archive_group(State(state.clone()), bob(), Path(group_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    let Json(bob_list) = list_groups(State(state.clone()), bob())
+        .await
+        .expect("bob list should succeed");
+    assert!(bob_list.groups.is_empty());
+    let Json(alice_list) = list_groups(State(state.clone()), alice())
+        .await
+        .expect("alice list should succeed");
+    assert_eq!(alice_list.groups.len(), 1);
+
+    // Update: rename, switch to direct with an assignee, then remove the
+    // assignee through membership replacement.
+    let Json(updated) = update_group(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        Json(UpdateGroupRequest {
+            title: Some("War Room".to_string()),
+            execution_mode: Some(
+                serde_json::from_value(serde_json::json!("direct")).expect("mode should parse"),
+            ),
+            default_assignee_worker_id: Some(worker_ids[1].clone()),
+            ..empty_update_group_request()
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "group update should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(updated.group.title, "War Room");
+    assert_eq!(updated.group.execution_mode, "direct");
+    assert_eq!(
+        updated.group.default_assignee_worker_id.as_deref(),
+        Some(worker_ids[1].as_str())
+    );
+
+    let Json(shrunk) = update_group(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        Json(UpdateGroupRequest {
+            member_worker_ids: Some(vec![worker_ids[0].clone()]),
+            ..empty_update_group_request()
+        }),
+    )
+    .await
+    .expect("membership replacement should succeed");
+    assert_eq!(shrunk.group.members.len(), 1);
+    assert!(shrunk.group.default_assignee_worker_id.is_none());
+
+    // Archive hides the group and blocks further edits.
+    let Json(archived) = archive_group(State(state.clone()), alice(), Path(group_id.clone()))
+        .await
+        .expect("archive should succeed");
+    assert!(archived.ok);
+    let Json(after_archive) = list_groups(State(state.clone()), alice())
+        .await
+        .expect("list should succeed");
+    assert!(after_archive.groups.is_empty());
+    assert!(matches!(
+        update_group(
+            State(state.clone()),
+            alice(),
+            Path(group_id.clone()),
+            Json(empty_update_group_request()),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn group_messages_and_turns_read_with_exact_ownership_and_cursors() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+    let worker_ids = seed_two_workers(&state, "alice").await;
+    let (_, Json(created)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(create_group_request("Reading Room", worker_ids.clone())),
+    )
+    .await
+    .expect("group create should succeed");
+    let group_id = created.group.id.clone();
+
+    // Seed a small timeline and one turn directly through the store.
+    let store = mitsuro_core::storage::HiveGroupStore::new(Database::new(&state.db_path).unwrap());
+    let trigger = store
+        .append_message(&mitsuro_core::storage::NewHiveGroupMessage::user(
+            &group_id,
+            "hello room",
+        ))
+        .unwrap();
+    store
+        .append_message(&mitsuro_core::storage::NewHiveGroupMessage::worker(
+            &group_id,
+            &worker_ids[0],
+            "hello back",
+        ))
+        .unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let turn = mitsuro_core::storage::HiveGroupTurn {
+        id: uuid::Uuid::new_v4().to_string(),
+        group_id: group_id.clone(),
+        trigger_message_id: trigger.id.clone(),
+        execution_mode: created_mode(),
+        policy: mitsuro_core::storage::HiveGroupTurnPolicy {
+            max_rounds: 3,
+            max_member_messages_per_turn: 2,
+            parallelism: 3,
+            context_window_messages: 24,
+        },
+        speaker_plan: worker_ids.clone(),
+        next_speaker_index: 0,
+        status: mitsuro_core::storage::HiveGroupTurnStatus::Running,
+        member_outcomes: None,
+        started_at: now.clone(),
+        finished_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    mitsuro_core::storage::hive_groups::insert_turn_with_conn(
+        Database::new(&state.db_path).unwrap().conn(),
+        &turn,
+    )
+    .unwrap();
+
+    // Cursor pagination returns strictly-after rows.
+    let Json(page) = list_group_messages(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        Query(ListGroupMessagesQuery {
+            after_seq: Some(1),
+            limit: Some(10),
+        }),
+    )
+    .await
+    .expect("message list should succeed");
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].seq, 2);
+    assert_eq!(page.latest_seq, 2);
+
+    // Ownership: bob sees neither messages nor turns.
+    assert!(matches!(
+        list_group_messages(
+            State(state.clone()),
+            bob(),
+            Path(group_id.clone()),
+            Query(ListGroupMessagesQuery {
+                after_seq: None,
+                limit: None,
+            }),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        get_group_turn(
+            State(state.clone()),
+            bob(),
+            Path((group_id.clone(), turn.id.clone())),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+
+    let Json(turn_view) = get_group_turn(
+        State(state.clone()),
+        alice(),
+        Path((group_id.clone(), turn.id.clone())),
+    )
+    .await
+    .expect("turn read should succeed");
+    assert_eq!(turn_view.status, "running");
+    assert_eq!(turn_view.speaker_plan, worker_ids);
+
+    // A turn id from another group is not addressable through this group.
+    let (_, Json(other)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(create_group_request("Other Room", worker_ids.clone())),
+    )
+    .await
+    .expect("second group create should succeed");
+    assert!(matches!(
+        get_group_turn(
+            State(state.clone()),
+            alice(),
+            Path((other.group.id.clone(), turn.id.clone())),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+
+    // The group detail surfaces the active turn.
+    let Json(detail) = get_group(State(state.clone()), alice(), Path(group_id.clone()))
+        .await
+        .expect("group detail should succeed");
+    assert_eq!(
+        detail.active_turn.as_ref().map(|turn| turn.id.as_str()),
+        Some(turn.id.as_str())
+    );
+    assert_eq!(
+        detail.group.active_turn_id.as_deref(),
+        Some(turn.id.as_str())
+    );
+}
+
+fn created_mode() -> mitsuro_core::storage::HiveGroupExecutionMode {
+    mitsuro_core::storage::HiveGroupExecutionMode::Workbench
+}
+
+#[tokio::test]
+async fn group_sends_fail_closed_without_the_daemon_but_prepare_dm_lanes() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+    let worker_ids = seed_two_workers(&state, "alice").await;
+    let (_, Json(created)) = create_group(
+        State(state.clone()),
+        alice(),
+        Json(create_group_request("Send Room", worker_ids.clone())),
+    )
+    .await
+    .expect("group create should succeed");
+    let group_id = created.group.id.clone();
+
+    // Bad inputs fail before any daemon interaction.
+    assert!(matches!(
+        send_group_message(
+            State(state.clone()),
+            alice(),
+            Path(group_id.clone()),
+            HeaderMap::new(),
+            Json(SendGroupMessageRequest {
+                message: "   ".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+    let mut oversized_key = HeaderMap::new();
+    oversized_key.insert(
+        "idempotency-key",
+        axum::http::HeaderValue::from_str(&"k".repeat(300)).unwrap(),
+    );
+    assert!(matches!(
+        send_group_message(
+            State(state.clone()),
+            alice(),
+            Path(group_id.clone()),
+            oversized_key,
+            Json(SendGroupMessageRequest {
+                message: "hello".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+
+    // Ownership before side effects.
+    assert!(matches!(
+        send_group_message(
+            State(state.clone()),
+            bob(),
+            Path(group_id.clone()),
+            HeaderMap::new(),
+            Json(SendGroupMessageRequest {
+                message: "hello".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        stop_group(
+            State(state.clone()),
+            bob(),
+            Path(group_id.clone()),
+            HeaderMap::new(),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+
+    // Run-triggering sends fail closed onto the daemon control plane in the
+    // embedded test state instead of silently running in-process.
+    let send_error = send_group_message(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        HeaderMap::new(),
+        Json(SendGroupMessageRequest {
+            message: "@researcher take a look".into(),
+            mentions_override: None,
+        }),
+    )
+    .await
+    .expect_err("embedded state has no daemon control plane");
+    assert!(
+        app_error_description(send_error).contains("daemon control plane"),
+        "send must fail closed onto the daemon"
+    );
+    let stop_error = stop_group(
+        State(state.clone()),
+        alice(),
+        Path(group_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect_err("embedded state has no daemon control plane");
+    assert!(app_error_description(stop_error).contains("daemon control plane"));
+
+    // The send prepared every member's DM lane before reaching the daemon
+    // boundary, so a daemon-backed retry has controllers to queue on.
+    let worker_store =
+        mitsuro_core::storage::HiveWorkerStore::new(Database::new(&state.db_path).unwrap());
+    for worker_id in &worker_ids {
+        let worker = worker_store.get(worker_id).unwrap().unwrap();
+        assert!(
+            worker.dm_session_id.is_some(),
+            "send should ensure the member DM lane"
+        );
+    }
+
+    // Archived groups refuse sends outright.
+    let _ = archive_group(State(state.clone()), alice(), Path(group_id.clone()))
+        .await
+        .expect("archive should succeed");
+    assert!(matches!(
+        send_group_message(
+            State(state.clone()),
+            alice(),
+            Path(group_id.clone()),
+            HeaderMap::new(),
+            Json(SendGroupMessageRequest {
+                message: "hello".into(),
+                mentions_override: None,
+            }),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+}
+
+fn create_worker_request(slug: &str) -> CreateWorkerRequest {
+    CreateWorkerRequest {
+        slug: slug.to_string(),
+        display_name: None,
+        avatar_color: None,
+        model: None,
+        model_key: None,
+        permission_mode: None,
+        autonomy: None,
+        heartbeat_interval_secs: None,
+        identity: None,
+        soul: None,
+    }
+}
+
+fn empty_update_worker_request() -> UpdateWorkerRequest {
+    UpdateWorkerRequest {
+        display_name: None,
+        avatar_color: None,
+        model: None,
+        model_key: None,
+        permission_mode: None,
+        autonomy: None,
+        heartbeat_interval_secs: None,
+        identity: None,
+        soul: None,
+    }
+}
+
+#[tokio::test]
+async fn workers_crud_lifecycle_is_exact_owner_scoped() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+    let bob = || Some(current_user("bob", state.working_dir.as_ref()));
+
+    // Slug validation and creation.
+    assert!(matches!(
+        create_worker(
+            State(state.clone()),
+            alice(),
+            Json(create_worker_request("Bad Slug")),
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
+    let (created_status, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(CreateWorkerRequest {
+            display_name: Some("Deep Researcher".to_string()),
+            avatar_color: Some("#7743DB".to_string()),
+            identity: Some("You research deeply.".to_string()),
+            soul: Some("Calm and exact.".to_string()),
+            permission_mode: Some("supervised".parse().expect("permission mode should parse")),
+            ..create_worker_request("researcher")
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker create should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(created_status, axum::http::StatusCode::CREATED);
+    assert_eq!(created.worker.slug, "researcher");
+    assert_eq!(created.worker.display_name, "Deep Researcher");
+    assert_eq!(created.worker.status, "active");
+    assert_eq!(created.worker.permission_mode, "supervised");
+    assert_eq!(created.identity.as_deref(), Some("You research deeply."));
+    assert_eq!(created.soul.as_deref(), Some("Calm and exact."));
+
+    // Duplicate active slug for the same owner conflicts; other owners are free.
+    assert!(matches!(
+        create_worker(
+            State(state.clone()),
+            alice(),
+            Json(create_worker_request("researcher")),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    let (_, Json(_)) = create_worker(
+        State(state.clone()),
+        bob(),
+        Json(create_worker_request("researcher")),
+    )
+    .await
+    .expect("same slug under another owner should create");
+
+    // Reads and mutations are exact-owner scoped: bob never sees alice's worker.
+    let worker_id = created.worker.id.clone();
+    assert!(matches!(
+        get_worker(State(state.clone()), bob(), Path(worker_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            bob(),
+            Path(worker_id.clone()),
+            Json(empty_update_worker_request()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        ensure_worker_dm(State(state.clone()), bob(), Path(worker_id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    // Owner list shows only the owner's workers.
+    let Json(alice_list) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("alice list should succeed");
+    assert_eq!(alice_list.workers.len(), 1);
+    assert_eq!(alice_list.workers[0].id, worker_id);
+
+    // Profile and document updates round-trip.
+    let Json(updated) = update_worker(
+        State(state.clone()),
+        alice(),
+        Path(worker_id.clone()),
+        Json(UpdateWorkerRequest {
+            display_name: Some("Lead Researcher".to_string()),
+            autonomy: Some(
+                serde_json::from_value(serde_json::json!("always_on"))
+                    .expect("autonomy should parse"),
+            ),
+            heartbeat_interval_secs: Some(900),
+            soul: Some("Curious and rigorous.".to_string()),
+            ..empty_update_worker_request()
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker update should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(updated.worker.display_name, "Lead Researcher");
+    assert_eq!(updated.worker.autonomy, "always_on");
+    assert_eq!(updated.worker.heartbeat_interval_secs, Some(900));
+    assert_eq!(updated.soul.as_deref(), Some("Curious and rigorous."));
+    assert_eq!(updated.identity.as_deref(), Some("You research deeply."));
+
+    // Pause and resume flip status without touching identity.
+    let Json(paused) = pause_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("pause should succeed");
+    assert_eq!(paused.status, "paused");
+    let Json(resumed) = resume_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("resume should succeed");
+    assert_eq!(resumed.status, "active");
+
+    // Delete archives instead of destroying, frees the slug, and blocks writes.
+    let Json(archive_response) =
+        archive_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+            .await
+            .expect("archive should succeed");
+    assert!(archive_response.ok);
+    let Json(after_archive) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("list should succeed");
+    assert!(after_archive.workers.is_empty());
+    let Json(archived) = get_worker(State(state.clone()), alice(), Path(worker_id.clone()))
+        .await
+        .expect("archived worker remains readable");
+    assert_eq!(archived.worker.status, "archived");
+    assert_eq!(archived.identity.as_deref(), Some("You research deeply."));
+    assert!(matches!(
+        update_worker(
+            State(state.clone()),
+            alice(),
+            Path(worker_id.clone()),
+            Json(empty_update_worker_request()),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(
+        ensure_worker_dm(State(state.clone()), alice(), Path(worker_id.clone())).await,
+        Err(AppError::Conflict(_))
+    ));
+    let (_, Json(_)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("researcher")),
+    )
+    .await
+    .expect("archived slug should be reusable");
+}
+
+#[tokio::test]
+async fn worker_dm_ensure_is_idempotent_and_freezes_worker_model() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    configure_test_model(&state).await;
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(CreateWorkerRequest {
+            model: Some("gpt-5.5".to_string()),
+            permission_mode: Some("supervised".parse().expect("permission mode should parse")),
+            ..create_worker_request("builder")
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker create should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(created.worker.model.as_deref(), Some("gpt-5.5"));
+    assert!(created.worker.model_key.is_some());
+
+    let Json(first) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("dm ensure should succeed: {}", app_error_description(error)));
+    assert!(first.created);
+    assert_eq!(first.session_type, "hive");
+    assert_eq!(first.title, "Builder");
+    assert_eq!(first.permission_mode, "supervised");
+
+    let Json(second) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .expect("second dm ensure should reuse");
+    assert!(!second.created);
+    assert_eq!(second.session_id, first.session_id);
+
+    // The DM session row carries the Worker's frozen identity: hive type,
+    // Worker title, Worker permission mode, and the exact model key, so chat
+    // turns honoring the persisted session model run as this Worker.
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session = session_manager
+        .get_session(&first.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert_eq!(session.session_type, SessionType::Hive);
+    assert_eq!(session.title, "Builder");
+    assert_eq!(session.user_id.as_deref(), Some("alice"));
+    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        session.model_key.as_ref().map(|key| key.model_id.as_str()),
+        Some("gpt-5.5")
+    );
+    assert_eq!(session.permission_mode.as_str(), "supervised");
+    assert!(session.parent_session_id.is_none());
+    assert!(session.project_dir.is_none());
+
+    // The list surface exposes the binding and its idle DM state.
+    let Json(list) = list_workers(State(state.clone()), alice())
+        .await
+        .expect("list should succeed");
+    assert_eq!(
+        list.workers[0].dm_session_id.as_deref(),
+        Some(first.session_id.as_str())
+    );
+    assert_eq!(list.workers[0].dm_agent_state.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
+async fn worker_model_patch_propagates_to_dm_session_row() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    configure_test_model(&state).await;
+    let alice = || Some(current_user("alice", state.working_dir.as_ref()));
+
+    let (_, Json(created)) = create_worker(
+        State(state.clone()),
+        alice(),
+        Json(create_worker_request("builder")),
+    )
+    .await
+    .expect("worker create should succeed");
+    let Json(dm) = ensure_worker_dm(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+    )
+    .await
+    .expect("dm ensure should succeed");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let before = session_manager
+        .get_session(&dm.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert!(before.model.as_deref().unwrap_or("").is_empty());
+    assert!(before.model_key.is_none());
+
+    let Json(updated) = update_worker(
+        State(state.clone()),
+        alice(),
+        Path(created.worker.id.clone()),
+        Json(UpdateWorkerRequest {
+            model: Some("gpt-5.5".to_string()),
+            ..empty_update_worker_request()
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "worker model update should succeed: {}",
+            app_error_description(error)
+        )
+    });
+    assert_eq!(updated.worker.model.as_deref(), Some("gpt-5.5"));
+
+    let after = session_manager
+        .get_session(&dm.session_id)
+        .expect("session lookup should succeed")
+        .expect("dm session should exist");
+    assert_eq!(after.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        after.model_key.as_ref().map(|key| key.model_id.as_str()),
+        Some("gpt-5.5")
+    );
 }

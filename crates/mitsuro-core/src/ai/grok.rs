@@ -107,6 +107,10 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
     if id.is_empty() {
         return None;
     }
+    let normalized = id.to_ascii_lowercase().replace('_', "-");
+    if is_grok_45_family(&normalized) {
+        return None;
+    }
 
     let api_format = match model.api_backend.as_deref() {
         Some("chat_completions") => ApiFormat::OpenAI,
@@ -161,17 +165,26 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
 
 /// Graded `reasoning_effort` support for Grok model IDs.
 ///
-/// Public xAI Grok 4.5 is low/medium/high (default high, always-on).
+/// Public xAI Grok 4.6 is low/medium/high plus extra-high (`xhigh`).
+/// Grok 4.5 is no longer listed; leftover 4.5 IDs keep the old ladder if resolved.
 /// Older subscription-only rows (grok-build, composer) stay output-only.
 fn graded_effort_for_grok_model(
     model_id: &str,
 ) -> Option<(Vec<ReasoningEffort>, ReasoningEffort, bool)> {
     let normalized = model_id.trim().to_ascii_lowercase().replace('_', "-");
-    if normalized.starts_with("grok-4.5")
-        || normalized.starts_with("grok-4-5")
-        || normalized.contains("grok-4.5")
-        || normalized.contains("grok-4-5")
-    {
+    if is_grok_46_family(&normalized) {
+        return Some((
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ],
+            ReasoningEffort::High,
+            true,
+        ));
+    }
+    if is_grok_45_family(&normalized) {
         return Some((
             vec![
                 ReasoningEffort::Low,
@@ -209,6 +222,18 @@ fn default_max_output(context_window: usize) -> usize {
     } else {
         16_384
     }
+}
+
+fn is_grok_46_family(normalized: &str) -> bool {
+    ["grok-4.6", "grok-4-6"]
+        .into_iter()
+        .any(|family| normalized.starts_with(family) || normalized.contains(family))
+}
+
+fn is_grok_45_family(normalized: &str) -> bool {
+    ["grok-4.5", "grok-4-5"]
+        .into_iter()
+        .any(|family| normalized.starts_with(family) || normalized.contains(family))
 }
 
 fn is_grok_build_reasoning_model(model_id: &str) -> bool {
@@ -270,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_grok_45_with_graded_effort() {
+    fn drops_retired_grok_45_from_live_catalog() {
         let raw = GrokModel {
             id: Some("grok-4.5".to_string()),
             model: None,
@@ -283,9 +308,26 @@ mod tests {
             supports_reasoning_efforts: None,
         };
 
+        assert!(parse_model(raw).is_none());
+    }
+
+    #[test]
+    fn parses_grok_46_with_graded_effort() {
+        let raw = GrokModel {
+            id: Some("grok-4.6".to_string()),
+            model: None,
+            name: Some("Grok 4.6".to_string()),
+            description: None,
+            context_window: Some(500_000),
+            max_completion_tokens: Some(32_768),
+            api_backend: Some("responses".to_string()),
+            supports_reasoning_effort: Some(true),
+            supports_reasoning_efforts: None,
+        };
+
         let model = parse_model(raw).expect("model should parse");
 
-        assert_eq!(model.id, "grok-4.5");
+        assert_eq!(model.id, "grok-4.6");
         assert!(model.supports_thinking);
         assert_eq!(
             model.reasoning_control,
@@ -297,9 +339,20 @@ mod tests {
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
+                ReasoningEffort::XHigh,
             ]
         );
         assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::High));
         assert!(model.reasoning_is_mandatory);
+    }
+
+    #[test]
+    fn hyphenated_grok_46_id_uses_the_same_graded_effort() {
+        let levels = graded_effort_for_grok_model("grok-4-6").expect("hyphenated 4.6");
+        assert!(levels.0.contains(&ReasoningEffort::XHigh));
+        assert!(graded_effort_for_grok_model("xai/grok-4.6")
+            .is_some_and(|levels| levels.0.contains(&ReasoningEffort::XHigh)));
+        assert!(!graded_effort_for_grok_model("grok-4.5")
+            .is_some_and(|levels| levels.0.contains(&ReasoningEffort::XHigh)));
     }
 }

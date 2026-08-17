@@ -4,6 +4,7 @@
  */
 
 import { createStreamCallbacks } from '../src/session/streaming.ts';
+import { mergeDelegationEventCursor } from '../src/session/serverState.ts';
 import { createStreamingAssistantMessage } from '../src/session/transient.ts';
 
 declare const Deno: {
@@ -32,6 +33,7 @@ function testHarness() {
     isStreaming: true,
     isThinking: false,
     thinkingContent: '',
+    delegationEventCursor: 40,
   };
   const set = (partial: any) => {
     setCount += 1;
@@ -46,6 +48,31 @@ function testHarness() {
 
   return { callbacks, ref, state: () => state, setCount: () => setCount };
 }
+
+Deno.test('delegation SSE events request an immediate canonical refresh', () => {
+  const ref = { current: createStreamingAssistantMessage() };
+  let refreshes = 0;
+  const state: any = { messages: [ref.current], delegationEventCursor: 40 };
+  const callbacks = createStreamCallbacks(ref, () => {}, () => state, {
+    planStore: { getState: () => ({ setItems() {} }) } as never,
+    sessionsStore: { getState: () => ({ loadSessions() {} }) } as never,
+    persistSessionMode: async () => {},
+    onDelegationEvent: () => refreshes += 1,
+  });
+  const event = {
+    event_id: 41,
+    parent_session_id: 'session-1',
+    delegation_group_id: 'group-1',
+    delegation_task_id: 'task-1',
+    event_type: 'task_running' as const,
+    payload: { state: 'running' },
+    created_at: '2026-08-08T12:00:00Z',
+  };
+  callbacks.onDelegationEvent?.(event);
+  assertEquals(refreshes, 1, 'new delegation lifecycle events trigger canonical refresh');
+  callbacks.onDelegationEvent?.({ ...event, event_id: 39 });
+  assertEquals(refreshes, 1, 'already-applied events do not trigger duplicate refreshes');
+});
 
 Deno.test('duplicate tool starts remain one live tool block', () => {
   const { callbacks, ref } = testHarness();
@@ -62,6 +89,45 @@ Deno.test('duplicate tool starts remain one live tool block', () => {
     'tool render part should be idempotent',
   );
   assertEquals(ref.current.toolCalls?.[0]?.status, 'success', 'result updates the tool');
+});
+
+Deno.test('live sparse delegation events preserve the HTTP replay cursor', () => {
+  const harness = testHarness();
+  const event = {
+    event_id: 41,
+    parent_session_id: 'session-1',
+    delegation_group_id: 'group-1',
+    delegation_task_id: 'task-1',
+    event_type: 'task_running' as const,
+    payload: { state: 'running' },
+    created_at: '2026-08-08T12:00:00Z',
+  };
+
+  harness.callbacks.onDelegationEvent?.(event);
+  assertEquals(
+    harness.state().delegationEventCursor,
+    40,
+    'SSE must not advance the cursor before canonical snapshot state is applied',
+  );
+  harness.callbacks.onDelegationEvent?.({ ...event, event_id: 43 });
+  assertEquals(
+    harness.state().delegationEventCursor,
+    40,
+    'globally sparse event IDs remain replayable for this session',
+  );
+});
+
+Deno.test('an older in-flight snapshot cannot regress the live delegation cursor', () => {
+  assertEquals(
+    mergeDelegationEventCursor(42, 41),
+    42,
+    'cursor merges must be monotonic when SSE wins the race',
+  );
+  assertEquals(
+    mergeDelegationEventCursor(null, 41),
+    41,
+    'the first durable snapshot establishes the replay cursor',
+  );
 });
 
 Deno.test('bursty thinking and tool output deltas commit once per frame', async () => {

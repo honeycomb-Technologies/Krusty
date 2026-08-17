@@ -3,7 +3,7 @@
  *
  * Remote auth currently passes the token as a query parameter because browser
  * WebSocket constructors cannot set arbitrary Authorization headers (and the
- * xterm iframe path has the same limitation). The server only accepts query
+ * embedded terminal path has the same limitation). The server only accepts query
  * tokens on WebSocket upgrade requests.
  *
  * Tradeoffs / leakage risk: query tokens can appear in proxy logs, browser

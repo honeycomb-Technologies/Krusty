@@ -49,6 +49,7 @@ interface StreamCallbackDependencies {
 	) => Promise<void>;
 	isActive?: () => boolean;
 	onFirstEvent?: () => void;
+	onDelegationEvent?: () => void;
 }
 
 function appendBounded(existing: string, delta: string, max: number): string {
@@ -133,6 +134,7 @@ export function createStreamCallbacks(
 		persistSessionMode,
 		isActive = () => true,
 		onFirstEvent,
+		onDelegationEvent,
 	}: StreamCallbackDependencies,
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
@@ -343,6 +345,15 @@ export function createStreamCallbacks(
 			updateLastAssistantMessage();
 		},
 
+		onToolCallPreparing: (id, _name, receivedBytes) => {
+			flushPendingDeltas();
+			const kilobytes = Math.max(1, Math.round(receivedBytes / 1024));
+			mapToolCalls(id, (toolCall) => ({
+				...toolCall,
+				description: `Preparing input · ${kilobytes} KB`,
+			}));
+		},
+
 		onToolCallComplete: (id, _name, args) => {
 			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => {
@@ -353,6 +364,7 @@ export function createStreamCallbacks(
 				);
 				return {
 					...toolCall,
+					description: undefined,
 					arguments: args,
 					delegated: delegatedKind
 						? mergeDelegatedArtifactState(
@@ -422,6 +434,20 @@ export function createStreamCallbacks(
 			mapToolCalls(event.tool_call_id, (toolCall) =>
 				applyDelegatedProgress(toolCall, event),
 			);
+		},
+
+		onDelegationEvent: (event) => {
+			noteFirstEvent();
+			// Event IDs are global across sessions, so a session's valid sequence
+			// is inherently sparse. Keep the last HTTP-applied cursor until the
+			// canonical snapshot maps this event into group/task UI state; advancing
+			// it here would make the next metadata poll skip that remap entirely.
+			// The normal active-run poll applies it promptly, while this flag also
+			// guarantees a full reconciliation when the stream finishes first.
+			if (event.event_id > (get().delegationEventCursor ?? 0)) {
+				streamLagged = true;
+				onDelegationEvent?.();
+			}
 		},
 
 		onPlanUpdate: (items: PlanItem[]) => {
@@ -564,7 +590,7 @@ export function createStreamCallbacks(
 			sessionsStore.getState().loadSessions();
 		},
 
-		onFinish: (sessionId) => {
+		onFinish: (sessionId, _stopReason) => {
 			flushPendingDeltas();
 			const currentState = get();
 			const queued = currentState.queuedMessages;

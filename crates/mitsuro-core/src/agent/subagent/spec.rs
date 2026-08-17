@@ -243,10 +243,12 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 
 fn restrictive_turn_budget(requested: Option<usize>, inherited: Option<usize>) -> Option<usize> {
     match (requested, inherited) {
-        (Some(0), _) => Some(1),
         (Some(requested), Some(inherited)) => Some(requested.min(inherited).max(1)),
-        (Some(requested), None) => Some(requested.max(1)),
-        (None, inherited) => inherited,
+        // A model-authored Agent call must not invent a hidden child ceiling
+        // when the parent/session contract is unlimited. Requested values may
+        // only narrow an inherited governance budget.
+        (Some(_), None) => None,
+        (None, inherited) => inherited.map(|value| value.max(1)),
     }
 }
 
@@ -329,6 +331,25 @@ mod tests {
             .rendered_objective()
             .contains("implement the padding fix"));
         assert!(!spec.rendered_objective().contains("specialist profile"));
+    }
+
+    #[test]
+    fn model_request_cannot_invent_a_turn_budget_for_an_unlimited_parent() {
+        let spec = AgentSpec::resolve(
+            None,
+            None,
+            Some("build proof"),
+            "complete the proof",
+            None,
+            None,
+            &["write".to_string()],
+            None,
+            Some(20),
+            None,
+        )
+        .expect("resolved spec");
+
+        assert_eq!(spec.max_turns, None);
     }
 
     #[test]

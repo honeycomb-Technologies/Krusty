@@ -2,10 +2,15 @@
 
 use mitsuro_core::{
     agent::{
-        loop_events::LoopStopReason, subagent::AgentProgressStatus, DelegatedProgressEvent,
-        LoopEvent,
+        loop_events::LoopStopReason,
+        subagent::{AgentProgress, AgentProgressStatus},
+        DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind, LoopEvent,
     },
     ai::types::Citation,
+    storage::{
+        DelegatedRunRole, DelegationGroupRecord, DelegationGroupState, DelegationTaskRecord,
+        DelegationTaskState,
+    },
 };
 
 use crate::tui_v2::model::{
@@ -41,6 +46,9 @@ impl ConversationProjection {
                 signature,
             } => self.complete_thinking(&thinking, Some(signature)),
             LoopEvent::ToolCallStart { id, name } => {
+                self.upsert_tool(&id, &name, ToolStatus::Receiving, false);
+            }
+            LoopEvent::ToolCallPreparing { id, name, .. } => {
                 self.upsert_tool(&id, &name, ToolStatus::Receiving, false);
             }
             LoopEvent::ToolCallComplete {
@@ -570,6 +578,28 @@ pub(super) fn apply_delegated_progress(
         .find(|key| projection.tool_locations.contains_key(key.as_str()))
         .cloned();
     let key = existing.unwrap_or(delegated_key);
+    let aggregate_is_settled = projection.tool_mut(&key).is_some_and(|tool| {
+        matches!(
+            tool.status,
+            ToolStatus::Succeeded
+                | ToolStatus::Failed
+                | ToolStatus::Denied
+                | ToolStatus::Interrupted
+        )
+    });
+    // Aggregate completion/tool-result is authoritative. A buffered child
+    // tick arriving afterward must never reopen or relabel a settled run.
+    if aggregate_is_settled {
+        if let Some(loc) = projection.tool_locations.get(&key).copied() {
+            projection
+                .tool_locations
+                .insert(format!("delegated:{}", event.delegated_run_id), loc);
+            projection
+                .tool_locations
+                .insert(event.tool_call_id.clone(), loc);
+        }
+        return;
+    }
     let tool = projection.upsert_tool(&key, "agent", ToolStatus::Running, false);
     update_agent_stream(tool, event);
     // Dual-index so completion events keyed either way still hit this row.
@@ -580,6 +610,203 @@ pub(super) fn apply_delegated_progress(
         projection
             .tool_locations
             .insert(event.tool_call_id.clone(), loc);
+    }
+}
+
+/// Replay canonical delegation state after transcript projection. Transcript
+/// tool calls provide the stable row when present; the durable group id is the
+/// fallback for detached work that never reached canonical message history.
+pub(super) fn restore_delegation_groups(
+    projection: &mut ConversationProjection,
+    groups: &[DelegationGroupRecord],
+) {
+    for group in groups.iter().rev() {
+        let tool_call_id = group
+            .parent_tool_call_id
+            .as_deref()
+            .unwrap_or(&group.delegation_group_id)
+            .to_owned();
+        for task in &group.tasks {
+            apply_restored_delegated_progress(
+                projection,
+                &durable_progress_event(group, task, tool_call_id.clone()),
+            );
+        }
+        restore_group_status(projection, group, &tool_call_id);
+    }
+}
+
+fn apply_restored_delegated_progress(
+    projection: &mut ConversationProjection,
+    event: &DelegatedProgressEvent,
+) {
+    let delegated_key = format!("delegated:{}", event.delegated_run_id);
+    let keys = [
+        delegated_key.clone(),
+        event.tool_call_id.clone(),
+        format!("delegated:{}", event.tool_call_id),
+    ];
+    let key = keys
+        .iter()
+        .find(|key| projection.tool_locations.contains_key(key.as_str()))
+        .cloned()
+        .unwrap_or(delegated_key);
+    let tool = projection.upsert_tool(&key, "agent", ToolStatus::Running, false);
+    update_agent_stream(tool, event);
+    if let Some(loc) = projection.tool_locations.get(&key).copied() {
+        projection
+            .tool_locations
+            .insert(format!("delegated:{}", event.delegated_run_id), loc);
+        projection
+            .tool_locations
+            .insert(event.tool_call_id.clone(), loc);
+    }
+}
+
+fn durable_progress_event(
+    group: &DelegationGroupRecord,
+    task: &DelegationTaskRecord,
+    tool_call_id: String,
+) -> DelegatedProgressEvent {
+    let status = AgentProgressStatus::from(task.state);
+    let completion_summary = task
+        .result
+        .as_ref()
+        .and_then(|result| result.get("summary"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| task.error_summary.clone());
+    DelegatedProgressEvent {
+        delegated_run_id: group.delegation_group_id.clone(),
+        parent_session_id: group.parent_session_id.clone(),
+        tool_call_id,
+        kind: role_kind(&task.specification.role),
+        stage: task_stage(task.state),
+        progress: AgentProgress {
+            delegated_run_id: Some(group.delegation_group_id.clone()),
+            task_id: task.specification.delegation_task_id.clone(),
+            name: task.specification.task_key.clone(),
+            status,
+            completion_summary,
+            ..AgentProgress::default()
+        },
+    }
+}
+
+fn restore_group_status(
+    projection: &mut ConversationProjection,
+    group: &DelegationGroupRecord,
+    tool_call_id: &str,
+) {
+    let delegated_key = format!("delegated:{}", group.delegation_group_id);
+    let keys = [
+        delegated_key.clone(),
+        tool_call_id.to_owned(),
+        format!("delegated:{tool_call_id}"),
+    ];
+    let key = keys
+        .iter()
+        .find(|key| projection.tool_locations.contains_key(key.as_str()))
+        .cloned()
+        .unwrap_or(delegated_key);
+    let group_label = group_state_label(group.state);
+    let role_label = role_label(group.tasks.first().map(|task| &task.specification.role));
+    let tool = projection.upsert_tool(&key, "agent", group_tool_status(group.state), false);
+    let prior = match &tool.artifact.content {
+        ArtifactContent::Text(text) => text.text.clone(),
+        _ => String::new(),
+    };
+    let marker = format!("· group  {group_label}");
+    let body = if prior.lines().any(|line| line == marker) {
+        prior
+    } else if prior.trim().is_empty() {
+        marker
+    } else {
+        format!("{prior}\n\n{marker}")
+    };
+    tool.artifact = ArtifactModel {
+        content: ArtifactContent::Text(bound_text(&body, super::tool_output::LIVE_ARTIFACT_BYTES)),
+        ..ArtifactModel::default()
+    };
+    tool.arguments
+        .fields
+        .retain(|field| field.key != "agent_type" && field.key != "description");
+    tool.arguments.fields.extend([
+        crate::tui_v2::model::artifact::ArtifactField {
+            key: "agent_type".to_owned(),
+            value: role_label.to_owned(),
+        },
+        crate::tui_v2::model::artifact::ArtifactField {
+            key: "description".to_owned(),
+            value: format!("delegation group: {group_label}"),
+        },
+    ]);
+    if let Some(loc) = projection.tool_locations.get(&key).copied() {
+        projection
+            .tool_locations
+            .insert(format!("delegated:{}", group.delegation_group_id), loc);
+        projection
+            .tool_locations
+            .insert(tool_call_id.to_owned(), loc);
+    }
+}
+
+const fn group_tool_status(state: DelegationGroupState) -> ToolStatus {
+    match state {
+        DelegationGroupState::Complete | DelegationGroupState::Degraded => ToolStatus::Succeeded,
+        DelegationGroupState::Failed => ToolStatus::Failed,
+        DelegationGroupState::Cancelled => ToolStatus::Interrupted,
+        DelegationGroupState::Created
+        | DelegationGroupState::Queued
+        | DelegationGroupState::Running
+        | DelegationGroupState::ReadyForParent
+        | DelegationGroupState::Synthesizing => ToolStatus::Running,
+    }
+}
+
+const fn group_state_label(state: DelegationGroupState) -> &'static str {
+    match state {
+        DelegationGroupState::Created => "created",
+        DelegationGroupState::Queued => "queued",
+        DelegationGroupState::Running => "running",
+        DelegationGroupState::ReadyForParent => "ready for parent",
+        DelegationGroupState::Synthesizing => "synthesizing",
+        DelegationGroupState::Complete => "complete",
+        DelegationGroupState::Degraded => "degraded",
+        DelegationGroupState::Failed => "failed",
+        DelegationGroupState::Cancelled => "cancelled",
+    }
+}
+
+const fn role_kind(role: &DelegatedRunRole) -> DelegatedToolKind {
+    match role {
+        DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+        DelegatedRunRole::Build => DelegatedToolKind::Build,
+        DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+        DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+    }
+}
+
+const fn role_label(role: Option<&DelegatedRunRole>) -> &'static str {
+    match role {
+        Some(DelegatedRunRole::Explore) => "explore",
+        Some(DelegatedRunRole::Build) => "build",
+        Some(DelegatedRunRole::Planner) => "plan",
+        Some(DelegatedRunRole::Verifier) => "verify",
+        None => "agent",
+    }
+}
+
+const fn task_stage(state: DelegationTaskState) -> DelegatedRunStage {
+    match state {
+        DelegationTaskState::Created
+        | DelegationTaskState::Queued
+        | DelegationTaskState::Leased => DelegatedRunStage::Created,
+        DelegationTaskState::Running | DelegationTaskState::Retrying => DelegatedRunStage::Running,
+        DelegationTaskState::Complete => DelegatedRunStage::Complete,
+        DelegationTaskState::Degraded => DelegatedRunStage::Degraded,
+        DelegationTaskState::Failed => DelegatedRunStage::Failed,
+        DelegationTaskState::Cancelled => DelegatedRunStage::Cancelled,
     }
 }
 
@@ -604,11 +831,8 @@ fn update_agent_stream(
         .current_action
         .as_deref()
         .or(progress.completion_summary.as_deref())
-        .unwrap_or(match progress.status {
-            AgentProgressStatus::Running => "working…",
-            AgentProgressStatus::Complete => "done",
-            AgentProgressStatus::Failed => "failed",
-        });
+        .unwrap_or_else(|| agent_progress_label(&progress.status));
+    let lifecycle_label = agent_progress_label(&progress.status);
 
     // Growing chat log (dialog + tool use), not a single status line.
     let prior = match &tool.artifact.content {
@@ -624,13 +848,31 @@ fn update_agent_stream(
         .map(str::to_owned)
         .collect();
 
-    // Section header when this child first appears.
+    // Re-open a child's section when parallel progress interleaves. Without
+    // this, an update from child A after child B would appear under B's name.
     let section = format!("── {display_name} ──");
-    if !lines.iter().any(|line| line == &section) {
+    let latest_section = lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("── ") && line.ends_with(" ──"));
+    if latest_section != Some(&section) {
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        lines.push(section);
+        lines.push(section.clone());
+    }
+
+    // Render lifecycle transitions from the typed progress status. This keeps
+    // queue/provider/retry/terminal state visible without inspecting arbitrary
+    // action prose, while suppressing repeated streaming ticks in one state.
+    let section_start = lines.iter().rposition(|line| line == &section).unwrap_or(0);
+    let latest_lifecycle = lines[section_start + 1..].iter().rev().find_map(|line| {
+        line.strip_prefix("· status  ")
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+    });
+    if latest_lifecycle != Some(lifecycle_label) {
+        lines.push(format!("· status  {lifecycle_label}"));
     }
 
     // Core AgentProgress no longer streams per-line agent prose on the progress
@@ -654,19 +896,10 @@ fn update_agent_stream(
         ..ArtifactModel::default()
     };
 
-    if matches!(
-        progress.status,
-        AgentProgressStatus::Running | AgentProgressStatus::Complete
-    ) {
-        tool.status = match progress.status {
-            AgentProgressStatus::Failed => ToolStatus::Failed,
-            AgentProgressStatus::Complete if progress.completion_summary.is_none() => {
-                // Keep Running until AgentBackgroundCompleted for multi-child runs.
-                ToolStatus::Running
-            }
-            _ => ToolStatus::Running,
-        };
-    }
+    // Child completion is not aggregate completion. The card remains live
+    // until ToolResult (foreground) or AgentBackgroundCompleted (detached)
+    // settles the group exactly once.
+    tool.status = ToolStatus::Running;
 
     // Collapsed-row summary tracks latest activity.
     if let Some(field) = tool
@@ -675,14 +908,37 @@ fn update_agent_stream(
         .iter_mut()
         .find(|field| field.key == "description")
     {
-        field.value = format!("{display_name}: {action}");
+        field.value = format_agent_progress_summary(&display_name, lifecycle_label, action);
     } else {
         tool.arguments
             .fields
             .push(crate::tui_v2::model::artifact::ArtifactField {
                 key: "description".to_owned(),
-                value: format!("{display_name}: {action}"),
+                value: format_agent_progress_summary(&display_name, lifecycle_label, action),
             });
+    }
+}
+
+fn agent_progress_label(status: &AgentProgressStatus) -> &'static str {
+    match status {
+        AgentProgressStatus::Created => "created",
+        AgentProgressStatus::Queued => "queued",
+        AgentProgressStatus::Leased => "waiting for provider",
+        AgentProgressStatus::Running => "running",
+        AgentProgressStatus::Retrying => "retrying",
+        AgentProgressStatus::Complete => "complete",
+        AgentProgressStatus::Degraded => "degraded",
+        AgentProgressStatus::Failed => "failed",
+        AgentProgressStatus::Cancelled => "cancelled",
+    }
+}
+
+fn format_agent_progress_summary(name: &str, status: &str, action: &str) -> String {
+    let action = action.trim();
+    if action.is_empty() || action == status {
+        format!("{name}: {status}")
+    } else {
+        format!("{name}: {status} — {action}")
     }
 }
 

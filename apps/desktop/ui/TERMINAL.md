@@ -12,7 +12,7 @@ Today:
 - `libghostty-vt` is real (C/Zig/WASM VT core)
 - mobile candidate exists (`expo-libghostty`) but web is unsupported
 
-So Mitsuro Desktop ships Ghostty-first via host launch now, not fake "Ghostty skin" xterm.
+Mitsuro Desktop ships Ghostty through both the native host launch and its embedded Ghostty WASM surface.
 
 ## Behavior
 - Code plane utility tab: **Ghostty**

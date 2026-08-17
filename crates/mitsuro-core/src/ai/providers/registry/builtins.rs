@@ -317,8 +317,8 @@ fn grok_provider() -> ProviderConfig {
                 .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
                 .with_reasoning(ReasoningFormat::OpenAI)
                 .with_reasoning_control(ReasoningControl::OutputOnly),
-            // Public-style Grok 4.5: low/medium/high effort (always-on reasoning).
-            ModelInfo::new("grok-4.5", "Grok 4.5", 500_000, 32_768)
+            // Public xAI Grok 4.6: low/medium/high plus extra-high (`xhigh`).
+            ModelInfo::new("grok-4.6", "Grok 4.6", 500_000, 32_768)
                 .with_vision()
                 .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
                 .with_reasoning(ReasoningFormat::OpenAI)
@@ -327,6 +327,7 @@ fn grok_provider() -> ProviderConfig {
                         ReasoningEffort::Low,
                         ReasoningEffort::Medium,
                         ReasoningEffort::High,
+                        ReasoningEffort::XHigh,
                     ],
                     ReasoningEffort::High,
                 )

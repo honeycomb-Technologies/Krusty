@@ -39,9 +39,9 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, DelegatedRunRecord, DelegatedRunStore, HiveProfileSnapshot, PartialAssistantState,
-    PendingInteractionSnapshot, ProjectSettings, RecoveryStatus, SessionManager, SessionType,
-    WorkMode,
+    Database, DelegatedRunRecord, DelegatedRunStore, HiveGroupRunContext, HiveProfileSnapshot,
+    PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
+    SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::{
     agent_call_action, agent_call_is_research, agent_call_requests_write, effective_tool_call,
@@ -316,12 +316,55 @@ fn finish_active_attempt_for_stop(db_path: &Path, session_id: &str, reason: &str
     }
 }
 
+#[derive(Debug, Default)]
+struct AttemptProgressTracker {
+    attempt_id: Option<String>,
+    turn_baseline: usize,
+    tool_call_baseline: usize,
+    research_action_baseline: usize,
+}
+
+impl AttemptProgressTracker {
+    fn local_counts(
+        &mut self,
+        attempt_id: &str,
+        run_turn_count: usize,
+        run_tool_call_count: usize,
+        run_research_action_count: usize,
+        current_turn_tool_calls: usize,
+        current_turn_research_actions: usize,
+    ) -> (u32, u32, u32) {
+        if self.attempt_id.as_deref() != Some(attempt_id) {
+            self.attempt_id = Some(attempt_id.to_string());
+            self.turn_baseline = run_turn_count.saturating_sub(1);
+            self.tool_call_baseline = run_tool_call_count.saturating_sub(current_turn_tool_calls);
+            self.research_action_baseline =
+                run_research_action_count.saturating_sub(current_turn_research_actions);
+        }
+
+        (
+            run_turn_count
+                .saturating_sub(self.turn_baseline)
+                .min(u32::MAX as usize) as u32,
+            run_tool_call_count
+                .saturating_sub(self.tool_call_baseline)
+                .min(u32::MAX as usize) as u32,
+            run_research_action_count
+                .saturating_sub(self.research_action_baseline)
+                .min(u32::MAX as usize) as u32,
+        )
+    }
+}
+
 fn record_active_attempt_progress(
     db_path: &Path,
     session_id: &str,
+    tracker: &mut AttemptProgressTracker,
     turn_count: usize,
     tool_call_count: usize,
     research_action_count: usize,
+    current_turn_tool_calls: usize,
+    current_turn_research_actions: usize,
     material_progress: bool,
     blocker_fingerprint: Option<String>,
 ) -> Option<(GoalStatus, Option<String>)> {
@@ -334,6 +377,14 @@ fn record_active_attempt_progress(
         .latest_attempt
         .as_ref()
         .filter(|attempt| attempt.status == AttemptStatus::Running)?;
+    let (turn_count, tool_call_count, research_action_count) = tracker.local_counts(
+        &attempt.id,
+        turn_count,
+        tool_call_count,
+        research_action_count,
+        current_turn_tool_calls,
+        current_turn_research_actions,
+    );
     let mutation = manager
         .record_attempt_progress(
             session_id,
@@ -341,9 +392,9 @@ fn record_active_attempt_progress(
             &attempt.id,
             snapshot.aggregate_revision,
             AttemptProgressInput {
-                turn_count: turn_count.min(u32::MAX as usize) as u32,
-                tool_call_count: tool_call_count.min(u32::MAX as usize) as u32,
-                research_action_count: research_action_count.min(u32::MAX as usize) as u32,
+                turn_count,
+                tool_call_count,
+                research_action_count,
                 material_progress,
                 blocker_fingerprint,
             },
@@ -549,6 +600,9 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) working_dir: PathBuf,
     pub(crate) project_dir: Option<PathBuf>,
     pub(crate) hive_crew_slug: Option<String>,
+    /// Group linkage when this run is one member of a Hive group turn. It
+    /// scopes the [GROUP ROOM] context block and the post_to_group tool.
+    pub(crate) hive_group_run: Option<HiveGroupRunContext>,
     /// Database-owned Mako identity frozen once at run start.
     pub(crate) hive_profile: Option<Arc<HiveProfileSnapshot>>,
     pub(crate) session_type: SessionType,
@@ -580,6 +634,7 @@ impl Default for OrchestratorConfig {
             working_dir: PathBuf::new(),
             project_dir: None,
             hive_crew_slug: None,
+            hive_group_run: None,
             hive_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
@@ -652,6 +707,7 @@ fn session_type_name(session_type: SessionType) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inject_runtime_context(
     conversation: &[ModelMessage],
     db_path: &Path,
@@ -659,6 +715,7 @@ fn inject_runtime_context(
     working_dir: &Path,
     project_dir: Option<&Path>,
     hive_crew_slug: Option<&str>,
+    hive_group_run: Option<&HiveGroupRunContext>,
     hive_profile: Option<&HiveProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
@@ -666,7 +723,7 @@ fn inject_runtime_context(
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context_with_hive_profile(
+    context::inject_context_with_hive_profile_and_group(
         conversation,
         db_path,
         session_id,
@@ -679,6 +736,7 @@ fn inject_runtime_context(
         hive_crew_slug,
         user_id,
         hive_profile,
+        hive_group_run,
     )
 }
 
@@ -767,6 +825,7 @@ impl AgenticOrchestrator {
             working_dir,
             project_dir,
             hive_crew_slug,
+            hive_group_run,
             hive_profile,
             session_type,
             permission_mode,
@@ -792,7 +851,10 @@ impl AgenticOrchestrator {
         };
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
-        let mut options = options;
+        // Resolve provider/model reasoning and tool capabilities once at the
+        // run boundary. The same canonical effort then governs parent calls,
+        // delegated children, durable replay, and observability.
+        let mut options = options.canonicalized_for_runtime(ai_client.resolved_model());
         let mode_tool_surface = ModeAwareToolSurface::capture(
             refresh_code_tools_on_mode_change,
             &options,
@@ -827,6 +889,7 @@ impl AgenticOrchestrator {
         let mut iteration = 0usize;
         let mut goal_tool_call_count = 0usize;
         let mut goal_research_action_count = 0usize;
+        let mut attempt_progress_tracker = AttemptProgressTracker::default();
         let mut loop_guard_landing = None::<LoopGuardLanding>;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
@@ -883,6 +946,7 @@ impl AgenticOrchestrator {
 
         loop {
             input_inbox.collect_ready();
+            emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1003,6 +1067,7 @@ impl AgenticOrchestrator {
                 &working_dir,
                 project_dir.as_deref(),
                 hive_crew_slug.as_deref(),
+                hive_group_run.as_ref(),
                 hive_profile.as_deref(),
                 work_mode,
                 &skills_manager,
@@ -1197,6 +1262,7 @@ impl AgenticOrchestrator {
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
+                    options.reasoning_effort,
                     "cancelled_during_setup",
                     None,
                     provider_call_started.elapsed(),
@@ -1243,6 +1309,7 @@ impl AgenticOrchestrator {
                             iteration,
                             ai_client.provider_id(),
                             &ai_client.config().model,
+                            options.reasoning_effort,
                             "setup_error",
                             None,
                             provider_call_started.elapsed(),
@@ -1361,6 +1428,7 @@ impl AgenticOrchestrator {
                     iteration,
                     ai_client.provider_id(),
                     &ai_client.config().model,
+                    options.reasoning_effort,
                     "cancelled_during_stream",
                     None,
                     provider_call_started.elapsed(),
@@ -1386,6 +1454,7 @@ impl AgenticOrchestrator {
                 iteration,
                 ai_client.provider_id(),
                 &ai_client.config().model,
+                options.reasoning_effort,
                 provider_call_outcome,
                 result.usage_available.then_some(result.usage.clone()),
                 provider_call_started.elapsed(),
@@ -1604,6 +1673,8 @@ impl AgenticOrchestrator {
             }
 
             input_inbox.collect_ready();
+            let workflow_updated =
+                emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
             if input_inbox.take_cancel() {
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1628,7 +1699,7 @@ impl AgenticOrchestrator {
                     &db_path,
                     &session_id,
                 );
-                if !injected_steering.is_empty() {
+                if !injected_steering.is_empty() || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
                     empty_stream_retry_attempted = false;
@@ -1710,7 +1781,7 @@ impl AgenticOrchestrator {
                     &db_path,
                     &session_id,
                 );
-                if no_tool_completion_should_continue(&injected_steering) {
+                if no_tool_completion_should_continue(&injected_steering) || workflow_updated {
                     loop_guard_landing = None;
                     delegation_nudge_tracker.reset_for_steering();
                     empty_stream_retry_attempted = false;
@@ -1822,9 +1893,11 @@ impl AgenticOrchestrator {
                         Some(&provider_call_trace),
                         &mut input_inbox,
                         project_settings.subagent_max_turns,
+                        options.reasoning_effort,
                         &advertised_tool_names,
                         execution_tool_allowlist.as_ref(),
                         project_settings.disabled_tools.as_deref(),
+                        hive_group_run.as_ref(),
                         Arc::clone(&file_observations),
                     )
                     .await;
@@ -1949,13 +2022,16 @@ impl AgenticOrchestrator {
                 Some(&provider_call_trace),
                 &mut input_inbox,
                 project_settings.subagent_max_turns,
+                options.reasoning_effort,
                 &advertised_tool_names,
                 execution_tool_allowlist.as_ref(),
                 project_settings.disabled_tools.as_deref(),
+                hive_group_run.as_ref(),
                 Arc::clone(&file_observations),
             )
             .await;
             work_mode = tool_batch.next_work_mode;
+            let yield_after_background_agent = tool_batch.yield_after_background_agent;
             // A tool batch can change either work mode (`set_work_mode`) or
             // plan lifecycle state (for example, completing the final task).
             // Refresh both dimensions before the next provider request.
@@ -1974,21 +2050,17 @@ impl AgenticOrchestrator {
             );
             let tool_results = tool_batch.results;
             let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
-            goal_tool_call_count = goal_tool_call_count.saturating_add(result.tool_calls.len());
-            goal_research_action_count = goal_research_action_count.saturating_add(
-                result
-                    .tool_calls
-                    .iter()
-                    .filter(|call| {
-                        is_research_action(
-                            call,
-                            &tool_results,
-                            delegated_store.as_ref(),
-                            &session_id,
-                        )
-                    })
-                    .count(),
-            );
+            let current_turn_tool_calls = result.tool_calls.len();
+            let current_turn_research_actions = result
+                .tool_calls
+                .iter()
+                .filter(|call| {
+                    is_research_action(call, &tool_results, delegated_store.as_ref(), &session_id)
+                })
+                .count();
+            goal_tool_call_count = goal_tool_call_count.saturating_add(current_turn_tool_calls);
+            goal_research_action_count =
+                goal_research_action_count.saturating_add(current_turn_research_actions);
 
             if tool_batch.cancelled {
                 let tool_msg = ModelMessage {
@@ -2068,9 +2140,12 @@ impl AgenticOrchestrator {
                 record_active_attempt_progress(
                     &db_path,
                     &session_id,
+                    &mut attempt_progress_tracker,
                     iteration,
                     goal_tool_call_count,
                     goal_research_action_count,
+                    current_turn_tool_calls,
+                    current_turn_research_actions,
                     tool_batch_made_material_progress(&tool_results),
                     blocker_fingerprint,
                 )
@@ -2139,26 +2214,7 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
-            if successful_task_completion_finished_plan(
-                &db_path,
-                &session_id,
-                &result.tool_calls,
-                &tool_msg.content,
-            ) {
-                let completion = "All approved plan steps are complete. The Goal remains active until its required verification criteria are passed.";
-                let _ = event_tx.send(LoopEvent::TextDelta {
-                    delta: completion.to_string(),
-                });
-                let assistant_msg = ModelMessage {
-                    role: Role::Assistant,
-                    content: vec![Content::Text {
-                        text: completion.to_string(),
-                    }],
-                };
-                conversation.push(assistant_msg.clone());
-                context_ledger.update_from_conversation(&conversation);
-                persist_context_state(&db_path, &session_id, &context_ledger);
-                save_message(&db_path, &session_id, &assistant_msg);
+            if yield_after_background_agent {
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -2169,6 +2225,23 @@ impl AgenticOrchestrator {
                     stop_reason: LoopStopReason::Completed,
                 });
                 return;
+            }
+
+            if successful_task_completion_needs_goal_followthrough(
+                &db_path,
+                &session_id,
+                &result.tool_calls,
+                &tool_msg.content,
+            ) {
+                let instruction = "All approved plan steps are now terminal, but the Goal is still active. Continue in this same run: call `workflow_update` with `verify_criterion` and concrete evidence for every pending required criterion, then call `workflow_update` with `complete_goal`. Do not stop or claim completion in prose while the Goal remains active.";
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text {
+                        text: instruction.to_string(),
+                    }],
+                });
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
             }
 
             let loop_guard_owns_blocked_stop = !token_budget_stopped
@@ -2334,6 +2407,21 @@ fn emit_steering_events(
     }
 }
 
+fn emit_workflow_update_inputs(
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    updates: Vec<(String, u64, String)>,
+) -> bool {
+    let changed = !updates.is_empty();
+    for (goal_id, aggregate_revision, operation_id) in updates {
+        let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+            goal_id,
+            aggregate_revision,
+            operation_id,
+        });
+    }
+    changed
+}
+
 fn steering_display_message(content: &[Content]) -> String {
     let text = content
         .iter()
@@ -2483,7 +2571,7 @@ fn update_validation_state(
     !was_pending && *mutation_needs_validation
 }
 
-fn successful_task_completion_finished_plan(
+fn successful_task_completion_needs_goal_followthrough(
     db_path: &Path,
     session_id: &str,
     tool_calls: &[AiToolCall],
@@ -2642,9 +2730,10 @@ mod tests {
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
-    use super::successful_task_completion_finished_plan;
+    use super::successful_task_completion_needs_goal_followthrough;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
+    use super::AttemptProgressTracker;
     use super::EmptyCompletionAction;
     use super::LoopGuardLanding;
     use super::VALIDATION_REMINDER;
@@ -2670,6 +2759,20 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn workflow_attempt_progress_uses_attempt_local_counters() {
+        let mut tracker = AttemptProgressTracker::default();
+
+        assert_eq!(tracker.local_counts("attempt-a", 1, 3, 2, 3, 2), (1, 3, 2));
+        assert_eq!(tracker.local_counts("attempt-a", 4, 8, 5, 2, 1), (4, 8, 5));
+        assert_eq!(
+            tracker.local_counts("attempt-b", 5, 10, 6, 2, 1),
+            (1, 2, 1),
+            "a new workflow attempt must not inherit prior step counters"
+        );
+        assert_eq!(tracker.local_counts("attempt-b", 7, 13, 7, 1, 0), (3, 5, 2));
+    }
 
     fn seed_research_accounting_run(
         store: &DelegatedRunStore,
@@ -2974,7 +3077,7 @@ mod tests {
             "a running attempt must not be duplicated"
         );
 
-        manager.complete_step(
+        let completed = manager.complete_step(
             &session_id,
             &goal_id,
             &step_id,
@@ -3001,13 +3104,37 @@ mod tests {
             is_error: Some(false),
         }];
         assert!(
-            successful_task_completion_finished_plan(
+            successful_task_completion_needs_goal_followthrough(
                 &db_path,
                 &session_id,
                 &tool_calls,
                 &tool_results,
             ),
-            "the final successful task completion must terminate the current run"
+            "the final task completion must keep the run alive for Goal follow-through"
+        );
+
+        let criterion_id = completed.snapshot.criteria[0].id.clone();
+        manager.set_criterion(
+            &session_id,
+            &goal_id,
+            &criterion_id,
+            completed.snapshot.aggregate_revision,
+            crate::workflow::SetCriterionInput {
+                status: crate::workflow::CriterionStatus::Passed,
+                evidence: vec!["focused validation passed".into()],
+                verifier: "agent".into(),
+            },
+            "verify-auto-goal",
+            "agent",
+        )?;
+        assert!(
+            successful_task_completion_needs_goal_followthrough(
+                &db_path,
+                &session_id,
+                &tool_calls,
+                &tool_results,
+            ),
+            "a fully verified Goal still needs follow-through so the agent completes it explicitly"
         );
         Ok(())
     }
@@ -3553,6 +3680,7 @@ mod tests {
             Some(repo),
             None,
             None,
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -3565,6 +3693,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             None,
             None,
             WorkMode::Build,

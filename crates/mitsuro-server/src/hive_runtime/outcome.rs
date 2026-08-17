@@ -7,7 +7,7 @@ use mitsuro_core::agent::loop_events::LoopStopReason;
 use mitsuro_core::agent::LoopEvent;
 
 use super::notify::{
-    notify_hive_awaiting_input, notify_hive_completion, notify_hive_error,
+    notify_hive_awaiting_input, notify_hive_completion, notify_hive_error, notify_hive_partial,
     notify_hive_tool_approval, notify_hive_user_message,
 };
 use super::state::refresh_snapshot_after_run;
@@ -59,6 +59,7 @@ impl HiveRunOutcome {
         if matches!(event, LoopEvent::AwaitingInput { .. }) && !self.awaiting_input {
             self.awaiting_input = true;
             notify_hive_awaiting_input(
+                state.db_path.as_ref(),
                 &state.push_service,
                 &state.apns_service,
                 user_id,
@@ -72,6 +73,7 @@ impl HiveRunOutcome {
         {
             if self.notified_tool_approvals.insert(id.clone()) {
                 notify_hive_tool_approval(
+                    state.db_path.as_ref(),
                     &state.push_service,
                     &state.apns_service,
                     user_id,
@@ -161,6 +163,15 @@ impl HiveRunOutcome {
                         session_id = %session_id,
                         stop_reason = ?self.stop_reason,
                         "Hive session did not complete; skipping completion push"
+                    );
+                }
+                NotificationTerminalDisposition::Partial => {
+                    notify_hive_partial(
+                        state.db_path.as_ref(),
+                        &state.push_service,
+                        &state.apns_service,
+                        user_id,
+                        session_id,
                     );
                 }
                 NotificationTerminalDisposition::Complete if !self.sent_user_message => {

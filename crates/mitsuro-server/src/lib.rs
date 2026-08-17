@@ -482,6 +482,7 @@ pub(crate) async fn build_app_state(
     let tool_registry = Arc::new(tool_registry_inner);
     register_all_tools(&tool_registry).await;
     register_hive_tools(&tool_registry).await;
+    routes::browser::register_tool(&tool_registry).await;
 
     let agent_extensions =
         mitsuro_core::extensions::AgentExtensionManager::new(&config.working_dir);

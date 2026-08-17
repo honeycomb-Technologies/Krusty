@@ -8,7 +8,10 @@ use mitsuro_core::ai::models::ModelKey as CoreModelKey;
 use mitsuro_core::hive::{
     canonical_timestamp, parse_timezone, DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy,
 };
-use mitsuro_core::storage::{hash_request_bytes, is_valid_crew_slug, OverlapPolicy};
+use mitsuro_core::storage::{
+    hash_request_bytes, hive_groups, is_valid_crew_slug, load_worker_with_conn,
+    resolve_worker_for_crew_slug_with_conn, HiveGroupStatus, OverlapPolicy,
+};
 use mitsuro_core::Content;
 use mitsuro_hive_protocol::{
     unix_time_millis, AckResponse, Actor, Command, CreateScheduleCommand, DaemonRuntimeStats,
@@ -364,6 +367,16 @@ impl DurableHiveCommandHandler {
                             &command.message,
                             &pending_id,
                         )
+                    }
+                    Command::GroupMessage(command) => super::groups::group_message(
+                        tx,
+                        actor,
+                        now,
+                        command,
+                        &mutation_idempotency_key,
+                    ),
+                    Command::GroupStop(command) => {
+                        super::groups::group_stop(tx, actor, now, &command.group_id)
                     }
                     Command::Steer(command) => {
                         let pending_id = steer_pending_id(
@@ -828,6 +841,9 @@ fn start_session(
             vec![event],
         ));
     }
+    // Surfacing an uncertain prior attempt above takes precedence; everything
+    // past this point wakes or creates work, which needs a claimable workspace.
+    require_session_workspace(&session)?;
     tx.execute(
         "UPDATE hive_controllers SET status = 'active', updated_at = ?2 WHERE id = ?1",
         params![controller.id, now],
@@ -1834,6 +1850,7 @@ fn queue_message_turn_if_idle(
     now: &str,
 ) -> Result<Option<PersistedEvent>, RuntimeStoreError> {
     let _ = require_frozen_session_model(session)?;
+    require_session_workspace(session)?;
     let unfinished: i64 = tx.query_row(
         "SELECT COUNT(*) FROM hive_runs
          WHERE controller_id = ?1
@@ -2028,6 +2045,36 @@ fn require_frozen_session_permission_mode(
             "Hive session has an invalid permission mode".into(),
         )),
     }
+}
+
+/// Enqueue-time mirror of the execution host's claim validation, which
+/// refuses a daemon-default workspace and requires absolute paths. Sessions
+/// predating explicit Hive workspaces would otherwise enqueue runs that are
+/// doomed to fail their claim with a redacted, non-actionable error.
+fn require_session_workspace(
+    session: &super::persistence::OwnedSession,
+) -> Result<(), RuntimeStoreError> {
+    let paths: Vec<&str> = [
+        session.working_dir.as_deref(),
+        session.project_dir.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|path| !path.is_empty())
+    .collect();
+    if paths.is_empty() {
+        return Err(RuntimeStoreError::StateConflict(
+            "Hive session has no working or project directory; set a workspace before starting it"
+                .into(),
+        ));
+    }
+    if paths.iter().any(|path| !Path::new(path).is_absolute()) {
+        return Err(RuntimeStoreError::StateConflict(
+            "Hive session workspace paths must be absolute".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn freeze_session_model_into_open_runs(
@@ -2464,6 +2511,8 @@ struct ParsedScheduleDefinition {
     model_catalog_revision: Option<String>,
     model_was_explicit: bool,
     crew_slug: Option<String>,
+    worker_id: Option<String>,
+    group_id: Option<String>,
     misfire: MisfireConfig,
     overlap_policy: OverlapPolicy,
     retry: RetryPolicy,
@@ -2560,6 +2609,19 @@ fn parse_schedule_definition(
     {
         return Err(RuntimeStoreError::Invalid("crew slug is invalid".into()));
     }
+    let worker_id = definition
+        .worker_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let group_id = definition
+        .group_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if worker_id.is_some() && group_id.is_some() {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule cannot target both a Worker and a Group".into(),
+        ));
+    }
 
     let project_dir = definition
         .project_dir
@@ -2603,10 +2665,73 @@ fn parse_schedule_definition(
         model_catalog_revision,
         model_was_explicit,
         crew_slug,
+        worker_id,
+        group_id,
         misfire,
         overlap_policy,
         retry,
     })
+}
+
+fn bind_schedule_worker(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    definition: &mut ParsedScheduleDefinition,
+) -> Result<(), RuntimeStoreError> {
+    if let Some(worker_id) = definition.worker_id.as_deref() {
+        let worker = load_worker_with_conn(tx, worker_id)
+            .map_err(RuntimeStoreError::Internal)?
+            .ok_or_else(|| RuntimeStoreError::Invalid("schedule worker was not found".into()))?;
+        if worker.user_id != actor.user_id {
+            return Err(RuntimeStoreError::Invalid(
+                "schedule worker does not belong to this owner".into(),
+            ));
+        }
+        if worker.status == mitsuro_core::storage::HiveWorkerStatus::Archived {
+            return Err(RuntimeStoreError::Invalid(
+                "schedule cannot target an archived Worker".into(),
+            ));
+        }
+        if definition.crew_slug.is_none() {
+            definition.crew_slug = Some(worker.slug);
+        }
+        return Ok(());
+    }
+    let Some(crew_slug) = definition.crew_slug.as_deref() else {
+        return Ok(());
+    };
+    if let Some(worker) =
+        resolve_worker_for_crew_slug_with_conn(tx, actor.user_id.as_deref(), crew_slug)
+            .map_err(RuntimeStoreError::Internal)?
+    {
+        definition.worker_id = Some(worker.id);
+    }
+    Ok(())
+}
+
+fn bind_schedule_group(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    definition: &mut ParsedScheduleDefinition,
+) -> Result<(), RuntimeStoreError> {
+    let Some(group_id) = definition.group_id.as_deref() else {
+        return Ok(());
+    };
+    let group = hive_groups::load_group(tx, group_id)
+        .map_err(RuntimeStoreError::Internal)?
+        .ok_or_else(|| RuntimeStoreError::Invalid("schedule group was not found".into()))?;
+    if group.user_id != actor.user_id {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule group does not belong to this owner".into(),
+        ));
+    }
+    if group.status == HiveGroupStatus::Archived {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule cannot target an archived Group".into(),
+        ));
+    }
+    definition.group_id = Some(group.id);
+    Ok(())
 }
 
 fn create_recurring_schedule(
@@ -2640,6 +2765,8 @@ fn create_recurring_schedule(
             .optional()?
             .flatten();
     }
+    bind_schedule_worker(tx, actor, &mut definition)?;
+    bind_schedule_group(tx, actor, &mut definition)?;
     if definition.project_dir.is_none() {
         return Err(RuntimeStoreError::Invalid(
             "schedule requires an explicit or session-owned workspace".into(),
@@ -2676,11 +2803,11 @@ fn create_recurring_schedule(
             model_key_json, model_catalog_revision, crew_slug,
             misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
             max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
-            revision, created_by, created_at, updated_at
+            revision, created_by, created_at, updated_at, worker_id, group_id
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL,
             'enabled', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, ?24, ?25, 0, ?26, ?27, ?27
+            ?21, ?22, ?23, ?24, ?25, 0, ?26, ?27, ?27, ?28, ?29
          )",
         params![
             schedule_id,
@@ -2710,6 +2837,8 @@ fn create_recurring_schedule(
             definition.retry.jitter.as_str(),
             actor.user_id.as_deref().unwrap_or("local"),
             now,
+            definition.worker_id,
+            definition.group_id,
         ],
     )?;
     let event = append_event(
@@ -2755,6 +2884,8 @@ fn replace_recurring_schedule(
             .model_catalog_revision
             .clone_from(&session.model_catalog_revision);
     }
+    bind_schedule_worker(tx, actor, &mut definition)?;
+    bind_schedule_group(tx, actor, &mut definition)?;
     if definition.project_dir.is_none() {
         return Err(RuntimeStoreError::Invalid(
             "schedule requires an explicit or session-owned workspace".into(),
@@ -2814,8 +2945,8 @@ fn replace_recurring_schedule(
             misfire_policy = ?18, misfire_grace_secs = ?19,
             catch_up_limit = ?20, overlap_policy = ?21, max_attempts = ?22,
             retry_base_secs = ?23, retry_max_secs = ?24, retry_jitter = ?25,
-            revision = revision + 1, updated_at = ?26
-         WHERE id = ?1 AND controller_id = ?2 AND revision = ?27",
+            revision = revision + 1, updated_at = ?26, worker_id = ?27, group_id = ?28
+         WHERE id = ?1 AND controller_id = ?2 AND revision = ?29",
         params![
             command.schedule_id,
             controller.id,
@@ -2843,6 +2974,8 @@ fn replace_recurring_schedule(
             definition.retry.max_delay_secs,
             definition.retry.jitter.as_str(),
             now,
+            definition.worker_id,
+            definition.group_id,
             command.expected_revision,
         ],
     )?;
@@ -3075,7 +3208,7 @@ fn insert_run(
     Ok(())
 }
 
-fn insert_canonical_user_message(
+pub(super) fn insert_canonical_user_message(
     tx: &Transaction<'_>,
     session_id: &str,
     message: &str,
@@ -3133,7 +3266,7 @@ fn insert_pending_user_message(
     insert_pending_user_content(tx, session_id, pending_id, &content, now)
 }
 
-fn insert_pending_user_content(
+pub(super) fn insert_pending_user_content(
     tx: &Transaction<'_>,
     session_id: &str,
     pending_id: &str,
@@ -3198,7 +3331,7 @@ fn session_mutation(
     }
 }
 
-fn ack(message: &str) -> ResponsePayload {
+pub(super) fn ack(message: &str) -> ResponsePayload {
     ResponsePayload::Ack(AckResponse {
         accepted: true,
         message: Some(message.to_string()),

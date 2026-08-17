@@ -132,7 +132,7 @@ export function useHiveHome(enabled: boolean) {
         setError(
           saveError instanceof Error
             ? saveError.message
-            : "Failed to update Hive Agent profile",
+            : "Failed to update Hive Worker profile",
         );
         throw saveError;
       } finally {

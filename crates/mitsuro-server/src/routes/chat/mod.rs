@@ -17,6 +17,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use mitsuro_core::ai::providers::ReasoningEffort;
 use mitsuro_core::ai::types::{ModelMessage, Role};
 use mitsuro_core::storage::{Database, SessionType};
 use mitsuro_core::tools::registry::PermissionMode;
@@ -65,19 +66,47 @@ pub(crate) async fn resume_child_completion_session(
     session_id: &str,
     user_id: Option<String>,
     workspace_root: PathBuf,
+    reasoning_effort: Option<ReasoningEffort>,
     guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<(), AppError> {
     let user = CurrentUser(AuthenticatedUser {
         user_id,
         home_dir: Some(workspace_root),
     });
-    // Thinking effort and fast mode are request-scoped rather than durable.
-    // A completion wake therefore resumes with their explicit safe defaults,
-    // while model identity, permission, work mode, and workspace come from the
-    // persisted session through the normal setup path.
+    // Detached Agent groups durably inherit the launch turn's reasoning
+    // effort. Preserve that immutable contract across the completion wake;
+    // legacy groups without it retain the explicit safe default.
+    let thinking_level = reasoning_effort
+        .map(crate::types::ThinkingLevel::from_reasoning_effort)
+        .unwrap_or(crate::types::ThinkingLevel::Off);
     let ctx = setup_chat_session_with_guard(
         state,
         Some(&user),
+        session_id,
+        RequestedModel::Unspecified,
+        thinking_level,
+        false,
+        false,
+        Some(guard),
+    )
+    .await?;
+    let work_mode = ctx.work_mode;
+    let permission_mode = ctx.permission_mode;
+    start_orchestrator_detached(state, ctx, work_mode, permission_mode).await
+}
+
+/// Start an approved Goal using the same persisted session contract as chat.
+/// The workflow route acquires the canonical session guard before mutating the
+/// Goal, preventing approval from racing a second foreground loop.
+pub(crate) async fn start_workflow_session_with_guard(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    session_id: &str,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), AppError> {
+    let ctx = setup_chat_session_with_guard(
+        state,
+        user,
         session_id,
         RequestedModel::Unspecified,
         crate::types::ThinkingLevel::Off,

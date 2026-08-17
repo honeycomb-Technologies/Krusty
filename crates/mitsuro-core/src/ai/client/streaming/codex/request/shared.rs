@@ -4,6 +4,74 @@ use super::super::super::super::core::AiClient;
 use crate::ai::retry::safe_provider_event_error;
 
 impl AiClient {
+    pub(crate) fn codex_api_event_is_retryable(event: &Value) -> bool {
+        let code = event
+            .pointer("/error/code")
+            .or_else(|| event.pointer("/response/error/code"))
+            .and_then(Value::as_str);
+        let error_type = event
+            .pointer("/error/type")
+            .or_else(|| event.pointer("/response/error/type"))
+            .and_then(Value::as_str);
+
+        let metadata = [code, error_type]
+            .into_iter()
+            .flatten()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+
+        if metadata.iter().any(|value| {
+            matches!(
+                value.as_str(),
+                "api_error"
+                    | "capacity_exceeded"
+                    | "gateway_timeout"
+                    | "internal_server_error"
+                    | "overloaded_error"
+                    | "rate_limit_error"
+                    | "rate_limit_exceeded"
+                    | "server_error"
+                    | "service_unavailable"
+                    | "too_many_requests"
+            )
+        }) {
+            return true;
+        }
+
+        if metadata.iter().any(|value| {
+            matches!(
+                value.as_str(),
+                "authentication_error"
+                    | "bad_request"
+                    | "billing_hard_limit_reached"
+                    | "conflict"
+                    | "content_policy_violation"
+                    | "context_length_exceeded"
+                    | "forbidden"
+                    | "insufficient_quota"
+                    | "invalid_request_error"
+                    | "model_not_found"
+                    | "not_found"
+                    | "not_found_error"
+                    | "permission_error"
+                    | "quota_exceeded"
+                    | "request_too_large"
+                    | "unauthorized"
+                    | "unprocessable_entity"
+                    | "usage_limit_reached"
+            )
+        }) {
+            return false;
+        }
+
+        // ChatGPT's Responses WebSocket occasionally returns backend-specific
+        // code/type vocabulary for transient failures. Unknown metadata stays
+        // fingerprint-only at the client boundary, but receives the same
+        // bounded pre-output retry as recognized transient codes. Events with
+        // no structured metadata remain terminal rather than being guessed at.
+        !metadata.is_empty()
+    }
+
     pub(crate) fn codex_ws_create_payload(body: Value) -> Value {
         match body {
             Value::Object(mut object) => {
@@ -112,5 +180,22 @@ mod tests {
         assert_eq!(payload["type"], "response.create");
         assert!(payload.get("stream").is_none());
         assert!(payload.get("background").is_none());
+    }
+
+    #[test]
+    fn websocket_server_errors_are_retryable_but_invalid_requests_are_not() {
+        assert!(AiClient::codex_api_event_is_retryable(
+            &serde_json::json!({"type":"error","error":{"code":"server_error"}})
+        ));
+        assert!(!AiClient::codex_api_event_is_retryable(
+            &serde_json::json!({"type":"error","error":{"code":"invalid_request_error"}})
+        ));
+        assert!(AiClient::codex_api_event_is_retryable(&serde_json::json!({
+            "type":"error",
+            "error":{"code":"BACKEND_TRANSIENT_SENTINEL","type":"CUSTOM_FAILURE"}
+        })));
+        assert!(!AiClient::codex_api_event_is_retryable(
+            &serde_json::json!({"type":"error","error":{"message":"unclassified"}})
+        ));
     }
 }

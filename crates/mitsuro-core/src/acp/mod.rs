@@ -31,6 +31,7 @@
 
 mod agent;
 mod bridge;
+mod delegation;
 mod error;
 mod model_manager;
 mod processor;

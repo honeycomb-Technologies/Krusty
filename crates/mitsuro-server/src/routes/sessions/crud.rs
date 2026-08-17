@@ -30,6 +30,9 @@ use crate::AppState;
 pub(super) struct ListSessionsQuery {
     /// Filter sessions by working directory
     pub working_dir: Option<String>,
+    /// Include reversibly archived sessions for management surfaces.
+    #[serde(default)]
+    pub include_archived: bool,
 }
 
 /// Query params for retrieving a session with messages (pagination)
@@ -130,8 +133,12 @@ pub(super) async fn list_sessions(
     )?;
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    let sessions =
-        session_manager.list_sessions_for_user(working_dir_filter.as_deref(), user_id)?;
+    let sessions = if query.include_archived {
+        session_manager
+            .list_sessions_for_user_including_archived(working_dir_filter.as_deref(), user_id)?
+    } else {
+        session_manager.list_sessions_for_user(working_dir_filter.as_deref(), user_id)?
+    };
     let wire_format = crate::legacy_identity::SessionWireFormat::from_headers(&headers);
     let response: Vec<SessionResponse> = sessions
         .into_iter()
@@ -306,9 +313,18 @@ pub(super) async fn update_session(
 ) -> Result<Json<SessionResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
-    if session.session_type == SessionType::Hive {
+    let updates_hive_owned_metadata = req.title.is_some()
+        || req.working_dir.is_some()
+        || req.project_dir.is_some()
+        || req.workspace_mode.is_some()
+        || req.mode.is_some()
+        || req.model.is_some()
+        || req.model_key.is_some()
+        || req.target_branch.is_some()
+        || req.permission_mode.is_some();
+    if session.session_type == SessionType::Hive && updates_hive_owned_metadata {
         return Err(AppError::Conflict(
-            "Hive session metadata is background-service-owned and cannot be changed through /sessions".into(),
+            "Hive runtime metadata is background-service-owned; only pin and archive organization may be changed through /sessions".into(),
         ));
     }
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
@@ -322,9 +338,11 @@ pub(super) async fn update_session(
         && req.model_key.is_none()
         && req.target_branch.is_none()
         && req.permission_mode.is_none()
+        && req.pinned.is_none()
+        && req.archived.is_none()
     {
         return Err(AppError::BadRequest(
-            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, model_key, target_branch, or permission_mode must be provided".to_string(),
+            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, model_key, target_branch, permission_mode, pinned, or archived must be provided".to_string(),
         ));
     }
 
@@ -409,6 +427,14 @@ pub(super) async fn update_session(
 
     if let Some(permission_mode) = req.permission_mode {
         session_manager.update_session_permission_mode(&id, permission_mode)?;
+    }
+
+    if let Some(pinned) = req.pinned {
+        session_manager.update_session_pinned(&id, pinned)?;
+    }
+
+    if let Some(archived) = req.archived {
+        session_manager.update_session_archived(&id, archived)?;
     }
 
     let session = session_manager

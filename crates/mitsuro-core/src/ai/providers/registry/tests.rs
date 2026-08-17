@@ -186,12 +186,19 @@ fn test_grok_config() {
     );
     assert_eq!(provider.auth_header, AuthHeader::Bearer);
     assert_eq!(provider.default_model(), "grok-build");
-    assert!(provider.has_model("grok-4.5"));
+    assert!(provider.has_model("grok-4.6"));
     assert!(provider.has_model("grok-composer-2.5-fast"));
     assert!(provider
         .models
         .iter()
         .all(|model| model.reasoning.is_some()));
+    assert!(
+        provider
+            .models
+            .iter()
+            .all(|model| !model.id.starts_with("grok-4.5") && !model.id.starts_with("grok-4-5")),
+        "Grok 4.5 is retired from the curated catalog"
+    );
 
     let build = provider
         .models
@@ -200,24 +207,27 @@ fn test_grok_config() {
         .expect("grok-build");
     assert_eq!(build.reasoning_control, Some(ReasoningControl::OutputOnly));
 
-    let grok_45 = provider
+    let grok_46 = provider
         .models
         .iter()
-        .find(|model| model.id == "grok-4.5")
-        .expect("grok-4.5");
+        .find(|model| model.id == "grok-4.6")
+        .expect("grok-4.6");
     assert_eq!(
-        grok_45.reasoning_control,
+        grok_46.reasoning_control,
         Some(ReasoningControl::OpenAiEffort)
     );
     assert_eq!(
-        grok_45.supported_reasoning_levels,
+        grok_46.supported_reasoning_levels,
         vec![
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
         ]
     );
-    assert!(grok_45.reasoning_is_mandatory);
+    assert!(grok_46.reasoning_is_mandatory);
+    assert_eq!(grok_46.context_window, 500_000);
+    assert_eq!(grok_46.max_output, 32_768);
 
     assert!(provider.supports_tools);
     assert!(provider.dynamic_models);

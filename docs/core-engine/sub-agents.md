@@ -10,13 +10,21 @@ Sub-agents solve both problems. For exploration, Mitsuro fans out multiple read-
 
 ## The Sub-Agent System
 
-At the core of delegation is `SubAgentPool`, defined in `crates/mitsuro-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks through `AgentScheduler`, an actor-owned adaptive queue. It takes an AI client, a cancellation token, an optional user concurrency ceiling, and a stagger delay, then spawns tasks as independent tokio tasks. There is no product-wide fixed four-agent limit: the scheduler derives an initial target from host parallelism, grows under healthy backlog, and backs off under provider pressure.
+The session-level authority is `DelegationCoordinator`, defined in `crates/mitsuro-core/src/agent/delegation.rs`. Before execution begins it materializes one immutable delegation group and all logical tasks in SQLite. The group owns execution mode, completion/failure policy, inherited permissions, the delegated turn budget, the per-group parallelism ceiling, writer mode, task attempts, leases, synthesis ownership, and parent continuation identity. `SubAgentPool` remains the in-process worker launcher, but it no longer owns the operation lifecycle or global capacity policy.
+
+Admission has two layers. `AgentScheduler` is the low-latency process-wide adaptive queue. A SQLite capacity authority is the hard cross-process ceiling for hosts that share the database. Capacity and cooldown are tracked by model domain, while workspace writer partitions prevent unsafe overlap. The current coordinator key is the resolved model identifier; refining it to provider, credential pool, endpoint, and model is a follow-up transport-contract change. There is no fixed four-agent product limit: host capacity starts from available parallelism, grows under healthy demand, and backs off under provider pressure. The immutable group contract applies the narrower per-operation ceiling.
+
+Lease maintenance is shared rather than task-local. One renewal actor per normalized database path owns a reusable SQLite connection, coalesces due task/capacity/synthesis renewals into one immediate transaction, and cancels only the exact owner that loses its fence. A transient busy database is retried within the last-confirmed lease lifetime; an explicit owner mismatch cancels immediately. Registrations remain live through task or synthesis completion CAS, closing the window where completed side effects could otherwise be replayed after a lease expired.
+
+Foreground delegation suspends the parent loop and returns the aggregate into that same run. Detached delegation persists one aggregate continuation identity; a terminal group may queue and promote it exactly once. Group and task transitions also append session-scoped events with a monotonic cursor. HTTP/SSE, the Rust client, Expo/Tauri, GPUI, TUI, CLI, and ACP all project the same durable snapshot and replay stream, so reconnect shows real queued/running/terminal parallel state rather than reconstructing it from prose or process-local progress. Event kinds are an extensible string protocol while group and task state machines remain closed.
 
 Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. Its control flow has the same basic provider/tool continuation shape as the parent -- call the model, execute accepted tool requests, retain governed results, and continue -- but it is **not** the parent streaming orchestrator. It runs through the separately governed, non-streaming `execute_agent_loop` mini-kernel in `crates/mitsuro-core/src/agent/subagent/execution/runtime.rs`, parameterized over an `AgentConfig` trait for the different agent types.
 
-That boundary is intentional and explicit. Delegated workers reuse the parent's exact `AiClient`, model identity, semantic `ProgressLedger`, history shaping, cancellation tree, process registry, and inherited permission/path/tool/turn ceiling. They do not consume `RunSpec`, emit the full parent `LoopEvent` stream, or own the parent session's crash-continuation state. A delegated run has a persisted lifecycle record and final evidence artifact; a later related run may use that artifact as a resume seed, but this is not equivalent to resuming a first-class child conversation at an interrupted provider/tool boundary. Unifying the kernels remains a possible focused refactor, not a reason to duplicate or rewrite the rest of core.
+That boundary is intentional and explicit. Delegated workers reuse the parent's exact `AiClient`, model identity, semantic `ProgressLedger`, history shaping, cancellation tree, process registry, and inherited permission/path/tool/turn ceiling. They do not consume `RunSpec` or emit a second provider-specific trace stream. The coordinator emits the canonical durable group/task event stream, while live progress is only a presentation optimization.
 
-A sub-agent task is described by `SubAgentTask`: a struct carrying a semantic task ID and name, an optional `AgentIdentity`, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. Identity separates the canonical runtime path from the display name. The root identity is Agent; children receive deterministic names such as `Hive Agent 01` while retaining task labels such as `Honey audit`. The task does not specify which model to use -- that is resolved by the pool from the user's current model selection, keeping the system provider-agnostic.
+Detached Chat/Code tasks persist a versioned, bounded executor envelope containing reconstruction metadata and an objective digest, never the parent transcript or raw tool output. A new host can reacquire non-build tasks under task and synthesis leases using freshly resolved credentials. For an isolated Build batch, terminal successful task worktrees can be restored and synthesized idempotently under replay, synthesis, and repository-owner fences. An unfinished writer is never replayed in its possibly dirty retained worktree: that task fails closed, its partial edits remain available for inspection, and only terminal successful sibling patches are eligible for integration. Foreground tasks, legacy/malformed envelopes, ambiguous model identity, shared-writer builds, and mixed writer-mode builds fail closed.
+
+A sub-agent task is described by `SubAgentTask`: a struct carrying a semantic task ID and name, an optional `AgentIdentity`, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. Identity separates the canonical runtime path from the display name. The root identity is Agent; children receive deterministic names such as `Hive Worker 01` while retaining task labels such as `Honey audit`. The task does not specify which model to use -- that is resolved by the pool from the user's current model selection, keeping the system provider-agnostic.
 
 Results come back as `SubAgentResult`, which includes whether the task succeeded, the agent's final output, a list of files it examined, how many turns it took, wall-clock duration, any errors, and any policy violations it triggered. The `agent` tool also records delegated-run lifecycle metadata and the final structured artifact when session storage is available.
 
@@ -30,7 +38,7 @@ The unified `agent` tool (`crates/mitsuro-core/src/tools/implementations/agent/m
 
 **Verify** agents run tests, builds, linters, and other validation commands. They are read-only for file access but have bash access enabled, so they can execute shell commands like `cargo test` or `npm run lint`. They output a structured verdict: PASS, FAIL, or PARTIAL, with details.
 
-**Build** agents write code. They get the full suite of tools -- glob, grep, read, write, edit, and bash -- plus a special `register_interface` tool for cross-agent coordination. Build agents are the only sub-agent type that can modify the filesystem. When multiple builders run in parallel, they use a shared build context with file-level locking to prevent conflicts.
+**Build** agents write code. They get the full suite of tools -- glob, grep, read, write, edit, and bash -- plus a special `register_interface` tool for cross-agent coordination. Build agents are the only sub-agent type that can modify the filesystem. Parallel builders execute in per-attempt Git worktrees rooted in a UID-private guarded batch directory. They never concurrently edit the authoritative workspace.
 
 ## Explore: Codebase Investigation
 
@@ -40,29 +48,21 @@ The unified agent tool's `explore` mode launches a focused read-only investigato
 
 When the agent tool receives `agent_type: "build"` with a `components` array, it creates one builder agent per component and runs them through a `SubAgentPool`. Each builder gets a detailed prompt explaining which component it owns, what the overall goal is, who the other builders are, and how to coordinate.
 
-Builders share a `SharedBuildContext` that provides three coordination mechanisms:
+Builders share a `SharedBuildContext` for advisory coordination inside the batch:
 
-1. **File locking.** Before writing or editing a file, a builder must acquire a lock through an RAII guard (`FileLockGuard`). If another builder holds the lock, it retries with exponential backoff (50ms, 100ms, 200ms, up to 10 attempts). The guard automatically releases the lock when dropped, preventing leaks from early returns or panics.
+1. **File ownership metadata.** Builders advertise the files and interfaces they are changing. This improves coordination, but filesystem safety comes from isolated worktrees rather than an in-memory lock.
 
 2. **Interface registration.** After creating a module, a builder can call `register_interface` to advertise its exports -- function names, class names, file paths, and a description. Other builders see these interfaces in their system prompt (which is refreshed every turn) and can import from them.
 
 3. **Line tracking.** The build context records lines added and removed across all builders, providing aggregate statistics when the build completes.
 
-Build agents are submitted eagerly to the adaptive scheduler. `max_concurrency` is an optional user ceiling, not a hidden default cap. Omitting it lets the scheduler choose a host-aware starting target, grow when queued work completes healthily, and reduce pressure when the provider returns rate-limit, overload, service-unavailable, or timeout signals.
+Build agents are submitted eagerly to the coordinator. `max_concurrency` is an optional user ceiling, not a hidden default cap. After every task settles, one synthesis lease owns integration. The worktree diffs are bounded, checked as one deterministic combined patch, and applied atomically. A conflict leaves the authoritative workspace unchanged and retains the recovery worktrees.
 
-## The Team System
+## Hive Delegation
 
-Beyond the agent tool's one-shot delegation, Mitsuro has a persistent team system for longer-running coordination. The `TeamManager` (`crates/mitsuro-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
+Hive does not use the obsolete rigid `TeamManager`/`TeammateRole` prototype under `agent/autonomy/team`; that module is intentionally not compiled. The live path is Honey's Hive runner → `TickEngine` → the shared `AgenticOrchestrator` and tool registry → the unified `agent` tool. Hive therefore receives the same coordinator, immutable governance, scheduler, lifecycle, and isolated build behavior as Chat and Code instead of maintaining a shadow worker architecture.
 
-Each teammate is defined by a `TeammateConfig` with a semantic name, a role, and an optional turn budget. `TeamManager` assigns a deterministic creature identity for display and keeps the semantic name for task ownership and cancellation. There are three roles:
-
-- **Builder** -- Can write files but cannot run shell commands. Gets `SubagentBuild` delegation surface.
-- **Reviewer** -- Read-only file access with bash enabled. Gets `SubagentVerify` delegation surface. Intended for code review.
-- **Tester** -- Same permissions as Reviewer. Intended for running test suites and validation.
-
-Teammates run according to the parent session's permission mode. The manager spawns them with `spawn_teammate`, and each one starts a background loop that polls the `autonomous_tasks` SQLite table every 5 seconds for unclaimed work. When a task appears, the teammate claims it atomically (using a SQL UPDATE ... RETURNING pattern to avoid races), executes it through the standard sub-agent loop, and records the result back to the database. A teammate may tighten the inherited turn budget but cannot relax it, and a supervised parent can never produce an autonomous child. If no tasks arrive for 30 seconds, the teammate exits gracefully.
-
-The manager provides lifecycle controls: `list_teammates` to check status, `cancel_teammate` to stop one, and `cancel_all` to shut everything down. Teammates carry their own `CancellationToken`, so cancellation is cooperative and immediate. The `Drop` implementation on `TeamManager` ensures all teammates are cancelled if the manager is dropped unexpectedly.
+Hive batching is model-directed: an autonomous tick requests an explicit multi-component build when work is genuinely separable. There is no second scheduler over the legacy `autonomous_tasks` prototype. Server startup recovery can adopt ordinary detached Chat/Code executor envelopes and can finish terminal isolated-Build synthesis, but Hive groups remain owned by the live Hive runtime. Unfinished writer execution cannot resume until recovery has a distinct durable per-attempt worktree and execution fence; it remains fail-closed with the retained worktree available for inspection.
 
 ## The Auto-Classifier
 
@@ -84,7 +84,7 @@ Sub-agents do not get to decide their own permissions. Every sub-agent inherits 
 
 - **Surface** -- What kind of delegation this is (explore, build, plan, verify). This determines which tools are available.
 - **Permission mode** -- Whether the sub-agent runs supervised or autonomous. Inherited from the parent session.
-- **Turn budget** -- An optional explicit ceiling on conversation turns. The budget cascades: a parent's `subagent_max_turns` setting flows into each task's policy, but an absent setting remains unlimited. Semantic progress guards, cancellation, permissions, and provider limits still govern the run.
+- **Turn budget** -- An optional explicit ceiling on conversation turns. The budget cascades from the parent's `subagent_max_turns`; durable unified-agent groups resolve an absent setting to 20 and apply that same value at execution time. A non-session compatibility caller has no durable contract and may remain unbounded. Semantic progress guards, cancellation, permissions, and provider limits still govern the run.
 - **Read-only flag** -- Whether the agent can only read or can also write. Explore and plan agents are always read-only.
 - **Bash access** -- Whether shell commands are available. Only verify agents and testers get this by default.
 - **Exact tool ceiling** -- If the parent run has an explicit execution allowlist, the child receives its intersection with the agent-type surface. `None` means ordinary governed defaults; an explicit empty set remains tool-free. A wrapper such as `tool_search` must have both the wrapper and its effective target in scope.
@@ -95,11 +95,11 @@ The policy is enforced at tool execution time. Before a sub-agent runs any tool,
 
 Concurrent agents are bounded at multiple levels:
 
-**Adaptive queued concurrency.** `AgentScheduler` owns admission state and queues excess work. The default target is based on host parallelism and begins above four on ordinary development machines. Sustained healthy backlog ramps the target gradually. HTTP 429/503/529, overload, timeout, and `Retry-After` signals halve the target, pause new starts for a bounded cooldown, and then permit gradual recovery. A reserved control lane keeps the root coordinator responsive, weighted session selection prevents one swarm from monopolizing starts, shared-write partitions avoid conflicting admission, and cancellation immediately releases capacity. An explicit `max_concurrency` remains available as a user safety ceiling.
+**Adaptive queued concurrency.** `AgentScheduler` owns low-latency admission within one process. The SQLite capacity authority fences the same host/model/writer limits across processes. The default target is based on host parallelism and begins above four on ordinary development machines. Sustained healthy backlog ramps the target gradually. HTTP 429/503/529, overload, timeout, and `Retry-After` signals reduce the affected model domain and start a bounded cooldown without pausing unrelated domains. A reserved control lane keeps the root coordinator responsive, weighted session selection prevents one swarm from monopolizing starts, writer partitions avoid conflicts, and cancellation releases capacity. An explicit `max_concurrency` remains available as a user safety ceiling.
 
-**Staggered spawning.** Agents are not all launched simultaneously. There is a configurable delay between spawns (default 100ms, higher for rate-sensitive providers like MiniMax at 600ms). This prevents burst traffic that could trigger provider rate limits.
+**Eager materialization, governed admission.** Logical tasks are created and shown to clients immediately. Provider calls start only after process and durable admission succeed, so the UI can display genuine parallel queued/running state without relying on artificial spawn delays.
 
-**Turn budgets.** Sub-agents are unlimited by default. A parent or task may set an explicit finite ceiling when it is a real resource policy; when that ceiling is exhausted, the agent stops with a typed budget-exhaustion reason. Loop detection is handled separately by the semantic progress ledger.
+**Turn budgets.** Durable unified-agent paths resolve an omitted request ceiling to the persisted 20-turn default, and the runtime task applies that exact same value. An explicit parent/task ceiling replaces it but may never exceed inherited governance. Legacy non-session callers can remain unbounded only when no durable group contract exists. Budget exhaustion is typed separately from semantic loop detection.
 
 **Cancellation tokens.** Every sub-agent receives a child cancellation token from its parent. If the parent is cancelled (Ctrl+C, Hive tick interrupted, team manager shutdown), cancellation propagates to all children immediately. Each turn of the agent loop checks the token before proceeding.
 
@@ -109,4 +109,4 @@ Concurrent agents are bounded at multiple levels:
 
 **Cleanup hooks.** The `AgentConfig` trait includes a `cleanup()` method called when any agent exits, whether normally or due to cancellation. For builders, this releases all file locks held by that agent, ensuring no stale locks persist.
 
-Together, these mechanisms ensure that sub-agents are adaptively bounded by current capacity, bounded by explicit resource policy when one is configured, semantically convergent when turns are unlimited, governed by their parent, and cleaned up reliably when they finish or fail. The remaining mini-kernel boundary above must stay visible in design and release claims until delegated runs share parent-grade streaming, tracing, and crash continuation.
+Together, these mechanisms ensure that sub-agents are adaptively bounded by current capacity, bounded by their persisted resource policy, governed by their parent, and cleaned up reliably when they finish or fail. The remaining mini-kernel, unfinished-writer replay, shared-writer recovery, and Hive recovery boundaries above must stay visible in design and release claims.

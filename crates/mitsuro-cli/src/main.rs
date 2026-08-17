@@ -6,6 +6,7 @@
 //! - `mitsuro serve` — unified server + embedded web app + Tailscale
 //! - Clean architecture from day one
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
@@ -130,6 +131,45 @@ enum HiveCommand {
         /// Follow-up message
         message: String,
     },
+    /// List Hive Workers or open a Worker DM
+    Workers {
+        #[command(subcommand)]
+        action: HiveWorkersAction,
+    },
+    /// List Groups, send a room message, or attach to a Group timeline
+    Groups {
+        #[command(subcommand)]
+        action: HiveGroupsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum HiveWorkersAction {
+    /// List durable Hive Workers
+    List,
+    /// Ensure a Worker DM exists and print its session id
+    Dm {
+        /// Worker id or slug
+        worker_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HiveGroupsAction {
+    /// List Groups
+    List,
+    /// Send a user message into a Group room
+    Send {
+        /// Group id
+        group_id: String,
+        /// Room message
+        message: String,
+    },
+    /// Attach to a Group's live timeline
+    Attach {
+        /// Group id
+        group_id: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +204,61 @@ struct HiveSessionSummaryResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct HiveWorkersListResponse {
+    workers: Vec<HiveWorkerListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveWorkerListItem {
+    id: String,
+    slug: String,
+    display_name: String,
+    status: String,
+    model: Option<String>,
+    dm_session_id: Option<String>,
+    dm_agent_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveWorkerDmCliResponse {
+    worker_id: String,
+    session_id: String,
+    title: String,
+    created: bool,
+    agent_state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveGroupsListResponse {
+    groups: Vec<HiveGroupListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveGroupListItem {
+    id: String,
+    title: String,
+    execution_mode: String,
+    status: String,
+    #[serde(default)]
+    members: Vec<HiveGroupMemberListItem>,
+    active_turn_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveGroupMemberListItem {
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HiveGroupSendResponse {
+    group_id: String,
+    turn_id: String,
+    message_id: String,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct HiveTaskResponse {
     id: String,
     subject: String,
@@ -182,6 +277,157 @@ struct HiveSessionStatusResponse {
     tasks: Vec<HiveTaskResponse>,
     agent_state: String,
     runtime: Option<HiveRuntimeStateResponse>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DelegationSessionStateResponse {
+    #[serde(default)]
+    delegation_groups: Vec<CliDelegationGroup>,
+    #[serde(default)]
+    delegation_event_cursor: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDelegationGroup {
+    delegation_group_id: String,
+    state: String,
+    #[serde(default)]
+    tasks: Vec<CliDelegationTask>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDelegationTask {
+    delegation_task_id: String,
+    task_key: String,
+    state: String,
+    attempt_count: usize,
+}
+
+struct CliDelegationProjection {
+    session_id: String,
+    cursor: i64,
+    group_tasks: HashMap<String, Vec<(String, String)>>,
+}
+
+impl CliDelegationProjection {
+    fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            cursor: 0,
+            group_tasks: HashMap::new(),
+        }
+    }
+
+    fn hydrate(&mut self, state: &DelegationSessionStateResponse) {
+        for group in &state.delegation_groups {
+            self.group_tasks.insert(
+                group.delegation_group_id.clone(),
+                group
+                    .tasks
+                    .iter()
+                    .map(|task| (task.delegation_task_id.clone(), task.task_key.clone()))
+                    .collect(),
+            );
+            println!(
+                "[delegation:group] {} {}",
+                group.delegation_group_id, group.state
+            );
+            for task in &group.tasks {
+                println!(
+                    "[delegation:task] {} {} {} attempt={}",
+                    task.delegation_task_id, task.task_key, task.state, task.attempt_count
+                );
+            }
+        }
+        self.cursor = self.cursor.max(state.delegation_event_cursor.unwrap_or(0));
+    }
+
+    fn print_event(&mut self, envelope: &serde_json::Value) {
+        let event = envelope.get("event").unwrap_or(envelope);
+        if event
+            .get("parent_session_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(self.session_id.as_str())
+        {
+            return;
+        }
+        let event_id = event
+            .get("event_id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if event_id > 0 && event_id <= self.cursor {
+            return;
+        }
+        let kind = event
+            .get("event_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let group_id = event
+            .get("delegation_group_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let task_id = event
+            .get("delegation_task_id")
+            .and_then(serde_json::Value::as_str);
+        let payload = event
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match kind {
+            "group_created" => {
+                println!("[delegation:group] {group_id} created");
+                let tasks = payload
+                    .get("tasks")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|tasks| {
+                        tasks
+                            .iter()
+                            .filter_map(|task| {
+                                Some((
+                                    task.get("delegation_task_id")?.as_str()?.to_owned(),
+                                    task.get("task_key")?.as_str()?.to_owned(),
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for (task_id, task_key) in &tasks {
+                    println!("[delegation:task] {task_id} {task_key} created attempt=0");
+                }
+                self.group_tasks.insert(group_id.to_owned(), tasks);
+            }
+            "group_queued" => {
+                println!("[delegation:group] {group_id} queued");
+                if let Some(tasks) = self.group_tasks.get(group_id) {
+                    for (task_id, task_key) in tasks {
+                        println!("[delegation:task] {task_id} {task_key} queued");
+                    }
+                }
+            }
+            "group_state_changed" => println!(
+                "[delegation:group] {} {}",
+                group_id,
+                payload
+                    .get("to")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            "task_claimed" => println!("[delegation:task] {} leased", task_id.unwrap_or("unknown")),
+            "task_running" => {
+                println!("[delegation:task] {} running", task_id.unwrap_or("unknown"))
+            }
+            "task_state_changed" => println!(
+                "[delegation:task] {} {}",
+                task_id.unwrap_or("unknown"),
+                payload
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            _ => println!("[delegation:event] {kind} {payload}"),
+        }
+        self.cursor = self.cursor.max(event_id);
+    }
 }
 
 fn hive_server_url() -> String {
@@ -283,6 +529,69 @@ async fn run_hive_command(command: HiveCommand) -> Result<()> {
                 println!("Queued message for Hive session {session_id}");
             }
         }
+        HiveCommand::Workers { action } => match action {
+            HiveWorkersAction::List => {
+                let response: HiveWorkersListResponse = request_json(
+                    client.get(format!("{base}/api/hive/workers")),
+                    "Failed to list Hive Workers",
+                )
+                .await?;
+                print_hive_workers(&response.workers);
+            }
+            HiveWorkersAction::Dm { worker_id } => {
+                let resolved = resolve_hive_worker_id(&client, &base, &worker_id).await?;
+                let response: HiveWorkerDmCliResponse = request_json(
+                    client.post(format!("{base}/api/hive/workers/{resolved}/dm")),
+                    "Failed to open Hive Worker DM",
+                )
+                .await?;
+                println!("Hive Worker DM ready");
+                println!("  Worker: {}", response.worker_id);
+                println!("  Session: {}", response.session_id);
+                println!("  Title: {}", response.title);
+                println!(
+                    "  {}",
+                    if response.created {
+                        "Created a new DM session"
+                    } else {
+                        "Reused the existing DM session"
+                    }
+                );
+                println!("  Agent: {}", response.agent_state);
+                println!("  Observe: mitsuro hive attach {}", response.session_id);
+            }
+        },
+        HiveCommand::Groups { action } => match action {
+            HiveGroupsAction::List => {
+                let response: HiveGroupsListResponse = request_json(
+                    client.get(format!("{base}/api/hive/groups")),
+                    "Failed to list Hive Groups",
+                )
+                .await?;
+                print_hive_groups(&response.groups);
+            }
+            HiveGroupsAction::Send { group_id, message } => {
+                let response: HiveGroupSendResponse = request_json(
+                    client
+                        .post(format!("{base}/api/hive/groups/{group_id}/messages"))
+                        .json(&serde_json::json!({ "message": message })),
+                    "Failed to send Group message",
+                )
+                .await?;
+                println!("Queued Group turn");
+                println!("  Group: {}", response.group_id);
+                println!("  Turn: {}", response.turn_id);
+                println!("  Message: {}", response.message_id);
+                println!("  Status: {}", response.status);
+                println!(
+                    "  Observe: mitsuro hive groups attach {}",
+                    response.group_id
+                );
+            }
+            HiveGroupsAction::Attach { group_id } => {
+                attach_hive_group(&client, &base, &group_id).await?;
+            }
+        },
     }
 
     Ok(())
@@ -341,6 +650,180 @@ fn print_hive_session_summaries(sessions: &[HiveSessionSummaryResponse]) {
             session.agent_state,
             truncate(&session.title, 36)
         );
+    }
+}
+
+fn print_hive_workers(workers: &[HiveWorkerListItem]) {
+    if workers.is_empty() {
+        println!("No Hive Workers found.");
+        return;
+    }
+
+    println!(
+        "{:<38} {:<16} {:<12} {:<18} {:<36}",
+        "WORKER ID", "SLUG", "STATUS", "MODEL", "NAME"
+    );
+    println!("{}", "-".repeat(124));
+    for worker in workers {
+        let presence = worker
+            .dm_agent_state
+            .as_deref()
+            .unwrap_or(worker.status.as_str());
+        println!(
+            "{:<38} {:<16} {:<12} {:<18} {:<36}",
+            worker.id,
+            truncate(&worker.slug, 16),
+            truncate(presence, 12),
+            truncate(worker.model.as_deref().unwrap_or("-"), 18),
+            truncate(&worker.display_name, 36)
+        );
+        if let Some(session_id) = &worker.dm_session_id {
+            println!("  DM: {session_id}");
+        }
+    }
+}
+
+fn print_hive_groups(groups: &[HiveGroupListItem]) {
+    if groups.is_empty() {
+        println!("No Hive Groups found.");
+        return;
+    }
+
+    println!(
+        "{:<38} {:<12} {:<10} {:<24} {:<36}",
+        "GROUP ID", "MODE", "STATUS", "MEMBERS", "TITLE"
+    );
+    println!("{}", "-".repeat(124));
+    for group in groups {
+        let members = group
+            .members
+            .iter()
+            .map(|member| {
+                if member.display_name.is_empty() || member.display_name == member.slug {
+                    member.slug.clone()
+                } else {
+                    format!("{} ({})", member.slug, member.display_name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{:<38} {:<12} {:<10} {:<24} {:<36}",
+            group.id,
+            truncate(&group.execution_mode, 12),
+            truncate(&group.status, 10),
+            truncate(&members, 24),
+            truncate(&group.title, 36)
+        );
+        if let Some(turn_id) = &group.active_turn_id {
+            println!("  Active turn: {turn_id}");
+        }
+    }
+}
+
+async fn resolve_hive_worker_id(
+    client: &reqwest::Client,
+    base: &str,
+    worker_ref: &str,
+) -> Result<String> {
+    let listed: HiveWorkersListResponse = request_json(
+        client.get(format!("{base}/api/hive/workers")),
+        "Failed to list Hive Workers",
+    )
+    .await?;
+    if listed.workers.iter().any(|worker| worker.id == worker_ref) {
+        return Ok(worker_ref.to_string());
+    }
+    let matches: Vec<_> = listed
+        .workers
+        .iter()
+        .filter(|worker| worker.slug == worker_ref)
+        .collect();
+    match matches.as_slice() {
+        [worker] => Ok(worker.id.clone()),
+        [] => anyhow::bail!("Hive Worker '{worker_ref}' was not found"),
+        _ => anyhow::bail!("Hive Worker slug '{worker_ref}' is ambiguous"),
+    }
+}
+
+async fn attach_hive_group(client: &reqwest::Client, base: &str, group_id: &str) -> Result<()> {
+    let response = client
+        .get(format!("{base}/api/hive/groups/{group_id}/events"))
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .context("Failed to attach to Hive Group")?;
+    let response = ensure_success(response).await?;
+
+    println!("Attaching to Hive Group {group_id}");
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("Failed to read Hive Group event stream")?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(newline_idx) = buffer.find('\n') {
+            let line = buffer[..newline_idx].trim_end_matches('\r').to_string();
+            buffer.drain(..=newline_idx);
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data.trim().is_empty() {
+                    continue;
+                }
+                let event: serde_json::Value = serde_json::from_str(data)
+                    .with_context(|| format!("Failed to parse Hive Group event: {data}"))?;
+                print_hive_group_event(&event);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_hive_group_event(event: &serde_json::Value) {
+    let event_type = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("event");
+    match event_type {
+        "message" => {
+            let message = event.get("message").unwrap_or(event);
+            let seq = message
+                .get("seq")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default();
+            let sender = message
+                .get("sender_kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let worker = message
+                .get("sender_worker_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let content = message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if worker.is_empty() {
+                println!("[{seq}] {sender}: {content}");
+            } else {
+                println!("[{seq}] {sender} {worker}: {content}");
+            }
+        }
+        "turn" => {
+            let turn = event.get("turn").unwrap_or(event);
+            let status = turn
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let turn_id = turn
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            println!("[turn] {turn_id} {status}");
+        }
+        _ => println!("[{event_type}] {event}"),
     }
 }
 
@@ -404,6 +887,18 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
     let response = ensure_success(response).await?;
 
     println!("Attaching to Hive session {}", session_id);
+    let mut delegation = CliDelegationProjection::new(session_id);
+    match request_json::<DelegationSessionStateResponse>(
+        client.get(format!(
+            "{base}/api/sessions/{session_id}/state?include_delegated_history=true"
+        )),
+        "Failed to hydrate delegation state",
+    )
+    .await
+    {
+        Ok(state) => delegation.hydrate(&state),
+        Err(error) => eprintln!("Delegation reconnect hydration unavailable: {error}"),
+    }
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
@@ -422,7 +917,7 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
 
                 let event: serde_json::Value = serde_json::from_str(data)
                     .with_context(|| format!("Failed to parse Hive event: {data}"))?;
-                if print_hive_event(&event)? {
+                if print_hive_event(&event, &mut delegation)? {
                     return Ok(());
                 }
             }
@@ -432,7 +927,10 @@ async fn attach_hive_session(client: &reqwest::Client, base: &str, session_id: &
     Ok(())
 }
 
-fn print_hive_event(event: &serde_json::Value) -> Result<bool> {
+fn print_hive_event(
+    event: &serde_json::Value,
+    delegation: &mut CliDelegationProjection,
+) -> Result<bool> {
     let Some(event_type) = event.get("type").and_then(|value| value.as_str()) else {
         println!("[event] {}", event);
         return Ok(false);
@@ -551,6 +1049,7 @@ fn print_hive_event(event: &serde_json::Value) -> Result<bool> {
                 );
             }
         }
+        "delegation_event" => delegation.print_event(event),
         "plan_update" => {
             let count = event
                 .get("items")
@@ -752,5 +1251,42 @@ mod cli_contract_tests {
             version.to_string().trim(),
             format!("mitsuro {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn delegation_projection_filters_session_and_replay_cursor() {
+        let mut projection = CliDelegationProjection::new("session-1");
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 8,
+                "parent_session_id": "other-session",
+                "delegation_group_id": "group-1",
+                "event_type": "future_event",
+                "payload": {"state": "future"}
+            }
+        }));
+        assert_eq!(projection.cursor, 0);
+
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 8,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "event_type": "future_event",
+                "payload": {"state": "future"}
+            }
+        }));
+        assert_eq!(projection.cursor, 8);
+        projection.print_event(&serde_json::json!({
+            "event": {
+                "event_id": 7,
+                "parent_session_id": "session-1",
+                "delegation_group_id": "group-1",
+                "event_type": "task_running",
+                "delegation_task_id": "task-1",
+                "payload": {}
+            }
+        }));
+        assert_eq!(projection.cursor, 8);
     }
 }

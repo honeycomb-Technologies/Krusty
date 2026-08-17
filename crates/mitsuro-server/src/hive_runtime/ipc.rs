@@ -9,11 +9,12 @@ use mitsuro_core::storage::RuntimeTraceEvent;
 use mitsuro_hive_protocol::HiveIpcClientConfig;
 use mitsuro_hive_protocol::{
     AckResponse, Actor, ClientError, Command, CreateScheduleCommand, DaemonStats, DispatchCommand,
-    EventEnvelope, EventSubscription, HiveEvent, HiveIpcClient, MessageCommand, ModelKey,
-    RecoverCommand, ReplaceScheduleCommand, RequestEnvelope, ResponsePayload, ScheduleCommand,
-    ScheduleDefinition, ScheduleResponse, SessionCommand, SetCrewCommand, SetPriorityCommand,
-    SetScheduleStatusCommand, SteerCommand, SubscribeCommand, ToolApprovalCommand,
-    UserResponseCommand, MODEL_IDENTITY_PROTOCOL_MINOR, PROTOCOL_MAJOR,
+    EventEnvelope, EventSubscription, GroupMessageCommand, GroupStopCommand, GroupTurnResponse,
+    HiveEvent, HiveIpcClient, MessageCommand, ModelKey, RecoverCommand, ReplaceScheduleCommand,
+    RequestEnvelope, ResponsePayload, ScheduleCommand, ScheduleDefinition, ScheduleResponse,
+    SessionCommand, SetCrewCommand, SetPriorityCommand, SetScheduleStatusCommand, SteerCommand,
+    SubscribeCommand, ToolApprovalCommand, UserResponseCommand, MODEL_IDENTITY_PROTOCOL_MINOR,
+    PROTOCOL_MAJOR,
 };
 
 use super::HiveRuntimeStats;
@@ -340,6 +341,56 @@ impl HiveDaemonControl {
                 unique_key(&format!("message:{session_id}")),
             ),
             "send message",
+        )
+        .await
+    }
+
+    /// Fan one room message out as a durable group turn. The daemon appends
+    /// the message, resolves targets, and queues member runs atomically.
+    pub(super) async fn group_message(
+        &self,
+        user_id: Option<&str>,
+        group_id: &str,
+        message: &str,
+        mentions_override: Option<Vec<String>>,
+        idempotency_key: Option<&str>,
+    ) -> Result<GroupTurnResponse> {
+        match self
+            .command(
+                user_id,
+                Command::GroupMessage(GroupMessageCommand {
+                    group_id: group_id.to_string(),
+                    message: message.to_string(),
+                    mentions_override,
+                }),
+                Some(request_key(
+                    idempotency_key,
+                    unique_key(&format!("group-message:{group_id}")),
+                )),
+            )
+            .await?
+        {
+            ResponsePayload::GroupTurn(turn) => Ok(turn),
+            payload => bail!("Hive group message returned unexpected response {payload:?}"),
+        }
+    }
+
+    pub(super) async fn group_stop(
+        &self,
+        user_id: Option<&str>,
+        group_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        self.expect_ack(
+            user_id,
+            Command::GroupStop(GroupStopCommand {
+                group_id: group_id.to_string(),
+            }),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("group-stop:{group_id}")),
+            ),
+            "stop the group turn",
         )
         .await
     }

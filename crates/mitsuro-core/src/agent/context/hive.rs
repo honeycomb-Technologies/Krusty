@@ -3,12 +3,15 @@ use std::path::Path;
 use tracing::warn;
 
 use crate::paths;
+use crate::storage::hive_groups;
 use crate::storage::{
-    HiveCrewProfileDocumentKind, HiveHomeProfile, HiveProfileDocumentKind, HiveProfileSnapshot,
+    HiveCrewProfileDocumentKind, HiveGroupRunContext, HiveGroupSenderKind, HiveHomeProfile,
+    HiveProfileDocumentKind, HiveProfileSnapshot, HiveWorker, HiveWorkerDocument,
+    HiveWorkerDocumentKind, HiveWorkerStore,
 };
 
 use super::project::discover_named_file;
-use super::truncate_utf8_bytes;
+use super::{open_context_database, truncate_utf8_bytes};
 
 const HIVE_FILES: &[&str] = &[
     "HIVE.md",
@@ -17,19 +20,231 @@ const HIVE_FILES: &[&str] = &[
     crate::identity::legacy::HIVE_PROJECT_OVERLAY_FILE_NAME_LOWERCASE,
 ];
 const MAX_HIVE_CONTEXT_BYTES: usize = 24 * 1024;
+/// Independent budget for the [GROUP ROOM] block so a chatty room cannot
+/// displace persona or project context.
+const MAX_GROUP_ROOM_CONTEXT_BYTES: usize = 16 * 1024;
+/// Per-message excerpt bound inside the room timeline.
+const MAX_GROUP_ROOM_MESSAGE_BYTES: usize = 1200;
+
+/// Persona material for a session that is a Hive Worker's private DM lane.
+pub(super) struct HiveWorkerPersona {
+    /// Memory namespace granted to this Worker (Shared + this namespace).
+    pub(super) memory_namespace_id: String,
+    /// Rendered `[HIVE WORKER ...]` sections replacing the crew treatment.
+    pub(super) sections: Vec<String>,
+}
+
+/// Resolve the Worker whose DM lane is this session, if any. The session
+/// itself is ownership-checked upstream; the owner comparison here keeps a
+/// mis-bound row from leaking another owner's persona or memory namespace.
+pub(super) fn load_worker_persona(
+    db_path: &Path,
+    session_id: &str,
+    user_id: Option<&str>,
+) -> Option<HiveWorkerPersona> {
+    let db = open_context_database(db_path, "loading Hive worker persona")?;
+    let store = HiveWorkerStore::new(db);
+    let worker = match store.get_by_dm_session(session_id) {
+        Ok(worker) => worker?,
+        Err(error) => {
+            warn!(session_id, error = %error, "Failed to resolve Hive worker for DM session");
+            return None;
+        }
+    };
+    if worker.user_id.as_deref() != user_id {
+        warn!(
+            session_id,
+            worker_id = %worker.id,
+            "Hive worker DM binding does not match the session owner; skipping persona"
+        );
+        return None;
+    }
+    let documents = match store.documents(&worker.id) {
+        Ok(documents) => documents,
+        Err(error) => {
+            warn!(worker_id = %worker.id, error = %error, "Failed to load Hive worker documents");
+            Vec::new()
+        }
+    };
+    Some(HiveWorkerPersona {
+        sections: build_worker_persona_sections(&worker, &documents),
+        memory_namespace_id: worker.memory_namespace_id,
+    })
+}
+
+/// Resolve a Worker's memory namespace for a group member run that may not
+/// be executing on that Worker's DM session.
+pub(super) fn load_worker_memory_namespace(
+    db_path: &Path,
+    worker_id: &str,
+    user_id: Option<&str>,
+) -> Option<String> {
+    let db = open_context_database(db_path, "loading Hive worker memory namespace")?;
+    let store = HiveWorkerStore::new(db);
+    let worker = match store.get(worker_id) {
+        Ok(worker) => worker?,
+        Err(error) => {
+            warn!(worker_id, error = %error, "Failed to resolve Hive worker for group memory scope");
+            return None;
+        }
+    };
+    if worker.user_id.as_deref() != user_id {
+        return None;
+    }
+    Some(worker.memory_namespace_id)
+}
+
+fn build_worker_persona_sections(
+    worker: &HiveWorker,
+    documents: &[HiveWorkerDocument],
+) -> Vec<String> {
+    let mut sections = vec![format!(
+        "[HIVE WORKER - {slug}]\n\nYou are {name} (@{slug}), a dedicated Hive Worker. This session is your private DM lane with the user; speak and act as this Worker.\n\n[END HIVE WORKER]",
+        slug = worker.slug,
+        name = worker.display_name,
+    )];
+    for kind in HiveWorkerDocumentKind::ALL {
+        if let Some(document) = documents.iter().find(|document| document.kind == kind) {
+            let label = kind.as_str().to_ascii_uppercase();
+            sections.push(format!(
+                "[HIVE WORKER {label} - {slug}]\n\n{content}\n\n[END HIVE WORKER {label}]",
+                slug = worker.slug,
+                content = document.content,
+            ));
+        }
+    }
+    sections
+}
+
+/// Render the [GROUP ROOM] block for one member run of a group turn: group
+/// title, member roster, posting contract, and the last
+/// `context_window_messages` room messages. Ordinary assistant output stays
+/// private to the run; only `post_to_group` reaches the room.
+pub(super) fn build_group_room_section(
+    db_path: &Path,
+    group_run: &HiveGroupRunContext,
+) -> Option<String> {
+    let db = open_context_database(db_path, "loading Hive group room context")?;
+    let conn = db.conn();
+    let group = match hive_groups::load_group(conn, &group_run.group_id) {
+        Ok(group) => group?,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group for room context");
+            return None;
+        }
+    };
+    let roster = match hive_groups::load_member_workers(conn, &group_run.group_id) {
+        Ok(roster) => roster,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group roster");
+            Vec::new()
+        }
+    };
+    let window = group_run.context_window_messages.max(1) as usize;
+    let messages = match hive_groups::load_recent_messages(conn, &group_run.group_id, window) {
+        Ok(messages) => messages,
+        Err(error) => {
+            warn!(group_id = %group_run.group_id, error = %error, "Failed to load Hive group messages");
+            Vec::new()
+        }
+    };
+
+    let display_for = |worker_id: Option<&str>| -> String {
+        worker_id
+            .and_then(|id| roster.iter().find(|worker| worker.id == id))
+            .map(|worker| format!("@{}", worker.slug))
+            .unwrap_or_else(|| "@former-member".to_string())
+    };
+    let self_label = roster
+        .iter()
+        .find(|worker| worker.id == group_run.worker_id)
+        .map(|worker| format!("{} (@{})", worker.display_name, worker.slug))
+        .unwrap_or_else(|| "a group member".to_string());
+
+    let mut section = format!(
+        "[GROUP ROOM - {title}]\n\nYou are {self_label}, working in the group room \"{title}\" with the user and the members below. This run was triggered by a room message.\n\nMembers:\n",
+        title = group.title,
+    );
+    for worker in &roster {
+        let provider = worker
+            .model_key
+            .as_ref()
+            .map(|key| format!("{}", key.provider))
+            .or_else(|| worker.model.clone())
+            .unwrap_or_else(|| "default model".to_string());
+        section.push_str(&format!(
+            "- @{} ({}, {}){}\n",
+            worker.slug,
+            worker.display_name,
+            provider,
+            if worker.id == group_run.worker_id {
+                " <- you"
+            } else {
+                ""
+            }
+        ));
+    }
+    section.push_str(&format!(
+        "\nRoom rules:\n- Everything you say normally (assistant text, tool use, reasoning) stays PRIVATE to this run.\n- To speak in the room, call the post_to_group tool. You may post at most {} message(s) this run; make them count.\n- Mention members with @slug when you address them. Reply to a specific message by passing its message id.\n- If you have nothing useful to add, do not post.\n",
+        group_run.max_member_messages_per_turn
+    ));
+
+    if messages.is_empty() {
+        section.push_str("\nThe room has no messages yet.\n");
+    } else {
+        section.push_str("\nRecent room messages (oldest first):\n");
+        for message in &messages {
+            let sender = match message.sender_kind {
+                HiveGroupSenderKind::User => "user".to_string(),
+                HiveGroupSenderKind::System => "system".to_string(),
+                HiveGroupSenderKind::Worker => display_for(message.sender_worker_id.as_deref()),
+            };
+            let reply = message
+                .reply_to_message_id
+                .as_deref()
+                .map(|id| format!(" (reply to {id})"))
+                .unwrap_or_default();
+            section.push_str(&format!(
+                "#{seq} [{id}] {sender}{reply}: {content}\n",
+                seq = message.seq,
+                id = message.id,
+                content = truncate_utf8_bytes(&message.content, MAX_GROUP_ROOM_MESSAGE_BYTES),
+            ));
+        }
+    }
+    section.push_str("\n[END GROUP ROOM]");
+
+    if section.len() > MAX_GROUP_ROOM_CONTEXT_BYTES {
+        let marker = "\n[GROUP ROOM TRUNCATED AT REQUEST BUDGET]\n[END GROUP ROOM]";
+        let mut bounded = truncate_utf8_bytes(
+            &section,
+            MAX_GROUP_ROOM_CONTEXT_BYTES.saturating_sub(marker.len()),
+        );
+        bounded.push_str(marker);
+        return Some(bounded);
+    }
+    Some(section)
+}
 
 pub(super) fn build_hive_context_sections(
     project_root: &Path,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let hive_home = paths::hive_dir();
-    build_hive_context_sections_with_home(project_root, &hive_home, hive_crew_slug)
+    build_hive_context_sections_with_home(
+        project_root,
+        &hive_home,
+        hive_crew_slug,
+        worker_persona_sections,
+    )
 }
 
 pub(super) fn build_hive_context_sections_with_home(
     project_root: &Path,
     hive_home: &Path,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let profile = HiveHomeProfile::load_from(hive_home);
     let layers = profile.context_layers();
@@ -44,7 +259,11 @@ pub(super) fn build_hive_context_sections_with_home(
         })
         .collect::<Vec<_>>();
 
-    if let Some(crew_slug) = hive_crew_slug
+    if !worker_persona_sections.is_empty() {
+        // A Worker-bound DM replaces the generic crew treatment with the
+        // Worker's own persona documents.
+        sections.extend_from_slice(worker_persona_sections);
+    } else if let Some(crew_slug) = hive_crew_slug
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -99,6 +318,7 @@ pub(super) fn build_hive_context_sections_with_profile(
     project_root: &Path,
     profile: &HiveProfileSnapshot,
     hive_crew_slug: Option<&str>,
+    worker_persona_sections: &[String],
 ) -> Vec<String> {
     let mut sections = Vec::new();
     for kind in [
@@ -115,7 +335,9 @@ pub(super) fn build_hive_context_sections_with_profile(
         }
     }
 
-    if let Some(crew_slug) = hive_crew_slug
+    if !worker_persona_sections.is_empty() {
+        sections.extend_from_slice(worker_persona_sections);
+    } else if let Some(crew_slug) = hive_crew_slug
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -234,6 +456,7 @@ fn hive_context_priority(section: &str) -> u8 {
         "[HIVE USER",
         "[HIVE CREW IDENTITY",
         "[HIVE CREW SOUL",
+        "[HIVE WORKER",
     ]
     .iter()
     .any(|prefix| section.starts_with(prefix))
@@ -346,11 +569,13 @@ mod tests {
             project.path(),
             &profile(4, "Check queue A.", "Main thread."),
             None,
+            &[],
         );
         let second = build_hive_context_sections_with_profile(
             project.path(),
             &profile(5, "Check queue B.", "Mobile push."),
             None,
+            &[],
         );
         let stable = |sections: &[String]| {
             sections

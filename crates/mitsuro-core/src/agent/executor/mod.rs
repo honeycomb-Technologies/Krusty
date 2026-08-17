@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::client::AiClient;
+use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::{AiToolCall, Content};
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
@@ -40,13 +41,14 @@ use super::tool_control::{AuthorizationDecision, RetryDirective, ToolControl};
 use super::ProviderCallTraceContext;
 
 use self::plan_updates::emit_plan_update;
-use self::regular::execute_regular_tool;
+use self::regular::{execute_regular_tool, successful_background_agent_start};
 use self::user_message::execute_send_user_message;
 
 pub(crate) struct ToolExecutionBatch {
     pub(crate) results: Vec<Content>,
     pub(crate) next_work_mode: WorkMode,
     pub(crate) cancelled: bool,
+    pub(crate) yield_after_background_agent: bool,
 }
 
 /// Execute a batch of tool calls, emitting LoopEvents and receiving LoopInputs
@@ -72,13 +74,16 @@ pub(crate) async fn execute_tools(
     provider_call_trace: Option<&ProviderCallTraceContext>,
     input_inbox: &mut LoopInputInbox,
     subagent_max_turns_override: Option<usize>,
+    delegated_reasoning_effort: Option<ReasoningEffort>,
     advertised_tool_names: &HashSet<String>,
     execution_tool_allowlist: Option<&HashSet<String>>,
     disabled_tools: Option<&[String]>,
+    hive_group_run: Option<&crate::storage::HiveGroupRunContext>,
     file_observations: Arc<FileObservationTracker>,
 ) -> ToolExecutionBatch {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
+    let mut yield_after_background_agent = false;
     let tool_control = ToolControl::new(permission_mode);
     let mut parallel_calls_to_skip = 0usize;
     let configured_extension_manager = tool_registry.agent_extension_manager();
@@ -215,7 +220,9 @@ pub(crate) async fn execute_tools(
                             event_tx,
                             provider_call_trace,
                             subagent_max_turns_override,
+                            delegated_reasoning_effort,
                             execution_tool_allowlist,
+                            hive_group_run,
                             Arc::clone(&file_observations),
                             extension_snapshot_prepared,
                             None,
@@ -273,6 +280,7 @@ pub(crate) async fn execute_tools(
                         results,
                         next_work_mode: work_mode,
                         cancelled: true,
+                        yield_after_background_agent: false,
                     };
                 };
 
@@ -329,6 +337,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
+                    yield_after_background_agent: false,
                 };
             }
         }
@@ -420,7 +429,9 @@ pub(crate) async fn execute_tools(
                 event_tx,
                 provider_call_trace,
                 subagent_max_turns_override,
+                delegated_reasoning_effort,
                 execution_tool_allowlist,
+                hive_group_run,
                 Arc::clone(&file_observations),
                 extension_snapshot_prepared,
                 Some(execution_cancellation.clone()),
@@ -454,6 +465,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
+                    yield_after_background_agent: false,
                 };
             };
 
@@ -463,6 +475,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
+                    yield_after_background_agent: false,
                 };
             }
 
@@ -481,6 +494,7 @@ pub(crate) async fn execute_tools(
             }
         };
 
+        yield_after_background_agent |= successful_background_agent_start(call, &result);
         results.push(tool_control.publish_result(call, &result, event_tx));
     }
 
@@ -488,6 +502,7 @@ pub(crate) async fn execute_tools(
         results,
         next_work_mode: work_mode,
         cancelled: false,
+        yield_after_background_agent,
     }
 }
 
@@ -661,6 +676,7 @@ mod tests {
     struct CapturedDelegationGovernance {
         permission_mode: PermissionMode,
         subagent_max_turns: Option<usize>,
+        reasoning_effort: Option<ReasoningEffort>,
         execution_tool_allowlist: Option<HashSet<String>>,
     }
 
@@ -690,6 +706,7 @@ mod tests {
                     .push(CapturedDelegationGovernance {
                         permission_mode: ctx.permission_mode,
                         subagent_max_turns: ctx.subagent_max_turns,
+                        reasoning_effort: ctx.delegated_reasoning_effort,
                         execution_tool_allowlist: ctx.execution_tool_allowlist.clone(),
                     });
             }
@@ -839,7 +856,9 @@ mod tests {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),
@@ -929,8 +948,10 @@ mod tests {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
             Some(&explicit_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -990,7 +1011,9 @@ mod tests {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),
@@ -1074,8 +1097,10 @@ mod tests {
             None,
             &mut blocked_input_inbox,
             None,
+            None,
             &advertised,
             Some(&explicit_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -1135,7 +1160,9 @@ mod tests {
             None,
             &mut allowed_input_inbox,
             None,
+            None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),
@@ -1192,8 +1219,10 @@ mod tests {
             None,
             &mut exact_input_inbox,
             None,
+            None,
             &advertised,
             Some(&exact_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -1213,7 +1242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_tool_context_inherits_exact_scope_permission_and_turn_budget() {
+    async fn background_agent_batch_inherits_governance_and_requests_foreground_yield() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let registry = Arc::new(ToolRegistry::new());
         let captured_calls = Arc::new(StdMutex::new(Vec::new()));
@@ -1245,7 +1274,11 @@ mod tests {
         let call = AiToolCall {
             id: "scoped-agent".to_string(),
             name: "agent".to_string(),
-            arguments: json!({"agent_type": "build", "prompt": "attempt mutation"}),
+            arguments: json!({
+                "agent_type": "build",
+                "prompt": "attempt mutation",
+                "run_in_background": true
+            }),
         };
 
         let batch = execute_tools(
@@ -1267,14 +1300,17 @@ mod tests {
             None,
             &mut input_inbox,
             Some(6),
+            Some(ReasoningEffort::Medium),
             &advertised,
             Some(&exact_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
 
         assert!(!batch.cancelled);
+        assert!(batch.yield_after_background_agent);
         assert_eq!(captured_calls.lock().unwrap().len(), 1);
         assert_eq!(
             captured_governance
@@ -1284,6 +1320,7 @@ mod tests {
             &[CapturedDelegationGovernance {
                 permission_mode: PermissionMode::Supervised,
                 subagent_max_turns: Some(6),
+                reasoning_effort: Some(ReasoningEffort::Medium),
                 execution_tool_allowlist: Some(exact_scope),
             }]
         );
@@ -1404,7 +1441,9 @@ export default (mitsuro) => {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),
@@ -1505,8 +1544,10 @@ export default (mitsuro) => {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
             Some(&explicit_scope),
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -1576,7 +1617,9 @@ export default (mitsuro) => {
             None,
             &mut input_inbox,
             None,
+            None,
             &advertised,
+            None,
             None,
             None,
             Arc::new(FileObservationTracker::new()),

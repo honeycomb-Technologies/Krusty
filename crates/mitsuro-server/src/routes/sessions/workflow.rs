@@ -3,7 +3,9 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use std::time::Duration;
 
+use mitsuro_core::agent::LoopInput;
 use mitsuro_core::workflow::{
     AttemptProgressInput, AttemptStatus, CompleteStepInput, CreateGoalInput, EditGoalInput,
     PlanProposalInput, SetCriterionInput, StartAttemptInput, WorkflowError, WorkflowManager,
@@ -147,6 +149,15 @@ pub(super) async fn execute_workflow_command(
     load_owned_session(&session_manager, &session_id, user.as_ref())?;
     let manager =
         WorkflowManager::new(state.db_path.as_ref().clone()).map_err(map_workflow_error)?;
+    let starts_execution = matches!(
+        &command,
+        WorkflowCommand::ActivateGoal { .. } | WorkflowCommand::ResumeGoal { .. }
+    );
+    let mut execution_guard = if starts_execution {
+        state.try_lock_session(&session_id).await
+    } else {
+        None
+    };
 
     let mutation = match command {
         WorkflowCommand::CreateGoal { operation_id, goal } => {
@@ -367,6 +378,59 @@ pub(super) async fn execute_workflow_command(
     ) {
         session_manager
             .update_session_work_mode(&session_id, mitsuro_core::storage::WorkMode::Build)?;
+    }
+
+    if starts_execution
+        && matches!(
+            mutation.snapshot.goal.status,
+            mitsuro_core::workflow::GoalStatus::Active
+        )
+    {
+        let workflow_input = LoopInput::WorkflowUpdated {
+            goal_id: mutation.snapshot.goal.id.clone(),
+            aggregate_revision: mutation.snapshot.aggregate_revision,
+            operation_id: mutation.operation_id.clone(),
+        };
+        let live_sender = state.session_inputs.read().await.get(&session_id).cloned();
+        if live_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(workflow_input.clone()).is_ok())
+        {
+            drop(execution_guard.take());
+        } else {
+            if execution_guard.is_none() {
+                execution_guard = tokio::time::timeout(
+                    Duration::from_millis(250),
+                    state.lock_session(&session_id),
+                )
+                .await
+                .ok();
+            }
+
+            let guard = execution_guard.take().ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "Session {session_id} is busy and its workflow wake channel is not ready; retry the command"
+                ))
+            })?;
+            if let Err(error) = super::super::chat::start_workflow_session_with_guard(
+                &state,
+                user.as_ref(),
+                &session_id,
+                guard,
+            )
+            .await
+            {
+                let _ = manager.pause_goal(
+                    &session_id,
+                    &mutation.snapshot.goal.id,
+                    mutation.snapshot.aggregate_revision,
+                    Some("activation_start_failed"),
+                    &format!("runtime-activation-failed-{}", uuid::Uuid::new_v4()),
+                    "runtime",
+                );
+                return Err(error);
+            }
+        }
     }
 
     Ok(Json(mutation))

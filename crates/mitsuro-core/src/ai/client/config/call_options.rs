@@ -2,7 +2,7 @@ use crate::ai::models::{
     resolve_model_metadata, ApiFormat, ModelCapabilities, ResolvedModelRuntime,
 };
 use crate::ai::providers::{
-    FastMode, ProviderCapabilities, ProviderId, ReasoningControl, ReasoningFormat,
+    FastMode, ProviderCapabilities, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
 };
 use crate::ai::types::{
     AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
@@ -83,6 +83,92 @@ impl PromptCacheRetention {
     }
 }
 
+fn normalize_reasoning_effort(
+    requested: Option<ReasoningEffort>,
+    capabilities: &ModelCapabilities,
+    control: Option<ReasoningControl>,
+) -> Option<ReasoningEffort> {
+    if !capabilities.supports_thinking || control == Some(ReasoningControl::OutputOnly) {
+        return None;
+    }
+
+    let mut supported = capabilities.supported_reasoning_levels.clone();
+    supported.dedup();
+    let fallback = capabilities
+        .default_reasoning_level
+        .filter(|level| *level != ReasoningEffort::None)
+        .or_else(|| {
+            supported
+                .iter()
+                .copied()
+                .find(|level| *level != ReasoningEffort::None)
+        })
+        .unwrap_or(ReasoningEffort::Medium);
+
+    let mut requested = requested?;
+    if requested == ReasoningEffort::None {
+        return if capabilities.reasoning_is_mandatory {
+            Some(fallback)
+        } else {
+            Some(ReasoningEffort::None)
+        };
+    }
+    if supported.is_empty() || supported.contains(&requested) {
+        return Some(requested);
+    }
+    if requested == ReasoningEffort::Ultra && supported.contains(&ReasoningEffort::Max) {
+        requested = ReasoningEffort::Max;
+        return Some(requested);
+    }
+    Some(fallback)
+}
+
+const fn codex_effort_for_reasoning_level(level: ReasoningEffort) -> Option<CodexReasoningEffort> {
+    Some(match level {
+        ReasoningEffort::None => return None,
+        ReasoningEffort::Minimal => CodexReasoningEffort::Minimal,
+        ReasoningEffort::Low => CodexReasoningEffort::Low,
+        ReasoningEffort::Medium => CodexReasoningEffort::Medium,
+        ReasoningEffort::High => CodexReasoningEffort::High,
+        ReasoningEffort::XHigh => CodexReasoningEffort::XHigh,
+        ReasoningEffort::Max | ReasoningEffort::Ultra => CodexReasoningEffort::Max,
+    })
+}
+
+const fn anthropic_effort_for_reasoning_level(
+    level: ReasoningEffort,
+) -> Option<AnthropicAdaptiveEffort> {
+    Some(match level {
+        ReasoningEffort::None => return None,
+        ReasoningEffort::Minimal | ReasoningEffort::Low => AnthropicAdaptiveEffort::Low,
+        ReasoningEffort::Medium => AnthropicAdaptiveEffort::Medium,
+        ReasoningEffort::High => AnthropicAdaptiveEffort::High,
+        ReasoningEffort::XHigh => AnthropicAdaptiveEffort::XHigh,
+        ReasoningEffort::Max | ReasoningEffort::Ultra => AnthropicAdaptiveEffort::Max,
+    })
+}
+
+const fn reasoning_level_for_codex_effort(level: CodexReasoningEffort) -> ReasoningEffort {
+    match level {
+        CodexReasoningEffort::Minimal => ReasoningEffort::Minimal,
+        CodexReasoningEffort::Low => ReasoningEffort::Low,
+        CodexReasoningEffort::Medium => ReasoningEffort::Medium,
+        CodexReasoningEffort::High => ReasoningEffort::High,
+        CodexReasoningEffort::XHigh => ReasoningEffort::XHigh,
+        CodexReasoningEffort::Max => ReasoningEffort::Max,
+    }
+}
+
+const fn reasoning_level_for_anthropic_effort(level: AnthropicAdaptiveEffort) -> ReasoningEffort {
+    match level {
+        AnthropicAdaptiveEffort::Low => ReasoningEffort::Low,
+        AnthropicAdaptiveEffort::Medium => ReasoningEffort::Medium,
+        AnthropicAdaptiveEffort::High => ReasoningEffort::High,
+        AnthropicAdaptiveEffort::XHigh => ReasoningEffort::XHigh,
+        AnthropicAdaptiveEffort::Max => ReasoningEffort::Max,
+    }
+}
+
 /// Call options for API requests
 #[derive(Debug, Clone)]
 pub struct CallOptions {
@@ -99,6 +185,12 @@ pub struct CallOptions {
     /// Catalog-selected wire control. When present, this is authoritative over
     /// model-name heuristics and keeps dynamically discovered models usable.
     pub reasoning_control: Option<ReasoningControl>,
+    /// Provider-independent reasoning level selected for this exact run.
+    ///
+    /// `None` preserves legacy/unspecified behavior. An explicit
+    /// `Some(ReasoningEffort::None)` is an Off request which mandatory-
+    /// reasoning models normalize against their immutable capability snapshot.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Enable prompt caching (default: true)
     pub enable_caching: bool,
     /// Requested provider prompt-cache lifetime. Defaults from
@@ -141,6 +233,7 @@ impl Default for CallOptions {
             thinking: None,
             reasoning_format: None,
             reasoning_control: None,
+            reasoning_effort: None,
             enable_caching: true,
             prompt_cache_retention: PromptCacheRetention::from_env(),
             context_management: None,
@@ -216,9 +309,7 @@ impl CallOptions {
             reasoning_control: canonical
                 .reasoning_control
                 .map(|value| format!("{value:?}")),
-            reasoning_effort: canonical
-                .codex_reasoning_effort
-                .map(|value| format!("{value:?}")),
+            reasoning_effort: canonical.reasoning_effort.map(|value| format!("{value:?}")),
             parallel_tool_calls: canonical.codex_parallel_tool_calls,
             caching_enabled: canonical.enable_caching,
             fast_mode: canonical.fast_mode,
@@ -325,6 +416,32 @@ impl CallOptions {
         let resolved_reasoning_control = options
             .reasoning_control
             .or(model_capabilities.reasoning_control);
+        // Provider-specific fields are compatibility readers. Translate them
+        // once into the shared typed contract, then regenerate the exact wire
+        // control from the canonical value below.
+        let requested_reasoning_effort = options
+            .reasoning_effort
+            .or_else(|| {
+                options
+                    .codex_reasoning_effort
+                    .map(reasoning_level_for_codex_effort)
+            })
+            .or_else(|| {
+                options
+                    .anthropic_adaptive_effort
+                    .map(reasoning_level_for_anthropic_effort)
+            });
+        options.reasoning_effort = normalize_reasoning_effort(
+            requested_reasoning_effort,
+            model_capabilities,
+            resolved_reasoning_control,
+        );
+
+        if options.reasoning_effort == Some(ReasoningEffort::None) {
+            options.thinking = None;
+        } else if options.reasoning_effort.is_some() {
+            options.thinking = Some(ThinkingConfig::default());
+        }
 
         if resolved_reasoning_control == Some(ReasoningControl::OutputOnly) {
             // Output-only transports (classic Grok Build / Composer rows) can
@@ -333,12 +450,14 @@ impl CallOptions {
             options.reasoning_format = resolved_reasoning_format;
             options.reasoning_control = Some(ReasoningControl::OutputOnly);
             options.thinking = None;
+            options.reasoning_effort = None;
             options.codex_reasoning_effort = None;
             options.anthropic_adaptive_effort = None;
         } else if resolved_reasoning_format.is_none() {
             options.reasoning_format = None;
             options.reasoning_control = None;
             options.thinking = None;
+            options.reasoning_effort = None;
             options.codex_reasoning_effort = None;
             options.anthropic_adaptive_effort = None;
         } else {
@@ -353,9 +472,15 @@ impl CallOptions {
 
             match options.reasoning_control {
                 Some(ReasoningControl::OpenAiEffort) => {
+                    options.codex_reasoning_effort = options
+                        .reasoning_effort
+                        .and_then(codex_effort_for_reasoning_level);
                     options.anthropic_adaptive_effort = None;
                 }
                 Some(ReasoningControl::AnthropicAdaptive) => {
+                    options.anthropic_adaptive_effort = options
+                        .reasoning_effort
+                        .and_then(anthropic_effort_for_reasoning_level);
                     options.codex_reasoning_effort = None;
                 }
                 Some(ReasoningControl::AnthropicBudget | ReasoningControl::Boolean) | None => {
@@ -366,6 +491,7 @@ impl CallOptions {
             }
 
             if options.thinking.is_none() {
+                options.reasoning_effort = None;
                 options.codex_reasoning_effort = None;
                 options.anthropic_adaptive_effort = None;
             }
@@ -598,7 +724,9 @@ mod tests {
     };
     use crate::ai::client::config::CodexReasoningEffort;
     use crate::ai::models::ApiFormat;
-    use crate::ai::providers::{FastMode, ProviderId, ReasoningControl, ReasoningFormat};
+    use crate::ai::providers::{
+        FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+    };
     use crate::ai::types::{
         AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
     };
@@ -989,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalization_keeps_grok_45_graded_effort() {
+    fn canonicalization_keeps_grok_46_graded_effort() {
         let options = CallOptions {
             thinking: Some(ThinkingConfig::default()),
             codex_reasoning_effort: Some(CodexReasoningEffort::Medium),
@@ -999,7 +1127,7 @@ mod tests {
         };
 
         let canonical =
-            options.canonicalized_for(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
+            options.canonicalized_for(ProviderId::Grok, "grok-4.6", ApiFormat::OpenAIResponses);
 
         assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::OpenAI));
         assert_eq!(
@@ -1011,6 +1139,33 @@ mod tests {
             Some(CodexReasoningEffort::Medium)
         );
         assert!(canonical.thinking.is_some());
+    }
+
+    #[test]
+    fn canonicalization_maps_typed_reasoning_to_provider_controls() {
+        let grok = CallOptions {
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            ..Default::default()
+        }
+        .canonicalized_for(ProviderId::Grok, "grok-4.6", ApiFormat::OpenAIResponses);
+        assert_eq!(grok.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            grok.codex_reasoning_effort,
+            Some(CodexReasoningEffort::Medium)
+        );
+        assert!(grok.thinking.is_some());
+
+        let luna = CallOptions {
+            reasoning_effort: Some(ReasoningEffort::XHigh),
+            ..Default::default()
+        }
+        .canonicalized_for(
+            ProviderId::Anthropic,
+            "claude-opus-4-8",
+            ApiFormat::Anthropic,
+        );
+        assert_eq!(luna.reasoning_effort, Some(ReasoningEffort::XHigh));
+        assert!(luna.thinking.is_some());
     }
 
     #[test]
@@ -1104,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_settings_keep_grok_45_graded_effort() {
+    fn effective_settings_keep_grok_46_graded_effort() {
         let options = CallOptions {
             thinking: Some(ThinkingConfig::default()),
             codex_reasoning_effort: Some(CodexReasoningEffort::Medium),
@@ -1115,15 +1270,38 @@ mod tests {
 
         let settings = options.effective_request_settings(
             ProviderId::Grok,
-            "grok-4.5",
+            "grok-4.6",
             ApiFormat::OpenAIResponses,
         );
 
         assert_eq!(settings.provider, "grok");
-        assert_eq!(settings.model, "grok-4.5");
+        assert_eq!(settings.model, "grok-4.6");
         assert!(settings.thinking_enabled);
         assert_eq!(settings.reasoning_control.as_deref(), Some("OpenAiEffort"));
         assert_eq!(settings.reasoning_effort.as_deref(), Some("Medium"));
+        assert!(settings.warnings.is_empty());
+    }
+
+    #[test]
+    fn effective_settings_keep_grok_46_xhigh_effort() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            codex_reasoning_effort: Some(CodexReasoningEffort::XHigh),
+            reasoning_format: Some(ReasoningFormat::OpenAI),
+            reasoning_control: Some(ReasoningControl::OpenAiEffort),
+            ..Default::default()
+        };
+
+        let settings = options.effective_request_settings(
+            ProviderId::Grok,
+            "grok-4.6",
+            ApiFormat::OpenAIResponses,
+        );
+
+        assert_eq!(settings.model, "grok-4.6");
+        assert!(settings.thinking_enabled);
+        assert_eq!(settings.reasoning_control.as_deref(), Some("OpenAiEffort"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("XHigh"));
         assert!(settings.warnings.is_empty());
     }
 

@@ -78,7 +78,7 @@ fn run(id: &str, priority: i32, max_attempts: u32) -> HiveRun {
 
 fn claim_request(now: DateTime<Utc>, epoch: u64) -> ClaimRunRequest {
     ClaimRunRequest {
-        worker_id: "worker-1".into(),
+        executor_id: "executor-1".into(),
         lease_epoch: epoch,
         now,
         lease_duration: Duration::from_secs(10),
@@ -343,6 +343,38 @@ fn expired_running_delivery_requires_recovery() {
 }
 
 #[test]
+fn expired_running_group_turn_is_requeued() {
+    let (store, _temp) = store();
+    let mut group_turn = run("group-turn-1", 0, 3);
+    group_turn.kind = HiveRunKind::GroupTurn;
+    store.insert_run(&group_turn).unwrap();
+    let claimed = store
+        .claim_next(&claim_request(instant(0), 1))
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .mark_running("group-turn-1", &claimed.lease_token, 1, instant(1))
+        .unwrap());
+
+    let reconciled = store.reconcile_expired_leases(instant(11)).unwrap();
+    assert_eq!(reconciled.requeued_unstarted, 1);
+    assert_eq!(reconciled.recovery_required, 0);
+    assert_eq!(
+        store.get_run("group-turn-1").unwrap().unwrap().status,
+        HiveRunStatus::Queued
+    );
+    assert_eq!(
+        store
+            .claim_next(&claim_request(instant(12), 2))
+            .unwrap()
+            .unwrap()
+            .run
+            .id,
+        "group-turn-1"
+    );
+}
+
+#[test]
 fn second_daemon_takeover_rejects_stale_completion() {
     let (store, temp) = store();
     let lease_store = HiveDaemonLeaseStore::new(
@@ -436,7 +468,7 @@ fn execution_host_revalidates_exact_claim_and_immutable_inputs() {
     let lease = match lease_store
         .acquire(
             "hive-scheduler",
-            "worker-1",
+            "executor-1",
             instant(0),
             Duration::from_secs(10),
         )
@@ -559,7 +591,7 @@ fn committed_cancellation_requires_exact_live_claim_and_daemon_fence() {
     )
     .acquire(
         "hive-scheduler",
-        "worker-1",
+        "executor-1",
         instant(0),
         Duration::from_secs(10),
     )

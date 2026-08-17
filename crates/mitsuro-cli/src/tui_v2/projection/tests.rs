@@ -1,6 +1,18 @@
+use chrono::Utc;
 use mitsuro_core::{
-    agent::{loop_events::LoopStopReason, LoopEvent},
+    agent::{
+        loop_events::LoopStopReason,
+        subagent::{AgentProgress, AgentProgressStatus},
+        DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind, LoopEvent,
+    },
     ai::types::{Content, ModelMessage, Role},
+    storage::{
+        DelegatedRunRole, DelegationCompletionPolicy, DelegationExecutionMode,
+        DelegationFailurePolicy, DelegationGovernance, DelegationGroupContract,
+        DelegationGroupRecord, DelegationGroupState, DelegationParentContinuationState,
+        DelegationTaskRecord, DelegationTaskSpec, DelegationTaskState, DelegationWriterMode,
+    },
+    tools::registry::{DelegationPolicy, PermissionMode},
 };
 use serde_json::json;
 
@@ -191,7 +203,7 @@ fn tool_events_do_not_split_a_streaming_word_across_agent_parts() {
     // Reassembly must produce the full stream without a permanent dangling token part.
     assert_eq!(agent_text.join(""), "Checking Hive/Mako next.");
     assert!(
-        !agent_text.iter().any(|text| *text == "Checking Hive/M"),
+        !agent_text.contains(&"Checking Hive/M"),
         "incomplete stream token should not remain as its own final AgentText part: {agent_text:?}"
     );
 }
@@ -432,4 +444,272 @@ fn canonical_steering_event_opens_a_new_user_turn() {
         .expect("canonical steering prompt");
     assert!(steering.steering);
     assert_eq!(steering.text, "Also update the tests.");
+}
+
+#[test]
+fn delegated_task_lifecycle_is_visible_without_settling_the_aggregate() {
+    let mut projection = ConversationProjection::new("session");
+    projection.push_user_prompt("u1", "Build it.".to_owned(), Vec::new(), false);
+    projection.apply_event(LoopEvent::AgentBackgroundStarted {
+        delegated_run_id: "run-1".to_owned(),
+        agent_type: "build".to_owned(),
+        description: "parallel implementation".to_owned(),
+    });
+
+    for status in [
+        AgentProgressStatus::Queued,
+        AgentProgressStatus::Leased,
+        AgentProgressStatus::Running,
+        AgentProgressStatus::Retrying,
+        AgentProgressStatus::Running,
+        AgentProgressStatus::Complete,
+    ] {
+        projection.apply_delegated_progress(&delegated_progress("builder-a", status));
+    }
+
+    let TimelinePart::Tool(tool) = &projection.presentation().turns[0].parts[0] else {
+        panic!("agent tool");
+    };
+    assert_eq!(tool.status, ToolStatus::Running);
+    let ArtifactContent::Text(text) = &tool.artifact.content else {
+        panic!("agent lifecycle text");
+    };
+    for expected in [
+        "· status  queued",
+        "· status  waiting for provider",
+        "· status  running",
+        "· status  retrying",
+        "· status  complete",
+    ] {
+        assert!(
+            text.text.contains(expected),
+            "missing {expected}: {}",
+            text.text
+        );
+    }
+
+    projection.apply_event(LoopEvent::AgentBackgroundCompleted {
+        delegated_run_id: "run-1".to_owned(),
+        agent_type: "build".to_owned(),
+        success: true,
+        summary: "Integrated both patches.".to_owned(),
+    });
+    projection.apply_delegated_progress(&delegated_progress(
+        "builder-a",
+        AgentProgressStatus::Failed,
+    ));
+
+    let TimelinePart::Tool(tool) = &projection.presentation().turns[0].parts[0] else {
+        panic!("settled agent tool");
+    };
+    assert_eq!(tool.status, ToolStatus::Succeeded);
+    assert!(matches!(
+        &tool.artifact.content,
+        ArtifactContent::Text(text) if text.text.contains("Integrated both patches.")
+            && !text.text.contains("· status  failed")
+    ));
+}
+
+#[test]
+fn delegated_terminal_task_states_do_not_impersonate_group_failure() {
+    let mut projection = ConversationProjection::new("session");
+    projection.push_user_prompt("u1", "Review it.".to_owned(), Vec::new(), false);
+
+    for (name, status) in [
+        ("partial", AgentProgressStatus::Degraded),
+        ("broken", AgentProgressStatus::Failed),
+        ("stopped", AgentProgressStatus::Cancelled),
+    ] {
+        projection.apply_delegated_progress(&delegated_progress(name, status));
+    }
+
+    let TimelinePart::Tool(tool) = &projection.presentation().turns[0].parts[0] else {
+        panic!("agent tool");
+    };
+    assert_eq!(tool.status, ToolStatus::Running);
+    let ArtifactContent::Text(text) = &tool.artifact.content else {
+        panic!("agent lifecycle text");
+    };
+    for expected in [
+        "· status  degraded",
+        "· status  failed",
+        "· status  cancelled",
+    ] {
+        assert!(
+            text.text.contains(expected),
+            "missing {expected}: {}",
+            text.text
+        );
+    }
+
+    projection.apply_event(LoopEvent::AgentBackgroundCompleted {
+        delegated_run_id: "run-1".to_owned(),
+        agent_type: "build".to_owned(),
+        success: false,
+        summary: "The delegation group failed.".to_owned(),
+    });
+    let TimelinePart::Tool(tool) = &projection.presentation().turns[0].parts[0] else {
+        panic!("failed aggregate tool");
+    };
+    assert_eq!(tool.status, ToolStatus::Failed);
+}
+
+#[test]
+fn parallel_child_updates_reopen_the_correct_named_section() {
+    let mut projection = ConversationProjection::new("session");
+    projection.push_user_prompt("u1", "Inspect in parallel.".to_owned(), Vec::new(), false);
+
+    projection
+        .apply_delegated_progress(&delegated_progress("reader-a", AgentProgressStatus::Queued));
+    projection
+        .apply_delegated_progress(&delegated_progress("reader-b", AgentProgressStatus::Queued));
+    projection.apply_delegated_progress(&delegated_progress(
+        "reader-a",
+        AgentProgressStatus::Running,
+    ));
+
+    let TimelinePart::Tool(tool) = &projection.presentation().turns[0].parts[0] else {
+        panic!("agent tool");
+    };
+    let ArtifactContent::Text(text) = &tool.artifact.content else {
+        panic!("agent lifecycle text");
+    };
+    assert!(text
+        .text
+        .contains("── reader-a ──\n· status  queued\n\n── reader-b ──\n· status  queued"));
+    assert!(text.text.contains("── reader-a ──\n· status  running"));
+}
+
+#[test]
+fn reopened_session_restores_canonical_delegation_into_existing_agent_card() {
+    let mut projection = ConversationProjection::new("session");
+    projection.push_user_prompt("u1", "Build it.".to_owned(), Vec::new(), false);
+    projection.apply_event(LoopEvent::ToolCallComplete {
+        id: "agent-call".to_owned(),
+        name: "agent".to_owned(),
+        arguments: json!({"role": "build"}),
+    });
+    projection.apply_event(LoopEvent::ToolResult {
+        id: "agent-call".to_owned(),
+        output: "Compatibility aggregate persisted.".to_owned(),
+        is_error: false,
+    });
+
+    projection.restore_delegation_groups(&[delegation_group(
+        DelegationGroupState::Complete,
+        DelegationTaskState::Complete,
+    )]);
+
+    let tools = projection.presentation().turns[0]
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            TimelinePart::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tools.len(),
+        1,
+        "durable replay must reuse the transcript card"
+    );
+    assert_eq!(tools[0].tool_call_id, "agent-call");
+    assert_eq!(tools[0].status, ToolStatus::Succeeded);
+    assert!(matches!(
+        &tools[0].artifact.content,
+        ArtifactContent::Text(text)
+            if text.text.contains("· status  complete")
+                && text.text.contains("· group  complete")
+                && text.text.contains("Implemented the focused change.")
+    ));
+}
+
+fn delegation_group(
+    group_state: DelegationGroupState,
+    task_state: DelegationTaskState,
+) -> DelegationGroupRecord {
+    let now = Utc::now();
+    DelegationGroupRecord {
+        delegation_group_id: "group-1".to_owned(),
+        parent_session_id: "session".to_owned(),
+        parent_tool_call_id: Some("agent-call".to_owned()),
+        contract: DelegationGroupContract {
+            execution_mode: DelegationExecutionMode::Detached,
+            completion_policy: DelegationCompletionPolicy::AllSettled,
+            failure_policy: DelegationFailurePolicy::Continue,
+            governance: DelegationGovernance {
+                permission_mode: PermissionMode::Supervised,
+                reasoning_effort: None,
+                delegated_turn_budget: Some(12),
+                max_parallelism: 1,
+                execution_tool_allowlist: None,
+                delegation_policy: DelegationPolicy::for_subagent_build(
+                    PermissionMode::Supervised,
+                    Some(12),
+                ),
+            },
+        },
+        state: group_state,
+        parent_continuation_state: DelegationParentContinuationState::NotRequested,
+        parent_continuation_id: None,
+        synthesis_owner_id: None,
+        synthesis_lease_expires_at_ms: None,
+        synthesis_attempt_count: 1,
+        tasks: vec![DelegationTaskRecord {
+            delegation_group_id: "group-1".to_owned(),
+            ordinal: 0,
+            specification: DelegationTaskSpec {
+                delegation_task_id: "task-1".to_owned(),
+                task_key: "builder-a".to_owned(),
+                objective: "Implement the focused change".to_owned(),
+                role: DelegatedRunRole::Build,
+                target_scope: Vec::new(),
+                max_attempts: 2,
+                depends_on: Vec::new(),
+                write_intent: Vec::new(),
+                task_policy: None,
+                writer_mode: DelegationWriterMode::Isolated,
+                attempt_workspace: None,
+                workspace_baseline: None,
+                executor_envelope: None,
+            },
+            state: task_state,
+            attempt_count: 1,
+            result: Some(json!({"summary": "Implemented the focused change."})),
+            error_summary: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: task_state.is_terminal().then_some(now),
+        }],
+        created_at: now,
+        updated_at: now,
+        completed_at: group_state.is_terminal().then_some(now),
+    }
+}
+
+fn delegated_progress(name: &str, status: AgentProgressStatus) -> DelegatedProgressEvent {
+    let stage = match status {
+        AgentProgressStatus::Created
+        | AgentProgressStatus::Queued
+        | AgentProgressStatus::Leased => DelegatedRunStage::Created,
+        AgentProgressStatus::Running | AgentProgressStatus::Retrying => DelegatedRunStage::Running,
+        AgentProgressStatus::Complete => DelegatedRunStage::Complete,
+        AgentProgressStatus::Degraded => DelegatedRunStage::Degraded,
+        AgentProgressStatus::Failed => DelegatedRunStage::Failed,
+        AgentProgressStatus::Cancelled => DelegatedRunStage::Cancelled,
+    };
+    DelegatedProgressEvent {
+        delegated_run_id: "run-1".to_owned(),
+        parent_session_id: "session".to_owned(),
+        tool_call_id: "agent-call".to_owned(),
+        kind: DelegatedToolKind::Build,
+        stage,
+        progress: AgentProgress {
+            delegated_run_id: Some("run-1".to_owned()),
+            task_id: name.to_owned(),
+            name: name.to_owned(),
+            status,
+            ..AgentProgress::default()
+        },
+    }
 }

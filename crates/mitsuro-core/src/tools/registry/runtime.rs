@@ -56,6 +56,29 @@ pub(super) fn execution_timeout_for_call(
         })
 }
 
+/// Foreground Agent runs own their convergence through durable group state,
+/// per-provider deadlines, semantic loop guards, and explicit cancellation.
+/// Wrapping that lifecycle in the generic tool timeout can abandon a healthy
+/// graph while its leased tasks are still making progress. Explicit context
+/// deadlines remain authoritative, and detached starts/control calls retain
+/// the ordinary outer guard.
+pub(super) fn should_apply_outer_timeout(
+    name: &str,
+    params: &Value,
+    context_override: Option<Duration>,
+) -> bool {
+    if name != "agent" || context_override.is_some() {
+        return true;
+    }
+    let action = params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("spawn");
+    let foreground_run = matches!(action, "spawn" | "resume" | "followup")
+        && params.get("run_in_background").and_then(Value::as_bool) != Some(true);
+    !foreground_run
+}
+
 /// Trait for tool implementations
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -309,28 +332,32 @@ impl ToolRegistry {
                 HookResult::Continue => {}
                 HookResult::Block { reason } => {
                     tracing::info!(tool = name, reason = %reason, "Pre-hook blocked execution");
-                    return Some(ToolResult::error_with_code("blocked_by_policy", reason));
+                    return Some(policy_block_result(name, &params, reason));
                 }
             }
         }
 
-        let result = match tokio::time::timeout(timeout, tool.execute(params.clone(), ctx)).await {
-            Ok(result) => result,
-            Err(_) => {
-                tracing::warn!(
-                    tool = name,
-                    timeout_secs = timeout.as_secs(),
-                    "Tool execution timed out"
-                );
-                ToolResult::error_with_code(
-                    "timeout",
-                    format!(
-                        "Tool '{}' timed out after {} seconds",
-                        name,
-                        timeout.as_secs()
-                    ),
-                )
+        let result = if should_apply_outer_timeout(name, &params, ctx.timeout) {
+            match tokio::time::timeout(timeout, tool.execute(params.clone(), ctx)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        tool = name,
+                        timeout_secs = timeout.as_secs(),
+                        "Tool execution timed out"
+                    );
+                    ToolResult::error_with_code(
+                        "timeout",
+                        format!(
+                            "Tool '{}' timed out after {} seconds",
+                            name,
+                            timeout.as_secs()
+                        ),
+                    )
+                }
             }
+        } else {
+            tool.execute(params.clone(), ctx).await
         };
 
         let duration = start.elapsed();
@@ -347,4 +374,56 @@ impl ToolRegistry {
 
         Some(result)
     }
+}
+
+pub(super) fn policy_block_result(name: &str, params: &Value, reason: String) -> ToolResult {
+    let normalized = reason.to_ascii_lowercase();
+    let normalized_command = params
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let public_preview_bind = name == "bash"
+        && (normalized.contains("0.0.0.0")
+            || normalized.contains("non-loopback")
+            || normalized.contains("all-interface")
+            || normalized.contains("all network interfaces")
+            || normalized_command.contains("0.0.0.0")
+            || normalized_command.contains("--host 0.0.0.0")
+            || normalized_command.contains("--bind 0.0.0.0"));
+
+    if public_preview_bind {
+        return ToolResult::error_with_recovery(
+            "blocked_by_policy",
+            reason,
+            false,
+            "Bind the preview server to 127.0.0.1, verify it locally, then expose that loopback endpoint through the approved private proxy such as Tailscale Serve.",
+            vec![
+                "Do not retry the same command with another wildcard or non-loopback bind syntax."
+                    .to_string(),
+                "Do not use an untracked shell background process to bypass listener policy."
+                    .to_string(),
+            ],
+            Some(serde_json::json!({
+                "bind_address": "127.0.0.1",
+                "exposure": "tailscale_serve",
+                "verify_local_first": true,
+            })),
+        );
+    }
+
+    ToolResult::error_with_recovery(
+        "blocked_by_policy",
+        reason,
+        false,
+        format!(
+            "Change the {name} operation to satisfy the reported policy boundary; do not repeat the same blocked operation unchanged."
+        ),
+        vec!["Do not retry the same blocked operation with cosmetic argument changes.".to_string()],
+        params.get("command").map(|_| {
+            serde_json::json!({
+                "strategy": "use a narrower in-scope command or a dedicated governed tool"
+            })
+        }),
+    )
 }

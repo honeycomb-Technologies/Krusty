@@ -34,8 +34,29 @@ pub async fn execute_single_child(
     cancellation: CancellationToken,
     progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
+    let project_context = delegated_execution_context(&task, project_context);
     let config = SingleChildConfig::new(registry, policy, project_context).await;
     execute_agent_loop(&client, &task, &model, cancellation, &config, progress_tx).await
+}
+
+fn delegated_execution_context(task: &SubAgentTask, project_context: String) -> String {
+    let execution_root = task
+        .sandbox_root
+        .as_deref()
+        .unwrap_or(&task.working_dir)
+        .display();
+    let working_dir = task.working_dir.display();
+    format!(
+        "{project_context}\n\n\
+[DELEGATED EXECUTION AUTHORITY]\n\
+Writable execution root: {execution_root}\n\
+Current working directory: {working_dir}\n\
+- These paths are the canonical filesystem authority for this delegated attempt.\n\
+- Use paths relative to the current working directory whenever possible.\n\
+- Any source/project path shown earlier is parent-session context only and may be read-only inside this attempt. Do not cd to it, write to it, or use it as a Cargo/build output root.\n\
+- Run validation from the current working directory. The parent will integrate accepted changes into the authoritative source workspace.\n\
+[/DELEGATED EXECUTION AUTHORITY]"
+    )
 }
 
 /// Legacy explorer-pool compatibility wrapper.
@@ -100,17 +121,36 @@ pub(crate) async fn execute_builder_with_progress(
 
 #[cfg(test)]
 mod tests {
+    use super::delegated_execution_context;
     use super::explorer::{
-        collect_paths_from_tool_result, should_replace_forced_summary, synthesized_explorer_output,
-        text_claims_tool_empty, timeout_partial_output, tool_result_has_positive_evidence,
+        collect_paths_from_tool_result, normalize_explorer_result, should_replace_forced_summary,
+        synthesized_explorer_output, text_claims_tool_empty, timeout_partial_output,
+        tool_result_has_positive_evidence,
     };
     use super::governance::{build_subagent_tool_context, delegated_turn_budget};
-    use crate::agent::subagent::SubAgentTask;
+    use crate::agent::subagent::{
+        SubAgentResult, SubAgentTask, SubAgentTermination, TaskObjectiveStatus,
+    };
     use crate::process::ProcessRegistry;
     use crate::tools::registry::{DelegationPolicy, PermissionMode};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    #[test]
+    fn delegated_execution_authority_overrides_parent_workspace_context() {
+        let task = SubAgentTask::new("writer", "work")
+            .with_working_dir(PathBuf::from("/tmp/attempt/repo/component"))
+            .with_sandbox_root(PathBuf::from("/tmp/attempt/repo"));
+
+        let context =
+            delegated_execution_context(&task, "Project directory: /home/user/source".to_string());
+
+        assert!(context.contains("Writable execution root: /tmp/attempt/repo"));
+        assert!(context.contains("Current working directory: /tmp/attempt/repo/component"));
+        assert!(context.contains("parent-session context only"));
+        assert!(context.contains("Do not cd to it, write to it"));
+    }
 
     #[test]
     fn delegated_turn_budget_prefers_task_override_then_policy_then_unlimited_default() {
@@ -197,7 +237,44 @@ mod tests {
             .as_ref()
             .is_some_and(|inherited| Arc::ptr_eq(inherited, &registry)));
         assert_eq!(ctx.user_id.as_deref(), Some("owner-a"));
+        assert!(ctx
+            .process_owner_id
+            .as_deref()
+            .is_some_and(|owner| owner.starts_with("owner-a:hive:")));
+        assert_ne!(ctx.process_owner_id, ctx.user_id);
         assert_eq!(ctx.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn delegated_process_owners_are_stable_and_task_isolated() {
+        let base = SubAgentTask::new("task-a", "prompt")
+            .with_delegated_run_id("run-a")
+            .with_process_context(None, Some("tenant-a".to_string()), None);
+        let same = base.clone();
+        let peer = SubAgentTask::new("task-b", "prompt")
+            .with_delegated_run_id("run-a")
+            .with_process_context(None, Some("tenant-a".to_string()), None);
+        let other_run = SubAgentTask::new("task-a", "prompt")
+            .with_delegated_run_id("run-b")
+            .with_process_context(None, Some("tenant-a".to_string()), None);
+
+        assert_eq!(
+            base.delegated_process_owner_id(),
+            same.delegated_process_owner_id()
+        );
+        assert_ne!(
+            base.delegated_process_owner_id(),
+            peer.delegated_process_owner_id()
+        );
+        assert_ne!(
+            base.delegated_process_owner_id(),
+            other_run.delegated_process_owner_id()
+        );
+
+        let single_tenant = SubAgentTask::new("task-a", "prompt")
+            .with_delegated_run_id("run-a")
+            .delegated_process_owner_id();
+        assert!(single_tenant.starts_with("default:hive:"));
     }
 
     #[test]
@@ -274,6 +351,22 @@ mod tests {
     }
 
     #[test]
+    fn collect_paths_from_empty_glob_retains_the_searched_directory() {
+        let working_dir = PathBuf::from("/tmp/mitsuro-empty-workspace");
+        let output = json!({
+            "data": {
+                "matches": [],
+                "count": 0,
+                "search_path": "/tmp/mitsuro-empty-workspace"
+            }
+        })
+        .to_string();
+
+        let paths = collect_paths_from_tool_result("glob", &output, &working_dir);
+        assert_eq!(paths, vec!["."]);
+    }
+
+    #[test]
     fn placeholder_forced_summary_gets_replaced() {
         assert!(should_replace_forced_summary(
             "Let me try using glob to inspect this target."
@@ -316,6 +409,37 @@ mod tests {
             synthesized_explorer_output("explorer", substantive, &["orchestrator.rs".to_string()]),
             substantive
         );
+    }
+
+    #[test]
+    fn explorer_normalization_preserves_valid_handoff_when_synthesizing_report() {
+        let task = SubAgentTask::new("environment proof", "inspect marker").with_delegation_policy(
+            DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, None),
+        );
+        let result = SubAgentResult {
+            task_id: "environment-proof".to_string(),
+            agent_name: "proof worker".to_string(),
+            delegated_run_id: None,
+            success: true,
+            output: r#"<explore_report>{"status":"complete","objective":"inspect marker"}</explore_report>
+<delegated_handoff>{"status":"complete","summary":"marker verified","acceptance_checks":[{"id":"marker","status":"passed","evidence":"marker read"}],"remaining_work":[],"blockers":[]}</delegated_handoff>"#
+                .to_string(),
+            files_examined: vec!["marker-a.txt".to_string()],
+            duration_ms: 1,
+            turns_used: 1,
+            error: None,
+            termination: SubAgentTermination::Completed,
+            policy_violations: Vec::new(),
+            evidence: Default::default(),
+            background_processes: Vec::new(),
+        };
+        assert!(result.delegated_handoff().is_some());
+
+        let normalized = normalize_explorer_result(result, &task);
+
+        assert!(normalized.output.starts_with("<explore_report>"));
+        assert!(normalized.delegated_handoff().is_some());
+        assert_eq!(normalized.objective_status(), TaskObjectiveStatus::Complete);
     }
 
     #[test]

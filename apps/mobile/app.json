@@ -34,7 +34,7 @@
       "config": {
         "usesNonExemptEncryption": false
       },
-      "buildNumber": "275"
+      "buildNumber": "287"
     },
     "android": {
       "package": "io.krusty.mobile",
@@ -89,7 +89,7 @@
             {
               "name": "HiveWidget",
               "displayName": "Hive Status",
-              "description": "Daily updates and status from your Hive agent",
+              "description": "Daily updates and status from your Hive Workers",
               "supportedFamilies": [
                 "systemSmall",
                 "systemMedium",
@@ -133,10 +133,12 @@
         "expo-build-properties",
         {
           "ios": {
+            "deploymentTarget": "16.4",
             "buildReactNativeFromSource": true
           }
         }
-      ]
+      ],
+      "./plugins/withGhosttyHostAccessory"
     ],
     "experiments": {
       "typedRoutes": true

@@ -1,12 +1,13 @@
 use super::model::{
-    AgentMemory, MemoryNamespace, MemorySensitivity, MemorySource, MemoryStatus, MemoryType,
+    AgentMemory, MemoryAclScope, MemoryNamespace, MemorySensitivity, MemorySource, MemoryStatus,
+    MemoryType,
 };
 
 pub(super) const MEMORY_SELECT_COLUMNS: &str =
     "id, memory_type, title, content, project_dir, user_id, created_at, updated_at, \
      canonical_key, namespace, namespace_id, status, source, source_session_id, \
      source_message_id, confidence, sensitivity, pinned, supersedes_id, \
-     last_accessed_at, access_count";
+     last_accessed_at, access_count, acl_scope, conversation_id";
 
 pub(super) fn row_to_memory(row: &rusqlite::Row) -> AgentMemory {
     let type_str: String = row.get(1).unwrap_or_default();
@@ -36,6 +37,12 @@ pub(super) fn row_to_memory(row: &rusqlite::Row) -> AgentMemory {
         supersedes_id: row.get::<_, Option<String>>(18).unwrap_or_default(),
         last_accessed_at: row.get::<_, Option<String>>(19).unwrap_or_default(),
         access_count: row.get(20).unwrap_or_default(),
+        acl_scope: row
+            .get::<_, String>(21)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(MemoryAclScope::Owner),
+        conversation_id: row.get::<_, Option<String>>(22).unwrap_or_default(),
     }
 }
 

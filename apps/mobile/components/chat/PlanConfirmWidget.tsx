@@ -1,3 +1,4 @@
+import { colors } from '@mitsuro/ui';
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { FileText, Play, Trash2, Check } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -72,7 +73,7 @@ export function PlanConfirmWidget({
                 { backgroundColor: t.success, opacity: isSubmitting ? 0.6 : 1 },
               ]}
             >
-              <Play size={16} color="#fff" strokeWidth={2.2} />
+              <Play size={16} color={t.onAccent} strokeWidth={2.2} />
               <Text style={styles.primaryLabel}>Execute</Text>
             </Pressable>
             <Pressable
@@ -154,7 +155,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   primaryLabel: {
-    color: "#fff",
+    color: colors.onAccent,
     fontSize: 14,
     fontWeight: "600",
   },

@@ -7,18 +7,14 @@ import {
   Text,
   View,
 } from "react-native";
-import {
-  AlertCircle,
-  Plus,
-  RefreshCw,
-  X,
-} from "lucide-react-native";
+import { AlertCircle, Plus, RefreshCw, X } from "lucide-react-native";
 
 import * as Haptics from "../../platform/haptics";
+import * as Clipboard from "../../platform/clipboard";
 import { useConnection } from "../../hooks/useConnection";
-import { useWorkspaceStore } from "../../hooks/useStores";
 import { useThemeContext } from "../../hooks/useTheme";
 import { buildTerminalWebSocketUrl } from "../terminalUrl";
+import { TerminalQuickBar } from "../toolbox/TerminalQuickBar";
 
 const MAX_RECONNECT_ATTEMPTS = 8;
 const RECONNECT_INITIAL_DELAY_MS = 250;
@@ -26,6 +22,14 @@ const RECONNECT_MAX_DELAY_MS = 5_000;
 const RECONNECT_STABLE_RESET_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
+const OUTPUT_HIGH_WATERMARK_BYTES = 512 * 1024;
+const DEFAULT_TERMINAL_FONT_SIZE = 14;
+
+function terminalFontSizeForWidth(width: number): number {
+  if (width <= 520) return 11;
+  if (width <= 760) return 12;
+  return DEFAULT_TERMINAL_FONT_SIZE;
+}
 
 interface TerminalTab {
   id: string;
@@ -47,7 +51,9 @@ function createTerminalId(): string {
   return `term-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function createXtermTheme(colors: ReturnType<typeof useThemeContext>["theme"]["colors"]) {
+function createGhosttyTheme(
+  colors: ReturnType<typeof useThemeContext>["theme"]["colors"],
+) {
   return {
     background: colors.background,
     foreground: colors.foreground,
@@ -73,14 +79,23 @@ function createXtermTheme(colors: ReturnType<typeof useThemeContext>["theme"]["c
   };
 }
 
-function escapeShellPath(path: string): string {
-  return path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+function suppressGhosttyScrollbar(terminal: any) {
+  // ghostty-web 0.4 draws its scrollbar directly into the canvas and does not
+  // expose a visibility option. Keep scrollback/wheel behavior, but suppress
+  // that renderer-only rail at this compatibility boundary.
+  terminal.scrollbarVisible = false;
+  terminal.scrollbarOpacity = 0;
+  if (typeof terminal.showScrollbar === "function") {
+    terminal.showScrollbar = () => {
+      terminal.scrollbarVisible = false;
+      terminal.scrollbarOpacity = 0;
+    };
+  }
 }
 
 export function Terminal({ visible, style }: TerminalProps) {
   const { theme } = useThemeContext();
   const { serverUrl, serverToken } = useConnection();
-  const workspaceDirectory = useWorkspaceStore((state) => state.directory) ?? null;
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -114,7 +129,7 @@ export function Terminal({ visible, style }: TerminalProps) {
         setActiveTabId((currentActive) =>
           currentActive === tabId
             ? nextTabs[Math.max(0, index - 1)]?.id ?? nextTabs[0]?.id ?? null
-            : currentActive,
+            : currentActive
         );
         return nextTabs;
       });
@@ -123,9 +138,12 @@ export function Terminal({ visible, style }: TerminalProps) {
   );
 
   const handleStatusChange = useCallback(
-    (tabId: string, patch: Partial<Pick<TerminalTab, "connected" | "error">>) => {
+    (
+      tabId: string,
+      patch: Partial<Pick<TerminalTab, "connected" | "error">>,
+    ) => {
       setTabs((current) =>
-        current.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab)),
+        current.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab))
       );
     },
     [],
@@ -140,7 +158,7 @@ export function Terminal({ visible, style }: TerminalProps) {
     return null;
   }
 
-  // Keep tab metadata warm, but freeze live xterm/websocket processes while
+  // Keep tab metadata warm, but freeze live Ghostty/websocket processes while
   // the toolbox is closed to avoid background CPU/memory tax.
   if (!visible) {
     return (
@@ -171,8 +189,8 @@ export function Terminal({ visible, style }: TerminalProps) {
           const statusColor = tab.connected
             ? t.success
             : tab.error && !tab.error.startsWith("Reconnecting")
-              ? t.error
-              : t.warning;
+            ? t.error
+            : t.warning;
 
           return (
             <View
@@ -180,7 +198,9 @@ export function Terminal({ visible, style }: TerminalProps) {
               style={[
                 styles.tab,
                 {
-                  backgroundColor: active ? `${t.userMessage}18` : "transparent",
+                  backgroundColor: active
+                    ? `${t.userMessage}18`
+                    : "transparent",
                   borderColor: active ? `${t.userMessage}25` : "transparent",
                 },
               ]}
@@ -192,7 +212,9 @@ export function Terminal({ visible, style }: TerminalProps) {
                 }}
                 style={styles.tabPressable}
               >
-                <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+                <View
+                  style={[styles.statusDot, { backgroundColor: statusColor }]}
+                />
                 <Text
                   style={[
                     styles.tabLabel,
@@ -229,32 +251,35 @@ export function Terminal({ visible, style }: TerminalProps) {
       </View>
 
       <View style={styles.terminalArea}>
-        {!serverUrl ? (
-          <View style={styles.centerState}>
-            <Text style={[styles.stateText, { color: t.mutedForeground }]}>
-              Connect to a server to open a terminal.
-            </Text>
-          </View>
-        ) : tabs.length === 0 ? (
-          <View style={styles.centerState}>
-            <Text style={[styles.stateText, { color: t.mutedForeground }]}>
-              No terminal open.
-            </Text>
-          </View>
-        ) : (
-          tabs.map((tab) => (
-            <TerminalPane
-              key={tab.id}
-              active={activeTabId === tab.id}
-              serverUrl={serverUrl}
-              serverToken={serverToken}
-              tab={tab}
-              themeColors={theme.colors}
-              workspaceDirectory={workspaceDirectory}
-              onStatusChange={handleStatusChange}
-            />
-          ))
-        )}
+        {!serverUrl
+          ? (
+            <View style={styles.centerState}>
+              <Text style={[styles.stateText, { color: t.mutedForeground }]}>
+                Connect to a server to open a terminal.
+              </Text>
+            </View>
+          )
+          : tabs.length === 0
+          ? (
+            <View style={styles.centerState}>
+              <Text style={[styles.stateText, { color: t.mutedForeground }]}>
+                No terminal open.
+              </Text>
+            </View>
+          )
+          : (
+            tabs.map((tab) => (
+              <TerminalPane
+                key={tab.id}
+                active={activeTabId === tab.id}
+                serverUrl={serverUrl}
+                serverToken={serverToken}
+                tab={tab}
+                themeColors={theme.colors}
+                onStatusChange={handleStatusChange}
+              />
+            ))
+          )}
       </View>
     </View>
   );
@@ -266,7 +291,6 @@ function TerminalPane({
   serverToken,
   tab,
   themeColors,
-  workspaceDirectory,
   onStatusChange,
 }: {
   active: boolean;
@@ -274,7 +298,6 @@ function TerminalPane({
   serverToken: string | null;
   tab: TerminalTab;
   themeColors: ReturnType<typeof useThemeContext>["theme"]["colors"];
-  workspaceDirectory: string | null;
   onStatusChange: (
     tabId: string,
     patch: Partial<Pick<TerminalTab, "connected" | "error">>,
@@ -287,23 +310,66 @@ function TerminalPane({
   const serverUrlRef = useRef(serverUrl);
   const serverTokenRef = useRef(serverToken);
   const activeRef = useRef(active);
-  const workspaceDirectoryRef = useRef(workspaceDirectory);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stableResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const heartbeatTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stableResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const heartbeatTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const resizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushFrameRef = useRef<number | null>(null);
-  const pendingOutputRef = useRef("");
+  const pendingOutputRef = useRef<Array<string | Uint8Array>>([]);
+  const pendingOutputBytesRef = useRef(0);
   const lastColsRef = useRef(0);
   const lastRowsRef = useRef(0);
-  const lastSyncedDirectoryRef = useRef<string | null>(null);
   const manualDisconnectRef = useRef(false);
 
-  const queueOutput = useCallback((data: string) => {
-    pendingOutputRef.current += data;
+  const sendQuickInput = useCallback((data: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "input", data }));
+    }
+  }, []);
+
+  const pasteClipboard = useCallback(async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text) return;
+    if (typeof terminalRef.current?.paste === "function") {
+      terminalRef.current.paste(text);
+      return;
+    }
+    sendQuickInput(text);
+  }, [sendQuickInput]);
+
+  const refocusTerminal = useCallback(() => {
+    terminalRef.current?.focus?.();
+  }, []);
+
+  const queueOutput = useCallback((data: string | Uint8Array) => {
+    const byteLength = typeof data === "string"
+      ? data.length * 2
+      : data.byteLength;
+    if (
+      pendingOutputBytesRef.current + byteLength > OUTPUT_HIGH_WATERMARK_BYTES
+    ) {
+      pendingOutputRef.current = [];
+      pendingOutputBytesRef.current = 0;
+      onStatusChange(tab.id, {
+        connected: false,
+        error:
+          "Terminal output exceeded the safe buffer. Reconnect to continue.",
+      });
+      wsRef.current?.close(1008, "terminal output buffer exceeded");
+      return;
+    }
+    pendingOutputRef.current.push(data);
+    pendingOutputBytesRef.current += byteLength;
     if (flushFrameRef.current !== null) {
       return;
     }
@@ -311,11 +377,13 @@ function TerminalPane({
     flushFrameRef.current = window.requestAnimationFrame(() => {
       flushFrameRef.current = null;
       if (terminalRef.current && pendingOutputRef.current.length > 0) {
-        terminalRef.current.write(pendingOutputRef.current);
-        pendingOutputRef.current = "";
+        const chunks = pendingOutputRef.current;
+        pendingOutputRef.current = [];
+        pendingOutputBytesRef.current = 0;
+        for (const chunk of chunks) terminalRef.current.write(chunk);
       }
     });
-  }, []);
+  }, [onStatusChange, tab.id]);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -358,12 +426,20 @@ function TerminalPane({
   );
 
   const fitAndResize = useCallback((force = false) => {
-    if (!terminalRef.current || !fitAddonRef.current) return;
+    if (!terminalRef.current || !fitAddonRef.current || !divRef.current) return;
+
+    const fontSize = terminalFontSizeForWidth(divRef.current.clientWidth);
+    if (terminalRef.current.options.fontSize !== fontSize) {
+      terminalRef.current.options.fontSize = fontSize;
+      force = true;
+    }
 
     fitAddonRef.current.fit();
     const cols = terminalRef.current.cols;
     const rows = terminalRef.current.rows;
-    if (!force && cols === lastColsRef.current && rows === lastRowsRef.current) {
+    if (
+      !force && cols === lastColsRef.current && rows === lastRowsRef.current
+    ) {
       return;
     }
 
@@ -374,29 +450,6 @@ function TerminalPane({
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
-  }, []);
-
-  const syncWorkspaceDirectory = useCallback(() => {
-    const directory = workspaceDirectoryRef.current;
-    const ws = wsRef.current;
-
-    if (
-      !activeRef.current ||
-      !directory ||
-      !ws ||
-      ws.readyState !== WebSocket.OPEN ||
-      lastSyncedDirectoryRef.current === directory
-    ) {
-      return;
-    }
-
-    ws.send(
-      JSON.stringify({
-        type: "input",
-        data: `cd "${escapeShellPath(directory)}"\n`,
-      }),
-    );
-    lastSyncedDirectoryRef.current = directory;
   }, []);
 
   const connectToTerminal = useCallback(
@@ -468,7 +521,6 @@ function TerminalPane({
         window.requestAnimationFrame(() => {
           fitAndResize(true);
           terminalRef.current?.focus?.();
-          syncWorkspaceDirectory();
         });
       };
 
@@ -476,18 +528,20 @@ function TerminalPane({
         touchHeartbeat(ws);
 
         if (event.data instanceof ArrayBuffer) {
-          queueOutput(new TextDecoder().decode(new Uint8Array(event.data)));
+          queueOutput(new Uint8Array(event.data));
           return;
         }
 
         if (event.data instanceof Blob) {
           void event.data.arrayBuffer().then((buffer) => {
-            queueOutput(new TextDecoder().decode(new Uint8Array(buffer)));
+            queueOutput(new Uint8Array(buffer));
           });
           return;
         }
 
-        const raw = typeof event.data === "string" ? event.data : String(event.data);
+        const raw = typeof event.data === "string"
+          ? event.data
+          : String(event.data);
         try {
           const message = JSON.parse(raw);
           if (message.type === "output" && typeof message.data === "string") {
@@ -559,7 +613,6 @@ function TerminalPane({
       fitAndResize,
       onStatusChange,
       queueOutput,
-      syncWorkspaceDirectory,
       tab.id,
       touchHeartbeat,
     ],
@@ -570,20 +623,16 @@ function TerminalPane({
     if (active && terminalRef.current && fitAddonRef.current) {
       window.requestAnimationFrame(() => {
         if (pendingOutputRef.current.length > 0) {
-          terminalRef.current.write(pendingOutputRef.current);
-          pendingOutputRef.current = "";
+          const chunks = pendingOutputRef.current;
+          pendingOutputRef.current = [];
+          pendingOutputBytesRef.current = 0;
+          for (const chunk of chunks) terminalRef.current.write(chunk);
         }
         fitAndResize(true);
         terminalRef.current?.focus?.();
-        syncWorkspaceDirectory();
       });
     }
-  }, [active, fitAndResize, syncWorkspaceDirectory]);
-
-  useEffect(() => {
-    workspaceDirectoryRef.current = workspaceDirectory;
-    syncWorkspaceDirectory();
-  }, [syncWorkspaceDirectory, workspaceDirectory]);
+  }, [active, fitAndResize]);
 
   useEffect(() => {
     serverUrlRef.current = serverUrl;
@@ -602,9 +651,8 @@ function TerminalPane({
 
     void (async () => {
       try {
-        const { Terminal } = await import("xterm");
-        const { FitAddon } = await import("@xterm/addon-fit");
-        await import("xterm/css/xterm.css");
+        const { FitAddon, Terminal, init } = await import("ghostty-web");
+        await init();
 
         if (cancelled || !divRef.current) {
           return;
@@ -613,14 +661,15 @@ function TerminalPane({
         const terminal = new Terminal({
           cursorBlink: true,
           cursorStyle: "block",
-          fontSize: 14,
+          fontSize: terminalFontSizeForWidth(divRef.current.clientWidth),
           fontFamily: "JetBrains Mono, Fira Code, monospace",
-          theme: createXtermTheme(themeColors),
+          theme: createGhosttyTheme(themeColors),
         });
 
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(divRef.current);
+        suppressGhosttyScrollbar(terminal);
 
         terminalRef.current = terminal;
         fitAddonRef.current = fitAddon;
@@ -649,7 +698,9 @@ function TerminalPane({
       } catch (err) {
         onStatusChange(tab.id, {
           connected: false,
-          error: err instanceof Error ? err.message : "Failed to initialize terminal.",
+          error: err instanceof Error
+            ? err.message
+            : "Failed to initialize terminal.",
         });
       }
     })();
@@ -677,8 +728,8 @@ function TerminalPane({
       fitAddonRef.current = null;
       terminalRef.current?.dispose();
       terminalRef.current = null;
-      pendingOutputRef.current = "";
-      lastSyncedDirectoryRef.current = null;
+      pendingOutputRef.current = [];
+      pendingOutputBytesRef.current = 0;
     };
   }, [
     clearHeartbeat,
@@ -692,7 +743,7 @@ function TerminalPane({
 
   useEffect(() => {
     if (!terminalRef.current) return;
-    terminalRef.current.setOption("theme", createXtermTheme(themeColors));
+    terminalRef.current.options.theme = createGhosttyTheme(themeColors);
   }, [themeColors]);
 
   return (
@@ -701,42 +752,87 @@ function TerminalPane({
         style={styles.terminalSurface}
         onPress={() => terminalRef.current?.focus?.()}
       >
-        <div ref={divRef as any} style={{ width: "100%", height: "100%" }} />
+        <div
+          ref={divRef as any}
+          style={{
+            width: "100%",
+            height: "100%",
+            minWidth: 0,
+            overflow: "hidden",
+            position: "relative",
+          }}
+        />
       </Pressable>
 
-      {!tab.connected ? (
-        <View style={styles.overlay}>
-          {tab.error && !tab.error.startsWith("Reconnecting") ? (
-            <>
-              <AlertCircle size={16} color={themeColors.error} strokeWidth={1.8} />
-              <Text style={[styles.overlayText, { color: themeColors.error }]}>
-                {tab.error}
-              </Text>
-              <Pressable
-                onPress={() => {
-                  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  reconnectAttemptsRef.current = 0;
-                  clearReconnectTimer();
-                  connectToTerminal(false);
-                }}
-                style={[styles.reconnectBtn, { borderColor: themeColors.border }]}
-              >
-                <RefreshCw size={14} color={themeColors.foreground} strokeWidth={1.8} />
-                <Text style={[styles.reconnectText, { color: themeColors.foreground }]}>
-                  Reconnect
-                </Text>
-              </Pressable>
-            </>
-          ) : (
-            <>
-              <ActivityIndicator color={themeColors.userMessage} size="small" />
-              <Text style={[styles.overlayText, { color: themeColors.mutedForeground }]}>
-                {tab.error ?? "Connecting…"}
-              </Text>
-            </>
-          )}
-        </View>
-      ) : null}
+      <TerminalQuickBar
+        disabled={!tab.connected}
+        onInput={sendQuickInput}
+        onPaste={pasteClipboard}
+        onRefocus={refocusTerminal}
+      />
+
+      {!tab.connected
+        ? (
+          <View style={styles.overlay}>
+            {tab.error && !tab.error.startsWith("Reconnecting")
+              ? (
+                <>
+                  <AlertCircle
+                    size={16}
+                    color={themeColors.error}
+                    strokeWidth={1.8}
+                  />
+                  <Text
+                    style={[styles.overlayText, { color: themeColors.error }]}
+                  >
+                    {tab.error}
+                  </Text>
+                  <Pressable
+                    onPress={() => {
+                      void Haptics.impactAsync(
+                        Haptics.ImpactFeedbackStyle.Light,
+                      );
+                      reconnectAttemptsRef.current = 0;
+                      clearReconnectTimer();
+                      connectToTerminal(false);
+                    }}
+                    style={[styles.reconnectBtn, {
+                      borderColor: themeColors.border,
+                    }]}
+                  >
+                    <RefreshCw
+                      size={14}
+                      color={themeColors.foreground}
+                      strokeWidth={1.8}
+                    />
+                    <Text
+                      style={[styles.reconnectText, {
+                        color: themeColors.foreground,
+                      }]}
+                    >
+                      Reconnect
+                    </Text>
+                  </Pressable>
+                </>
+              )
+              : (
+                <>
+                  <ActivityIndicator
+                    color={themeColors.userMessage}
+                    size="small"
+                  />
+                  <Text
+                    style={[styles.overlayText, {
+                      color: themeColors.mutedForeground,
+                    }]}
+                  >
+                    {tab.error ?? "Connecting…"}
+                  </Text>
+                </>
+              )}
+          </View>
+        )
+        : null}
     </View>
   );
 }

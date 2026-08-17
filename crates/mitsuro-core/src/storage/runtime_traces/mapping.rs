@@ -10,6 +10,7 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::ThinkingDelta { .. } => "thinking_delta",
         LoopEvent::ThinkingComplete { .. } => "thinking_complete",
         LoopEvent::ToolCallStart { .. } => "tool_call_start",
+        LoopEvent::ToolCallPreparing { .. } => "tool_call_preparing",
         LoopEvent::ToolCallComplete { .. } => "tool_call_complete",
         LoopEvent::ToolExecuting { .. } => "tool_executing",
         LoopEvent::ToolOutputDelta { .. } => "tool_output_delta",
@@ -64,6 +65,11 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
             json!({ "chars": thinking.chars().count() })
         }
         LoopEvent::ToolCallStart { id, name } => json!({ "id": id, "name": name }),
+        LoopEvent::ToolCallPreparing {
+            id,
+            name,
+            received_bytes,
+        } => json!({ "id": id, "name": name, "received_bytes": received_bytes }),
         LoopEvent::ToolCallComplete {
             id,
             name,

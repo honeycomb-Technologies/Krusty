@@ -6,11 +6,13 @@ import {
   MessagesSquare,
   Toolbox,
 } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { SessionType } from "@mitsuro/api";
 
 import { useThemeContext } from "../../hooks/useTheme";
 import * as Haptics from "../../platform/haptics";
 import { HiveIcon } from "../brand";
+import { AdaptiveMaterial } from "../ui/AdaptiveMaterial";
 
 const MODES: Array<{
   id: SessionType;
@@ -33,6 +35,7 @@ interface MobileAppHeaderProps {
   onOpenThreads: () => void;
   onOpenToolbox: () => void;
   onTitlePress?: () => void;
+  onHeightChange?: (height: number) => void;
 }
 
 export function MobileAppHeader({
@@ -42,17 +45,37 @@ export function MobileAppHeader({
   onOpenThreads,
   onOpenToolbox,
   onTitlePress,
+  onHeightChange,
 }: MobileAppHeaderProps) {
   const { theme } = useThemeContext();
+  const insets = useSafeAreaInsets();
   const t = theme.colors;
   const visibleTitle = title?.trim() ?? "";
+  const topInset = insets.top;
 
   const impact = () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
 
   return (
-    <View style={styles.root}>
+    <View
+      style={[styles.root, { paddingTop: topInset }]}
+      onLayout={(event) =>
+        onHeightChange?.(
+          Math.max(0, Math.ceil(event.nativeEvent.layout.height) - topInset),
+        )}
+    >
+      {topInset > 0
+        ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.statusBarFill,
+              { height: topInset, backgroundColor: t.background },
+            ]}
+          />
+        )
+        : null}
       <View style={[styles.header, visibleTitle ? styles.headerWithTitle : null]}>
         <Pressable
           accessibilityRole="button"
@@ -65,10 +88,10 @@ export function MobileAppHeader({
             styles.headerButton,
             {
               borderColor: t.glass.border,
-              backgroundColor: t.glass.background,
             },
           ]}
         >
+          <AdaptiveMaterial borderRadius={12} tone="regular" />
           <MessagesSquare
             size={19}
             color={t.mutedForeground}
@@ -82,11 +105,11 @@ export function MobileAppHeader({
             style={[
               styles.modeIsland,
               {
-                backgroundColor: t.glass.background,
                 borderColor: t.glass.border,
               },
             ]}
           >
+            <AdaptiveMaterial borderRadius={12} tone="regular" />
             {MODES.map((item) => {
               const active = item.id === mode;
               const Icon = item.icon;
@@ -114,7 +137,10 @@ export function MobileAppHeader({
                     color={active ? t.foreground : t.mutedForeground}
                   />
                   {active ? (
-                    <Text style={[styles.modeLabel, { color: t.foreground }]}>
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.modeLabel, { color: t.foreground }]}
+                    >
                       {item.label}
                     </Text>
                   ) : null}
@@ -133,10 +159,10 @@ export function MobileAppHeader({
                 styles.titleTag,
                 {
                   borderColor: t.glass.border,
-                  backgroundColor: t.glass.background,
                 },
               ]}
             >
+              <AdaptiveMaterial borderRadius={10} tone="regular" />
               <Text
                 numberOfLines={1}
                 style={[styles.titleText, { color: t.foreground }]}
@@ -158,10 +184,10 @@ export function MobileAppHeader({
             styles.headerButton,
             {
               borderColor: t.glass.border,
-              backgroundColor: t.glass.background,
             },
           ]}
         >
+          <AdaptiveMaterial borderRadius={12} tone="regular" />
           <Toolbox
             size={19}
             color={t.mutedForeground}
@@ -179,6 +205,12 @@ const styles = StyleSheet.create({
     zIndex: 40,
     overflow: "visible",
   },
+  statusBarFill: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+  },
   header: {
     minHeight: 48,
     flexDirection: "row",
@@ -194,18 +226,23 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   headerButton: {
+    position: "relative",
     width: 40,
     height: 40,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",
   },
   modeIsland: {
+    position: "relative",
+    maxWidth: "100%",
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     padding: 3,
     gap: 2,
   },
@@ -216,6 +253,7 @@ const styles = StyleSheet.create({
     overflow: "visible",
   },
   modeButton: {
+    flexShrink: 1,
     height: 34,
     minWidth: 38,
     paddingHorizontal: 10,
@@ -232,11 +270,13 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   titleTag: {
+    position: "relative",
     marginTop: 8,
     maxWidth: "100%",
     minHeight: 32,
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     paddingHorizontal: 14,
     paddingVertical: 7,
     justifyContent: "center",

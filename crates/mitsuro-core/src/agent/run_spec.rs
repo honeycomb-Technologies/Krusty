@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::types::ModelMessage;
-use crate::storage::{HiveProfileSnapshot, SessionType, WorkMode};
+use crate::storage::{HiveGroupRunContext, HiveProfileSnapshot, SessionType, WorkMode};
 use crate::tools::registry::PermissionMode;
 
 use super::loop_events::{LoopEvent, LoopInput};
@@ -224,6 +224,12 @@ impl RunSpecBuilder {
 
     pub fn hive_crew_slug(mut self, hive_crew_slug: Option<String>) -> Self {
         self.config.hive_crew_slug = hive_crew_slug;
+        self
+    }
+
+    /// Attach group linkage when this run is one member of a Hive group turn.
+    pub fn hive_group_run(mut self, hive_group_run: Option<HiveGroupRunContext>) -> Self {
+        self.config.hive_group_run = hive_group_run;
         self
     }
 

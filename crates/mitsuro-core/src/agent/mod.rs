@@ -40,6 +40,7 @@ pub mod compaction;
 pub mod constants;
 pub mod context;
 pub mod context_ledger;
+pub mod delegation;
 pub mod event_bus;
 pub mod events;
 pub mod executor;
@@ -76,6 +77,10 @@ pub use compaction::{
 };
 pub use context::{
     build_plan_context, build_project_context, build_skills_context, inject_context,
+};
+pub use delegation::{
+    CoordinatedSynthesisOwnerFence, CoordinatedSynthesisPermit, CoordinatedTaskPermit,
+    DelegationCoordinator, DelegationTaskOutcome,
 };
 pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};

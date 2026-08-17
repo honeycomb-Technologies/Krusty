@@ -14,6 +14,8 @@ export interface SessionListItem {
   session_type?: 'chat' | 'code' | 'hive';
   target_branch?: string | null;
   permission_mode?: 'supervised' | 'autonomous';
+  pinned_at?: string | null;
+  archived_at?: string | null;
 }
 
 export interface SessionsStoreState {
@@ -42,6 +44,8 @@ function sessionsListSignature(sessions: SessionListItem[]): string {
         session.token_count ?? '',
         session.session_type ?? '',
         session.project_dir ?? session.working_dir ?? '',
+        session.pinned_at ?? '',
+        session.archived_at ?? '',
       ].join('\u001f'),
     )
     .join('\u001e');

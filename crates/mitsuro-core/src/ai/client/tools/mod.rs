@@ -10,8 +10,9 @@ mod openai;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::config::{CallOptions, CodexReasoningEffort};
+use super::config::CallOptions;
 use super::core::AiClient;
+use crate::ai::providers::ReasoningEffort;
 use crate::ai::retry::{with_retry, RetryConfig};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role, ThinkingConfig};
 
@@ -109,8 +110,40 @@ impl AiClient {
         session_id: Option<&str>,
         prompt_cache_key: Option<&str>,
     ) -> Result<Value> {
+        self.call_with_tools_at_reasoning(
+            model,
+            system_prompt,
+            messages,
+            tools,
+            max_tokens,
+            thinking_enabled.then_some(ReasoningEffort::Medium),
+            session_id,
+            prompt_cache_key,
+        )
+        .await
+    }
+
+    /// Typed non-streaming tool call used by delegated execution.
+    ///
+    /// Unlike the compatibility wrapper above, this preserves the exact
+    /// parent-selected reasoning level until immutable model capability
+    /// normalization maps it to the provider wire contract.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_with_tools_at_reasoning(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[ModelMessage],
+        tools: &[AiTool],
+        max_tokens: usize,
+        reasoning_effort: Option<ReasoningEffort>,
+        session_id: Option<&str>,
+        prompt_cache_key: Option<&str>,
+    ) -> Result<Value> {
         self.ensure_run_model(model)?;
         let requested_tool_count = tools.len();
+        let thinking_enabled =
+            reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None);
         let options = self.canonical_call_options(
             model,
             &CallOptions {
@@ -118,7 +151,7 @@ impl AiClient {
                 tools: (!tools.is_empty()).then(|| tools.to_vec()),
                 system_prompt: Some(system_prompt.to_string()),
                 thinking: thinking_enabled.then(ThinkingConfig::default),
-                codex_reasoning_effort: thinking_enabled.then_some(CodexReasoningEffort::Medium),
+                reasoning_effort,
                 codex_parallel_tool_calls: true,
                 session_id: session_id.map(ToString::to_string),
                 prompt_cache_key: prompt_cache_key.map(ToString::to_string),

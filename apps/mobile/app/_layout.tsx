@@ -72,11 +72,23 @@ function RootNavigator() {
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: theme.colors.background },
-          animation: 'fade',
+          // Fade is an ancestor alpha and permanently disables iOS liquid
+          // glass / UIVisualEffectView on every surface inside the screen.
+          animation: 'none',
         }}
       >
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="connect" />
         <Stack.Screen name="onboarding" />
+        <Stack.Screen
+          name="agent/[sessionId]/[groupId]/[taskId]"
+          options={{
+            presentation: 'transparentModal',
+            animation: 'none',
+            gestureEnabled: false,
+            contentStyle: { backgroundColor: 'transparent' },
+          }}
+        />
       </Stack>
     </>
   );

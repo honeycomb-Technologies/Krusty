@@ -988,7 +988,7 @@ mod tests {
         let big = "x".repeat(4_000);
         let arguments = parse_tool_arguments(&json!({
             "file_path": "a.rs",
-            "content": big.clone()
+            "content": big
         }));
         let content = arguments
             .fields

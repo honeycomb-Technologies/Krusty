@@ -4,9 +4,9 @@ use crate::plan::{has_active_workflow_or_plan, PlanManager, TaskStatus};
 use crate::storage::{Database, SessionManager};
 
 use super::{
-    AttemptProgressInput, CompleteStepInput, CreateGoalInput, CriterionInput, CriterionStatus,
-    GoalStatus, PlanProposalInput, SetCriterionInput, StartAttemptInput, StepProposalInput,
-    WorkflowError, WorkflowManager, WorkflowStepStatus,
+    AttemptProgressInput, AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput,
+    CriterionStatus, GoalStatus, PlanProposalInput, SetCriterionInput, StartAttemptInput,
+    StepProposalInput, WorkflowError, WorkflowManager, WorkflowStepStatus,
 };
 
 fn setup() -> (TempDir, String, WorkflowManager) {
@@ -223,16 +223,23 @@ fn lifecycle_is_revisioned_evidence_backed_and_idempotent() {
 }
 
 #[test]
-fn finite_research_budget_pauses_instead_of_looping() {
+fn finite_attempt_budget_rolls_step_back_without_pausing_goal() {
     let (_temp, session_id, manager) = setup();
     let (goal_id, _plan_id, revision) = activate_fixture(&manager, &session_id);
+    let step_id = manager
+        .get_snapshot(&session_id)
+        .expect("snapshot should load")
+        .expect("workflow should exist")
+        .steps[0]
+        .id
+        .clone();
     let attempt = manager
         .start_attempt(
             &session_id,
             &goal_id,
             revision,
             StartAttemptInput {
-                step_id: None,
+                step_id: Some(step_id.clone()),
                 permission_mode: "supervised".to_string(),
                 max_turns: 20,
                 max_tool_calls: 100,
@@ -267,11 +274,43 @@ fn finite_research_budget_pauses_instead_of_looping() {
             "agent",
         )
         .expect("record progress");
-    assert_eq!(stopped.snapshot.goal.status, GoalStatus::Paused);
+    assert_eq!(stopped.snapshot.goal.status, GoalStatus::Active);
+    assert_eq!(stopped.snapshot.goal.status_reason, None);
     assert_eq!(
-        stopped.snapshot.goal.status_reason.as_deref(),
-        Some("research_budget_exhausted")
+        stopped
+            .snapshot
+            .latest_attempt
+            .as_ref()
+            .expect("attempt should remain auditable")
+            .status,
+        AttemptStatus::Paused
     );
+    let released_step = stopped
+        .snapshot
+        .steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .expect("claimed step should remain in the plan");
+    assert_eq!(released_step.status, WorkflowStepStatus::Pending);
+    assert_eq!(released_step.claimed_attempt_id, None);
+
+    manager
+        .start_attempt(
+            &session_id,
+            &goal_id,
+            stopped.snapshot.aggregate_revision,
+            StartAttemptInput {
+                step_id: Some(step_id),
+                permission_mode: "supervised".to_string(),
+                max_turns: 20,
+                max_tool_calls: 100,
+                max_wall_time_secs: 900,
+                max_research_actions: 2,
+            },
+            "retry-attempt",
+            "agent",
+        )
+        .expect("the active goal should accept a fresh attempt for the released step");
 }
 
 #[test]

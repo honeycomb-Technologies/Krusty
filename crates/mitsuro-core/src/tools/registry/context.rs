@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
@@ -11,11 +11,12 @@ use crate::agent::subagent::AgentProgress;
 use crate::agent::ProviderCallTraceContext;
 use crate::ai::client::AiClient;
 use crate::ai::models::ModelKey;
+use crate::ai::providers::ReasoningEffort;
 use crate::ai::types::ModelMessage;
 use crate::mcp::McpManager;
-use crate::process::ProcessRegistry;
+use crate::process::{CommandEnvironmentPolicy, ProcessRegistry};
 use crate::skills::SkillsManager;
-use crate::storage::WorkspaceMode;
+use crate::storage::{HiveGroupRunContext, WorkspaceMode};
 use crate::tools::git_identity::GitIdentity;
 
 use super::{DelegationPolicy, PermissionMode, ToolRegistry};
@@ -118,11 +119,20 @@ pub struct ToolContext {
     pub filesystem_access: FilesystemAccess,
     /// User ID for multi-tenant operation scoping (processes, etc.)
     pub user_id: Option<String>,
+    /// Optional execution-scoped process owner. Delegated tasks use a distinct
+    /// owner so temporary servers cannot consume the parent session's process
+    /// budget. Tenant-scoped tools must continue to use `user_id`.
+    pub process_owner_id: Option<String>,
     pub process_registry: Option<Arc<ProcessRegistry>>,
     pub skills_manager: Option<Arc<RwLock<SkillsManager>>>,
     pub mcp_manager: Option<Arc<McpManager>>,
     /// Optional per-call timeout override
     pub timeout: Option<Duration>,
+    /// Runtime-owned command environment. Tool inputs cannot modify this map.
+    pub command_environment: BTreeMap<String, String>,
+    /// Whether shell commands inherit the host environment or execute inside
+    /// the delegated sanitized environment boundary.
+    pub command_environment_policy: CommandEnvironmentPolicy,
     /// Cancellation scoped to this exact dispatched tool call. Delegated
     /// runtimes use this instead of the process-global compatibility token so
     /// cancelling one parent session cannot affect another session's child.
@@ -151,6 +161,10 @@ pub struct ToolContext {
     pub supervised_approval_granted: bool,
     /// Optional delegated sub-agent turn budget inherited from parent config.
     pub subagent_max_turns: Option<usize>,
+    /// Exact effective parent reasoning level inherited by delegated runs.
+    /// `None` preserves legacy/unspecified behavior; `Some(None)` is explicit
+    /// Off for models which permit it.
+    pub delegated_reasoning_effort: Option<ReasoningEffort>,
     /// Optional delegated execution policy contract for downstream calls.
     pub delegation_policy: Option<DelegationPolicy>,
     /// Exact run-scoped tool capability inherited by delegated execution.
@@ -167,6 +181,9 @@ pub struct ToolContext {
     pub provider_call_trace: Option<ProviderCallTraceContext>,
     /// Shared file-observation tracker used to enforce observe-before-edit policy.
     pub file_observations: Arc<FileObservationTracker>,
+    /// Group linkage when this execution is one member run of a Hive group
+    /// turn. post_to_group requires it and enforces its per-run message cap.
+    pub hive_group_run: Option<HiveGroupRunContext>,
 }
 
 impl Default for ToolContext {
@@ -180,10 +197,13 @@ impl Default for ToolContext {
             sandbox_root: None,
             filesystem_access: FilesystemAccess::Unrestricted,
             user_id: None,
+            process_owner_id: None,
             process_registry: None,
             skills_manager: None,
             mcp_manager: None,
             timeout: None,
+            command_environment: BTreeMap::new(),
+            command_environment_policy: CommandEnvironmentPolicy::default(),
             execution_cancellation: None,
             output_tx: None,
             tool_use_id: None,
@@ -196,6 +216,7 @@ impl Default for ToolContext {
             permission_mode: PermissionMode::default(),
             supervised_approval_granted: false,
             subagent_max_turns: None,
+            delegated_reasoning_effort: None,
             delegation_policy: None,
             execution_tool_allowlist: None,
             tool_registry: None,
@@ -203,6 +224,7 @@ impl Default for ToolContext {
             loop_event_tx: None,
             provider_call_trace: None,
             file_observations: Arc::new(FileObservationTracker::default()),
+            hive_group_run: None,
         }
     }
 }
@@ -286,6 +308,18 @@ impl ToolContext {
         self
     }
 
+    /// Set a process-only owner without changing tenant ownership.
+    pub fn with_process_owner_id(mut self, process_owner_id: String) -> Self {
+        self.process_owner_id = Some(process_owner_id);
+        self
+    }
+
+    /// Owner used exclusively by the shared process registry. Normal parent
+    /// sessions retain the historical user-scoped behavior.
+    pub fn effective_process_owner_id(&self) -> Option<&str> {
+        self.process_owner_id.as_deref().or(self.user_id.as_deref())
+    }
+
     /// Add MCP manager to context
     pub fn with_mcp_manager(mut self, mcp_manager: Arc<McpManager>) -> Self {
         self.mcp_manager = Some(mcp_manager);
@@ -359,6 +393,14 @@ impl ToolContext {
         self
     }
 
+    pub fn with_delegated_reasoning_effort(
+        mut self,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Self {
+        self.delegated_reasoning_effort = reasoning_effort;
+        self
+    }
+
     /// Attach delegated execution policy metadata.
     pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
         self.delegation_policy = Some(policy);
@@ -401,6 +443,12 @@ impl ToolContext {
     /// Attach a shared file-observation tracker.
     pub fn with_file_observation_tracker(mut self, tracker: Arc<FileObservationTracker>) -> Self {
         self.file_observations = tracker;
+        self
+    }
+
+    /// Attach the group linkage of a Hive group member run.
+    pub fn with_hive_group_run(mut self, group_run: Option<HiveGroupRunContext>) -> Self {
+        self.hive_group_run = group_run;
         self
     }
 

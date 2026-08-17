@@ -9,57 +9,77 @@ use crate::tools::registry::PermissionMode;
 use super::{SessionInfo, SessionManager, SessionType, WorkspaceMode};
 
 const LIST_SESSIONS_SQL_ALL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
+             WHERE archived_at IS NULL
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
+             FROM sessions
+             WHERE working_dir = ?1 AND archived_at IS NULL
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_USER: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
+             FROM sessions
+             WHERE user_id = ?1 AND archived_at IS NULL
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
+             FROM sessions
+             WHERE working_dir = ?1 AND user_id = ?2 AND archived_at IS NULL
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_ALL: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
+             FROM sessions
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_DIR: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
              WHERE working_dir = ?1
              ORDER BY updated_at DESC";
-const LIST_SESSIONS_SQL_BY_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+const LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_USER: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
              WHERE user_id = ?1
              ORDER BY updated_at DESC";
-const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+const LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_DIR_AND_USER: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
-             WHERE session_type = ?1
+             WHERE session_type = ?1 AND archived_at IS NULL
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
-             WHERE working_dir = ?1 AND session_type = ?2
+             WHERE working_dir = ?1 AND session_type = ?2 AND archived_at IS NULL
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_USER_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
-             WHERE user_id = ?1 AND session_type = ?2
+             WHERE user_id = ?1 AND session_type = ?2 AND archived_at IS NULL
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_USER_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
-             WHERE working_dir = ?1 AND user_id = ?2 AND session_type = ?3
+             WHERE working_dir = ?1 AND user_id = ?2 AND session_type = ?3 AND archived_at IS NULL
              ORDER BY updated_at DESC";
 const LIST_SESSION_DIRS_SQL_ALL: &str = "SELECT DISTINCT working_dir FROM sessions
-                 WHERE working_dir IS NOT NULL
+                 WHERE working_dir IS NOT NULL AND archived_at IS NULL
                  ORDER BY working_dir";
 const LIST_SESSION_DIRS_SQL_BY_USER: &str = "SELECT DISTINCT working_dir FROM sessions
-                 WHERE working_dir IS NOT NULL AND user_id = ?1
+                 WHERE working_dir IS NOT NULL AND user_id = ?1 AND archived_at IS NULL
                  ORDER BY working_dir";
 const LIST_SESSIONS_BY_DIRECTORY_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
-             WHERE working_dir IS NOT NULL
+             WHERE working_dir IS NOT NULL AND archived_at IS NULL
              ORDER BY working_dir, updated_at DESC";
 const GET_SESSION_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision, agent_state, pinned_at, archived_at
              FROM sessions
              WHERE id = ?1";
 
@@ -84,6 +104,27 @@ impl SessionManager {
             (Some(dir), None) => self.collect_sessions(LIST_SESSIONS_SQL_BY_DIR, [dir]),
             (None, Some(uid)) => self.collect_sessions(LIST_SESSIONS_SQL_BY_USER, [uid]),
             (None, None) => self.collect_sessions(LIST_SESSIONS_SQL_ALL, []),
+        }
+    }
+
+    /// List active and archived sessions for management surfaces.
+    pub fn list_sessions_for_user_including_archived(
+        &self,
+        working_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<SessionInfo>> {
+        match (working_dir, user_id) {
+            (Some(dir), Some(uid)) => self.collect_sessions(
+                LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_DIR_AND_USER,
+                [dir, uid],
+            ),
+            (Some(dir), None) => {
+                self.collect_sessions(LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_DIR, [dir])
+            }
+            (None, Some(uid)) => {
+                self.collect_sessions(LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_BY_USER, [uid])
+            }
+            (None, None) => self.collect_sessions(LIST_SESSIONS_INCLUDING_ARCHIVED_SQL_ALL, []),
         }
     }
 
@@ -159,6 +200,9 @@ impl SessionManager {
         Ok(SessionInfo {
             id: row.get(0)?,
             title: row.get(1)?,
+            agent_state: row.get(16).unwrap_or_else(|_| "idle".to_string()),
+            pinned_at: parse_optional_session_timestamp(row, 17)?,
+            archived_at: parse_optional_session_timestamp(row, 18)?,
             updated_at: parse_session_timestamp(row, 2)?,
             token_count: token_count.map(|t| t as usize),
             parent_session_id: row.get(4)?,
@@ -199,9 +243,9 @@ impl SessionManager {
     ) -> rusqlite::Result<(SessionInfo, super::super::agent_state::AgentState)> {
         let session = Self::map_session_row(row)?;
         let agent_state = super::super::agent_state::AgentState {
-            state: row.get(16)?,
-            started_at: row.get(17)?,
-            last_event_at: row.get(18)?,
+            state: session.agent_state.clone(),
+            started_at: row.get(19)?,
+            last_event_at: row.get(20)?,
         };
         Ok((session, agent_state))
     }
@@ -326,5 +370,15 @@ fn parse_session_timestamp(row: &rusqlite::Row, index: usize) -> rusqlite::Resul
             "updated_at".to_string(),
             value.data_type(),
         )),
+    }
+}
+
+fn parse_optional_session_timestamp(
+    row: &rusqlite::Row,
+    index: usize,
+) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        _ => parse_session_timestamp(row, index).map(Some),
     }
 }

@@ -403,6 +403,7 @@ same_release() {
     regular_file_with_mode "$existing_release/.archive-sha256" 444 || return 1
     cmp -s "$candidate_release/.archive-sha256" "$existing_release/.archive-sha256" || return 1
     same_optional_file "$candidate_release/mitsuro-hive" "$existing_release/mitsuro-hive" 555 || return 1
+    same_optional_file "$candidate_release/agent-browser" "$existing_release/agent-browser" 555 || return 1
     regular_file_with_mode "$candidate_release/$COMPAT_BINARY" 555 || return 1
     regular_file_with_mode "$existing_release/$COMPAT_BINARY" 555 || return 1
     cmp -s "$candidate_release/$COMPAT_BINARY" "$existing_release/$COMPAT_BINARY" || return 1
@@ -493,6 +494,13 @@ stage_unix_release() {
     chmod 0555 "$release_stage/$BINARY"
     cp "$payload_dir/$COMPAT_BINARY" "$release_stage/$COMPAT_BINARY"
     chmod 0555 "$release_stage/$COMPAT_BINARY"
+    if [ -f "$payload_dir/agent-browser" ] && [ ! -L "$payload_dir/agent-browser" ]; then
+        cp "$payload_dir/agent-browser" "$release_stage/agent-browser"
+        chmod 0555 "$release_stage/agent-browser"
+    elif [ -e "$payload_dir/agent-browser" ] || [ -L "$payload_dir/agent-browser" ]; then
+        fail "agent-browser must be a regular file when present."
+        return 1
+    fi
     if [ "$payload_has_daemon" = true ]; then
         cp "$payload_dir/$COMPAT_DAEMON_BINARY" "$release_stage/$COMPAT_DAEMON_BINARY"
         chmod 0555 "$release_stage/$COMPAT_DAEMON_BINARY"

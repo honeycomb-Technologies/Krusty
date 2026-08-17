@@ -1,12 +1,15 @@
 use mitsuro_core::ai::models::ModelKey;
 use mitsuro_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, DelegatedRunSummary, PartialAssistantState,
+    DelegatedRunRecord, DelegatedRunRole, DelegatedRunScope, DelegatedRunSummary,
+    DelegationEventRecord, DelegationExecutionMode, DelegationGroupRecord, DelegationGroupState,
+    DelegationParentContinuationState, DelegationTaskState, PartialAssistantState,
     PendingInteractionSnapshot, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
     SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
 use mitsuro_core::tools::registry::PermissionMode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
 
@@ -47,6 +50,8 @@ pub struct UpdateSessionRequest {
     )]
     pub target_branch: Option<Option<String>>,
     pub permission_mode: Option<PermissionMode>,
+    pub pinned: Option<bool>,
+    pub archived: Option<bool>,
 }
 
 fn deserialize_target_branch_update<'de, D>(
@@ -91,6 +96,18 @@ mod tests {
                 .and_then(|branch| branch.as_deref()),
             Some("feature/mobile-continuation")
         );
+    }
+
+    #[test]
+    fn update_session_request_accepts_pin_and_archive_changes() {
+        let req: UpdateSessionRequest = serde_json::from_value(json!({
+            "pinned": true,
+            "archived": false,
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.pinned, Some(true));
+        assert_eq!(req.archived, Some(false));
     }
 
     #[test]
@@ -148,6 +165,7 @@ pub struct PinchResponse {
 pub struct SessionResponse {
     pub id: String,
     pub title: String,
+    pub agent_state: String,
     pub updated_at: String,
     pub token_count: Option<usize>,
     pub parent_session_id: Option<String>,
@@ -161,6 +179,8 @@ pub struct SessionResponse {
     pub model_catalog_revision: Option<String>,
     pub target_branch: Option<String>,
     pub permission_mode: PermissionMode,
+    pub pinned_at: Option<String>,
+    pub archived_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -206,6 +226,7 @@ impl SessionResponse {
         Self {
             id: s.id,
             title: s.title,
+            agent_state: s.agent_state,
             updated_at: s.updated_at.to_rfc3339(),
             token_count: s.token_count,
             parent_session_id: s.parent_session_id,
@@ -219,6 +240,8 @@ impl SessionResponse {
             model_catalog_revision: s.model_catalog_revision,
             target_branch: s.target_branch,
             permission_mode: s.permission_mode,
+            pinned_at: s.pinned_at.map(|value| value.to_rfc3339()),
+            archived_at: s.archived_at.map(|value| value.to_rfc3339()),
         }
     }
 }
@@ -266,8 +289,180 @@ pub struct SessionStateResponse {
     /// transcript. Unlike recent_delegated_runs, these rows never carry large
     /// snapshots or artifacts.
     pub delegated_run_summaries: Vec<DelegatedRunSummaryResponse>,
+    /// Canonical group/task snapshots. These deliberately exclude objectives,
+    /// result artifacts, tool output, and error text.
+    pub delegation_groups: Vec<DelegationGroupStateResponse>,
+    /// Cursor-replay window from the append-only delegation event stream.
+    pub delegation_events: Vec<DelegationEventRecord>,
+    pub delegation_event_cursor: Option<i64>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegationGroupStateResponse {
+    pub delegation_group_id: String,
+    pub parent_tool_call_id: Option<String>,
+    pub state: DelegationGroupState,
+    pub execution_mode: DelegationExecutionMode,
+    pub max_parallelism: usize,
+    pub effective_parallelism: usize,
+    pub parent_continuation_state: DelegationParentContinuationState,
+    pub tasks: Vec<DelegationTaskStateResponse>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegationTaskStateResponse {
+    pub delegation_task_id: String,
+    pub task_key: String,
+    pub role: DelegatedRunRole,
+    pub objective: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub working_dir: Option<String>,
+    pub state: DelegationTaskState,
+    pub attempt_count: usize,
+    pub integration_state: Option<String>,
+    pub depends_on: Vec<String>,
+    pub write_intent: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+fn effective_parallelism(group: &DelegationGroupRecord) -> usize {
+    let tasks = group
+        .tasks
+        .iter()
+        .map(|task| {
+            (
+                task.specification.task_key.clone(),
+                task.specification.depends_on.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    effective_parallelism_for(&tasks, group.contract.governance.max_parallelism)
+}
+
+fn effective_parallelism_for(tasks: &[(String, Vec<String>)], max_parallelism: usize) -> usize {
+    let mut remaining = tasks
+        .iter()
+        .map(|(task_key, _)| task_key.clone())
+        .collect::<BTreeSet<_>>();
+    let mut settled = BTreeSet::new();
+    let mut widest_wave = 0usize;
+    while !remaining.is_empty() {
+        let ready = tasks
+            .iter()
+            .filter(|(task_key, _)| remaining.contains(task_key))
+            .filter(|(_, depends_on)| {
+                depends_on
+                    .iter()
+                    .all(|dependency| settled.contains(dependency))
+            })
+            .map(|(task_key, _)| task_key.clone())
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        widest_wave = widest_wave.max(ready.len());
+        for task_key in ready {
+            remaining.remove(&task_key);
+            settled.insert(task_key);
+        }
+    }
+    widest_wave.max(1).min(max_parallelism.max(1))
+}
+
+impl From<DelegationGroupRecord> for DelegationGroupStateResponse {
+    fn from(group: DelegationGroupRecord) -> Self {
+        let effective_parallelism = effective_parallelism(&group);
+        Self {
+            delegation_group_id: group.delegation_group_id,
+            parent_tool_call_id: group.parent_tool_call_id,
+            state: group.state,
+            execution_mode: group.contract.execution_mode,
+            max_parallelism: group.contract.governance.max_parallelism,
+            effective_parallelism,
+            parent_continuation_state: group.parent_continuation_state,
+            tasks: group
+                .tasks
+                .into_iter()
+                .map(|task| {
+                    let provider = task
+                        .specification
+                        .executor_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.provider_id.clone());
+                    let model = task
+                        .specification
+                        .executor_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.resolved_model.clone());
+                    let working_dir = task
+                        .specification
+                        .executor_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.working_dir.clone());
+                    let objective = task.specification.objective.chars().take(320).collect();
+                    let integration_state = task
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("integration_state"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|state| matches!(*state, "pending" | "ready" | "failed"))
+                        .map(ToString::to_string);
+                    DelegationTaskStateResponse {
+                        delegation_task_id: task.specification.delegation_task_id,
+                        task_key: task.specification.task_key,
+                        role: task.specification.role,
+                        objective,
+                        provider,
+                        model,
+                        working_dir,
+                        state: task.state,
+                        attempt_count: task.attempt_count,
+                        integration_state,
+                        depends_on: task.specification.depends_on,
+                        write_intent: task.specification.write_intent,
+                        created_at: task.created_at.to_rfc3339(),
+                        updated_at: task.updated_at.to_rfc3339(),
+                        completed_at: task.completed_at.map(|value| value.to_rfc3339()),
+                    }
+                })
+                .collect(),
+            created_at: group.created_at.to_rfc3339(),
+            updated_at: group.updated_at.to_rfc3339(),
+            completed_at: group.completed_at.map(|value| value.to_rfc3339()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod delegation_projection_tests {
+    use super::effective_parallelism_for;
+
+    #[test]
+    fn effective_parallelism_reflects_dependency_waves_and_capacity() {
+        let chain = vec![
+            ("plan".to_string(), vec![]),
+            ("build".to_string(), vec!["plan".to_string()]),
+            ("verify".to_string(), vec!["build".to_string()]),
+        ];
+        assert_eq!(effective_parallelism_for(&chain, 8), 1);
+
+        let fan_out = vec![
+            ("plan".to_string(), vec![]),
+            ("ui".to_string(), vec!["plan".to_string()]),
+            ("server".to_string(), vec!["plan".to_string()]),
+            ("tests".to_string(), vec!["plan".to_string()]),
+        ];
+        assert_eq!(effective_parallelism_for(&fan_out, 8), 3);
+        assert_eq!(effective_parallelism_for(&fan_out, 2), 2);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +502,10 @@ impl DelegatedToolStateResponse {
         let tool_call_id = record.parent_tool_call_id.clone()?;
         let snapshot = record.snapshot.as_ref()?;
         let status = |status: &str| match status {
+            "created" => DelegatedProgressStatus::Created,
+            "queued" => DelegatedProgressStatus::Queued,
+            "leased" => DelegatedProgressStatus::Leased,
+            "retrying" => DelegatedProgressStatus::Retrying,
             "complete" => DelegatedProgressStatus::Complete,
             "degraded" => DelegatedProgressStatus::Degraded,
             "cancelled" => DelegatedProgressStatus::Cancelled,

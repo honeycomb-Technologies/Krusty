@@ -7,8 +7,8 @@ import { trackMitsuroPerformanceResource } from '@mitsuro/state';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
-import { WorkspacePreview } from '../desktop/WorkspacePreview';
 import { recordWebViewDiagnostic } from '../../diagnostics/mobileDiagnostics';
+import { AtlasMobileSurface } from './AtlasMobileSurface';
 
 let WebViewComponent: React.ComponentType<WebViewProps> | null = null;
 if (Platform.OS !== 'web') {
@@ -54,11 +54,7 @@ interface ToolboxBrowserProps {
 }
 
 export function ToolboxBrowser({ visible }: ToolboxBrowserProps) {
-  if (Platform.OS === 'web') {
-    return <WorkspacePreview visible={visible} style={{ flex: 1, height: undefined, borderTopWidth: 0 }} />;
-  }
-
-  return <NativeBrowser visible={visible} />;
+  return <AtlasMobileSurface visible={visible} />;
 }
 
 function NativeBrowser({ visible }: { visible: boolean }) {

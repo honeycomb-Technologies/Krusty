@@ -577,7 +577,7 @@ mod tests {
 
             // Discover max scroll via follow-live frame then walk every offset.
             state.transcript.follow_live = true;
-            let live = RenderHarness::new(width, height).draw_conversation(&state, &presentation);
+            let live = RenderHarness::new(width, height).draw_conversation(&state, presentation);
             let max = live
                 .layout
                 .transcript
@@ -586,7 +586,7 @@ mod tests {
             state.transcript.follow_live = false;
             for offset in 0..=max {
                 state.transcript.scroll_rows = offset;
-                let _ = RenderHarness::new(width, height).draw_conversation(&state, &presentation);
+                let _ = RenderHarness::new(width, height).draw_conversation(&state, presentation);
             }
         }
     }

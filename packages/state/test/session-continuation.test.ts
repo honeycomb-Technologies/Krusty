@@ -988,3 +988,72 @@ Deno.test("a stale persisted session is cleared without discarding its workspace
 	assertEquals(sessions.loadCount, 1, "session list should refresh after stale-session recovery");
 	store.getState().cleanup();
 });
+
+Deno.test("idle parent keeps polling an active delegation group and advances its replay cursor", async () => {
+	const timers = installFakeIntervals();
+	try {
+		const requestedCursors: Array<number | undefined> = [];
+		let nextCursor = 7;
+		const client = {
+			getSessionState: async (
+				_sessionId: string,
+				options?: { delegationAfterCursor?: number },
+			) => {
+				requestedCursors.push(options?.delegationAfterCursor);
+				return sessionState("idle", {
+					delegation_groups: [{
+						delegation_group_id: "group-detached",
+						parent_tool_call_id: "tool-detached",
+						state: "running",
+						execution_mode: "detached",
+						parent_continuation_state: "not_requested",
+						tasks: [{
+							delegation_task_id: "task-1",
+							task_key: "worker-1",
+							role: "build",
+							state: "running",
+							attempt_count: 1,
+							updated_at: "2026-08-08T00:00:00Z",
+						}],
+						updated_at: "2026-08-08T00:00:00Z",
+					}],
+					delegation_events: [],
+					delegation_event_cursor: nextCursor++,
+				});
+			},
+			removeSessionPresence: async () => ({}),
+		};
+		const store = createSessionStore(
+			client as never,
+			createStorage(),
+			createWorkspace() as never,
+			createSessionsStore() as never,
+			createPlanStore() as never,
+		);
+
+		store.getState().initSession("session-1", "Detached delegation");
+		store.getState().startStatePolling("session-1");
+		await timers.runLatestPollingTick();
+
+		assertEquals(
+			timers.activePollingCount(),
+			1,
+			"an idle parent must not stop polling while a detached group is active",
+		);
+		assertEquals(
+			store.getState().delegationEventCursor,
+			7,
+			"the canonical delegation cursor should advance from the snapshot",
+		);
+
+		await timers.runLatestPollingTick();
+		assertDeepEquals(
+			requestedCursors,
+			[undefined, 7],
+			"the next poll should request only delegation events after the applied cursor",
+		);
+		store.getState().cleanup();
+	} finally {
+		timers.restore();
+	}
+});

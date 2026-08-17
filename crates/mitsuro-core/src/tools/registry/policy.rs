@@ -184,6 +184,15 @@ impl ToolRequestPolicy {
             .into_iter()
             .filter(|tool| selected.contains(&tool.name.as_str()))
             .filter(|tool| !self.disabled_tools.contains(&tool.name))
+            // An autonomous Build turn is already authorized to execute. The
+            // model must not convert it into a draft-plan approval stop; users
+            // who want planning select Plan mode explicitly at the request
+            // boundary. Supervised Build retains the voluntary switch.
+            .filter(|tool| {
+                self.permission_mode != PermissionMode::Autonomous
+                    || self.plan_mode
+                    || tool.name != "enter_plan_mode"
+            })
             .filter(|tool| {
                 let policy = tool_policy(&tool.name);
                 !self.plan_mode || policy.allowed_in_plan_mode
@@ -385,6 +394,35 @@ pub struct DelegationPolicy {
 }
 
 impl DelegationPolicy {
+    /// Whether this policy is an equal-or-narrower executable subset of a
+    /// parent/group ceiling. Surface labels describe intent and may differ;
+    /// executable authority is defined by permission, turn, read/write/bash,
+    /// approval, and exact tool allowlists.
+    pub fn is_within(&self, ceiling: &Self) -> bool {
+        if self.inherited_permission_mode != ceiling.inherited_permission_mode
+            || (self.supervised_approval_granted && !ceiling.supervised_approval_granted)
+            || (!self.read_only_only && ceiling.read_only_only)
+            || (self.bash_allowed && !ceiling.bash_allowed)
+        {
+            return false;
+        }
+
+        match (self.max_turns, ceiling.max_turns) {
+            (Some(requested), Some(limit)) if requested > limit => return false,
+            (None, Some(_)) => return false,
+            _ => {}
+        }
+
+        match (
+            self.execution_tool_allowlist.as_ref(),
+            ceiling.execution_tool_allowlist.as_ref(),
+        ) {
+            (Some(requested), Some(allowed)) => requested.is_subset(allowed),
+            (None, Some(_)) => false,
+            _ => true,
+        }
+    }
+
     pub fn for_subagent_explore(
         inherited_permission_mode: PermissionMode,
         max_turns: Option<usize>,
@@ -464,6 +502,12 @@ impl DelegationPolicy {
             Self::for_subagent_explore(inherited_permission_mode, max_turns)
         };
 
+        // `bash_allowed` is part of the immutable policy lattice, not merely an
+        // authorization shortcut for read-only verifier surfaces. Keep it in
+        // lockstep with the exact execute capability so a mixed write+execute
+        // group is a truthful ceiling for an execute-only verifier task.
+        policy.bash_allowed = wants_execute;
+
         // Capability requests are an exact child-side ceiling. In particular,
         // execute-only must not silently acquire read access, and write does
         // not imply shell execution. The immutable parent ceiling is
@@ -493,6 +537,7 @@ impl DelegationPolicy {
         }
         if wants_execute {
             allowlist.insert("bash".to_string());
+            allowlist.insert("browser_check".to_string());
         }
         policy.execution_tool_allowlist = Some(allowlist);
         policy
@@ -541,6 +586,22 @@ impl DelegationPolicy {
         self.authorize_non_recursive_tool(tool_name)?;
         self.authorize_non_recursive_tool(effective_name)?;
         self.authorize_execution_scope(tool_name, effective_name)?;
+        if self.is_subagent()
+            && self
+                .execution_tool_allowlist
+                .as_ref()
+                .is_some_and(|allowlist| allowlist.contains("browser_check"))
+            && effective_name == "bash"
+            && effective_params
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(is_browser_runtime_install_command)
+        {
+            return Err(
+                "Delegated policy blocked browser-runtime installation: use the governed browser_check tool with the installed browser instead of downloading Playwright, Puppeteer, or another browser runtime"
+                    .to_string(),
+            );
+        }
         self.authorize_tool_policy(
             effective_name,
             tool_policy_for_call(effective_name, effective_params),
@@ -568,14 +629,7 @@ impl DelegationPolicy {
     }
 
     fn authorize_non_recursive_tool(&self, tool_name: &str) -> Result<(), String> {
-        let is_subagent = matches!(
-            self.surface,
-            DelegationSurface::SubagentExplore
-                | DelegationSurface::SubagentBuild
-                | DelegationSurface::SubagentPlan
-                | DelegationSurface::SubagentVerify
-        );
-        if is_subagent
+        if self.is_subagent()
             && matches!(
                 tool_name,
                 "agent" | "skill" | "enter_plan_mode" | "set_work_mode" | "set_workspace_context"
@@ -587,6 +641,16 @@ impl DelegationPolicy {
             ));
         }
         Ok(())
+    }
+
+    fn is_subagent(&self) -> bool {
+        matches!(
+            self.surface,
+            DelegationSurface::SubagentExplore
+                | DelegationSurface::SubagentBuild
+                | DelegationSurface::SubagentPlan
+                | DelegationSurface::SubagentVerify
+        )
     }
 
     fn authorize_tool_policy(
@@ -646,6 +710,14 @@ impl DelegationPolicy {
             "execution_tool_allowlist": self.execution_tool_allowlist,
         })
     }
+}
+
+fn is_browser_runtime_install_command(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    (normalized.contains("playwright")
+        && (normalized.contains(" install") || normalized.contains("install-deps")))
+        || (normalized.contains("puppeteer")
+            && (normalized.contains(" install") || normalized.contains("browsers install")))
 }
 
 /// Authorize a concrete top-level tool call under the current runtime mode.
@@ -768,13 +840,9 @@ pub fn agent_call_requests_write(params: &Value) -> bool {
     if agent_call_action(params) == "resume" {
         return true;
     }
-    if params
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some()
-    {
-        return agent_call_has_capability(params, "write")
-            || agent_call_has_capability(params, "execute");
+    let contract = resolved_agent_call_capabilities(params);
+    if contract.explicit {
+        return contract.values.contains("write") || contract.values.contains("execute");
     }
     ["profile", "agent_type"].iter().any(|field| {
         matches!(
@@ -785,12 +853,9 @@ pub fn agent_call_requests_write(params: &Value) -> bool {
 }
 
 pub fn agent_call_execution_profile(params: &Value) -> &'static str {
-    if params
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some()
-    {
-        return if agent_call_has_capability(params, "write") {
+    let contract = resolved_agent_call_capabilities(params);
+    if contract.explicit {
+        return if contract.values.contains("write") {
             "build"
         } else {
             "explore"
@@ -821,13 +886,9 @@ pub fn agent_call_is_research(params: &Value) -> bool {
         return false;
     }
 
-    if params
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some()
-    {
-        return agent_call_has_capability(params, "read")
-            && !agent_call_has_capability(params, "write");
+    let contract = resolved_agent_call_capabilities(params);
+    if contract.explicit {
+        return contract.values.contains("read") && !contract.values.contains("write");
     }
 
     // A bare durable resume restores capabilities from storage after top-level
@@ -845,16 +906,45 @@ pub fn agent_call_is_research(params: &Value) -> bool {
     )
 }
 
-fn agent_call_has_capability(params: &Value, expected: &str) -> bool {
-    params
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|capability| capability == expected)
-        })
+#[derive(Debug, Default)]
+struct ResolvedAgentCallCapabilities<'a> {
+    explicit: bool,
+    values: BTreeSet<&'a str>,
+}
+
+/// Resolve the capability ceiling from the complete raw Agent invocation.
+///
+/// Authorization and loop accounting run before the Agent tool deserializes
+/// and normalizes a structured task graph. They must therefore observe nested
+/// task capabilities too; otherwise the executor can correctly see a build
+/// graph while the outer loop incorrectly treats the same call as research.
+fn resolved_agent_call_capabilities(params: &Value) -> ResolvedAgentCallCapabilities<'_> {
+    let mut resolved = ResolvedAgentCallCapabilities::default();
+    if let Some(capabilities) = params.get("capabilities").and_then(Value::as_array) {
+        resolved.explicit = true;
+        resolved
+            .values
+            .extend(capabilities.iter().filter_map(Value::as_str));
+    }
+
+    if let Some(tasks) = params.get("tasks").and_then(Value::as_array) {
+        // A structured task with omitted capabilities is normalized to read by
+        // the executor. Record that default here so every pre-execution policy
+        // consumer sees the same contract.
+        resolved.explicit = true;
+        for task in tasks {
+            match task.get("capabilities").and_then(Value::as_array) {
+                Some(capabilities) => resolved
+                    .values
+                    .extend(capabilities.iter().filter_map(Value::as_str)),
+                None => {
+                    resolved.values.insert("read");
+                }
+            }
+        }
+    }
+
+    resolved
 }
 
 /// Resolve the canonical policy for a tool name.
@@ -862,6 +952,7 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
         "agent" => ToolPolicy::read_only_without_retry_with_timeout(DELEGATED_TOOL_TIMEOUT),
         "read"
+        | "browser_check"
         | "glob"
         | "grep"
         | "list"

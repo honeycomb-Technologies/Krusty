@@ -13,7 +13,9 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use mitsuro_core::ai::models::{ModelKey, ModelLookupError};
 use mitsuro_core::storage::credentials::CredentialStore;
-use mitsuro_core::storage::{ClaimedHiveRun, DaemonFence, Database, HiveRunStore};
+use mitsuro_core::storage::{
+    ClaimedHiveRun, DaemonFence, Database, HiveGroupRunContext, HiveRunStore,
+};
 use mitsuro_core::tools::registry::PermissionMode;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::AbortHandle;
@@ -80,6 +82,8 @@ pub(crate) struct HiveExecutionSpec {
     pub(crate) model_catalog_revision: Option<String>,
     pub(crate) crew_slug: Option<String>,
     pub(crate) permission_mode: PermissionMode,
+    /// Frozen group linkage when this run is one member of a group turn.
+    pub(crate) hive_group_run: Option<HiveGroupRunContext>,
 }
 
 impl HiveExecutionSpec {
@@ -134,6 +138,7 @@ impl HiveExecutionSpec {
             .context("claimed Hive run has no explicit permission_mode")?
             .parse::<PermissionMode>()
             .map_err(|error| anyhow::anyhow!("invalid claimed Hive permission_mode: {error}"))?;
+        let hive_group_run = optional_config_group_run(&claim.run.config, &claim.run.id)?;
         tracing::debug!(
             run_id = %claim.run.id,
             session_id,
@@ -154,6 +159,7 @@ impl HiveExecutionSpec {
             model_catalog_revision,
             crew_slug,
             permission_mode,
+            hive_group_run,
         })
     }
 
@@ -211,6 +217,41 @@ fn optional_config_model_key(config: &serde_json::Value) -> Result<Option<ModelK
             .map(Some)
             .context("claimed Hive model_key is invalid"),
     }
+}
+
+/// Frozen group linkage from the claimed config. The run id is filled from
+/// the claim itself so the per-run posting cap is bound to this exact run.
+fn optional_config_group_run(
+    config: &serde_json::Value,
+    run_id: &str,
+) -> Result<Option<HiveGroupRunContext>> {
+    let Some(group) = config.get("group").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    #[derive(serde::Deserialize)]
+    struct ClaimedGroup {
+        group_id: String,
+        group_turn_id: String,
+        worker_id: String,
+        max_member_messages_per_turn: u32,
+        context_window_messages: u32,
+    }
+    let claimed = serde_json::from_value::<ClaimedGroup>(group.clone())
+        .context("claimed Hive group linkage is invalid")?;
+    if claimed.group_id.trim().is_empty()
+        || claimed.group_turn_id.trim().is_empty()
+        || claimed.worker_id.trim().is_empty()
+    {
+        bail!("claimed Hive group linkage has empty identifiers");
+    }
+    Ok(Some(HiveGroupRunContext {
+        group_id: claimed.group_id,
+        group_turn_id: claimed.group_turn_id,
+        run_id: run_id.to_string(),
+        worker_id: claimed.worker_id,
+        max_member_messages_per_turn: claimed.max_member_messages_per_turn.max(1),
+        context_window_messages: claimed.context_window_messages.max(1),
+    }))
 }
 
 pub struct HiveExecutionHost {

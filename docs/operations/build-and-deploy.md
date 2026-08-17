@@ -117,7 +117,10 @@ release contract change, not routine naming cleanup.
 
 Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Mitsuro in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
 
-**2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
+**2. Desktop Linux bundles.** A separate job tests and builds the native GPUI desktop
+on Ubuntu, then produces one `.deb` and one `.rpm` with
+`scripts/package-gpui-desktop.sh`. The release artifact is the GPUI client, not the
+legacy Tauri/Expo shell.
 
 **3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `mitsuro` Cargo package version, verifies all five canonical platform archive checksum manifests and the Windows compatibility pair against their archives, renders `.github/homebrew/mitsuro.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists those six exact archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
 
@@ -353,25 +356,24 @@ For safe no-TestFlight validation of docs/tooling changes, inspect the workflow 
 
 ## Desktop builds
 
-The desktop app is a Tauri v2 shell (`apps/desktop/shell`) that wraps the same React frontend used by the mobile app. The Tauri process also starts the embedded Mitsuro server, so the desktop app is fully self-contained -- it does not require a separate server process.
+The canonical desktop app is the native GPUI crate at `apps/desktop/gpui`. It connects
+to an existing Mitsuro HTTP/SSE service or owns a managed Codex app-server child; the
+desktop package does not silently embed or invent either backend.
 
-The `tauri.conf.json` configures the build pipeline:
-
-- **Before build:** Runs `npx expo export --platform web` in the mobile app directory, which produces a static web export in `apps/mobile/dist`.
-- **Frontend dist:** Points to `../../mobile/dist`, so Tauri bundles those static assets into the native binary.
-
-Build scripts in `apps/desktop/shell/package.json`:
+Build and package it with:
 
 ```bash
-bun run build          # Produces .deb and .rpm packages
-bun run build:linux    # Same as above, explicit Linux target
-bun run build:all      # All Tauri bundle targets
-bun run build:appimage # AppImage (requires linuxdeploy)
+cargo test -p mitsuro-desktop-backend --lib
+cargo test -p mitsuro-gpui-desktop --bin mitsuro-gpui-desktop
+cargo build --release --locked -p mitsuro-gpui-desktop
+scripts/package-gpui-desktop.sh \
+  target/release/mitsuro-gpui-desktop artifacts/gpui-desktop
 ```
 
-The Tauri shell depends on `mitsuro-server` and `mitsuro-core` directly via path references in its `Cargo.toml`, so the Rust server is compiled into the desktop binary alongside the Tauri runtime.
-
-The bundle configuration targets the `DeveloperTool` category and includes icons at multiple resolutions (32px through 512px). Linux-specific settings put the `.deb` package in the `utils` section with `optional` priority.
+The Debian and RPM payloads install `mitsuro-desktop`, the
+`io.mitsuro.desktop` launcher/AppStream record, icon, license, and GPUI SVG assets.
+Runtime dependencies include GTK 3, WebKitGTK 4.1, xkbcommon, and `xdg-utils`.
+`apps/desktop/shell` remains only as the legacy Tauri/Expo migration boundary.
 
 ## The embedded web frontend
 

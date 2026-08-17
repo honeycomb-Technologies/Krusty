@@ -9,7 +9,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native';
-import { BlurView } from '../../platform/blur';
+import { AdaptiveMaterial } from '../ui/AdaptiveMaterial';
 import * as Haptics from '../../platform/haptics';
 import Animated, {
   type SharedValue,
@@ -96,8 +96,6 @@ const SPRING_CONFIG = { damping: 18, stiffness: 350, mass: 0.6 };
 const MAX_PILL_INDEX = 5;
 const OPEN_STAGGER_MS = 40;
 const CLOSE_STAGGER_MS = 28;
-const ACTION_FADE_IN_MS = 70;
-const ACTION_FADE_OUT_MS = 120;
 const ATTACH_ACTION_COUNT = 3;
 const DOCK_FADE_WIDTH = 34;
 const MODEL_BUTTON_GAP = 10;
@@ -111,7 +109,6 @@ const PROVIDER_AUTO_SCROLL_EDGE_WIDTH = 52;
 const PROVIDER_AUTO_SCROLL_MAX_STEP = 18;
 const PROVIDER_REORDER_SPRING_CONFIG = { damping: 24, stiffness: 420, mass: 0.55 };
 const PROVIDER_REORDER_LONG_PRESS_MS = 460;
-
 /** Desktop provider filter — keeps staggered spring entrance without scale-to-zero. */
 function DesktopFilterPill({
   index,
@@ -137,7 +134,6 @@ function DesktopFilterPill({
   }, [index, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: progress.value,
     transform: [
       { translateX: interpolate(progress.value, [0, 1], [16, 0]) },
       { scale: interpolate(progress.value, [0, 1], [0.88, 1]) },
@@ -155,34 +151,30 @@ function DesktopFilterPill({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onPress();
         }}
-        style={styles.desktopFilterHit}
+        style={[styles.desktopFilterHit, styles.materialHost]}
       >
-        <BlurView
-          intensity={theme.colors.glassBlur}
-          tint={
-            theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'
-          }
-          style={styles.providerDockBlur}
+        <AdaptiveMaterial
+          borderRadius={18}
+          tone="regular"
+        />
+        <View
+          style={[
+            styles.providerDockPill,
+            {
+              backgroundColor: active
+                ? theme.colors.thinking + '18'
+                : 'transparent',
+              borderColor: active
+                ? theme.colors.thinking + '80'
+                : g.borderLight,
+              borderWidth: StyleSheet.hairlineWidth,
+              alignItems: 'center',
+              justifyContent: 'center',
+            },
+          ]}
         >
-          <View
-            style={[
-              styles.providerDockPill,
-              {
-                backgroundColor: active
-                  ? theme.colors.thinking + '18'
-                  : g.background,
-                borderColor: active
-                  ? theme.colors.thinking + '80'
-                  : g.border,
-                borderWidth: StyleSheet.hairlineWidth,
-                alignItems: 'center',
-                justifyContent: 'center',
-              },
-            ]}
-          >
-            {children}
-          </View>
-        </BlurView>
+          {children}
+        </View>
       </Pressable>
     </Animated.View>
   );
@@ -216,7 +208,6 @@ function AccordionPill({
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
-  const opacityProgress = useSharedValue(0);
 
   useEffect(() => {
     const delayMs = isOpen
@@ -226,60 +217,53 @@ function AccordionPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    opacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [index, isOpen, maxIndex, opacityProgress, progress]);
+  }, [index, isOpen, maxIndex, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacityProgress.value,
     transform: [
       { translateY: interpolate(progress.value, [0, 1], [20, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.8, 1]) },
+      { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
     ],
   }));
 
   const g = theme.colors.glass;
 
   return (
-    <Animated.View
-      pointerEvents="box-none"
+    <View
       style={[
         compact ? styles.pillOuterCompact : styles.pillOuter,
-        animatedStyle,
+        styles.pointerBoxNone,
       ]}
     >
       {sideContent}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={accessibilityLabel}
-        accessibilityHint={accessibilityHint}
-        accessibilityState={{ disabled: !isOpen || disabled, selected: active }}
-        disabled={!isOpen || disabled}
-        onPress={onPress}
-      >
-        <BlurView
-          intensity={theme.colors.glassBlur}
-          tint={theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'}
-          style={styles.pillBlur}
+      <Animated.View style={animatedStyle}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={accessibilityLabel}
+          accessibilityHint={accessibilityHint}
+          accessibilityState={{ disabled: !isOpen || disabled, selected: active }}
+          disabled={!isOpen || disabled}
+          onPress={onPress}
+          style={styles.materialHost}
         >
+          <AdaptiveMaterial
+            borderRadius={18}
+            tone="regular"
+          />
           <View
             style={[
               styles.pill,
               {
-                backgroundColor: active ? theme.colors.thinking + '18' : g.background,
-                borderColor: active ? theme.colors.thinking + '80' : g.border,
+                backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
+                borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
               },
             ]}
           >
             {children}
           </View>
-        </BlurView>
-      </Pressable>
-    </Animated.View>
+        </Pressable>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -306,7 +290,6 @@ function InlineActionPill({
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
-  const opacityProgress = useSharedValue(0);
 
   useEffect(() => {
     const delayMs = isOpen
@@ -316,16 +299,9 @@ function InlineActionPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    opacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [isOpen, itemCount, closeStaggerMs, opacityProgress, progress]);
+  }, [isOpen, itemCount, closeStaggerMs, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacityProgress.value,
     transform: [
       { translateX: interpolate(progress.value, [0, 1], [size * 0.75, 0]) },
       { scale: interpolate(progress.value, [0, 1], [0.01, 1]) },
@@ -336,8 +312,12 @@ function InlineActionPill({
 
   return (
     <Animated.View
-      pointerEvents="box-none"
-      style={[styles.inlineActionOuter, { width: size, height: size }, animatedStyle]}
+      style={[
+        styles.inlineActionOuter,
+        styles.pointerBoxNone,
+        { width: size, height: size },
+        animatedStyle,
+      ]}
     >
       <Pressable
         accessibilityRole="button"
@@ -347,27 +327,26 @@ function InlineActionPill({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onPress();
         }}
+        style={styles.materialHost}
       >
-        <BlurView
-          intensity={theme.colors.glassBlur}
-          tint={theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'}
-          style={styles.pillBlur}
+        <AdaptiveMaterial
+          borderRadius={size >= 56 ? 18 : 14}
+          tone="regular"
+        />
+        <View
+          style={[
+            styles.inlinePill,
+            {
+              width: size,
+              height: size,
+              borderRadius: size >= 56 ? 18 : 14,
+              backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
+              borderColor: active ? theme.colors.thinking + '80' : g.borderLight,
+            },
+          ]}
         >
-          <View
-            style={[
-              styles.inlinePill,
-              {
-                width: size,
-                height: size,
-                borderRadius: size >= 56 ? 18 : 14,
-                backgroundColor: active ? theme.colors.thinking + '18' : g.background,
-                borderColor: active ? theme.colors.thinking + '80' : g.border,
-              },
-            ]}
-          >
-            {children}
-          </View>
-        </BlurView>
+          {children}
+        </View>
       </Pressable>
     </Animated.View>
   );
@@ -417,7 +396,6 @@ function ProviderDockPill({
   const { theme } = useThemeContext();
   const editProgress = useSharedValue(0);
   const revealProgress = useSharedValue(0);
-  const revealOpacityProgress = useSharedValue(0);
   const reorderX = useSharedValue(0);
   const dragging = useSharedValue(0);
   const rawDragX = useSharedValue(0);
@@ -438,13 +416,7 @@ function ProviderDockPill({
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
     );
-    revealOpacityProgress.value = withDelay(
-      delayMs,
-      withTiming(isOpen ? 1 : 0, {
-        duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
-      }),
-    );
-  }, [index, isOpen, itemCount, revealOpacityProgress, revealProgress]);
+  }, [index, isOpen, itemCount, revealProgress]);
 
   useEffect(() => {
     reorderX.value = 0;
@@ -572,6 +544,7 @@ function ProviderDockPill({
 
   const animatedStyle = useAnimatedStyle(() => {
     const isActiveDrag = dragIndex.value === index;
+    const zIndex = isActiveDrag ? 20 : editProgress.value ? 4 : 0;
     const revealTranslateX = interpolate(
       revealProgress.value,
       [0, 1],
@@ -588,8 +561,7 @@ function ProviderDockPill({
     );
 
     return {
-      opacity: revealOpacityProgress.value,
-      zIndex: isActiveDrag ? 20 : editProgress.value ? 4 : 0,
+      zIndex,
       transform: [
         {
           translateX: revealTranslateX + (isActiveDrag ? sharedDragX.value : reorderX.value),
@@ -605,9 +577,9 @@ function ProviderDockPill({
 
   const pill = (
     <Animated.View
-      pointerEvents={isOpen ? "auto" : "none"}
       style={[
         styles.providerDockCell,
+        { pointerEvents: isOpen ? "auto" : "none" },
         animatedStyle,
       ]}
     >
@@ -615,7 +587,7 @@ function ProviderDockPill({
         accessibilityRole="button"
         accessibilityLabel={`Filter models by ${provider.label}`}
         disabled={!isOpen}
-        style={styles.providerDockPressable}
+        style={[styles.providerDockPressable, styles.materialHost]}
         delayLongPress={PROVIDER_REORDER_LONG_PRESS_MS}
         onLongPress={handleLongPress}
         onTouchStart={handleTouchStart}
@@ -631,24 +603,22 @@ function ProviderDockPill({
           onPress();
         }}
       >
-        <BlurView
-          intensity={theme.colors.glassBlur}
-          tint={theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'}
-          style={styles.providerDockBlur}
+        <AdaptiveMaterial
+          borderRadius={18}
+          tone="regular"
+        />
+        <View
+          style={[
+            styles.inlinePill,
+            styles.providerDockPill,
+            {
+              backgroundColor: active ? theme.colors.thinking + '18' : 'transparent',
+              borderColor: editMode || active ? theme.colors.thinking + '70' : g.borderLight,
+            },
+          ]}
         >
-          <View
-            style={[
-              styles.inlinePill,
-              styles.providerDockPill,
-              {
-                backgroundColor: active ? theme.colors.thinking + '18' : g.background,
-                borderColor: editMode || active ? theme.colors.thinking + '70' : g.border,
-              },
-            ]}
-          >
-            {children}
-          </View>
-        </BlurView>
+          {children}
+        </View>
       </Pressable>
     </Animated.View>
   );
@@ -978,14 +948,14 @@ export function AccordionControls({
   const desktopFilterCount = providerFilters.length;
 
   return (
-    <View style={styles.container} pointerEvents="box-none">
+    <View style={[styles.container, styles.pointerBoxNone]}>
       {/* Floating accordion pills */}
       <GestureDetector gesture={swipeDown}>
         <Animated.View style={styles.pillColumn}>
           {/* Desktop: filters + bot as a flex row. Filters keep a light stagger
               animation but avoid nested sideContent/scale-to-zero (which hid them). */}
           {isDesktop ? (
-            <View style={styles.desktopModelRow} pointerEvents="box-none">
+            <View style={[styles.desktopModelRow, styles.pointerBoxNone]}>
               {showDesktopFilters
                 ? providerFilters.map((provider, visualIndex) => {
                     const active = selectedProviderFilter === provider.id;
@@ -1030,8 +1000,12 @@ export function AccordionControls({
             accessibilityLabel="Choose model"
             sideContent={
               <Animated.View
-                pointerEvents={providerDockOpen ? "box-none" : "none"}
-                style={styles.modelFilterDock}
+                style={[
+                  styles.modelFilterDock,
+                  {
+                    pointerEvents: providerDockOpen ? "box-none" : "none",
+                  },
+                ]}
               >
                 <ScrollView
                   ref={providerScrollRef}
@@ -1095,8 +1069,12 @@ export function AccordionControls({
             accessibilityLabel="Add attachment"
             sideContent={
               <View
-                pointerEvents={attachPickerOpen ? "box-none" : "none"}
-                style={styles.attachActions}
+                style={[
+                  styles.attachActions,
+                  {
+                    pointerEvents: attachPickerOpen ? "box-none" : "none",
+                  },
+                ]}
               >
                 <InlineActionPill
                   index={2}
@@ -1212,6 +1190,12 @@ export function AccordionControls({
 }
 
 const styles = StyleSheet.create({
+  materialHost: {
+    position: 'relative',
+  },
+  pointerBoxNone: {
+    pointerEvents: 'box-none',
+  },
   container: {
     width: '100%',
     alignItems: 'flex-end',
@@ -1311,8 +1295,8 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   providerDockPressable: {
-    width: '100%',
-    height: '100%',
+    width: PROVIDER_PILL_SIZE,
+    height: PROVIDER_PILL_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1325,14 +1309,6 @@ const styles = StyleSheet.create({
     width: PROVIDER_PILL_SIZE,
     height: PROVIDER_PILL_SIZE,
     borderRadius: 18,
-  },
-  providerDockBlur: {
-    borderRadius: 18,
-    overflow: 'hidden',
-  },
-  pillBlur: {
-    borderRadius: 16,
-    overflow: 'hidden',
   },
   pill: {
     width: 56,

@@ -11,6 +11,7 @@ import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import type { SessionResponse } from '@mitsuro/api';
+import { HIVE_PRIMARY_NAV_ITEMS } from './hiveDrawerItems';
 import type { HiveTopLevelView } from '../hive/types';
 
 interface DirEntry { name: string; path: string }
@@ -199,10 +200,38 @@ export function SessionList({
           );
         });
 
+  const renderHiveViewItem = (
+    view: HiveTopLevelView,
+    title: string,
+    detail: string,
+  ) => {
+    const isActive = activeHiveView === view;
+    return (
+      <Pressable
+        key={view}
+        onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onSelectHiveView?.(view); }}
+        style={[styles.hiveItem, isActive && { backgroundColor: t.userMessage + '12' }]}
+      >
+        <View style={styles.hiveCopy}>
+          <Text style={[styles.hiveTitle, { color: isActive ? t.userMessage : t.foreground }]}>{title}</Text>
+          <Text style={[styles.hiveDetail, { color: t.mutedForeground }]} numberOfLines={1}>{detail}</Text>
+        </View>
+      </Pressable>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <ScrollView style={styles.listArea} showsVerticalScrollIndicator={false}>
-        <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Conversations</Text>
+        {onSelectHiveView && activeTab === 2 && (
+          <>
+            <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Hive</Text>
+            {HIVE_PRIMARY_NAV_ITEMS.map((item) =>
+              renderHiveViewItem(item.id, item.label, item.detail),
+            )}
+          </>
+        )}
+        <Text style={[styles.sectionLabel, onSelectHiveView && activeTab === 2 ? styles.codeSection : undefined, { color: t.mutedForeground }]}>Conversations</Text>
         {chatSessions.length === 0
           ? <Text style={[styles.sectionEmpty, { color: t.mutedForeground }]}>No conversations</Text>
           : chatSessions.map(renderSessionItem)}

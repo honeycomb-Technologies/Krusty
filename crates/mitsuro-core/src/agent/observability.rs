@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::ai::client::SimpleCallResult;
-use crate::ai::providers::ProviderId;
+use crate::ai::providers::{ProviderId, ReasoningEffort};
 use crate::ai::types::Usage;
 use crate::storage::{Database, RuntimeTraceEvent, RuntimeTraceStore};
 
@@ -36,6 +36,7 @@ pub(crate) struct ProviderCallTrace {
     pub operation: String,
     pub provider: String,
     pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub outcome: String,
     pub usage: Option<Usage>,
     pub duration_ms: u64,
@@ -50,6 +51,7 @@ impl ProviderCallTrace {
         turn: usize,
         provider: ProviderId,
         model: &str,
+        reasoning_effort: Option<ReasoningEffort>,
         outcome: &str,
         usage: Option<Usage>,
         elapsed: Duration,
@@ -61,6 +63,7 @@ impl ProviderCallTrace {
             operation: "agent_turn".to_string(),
             provider: provider.storage_key().to_string(),
             model: model.to_string(),
+            reasoning_effort,
             outcome: outcome.to_string(),
             usage,
             duration_ms: duration_millis(elapsed),
@@ -129,6 +132,7 @@ impl ProviderCallTraceContext {
             operation: operation.to_string(),
             provider: provider.storage_key().to_string(),
             model: model.to_string(),
+            reasoning_effort: None,
             outcome: if result.is_ok() { "completed" } else { "error" }.to_string(),
             usage: result
                 .as_ref()
@@ -148,6 +152,7 @@ impl ProviderCallTraceContext {
         operation: &str,
         provider: ProviderId,
         model: &str,
+        reasoning_effort: Option<ReasoningEffort>,
         delegated_run_id: Option<&str>,
         delegated_task_id: &str,
         delegated_turn: usize,
@@ -162,6 +167,7 @@ impl ProviderCallTraceContext {
             operation: operation.to_string(),
             provider: provider.storage_key().to_string(),
             model: model.to_string(),
+            reasoning_effort,
             outcome: outcome.to_string(),
             usage,
             duration_ms: duration_millis(started_at.elapsed()),
@@ -315,6 +321,7 @@ fn provider_call_trace_event(
             "operation": provider_call.operation,
             "provider": provider_call.provider,
             "model": provider_call.model,
+            "reasoning_effort": provider_call.reasoning_effort,
             "final_snapshot": true,
             "outcome": provider_call.outcome,
             "duration_ms": provider_call.duration_ms,
@@ -456,7 +463,7 @@ mod tests {
     };
     use crate::agent::loop_events::{LoopEvent, LoopStopReason};
     use crate::ai::client::SimpleCallResult;
-    use crate::ai::providers::ProviderId;
+    use crate::ai::providers::{ProviderId, ReasoningEffort};
     use crate::ai::types::Usage;
     use crate::storage::{Database, RuntimeTraceEvent, RuntimeTraceStore};
 
@@ -609,6 +616,7 @@ mod tests {
                 operation: "agent_turn".to_string(),
                 provider: "anthropic".to_string(),
                 model: "claude-test".to_string(),
+                reasoning_effort: None,
                 outcome: "completed".to_string(),
                 usage: Some(Usage {
                     prompt_tokens: 100,
@@ -721,6 +729,7 @@ mod tests {
                 "delegated_agent_turn",
                 ProviderId::Grok,
                 "grok-4.5",
+                Some(ReasoningEffort::High),
                 Some("delegated-run-1"),
                 "builder-1",
                 3,

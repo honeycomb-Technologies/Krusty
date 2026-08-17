@@ -19,7 +19,7 @@ import {
 import {
   findCodeSessionForProject,
   resolveSendIntent,
-} from "../apps/mobile/app/(tabs)/chat-screen/sendIntent";
+} from "../apps/mobile/components/chat-screen/sendIntent";
 
 function makeSession(overrides: Partial<SessionResponse> = {}): SessionResponse {
   return {

@@ -10,7 +10,7 @@ use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::{
     Database, DelegatedRunLease, DelegatedRunRecord, DelegatedRunScope, DelegatedRunStore,
-    SessionManager,
+    DelegationStore, SessionManager,
 };
 use crate::tools::registry::DelegationPolicy;
 use crate::tools::{ToolContext, ToolResult};
@@ -110,6 +110,13 @@ pub(super) fn notify_child_completion(
     );
 
     let pending_id = event.pending_id.clone();
+    let group_store = DelegationStore::new(Database::new(db_path)?);
+    if group_store.get_group(delegated_run_id)?.is_some() {
+        ensure!(
+            group_store.authorize_parent_continuation(delegated_run_id, &pending_id)?,
+            "background child completion group does not authorize this parent continuation"
+        );
+    }
     let content_json = serde_json::to_string(&event.content)?;
     let session_manager = SessionManager::new(Database::new(db_path)?);
     let queued =
@@ -133,6 +140,12 @@ pub(super) fn notify_child_completion(
             delegated_run_id,
             pending_id,
             "Re-emitting wake for an existing pending child completion"
+        );
+    }
+    if group_store.get_group(delegated_run_id)?.is_some() {
+        ensure!(
+            group_store.mark_parent_continuation_queued(delegated_run_id, &pending_id)?,
+            "background child completion group lost its continuation queue fence"
         );
     }
 
@@ -179,8 +192,10 @@ pub(super) fn build_single_agent_artifact(
     let usable = result.has_usable_evidence();
     let complete = result.success
         && result.termination == crate::agent::subagent::SubAgentTermination::Completed
-        && usable;
-    let degraded = result.termination.is_degraded_interruption() && usable;
+        && usable
+        && result.objective_status() == crate::agent::subagent::TaskObjectiveStatus::Complete;
+    let degraded =
+        usable && (result.termination.is_degraded_interruption() || result.is_degraded_success());
     let cancelled = result.termination == crate::agent::subagent::SubAgentTermination::Cancelled;
     let outcome_reason = result.outcome_reason();
     let mut agent = result.evidence_json();
@@ -445,10 +460,14 @@ pub(super) fn existing_continuation_error(
 pub(super) fn agent_progress_for_terminal_stage(
     stage: DelegatedRunStage,
 ) -> (AgentProgressStatus, Option<String>) {
-    let status = if stage == DelegatedRunStage::Complete {
-        AgentProgressStatus::Complete
-    } else {
-        AgentProgressStatus::Failed
+    let status = match stage {
+        DelegatedRunStage::Complete => AgentProgressStatus::Complete,
+        DelegatedRunStage::Degraded => AgentProgressStatus::Degraded,
+        DelegatedRunStage::Cancelled => AgentProgressStatus::Cancelled,
+        DelegatedRunStage::Created
+        | DelegatedRunStage::Running
+        | DelegatedRunStage::Synthesizing
+        | DelegatedRunStage::Failed => AgentProgressStatus::Failed,
     };
     let current_action = match stage {
         DelegatedRunStage::Degraded => Some("degraded".to_string()),
@@ -482,6 +501,7 @@ pub(super) fn emit_single_agent_completion(
                 lines_added: 0,
                 lines_removed: 0,
                 completed_plan_task: None,
+                conversation_event: None,
             })
             .is_err()
         {
@@ -790,7 +810,7 @@ pub(super) fn build_investigation_summary(
     lines_removed: usize,
 ) -> String {
     let mut parts = vec![format!(
-        "Delegated build completed with {} successful builders across {} modified files.",
+        "Delegated build settled with {} successful builders across {} modified files.",
         successful_builders, modified_files
     )];
     parts.push(format!(

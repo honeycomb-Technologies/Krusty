@@ -7,15 +7,20 @@ import { HiveAttentionView } from "./HiveAttentionView";
 import { HiveChannelsView } from "./HiveChannelsView";
 import { HiveCurrentView } from "./HiveCurrentView";
 import { HiveCrewView } from "./HiveCrewView";
+import { HiveGroupsView } from "./HiveGroupsView";
 import { HiveLogbookView } from "./HiveLogbookView";
+import { HiveMemoryView } from "./HiveMemoryView";
 import { HiveRunView } from "./HiveRunView";
 import { HiveRunsView } from "./HiveRunsView";
 import { HiveScheduleView } from "./HiveScheduleView";
 import { HiveStatusView } from "./HiveStatusView";
 import { HiveTopBar } from "./HiveTopBar";
 import { useHiveCurrent } from "./hooks/useHiveCurrent";
+import { useHiveGroups } from "./hooks/useHiveGroups";
 import { useHiveHome } from "./hooks/useHiveHome";
+import { useHiveMemories } from "./hooks/useHiveMemories";
 import { useHiveNavigation } from "./hooks/useHiveNavigation";
+import { useHiveWorkers } from "./hooks/useHiveWorkers";
 import type { HiveChatContext, HiveTopLevelView } from "./types";
 
 interface HiveScreenProps {
@@ -48,6 +53,14 @@ export function HiveScreen({
   const current = useHiveCurrent(true);
   const home = useHiveHome(true);
   const navigation = useHiveNavigation();
+  // Workers are fetched only while a surface that needs the roster is
+  // visible (the Workers view, or the Groups editor picking members);
+  // opening a DM works from cached rows without a background poll.
+  const workers = useHiveWorkers(
+    navigation.topLevel === "crew" || navigation.topLevel === "groups",
+  );
+  const groups = useHiveGroups(navigation.topLevel === "groups");
+  const memories = useHiveMemories(navigation.topLevel === "memory", workspaceDirectory);
   const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
   const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
@@ -94,13 +107,15 @@ export function HiveScreen({
   const status = current.current?.status.home_status ?? "idle";
   const topLevelTitles: Record<HiveTopLevelView, string> = {
     hive: "Hive",
-    attention: "Attention",
-    schedule: "Schedule",
+    attention: "Activity",
+    schedule: "Calendar",
     logbook: "Logbook",
     runs: "Runs",
     details: "Details",
-    crew: "Agents",
+    crew: "Workers",
+    groups: "Groups",
     channels: "Channels",
+    memory: "Memory",
   };
   const title = topLevelTitles[navigation.topLevel] ?? "Hive";
   const subtitle = navigation.topLevel === "hive" ? "The hive is always alive." : undefined;
@@ -194,8 +209,26 @@ export function HiveScreen({
               onDenyTool={chat.onDenyTool}
             />
           ) : null}
-          {navigation.topLevel === "crew" ? <HiveCrewView state={home} /> : null}
+          {navigation.topLevel === "crew" ? (
+            <HiveCrewView
+              state={home}
+              workers={workers}
+              models={chat.models}
+              onOpenWorkerDm={(sessionId) => {
+                // Load the Worker's DM into the hive session store, then land
+                // on the thread surface that renders it.
+                void onOpenRunById(sessionId);
+                navigation.setTopLevel("hive");
+              }}
+            />
+          ) : null}
+          {navigation.topLevel === "groups" ? (
+            <HiveGroupsView state={groups} workers={workers} />
+          ) : null}
           {navigation.topLevel === "channels" ? <HiveChannelsView state={home} /> : null}
+          {navigation.topLevel === "memory" ? (
+            <HiveMemoryView workspaceDirectory={workspaceDirectory} state={memories} />
+          ) : null}
         </>
       )}
     </SafeAreaView>

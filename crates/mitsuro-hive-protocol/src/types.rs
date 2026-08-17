@@ -152,6 +152,8 @@ pub enum Command {
     CancelSession(SessionCommand),
     DeleteSession(SessionCommand),
     SendMessage(MessageCommand),
+    GroupMessage(GroupMessageCommand),
+    GroupStop(GroupStopCommand),
     Steer(SteerCommand),
     ToolApproval(ToolApprovalCommand),
     UserResponse(UserResponseCommand),
@@ -181,6 +183,8 @@ impl Command {
             Self::CancelSession(_) => "cancel_session",
             Self::DeleteSession(_) => "delete_session",
             Self::SendMessage(_) => "send_message",
+            Self::GroupMessage(_) => "group_message",
+            Self::GroupStop(_) => "group_stop",
             Self::Steer(_) => "steer",
             Self::ToolApproval(_) => "tool_approval",
             Self::UserResponse(_) => "user_response",
@@ -195,6 +199,12 @@ impl Command {
     /// Minimum negotiated minor needed to transmit this command without
     /// silently losing fields unknown to an older peer.
     pub fn minimum_protocol_minor(&self) -> u16 {
+        // Group-room commands did not exist before v1.3; an older daemon
+        // would reject the unknown variant with an opaque decode error, so
+        // fail closed with a clear version message instead.
+        if matches!(self, Self::GroupMessage(_) | Self::GroupStop(_)) {
+            return crate::GROUP_MESSAGING_PROTOCOL_MINOR;
+        }
         let carries_exact_model_identity = match self {
             Self::Dispatch(command) => {
                 command.model_key.is_some() || command.model_catalog_revision.is_some()
@@ -275,6 +285,10 @@ pub struct ScheduleDefinition {
     #[serde(default)]
     pub model_catalog_revision: Option<String>,
     pub crew_slug: Option<String>,
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
     pub misfire: serde_json::Value,
     pub overlap_policy: String,
     pub retry: serde_json::Value,
@@ -313,6 +327,25 @@ pub struct ScheduleCommand {
 pub struct MessageCommand {
     pub session_id: String,
     pub message: String,
+}
+
+/// One user message into a group room. The daemon appends it durably,
+/// resolves targets (explicit override or server-side mention parsing), and
+/// fans out member runs according to the group's execution mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupMessageCommand {
+    pub group_id: String,
+    pub message: String,
+    /// Explicit target Worker slugs; `None` derives targets from mentions.
+    #[serde(default)]
+    pub mentions_override: Option<Vec<String>>,
+}
+
+/// Cancel the in-flight member runs of a group's active turn and mark the
+/// turn cancelled. Idle groups acknowledge without effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupStopCommand {
+    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -409,6 +442,7 @@ pub enum ResponsePayload {
     Dispatch(DispatchResponse),
     Schedule(ScheduleResponse),
     Session(SessionResponse),
+    GroupTurn(GroupTurnResponse),
     Recover(RecoverResponse),
     SubscriptionAccepted(SubscriptionAccepted),
     Extension(ExtensionResponse),
@@ -486,6 +520,19 @@ pub struct SessionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoverResponse {
     pub recovered_count: usize,
+}
+
+/// Durable acceptance of one group turn: the appended trigger message plus
+/// the dispatch plan the daemon committed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupTurnResponse {
+    pub group_id: String,
+    pub turn_id: String,
+    pub message_id: String,
+    pub message_seq: i64,
+    pub status: String,
+    /// Worker ids selected as this turn's targets, in dispatch order.
+    pub target_worker_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -673,6 +720,8 @@ mod tests {
                 model_key: None,
                 model_catalog_revision: None,
                 crew_slug: None,
+                worker_id: None,
+                group_id: None,
                 misfire: serde_json::json!({
                     "policy": "fire_once",
                     "grace_secs": 300,
@@ -729,6 +778,58 @@ mod tests {
                 .unwrap();
         assert_eq!(round_trip, exact);
         assert_eq!(Command::Dispatch(exact).minimum_protocol_minor(), 2);
+    }
+
+    #[test]
+    fn group_commands_require_the_group_messaging_minor() {
+        let message = Command::GroupMessage(GroupMessageCommand {
+            group_id: "group-1".into(),
+            message: "@researcher take a look".into(),
+            mentions_override: None,
+        });
+        let stop = Command::GroupStop(GroupStopCommand {
+            group_id: "group-1".into(),
+        });
+        assert_eq!(
+            message.minimum_protocol_minor(),
+            crate::GROUP_MESSAGING_PROTOCOL_MINOR
+        );
+        assert_eq!(
+            stop.minimum_protocol_minor(),
+            crate::GROUP_MESSAGING_PROTOCOL_MINOR
+        );
+        // Pre-group commands stay transmittable to older daemons.
+        assert_eq!(Command::Ping.minimum_protocol_minor(), 0);
+
+        let encoded = serde_json::to_vec(&message).unwrap();
+        let decoded: Command = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, message);
+
+        // mentions_override stays additive for readers of the v1.3 shape.
+        let legacy_shape: GroupMessageCommand = serde_json::from_value(serde_json::json!({
+            "group_id": "group-1",
+            "message": "hello"
+        }))
+        .unwrap();
+        assert!(legacy_shape.mentions_override.is_none());
+    }
+
+    #[test]
+    fn group_turn_response_round_trips() {
+        let payload = ResponsePayload::GroupTurn(GroupTurnResponse {
+            group_id: "group-1".into(),
+            turn_id: "turn-1".into(),
+            message_id: "message-1".into(),
+            message_seq: 7,
+            status: "running".into(),
+            target_worker_ids: vec!["worker-a".into(), "worker-b".into()],
+        });
+        let encoded = serde_json::to_value(&payload).unwrap();
+        assert_eq!(encoded["response"], "group_turn");
+        assert_eq!(
+            serde_json::from_value::<ResponsePayload>(encoded).unwrap(),
+            payload
+        );
     }
 
     #[test]
