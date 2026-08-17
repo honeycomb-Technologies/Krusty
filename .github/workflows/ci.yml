@@ -21,6 +21,8 @@ jobs:
         run: bash scripts/check-canonical-names.sh
       - name: Check product marketing versions stay aligned
         run: sh scripts/check-product-version.sh
+      - name: Check workspace Cargo.lock versions stay aligned
+        run: sh scripts/refresh-workspace-lock-versions.sh --check
       - name: Exercise installer migration and rollback fixtures
         run: sh install.sh --self-test
 
